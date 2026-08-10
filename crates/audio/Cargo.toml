@@ -8,5 +8,70 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The logging facade. Diagnostics go through `tracing`; `clipped-logging` only
+# decides where they end up (docs/logging.md). MIT.
+tracing.workspace = true
+
+# WASAPI, the device enumerator whose notifications tell this crate that the
+# default endpoint moved, and the performance counter every timestamp is
+# expressed against. Target-specific so that the platform-neutral half of this
+# crate — the format vocabulary, the timeline that fills silence, the sample
+# conversion — still compiles and still runs its unit tests on a machine that is
+# not Windows; the capture client itself lives behind `#[cfg(windows)]` in
+# `src/windows/` (AGENTS.md section 5).
+#
+# The feature list is the exact set of namespaces this crate names. Dual
+# MIT/Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
+# The COM plumbing behind `windows`, named directly for one reason: this crate
+# *implements* a COM interface rather than only calling them.
+# `IMMNotificationClient` is how Windows tells a recording that its audio device
+# has been unplugged (`src/windows/notifications.rs`), and the `#[implement]`
+# macro that builds its vtable generates code rooted at `::windows_core`, which
+# only resolves if this crate depends on it by name. It is not a second copy of
+# anything: `windows 0.62` is built on this crate, and Cargo resolves both to the
+# same `0.62.x`, so the pin is written to match the `windows` pin in the root
+# `Cargo.toml` and moves with it. Dual MIT/Apache-2.0.
+windows-core = "0.62"
+
+# `examples/loopback_probe.rs` installs Clipped's own logging so that the
+# endpoint-change lines appear exactly as they will in a recording session,
+# which is the point of running it (issue #19's second acceptance criterion
+# needs a hand on a cable, so it is verified by watching this). `clipped-logging`
+# is layer 0 and `clipped-audio` is layer 1, so an example-only dependency on it
+# does not bend the layering `tests/integration/tests/workspace_layering.rs`
+# enforces, and it forces nothing on a consumer of the library.
+[dev-dependencies]
+clipped-logging.workspace = true
+
+# `tests/system_audio.rs` plays a tone it synthesises itself, so that the
+# frequency assertion has a known signal to find and the test needs no installed
+# application (AGENTS.md sections 25 and 26). Rendering needs the same WASAPI
+# namespaces the library uses, plus nothing else; none of this reaches the
+# library.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true
