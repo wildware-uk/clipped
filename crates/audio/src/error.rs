@@ -100,12 +100,12 @@ impl fmt::Display for AudioError {
             ),
             Self::UnsupportedFormat { described } => write!(
                 f,
-                "the audio output device presents samples in a format Clipped cannot \
-                 convert ({described})"
+                "the audio device presents samples in a format Clipped cannot convert \
+                 ({described})"
             ),
-            Self::NotOpen => f.write_str("this system audio capture has been closed"),
+            Self::NotOpen => f.write_str("this audio capture has been closed"),
             Self::Platform { operation, source } => {
-                write!(f, "system audio capture failed while {operation}: {source}")
+                write!(f, "audio capture failed while {operation}: {source}")
             }
         }
     }
@@ -174,8 +174,8 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "system audio capture failed while activating the audio client for the \
-             default endpoint: AUDCLNT_E_DEVICE_IN_USE"
+            "audio capture failed while activating the audio client for the default \
+             endpoint: AUDCLNT_E_DEVICE_IN_USE"
         );
         assert!(
             error.source().is_some(),

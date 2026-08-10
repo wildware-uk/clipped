@@ -14,9 +14,9 @@
 //!
 //! Device *removal* is the easier half: unplugging the endpoint that is being
 //! captured invalidates the client, and the next call returns
-//! `AUDCLNT_E_DEVICE_INVALIDATED`. That is handled in `loopback.rs`, and it is
-//! handled there as well as here because a device can disappear without anyone
-//! being notified in time.
+//! `AUDCLNT_E_DEVICE_INVALIDATED`. That is handled in `endpoint_capture.rs`,
+//! and it is handled there as well as here because a device can disappear
+//! without anyone being notified in time.
 //!
 //! So this module registers an `IMMNotificationClient` on the device enumerator
 //! and turns the four callbacks that matter into one question the capture asks
@@ -60,8 +60,8 @@ pub(super) enum EndpointChange {
     /// The endpoint being captured was removed from the system.
     CaptureEndpointRemoved,
     /// A call on the capture client reported that its device had been
-    /// invalidated. Raised by `loopback.rs` rather than by a callback, and kept
-    /// here so that every reason a capture reopens is one enumeration.
+    /// invalidated. Raised by `endpoint_capture.rs` rather than by a callback,
+    /// and kept here so that every reason a capture reopens is one enumeration.
     CaptureEndpointInvalidated,
 }
 

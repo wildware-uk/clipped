@@ -571,23 +571,34 @@ mod tests {
     #[test]
     fn a_chosen_microphone_is_found_again_by_its_identifier() {
         // The other half of a device coming back: a capture on a *chosen*
-        // device has to reopen that device rather than whatever Windows has
-        // since made default. The device here is chosen by identifier, torn
-        // down, and has to be the one that comes back.
-        let Some(default) = microphones()
-            .expect("Windows can list its input devices")
-            .into_iter()
-            .find(Microphone::is_default)
+        // device has to open that device and reopen that device, rather than
+        // whatever Windows makes default. The device is chosen by identifier,
+        // torn down, and has to be the one that comes back.
+        //
+        // A microphone that is *not* the default is preferred, because a
+        // capture that ignored the identifier and fell back to the default
+        // would pass this test on a machine with one microphone and lose
+        // somebody's chosen device on a machine with several. The default is
+        // the fallback, since a machine may genuinely have only one.
+        let devices = microphones().expect("Windows can list its input devices");
+        let Some((chosen, mut capture)) = devices
+            .iter()
+            .filter(|microphone| !microphone.is_default())
+            .chain(devices.iter().filter(|microphone| microphone.is_default()))
+            .find_map(|microphone| {
+                MicrophoneCapture::open(&microphone.select())
+                    .ok()
+                    .map(|capture| (microphone, capture))
+            })
         else {
-            skipped("this machine has no microphone");
+            skipped("no microphone on this machine could be opened");
             return;
         };
-
-        let Ok(mut capture) = MicrophoneCapture::open(&default.select()) else {
-            skipped("the chosen microphone could not be opened");
-            return;
-        };
-        assert_eq!(capture.device_name(), Some(default.name()));
+        assert_eq!(
+            capture.device_name(),
+            Some(chosen.name()),
+            "a capture must open the microphone whose identifier it was given"
+        );
 
         let _ = capture.read(Duration::from_millis(200));
         capture
@@ -599,7 +610,7 @@ mod tests {
 
         assert_eq!(
             capture.device_name(),
-            Some(default.name()),
+            Some(chosen.name()),
             "a capture on a chosen microphone must reopen that microphone"
         );
         assert!(capture.stats().frames > 0);
