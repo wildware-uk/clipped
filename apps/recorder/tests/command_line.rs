@@ -87,11 +87,76 @@ fn help_lists_the_subcommands_that_exist() {
 
     let help = stdout(&output);
     assert!(help.contains("record"), "{help}");
+    assert!(help.contains("list-windows"), "{help}");
     // The subcommands that do not exist yet must not appear: a command listed
     // in the help is a promise (AGENTS.md section 27).
     assert!(
-        !help.contains("list-windows") && !help.contains("capabilities"),
+        !help.contains("capabilities"),
         "help advertises a subcommand that has not been written: {help}"
+    );
+}
+
+#[test]
+fn list_windows_prints_a_table_of_what_can_be_captured() {
+    // Nothing here asserts *which* windows are open — that depends on the
+    // machine, and `crates/windows/tests/desktop.rs` covers the enumeration
+    // itself against windows it creates. What only the built binary can show is
+    // that the subcommand runs, exits 0 and prints a table to standard output.
+    let output = recorder(&["list-windows"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr was: {}",
+        stderr(&output)
+    );
+
+    let listing = stdout(&output);
+    assert!(
+        listing.contains("top-level windows can be captured."),
+        "the listing should say how much of the desktop it is showing: {listing}"
+    );
+    for column in [
+        "HANDLE", "PID", "PROCESS", "CLIENT", "DPI", "MONITOR", "TITLE",
+    ] {
+        assert!(
+            listing.contains(column),
+            "the {column} column is missing: {listing}"
+        );
+    }
+}
+
+#[test]
+fn list_windows_reports_a_selector_that_matches_nothing_as_a_usage_error() {
+    // A title no window can have, so this is deterministic on any machine
+    // (AGENTS.md section 25).
+    let output = recorder(&[
+        "list-windows",
+        "--window",
+        "no window is called this: clipped-recorder test 5f3a9c",
+    ]);
+
+    assert_eq!(output.status.code(), Some(EXIT_USAGE));
+    let message = stderr(&output);
+    assert!(message.contains("no window matches"), "{message}");
+    assert!(
+        !message.contains("panicked"),
+        "an unmatched selector must not panic: {message}"
+    );
+}
+
+#[test]
+fn list_windows_rejects_a_handle_that_is_not_one_before_enumerating_anything() {
+    let output = recorder(&["list-windows", "--handle", "chrome"]);
+
+    assert_eq!(output.status.code(), Some(EXIT_USAGE));
+    let message = stderr(&output);
+    assert!(
+        message.contains("invalid value 'chrome' for '--handle <HANDLE>'"),
+        "the rejection should name the argument and the value: {message}"
+    );
+    assert!(
+        message.contains("--help"),
+        "a value clap rejected should point at the help: {message}"
     );
 }
 

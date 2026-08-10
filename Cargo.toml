@@ -45,6 +45,15 @@ clap = { version = "4.5", features = ["derive"] }
 # FFmpeg itself is LGPL v3 and is not vendored here; it is fetched by
 # scripts/fetch-ffmpeg.ps1 and linked dynamically.
 rusty_ffmpeg = { version = "0.17.0", features = ["ffmpeg8_1"] }
+# Microsoft's generated bindings to the Windows API, pinned here for a reason
+# specific to them: more than one crate has to reach Windows — `clipped-windows`
+# enumerates windows and monitors today, and capture, audio and encoding each
+# need their own slice of the API later — and two versions of `windows` in one
+# binary means two incompatible `HWND` types and two copies of the COM plumbing,
+# which produces type errors a contributor has no way to interpret. Each crate
+# still chooses its own `features`, because the crate is enormous and only the
+# namespaces a crate names are compiled. Dual MIT/Apache-2.0.
+windows = "0.62"
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }

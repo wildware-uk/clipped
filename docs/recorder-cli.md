@@ -22,25 +22,33 @@ files under `%LOCALAPPDATA%\Clipped\logs` that every Clipped process writes
 probe, described under [defaults that touch the disk](#defaults-that-touch-the-disk),
 and it is removed again immediately.
 
-What works today is the argument surface and the shutdown path. The pipeline
-between them is milestone M1 — capture backend
+What works today is the argument surface, `list-windows`, and the shutdown path.
+The pipeline between them is milestone M1 — capture backend
 [#11](https://github.com/wildware-uk/clipped/issues/11), Windows Graphics
 Capture [#12](https://github.com/wildware-uk/clipped/issues/12), encoders
 [#15](https://github.com/wildware-uk/clipped/issues/15)–[#18](https://github.com/wildware-uk/clipped/issues/18),
 muxer [#21](https://github.com/wildware-uk/clipped/issues/21).
 
+`record` does not yet resolve its target through `list-windows`' machinery. The
+enumeration and the selection rules are in `clipped-windows` and are what
+`list-windows` runs on; wiring them into `record` belongs with the capture
+backend that will consume the resulting window handle
+([#11](https://github.com/wildware-uk/clipped/issues/11) and
+[#12](https://github.com/wildware-uk/clipped/issues/12)), because until then
+there is nothing to hand a resolved window to.
+
 ## Commands
 
 ```text
 clipped-recorder record --window <TITLE>
+clipped-recorder list-windows [--all] [<selector>]
 ```
 
-`record` is the only subcommand. Two more are specified and deliberately absent
-until they do something (AGENTS.md section 27):
+One more is specified and deliberately absent until it does something
+(AGENTS.md section 27):
 
 | Command | What it will do | Issue |
 | --- | --- | --- |
-| `list-windows` | List capturable windows with title, process and PID | [#10](https://github.com/wildware-uk/clipped/issues/10) |
 | `capabilities` | Report detected encoders, codecs and limits | [#14](https://github.com/wildware-uk/clipped/issues/14) |
 
 Adding one is a variant on `Command` in `apps/recorder/src/cli.rs` and an arm in
@@ -95,6 +103,110 @@ in the output directory, created and immediately deleted, because Windows has no
 permission bit that can be read and believed. Failing here beats failing twenty
 minutes into a session.
 
+## `list-windows`
+
+Lists what the recorder can be pointed at. This is the answer to "why can't it
+find my game?", and it is how the target selection rules are inspected without
+starting a recording.
+
+```text
+clipped-recorder list-windows
+```
+
+The listings in this section come from a real run on a two-monitor desktop, with
+rows removed and window titles shortened so that they fit the page and do not
+publish anybody's open tabs. The shape, the columns and the wording are exactly
+what the command prints.
+
+```text
+8 of 424 top-level windows can be captured.
+
+HANDLE      PID    PROCESS              CLIENT     DPI  MONITOR       TITLE
+0x00010698  24860  steamwebhelper.exe   2560x1392  96   \\.\DISPLAY2  Steam
+0x000201f2  11428  WindowsTerminal.exe  2560x1392  96   \\.\DISPLAY1  clipped
+0x000403ae  10228  chrome.exe           2560x1392  96   \\.\DISPLAY2  Issues - Google Chrome
+0x000a01ce  8560   explorer.exe         2560x1400  96   \\.\DISPLAY1  Videos - File Explorer
+0x00010a0a  36220  Spotify.exe          minimised  96   \\.\DISPLAY2  Spotify Free
+
+416 more windows cannot be captured. Pass --all to list them with the reason.
+```
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--all` | off | Also list the windows that cannot be captured, and why |
+| `--window <TITLE>` | — | Resolve, rather than list: substring match on the title |
+| `--process <NAME>` | — | Resolve by executable name; the `.exe` is optional |
+| `--pid <PID>` | — | Resolve by process identifier |
+| `--handle <HANDLE>` | — | Resolve one exact window, as printed in `HANDLE` |
+
+At most one selector may be given. With none, the command lists; with one, it
+resolves and prints everything known about the single window that answers to it:
+
+```text
+> clipped-recorder list-windows --window "File Explorer"
+
+the window title containing `File Explorer` resolves to one window:
+
+  Handle    0x000a01ce
+  Title     Videos - File Explorer
+  Process   explorer.exe (pid 8560)
+  Client    2560x1400 pixels at 96 DPI (100% scale)
+  Monitor   \\.\DISPLAY1 2560x1440 at (2560, 0)
+```
+
+### What "capturable" means
+
+Every top-level window Windows enumerates is examined, and the ones that cannot
+be recorded are listed by `--all` with the first reason that applies:
+
+| Reason | Why it is not a capture target |
+| --- | --- |
+| `shell` | The desktop or `Progman`; capturing it yields the wallpaper. Recording the screen is a monitor capture |
+| `invisible` | `IsWindowVisible` is false: hidden helper and message windows, which are most of a desktop |
+| `cloaked` | Composited away by the DWM: suspended Store apps, and everything on another virtual desktop |
+| `tool-window` | `WS_EX_TOOLWINDOW`: palettes, tray helpers, tooltips — the windows Alt-Tab also hides |
+| `untitled` | No title, so there is no way to name it and no way to tell it from the others |
+| `zero-sized` | The client area has no pixels |
+| `content-protected` | `SetWindowDisplayAffinity`: the owner excluded it from capture, and it would record black |
+
+A **minimised** window is not excluded. It is a legitimate target — it is about
+to be restored — but its size is not final and Windows Graphics Capture produces
+no frames until it is, so the listing shows `minimised` in place of a size and
+the resolution output says so.
+
+### Ambiguity is reported, never guessed
+
+A selector matching more than one capturable window is an error, not an
+invitation to pick one: recording the wrong window for twenty minutes is worse
+than being asked again.
+
+```text
+> clipped-recorder list-windows --window "e"
+
+error: 7 windows match the window title containing `e`, and choosing between them would be a guess:
+  0x000201f2  WindowsTerminal.exe (pid 11428)  clipped
+  0x00010698  steamwebhelper.exe (pid 24860)  Steam
+  0x000403ae  chrome.exe (pid 10228)  Issues - Google Chrome
+  0x000a01ce  explorer.exe (pid 8560)  Videos - File Explorer
+  0x00010a0a  Spotify.exe (pid 36220)  Spotify Free
+```
+
+The exception, and the only narrowing rule there is: a title that matches one
+window *exactly* wins over the windows it merely appears inside, so `--window
+Discord` finds "Discord" on a machine that also has "Discord Updater" open. Two
+windows with the same exact title stay ambiguous. A process owning several
+windows is ambiguous too — Windows has no concept of a process's "main" window,
+and every rule for inventing one is wrong for some application. `--handle` is
+the way out of any of these, which is why the handle is the first column.
+
+At most ten candidates are listed, with a count of the rest: `explorer.exe`
+alone owns sixty top-level windows, and an error nobody reads is not an error
+message.
+
+Long lists are unremarkable — the desktop above had 424 top-level windows and 8
+that could be captured — which is why the exclusion reasons exist rather than a
+filter that quietly drops them.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -108,6 +220,11 @@ minutes into a session.
 not exist yet" from "this went wrong". Today `record` always exits 3 once its
 arguments are accepted.
 
+`list-windows` exits 2 when a selector matched no window, or more than one: the
+command line is what has to change, and the message already lists the windows
+that could have been meant. It exits 1 only when Windows refused to describe the
+desktop at all.
+
 ## Diagnostics
 
 The recorder uses `clipped-logging`, so log files are under
@@ -118,8 +235,10 @@ The recorder uses `clipped-logging`, so log files are under
 CLIPPED_LOG=debug clipped-recorder record --window "Counter-Strike 2"
 ```
 
-Standard output is left for machine-readable output — `list-windows` and
-`capabilities` will use it — so errors and progress go to standard error.
+Standard output is left for a command's result — `list-windows` prints its
+listing there, and `capabilities` will — so errors and progress go to standard
+error. A `list-windows` run piped into another program therefore carries the
+table and nothing else.
 
 The resolved configuration is logged once, at `info`, before anything uses it.
 The output path is redacted to its file name and a digest of the whole path
@@ -170,3 +289,15 @@ rendering of it.
 `cargo test --test ctrl_c` on its own is not enough: cargo builds examples for
 `cargo test` but not for a single named test target, so the Ctrl+C test would
 run against a stale fixture. Run `cargo test -p clipped-recorder`.
+
+What `list-windows` prints depends on the machine, so the tests here assert only
+what does not: that it exits 0, that the columns are there, and that a selector
+matching nothing is a usage error rather than a panic. The behaviour that can be
+pinned down is tested where it lives — the selection rules against constructed
+desktops in `crates/windows/src/selection.rs`, and the enumeration against
+windows the test creates and destroys itself in
+`crates/windows/tests/desktop.rs`:
+
+```text
+cargo test -p clipped-windows
+```
