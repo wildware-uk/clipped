@@ -17,8 +17,8 @@
 //! │                                                        │
 //! │      ███  marker square, at x = f(counter)              │  64 px
 //! │                                                        │
-//! │  background: palette[counter % 8]                       │
-//! └────────────────────────────────────────────────────────┘
+//! │  constant dim backdrop                          ▒▒ ◄───┼── palette
+//! └────────────────────────────────────────────────────────┘   [counter % 8]
 //! ```
 //!
 //! - **A magic sequence**, four cells of fixed colours. It says "this is a
@@ -35,7 +35,13 @@
 //!   turns frame 4 into frame 262148, and the test reports a fictional gap of a
 //!   quarter of a million frames instead of a decode failure.
 //! - **A background colour** taken from an eight-entry palette by the counter,
-//!   and **a marker square** whose position is a function of the counter. Both
+//!   painted into a small patch in the bottom-right corner — the one pixel
+//!   `decode` samples — over a backdrop that never changes. It is a patch
+//!   rather than the whole window because filling the window meant the
+//!   application strobed at the frame rate, which is a photosensitive-seizure
+//!   risk (issue #162); the patch preserves every guarantee below, because the
+//!   decoder never read more than that one pixel. There is also **a marker
+//!   square** whose position is a function of the counter. Both
 //!   are redundant with the counter, deliberately: they are what makes a *torn*
 //!   frame — the top half from frame 900 and the bottom half from frame 901 —
 //!   fail to decode instead of being read as a good frame 900. A capture
@@ -150,15 +156,33 @@ const BYTES_PER_PIXEL: usize = 4;
 /// frames differ, so that the compositor always has new content to compose and
 /// a frame's background is a weak check on its counter.
 const PALETTE: [Colour; 8] = [
-    Colour::new(192, 64, 64),
-    Colour::new(64, 192, 64),
-    Colour::new(64, 64, 192),
-    Colour::new(192, 192, 64),
-    Colour::new(192, 64, 192),
-    Colour::new(64, 192, 192),
-    Colour::new(128, 128, 128),
-    Colour::new(32, 96, 160),
+    Colour::new(160, 16, 16),
+    Colour::new(16, 160, 16),
+    Colour::new(16, 16, 160),
+    Colour::new(160, 160, 16),
+    Colour::new(160, 16, 160),
+    Colour::new(16, 160, 160),
+    Colour::new(88, 88, 88),
+    Colour::new(88, 16, 160),
 ];
+
+/// The colour of everything the pattern does not otherwise draw.
+///
+/// This never changes between frames, and that is the point. The palette above
+/// used to fill the whole window, which made the application a full-screen
+/// colour strobe at the frame rate — a photosensitive-seizure risk, reported by
+/// a person who had to sit next to it (issue #162). Nothing needed it: `decode`
+/// reads the background at exactly one pixel, so the cycling colour is now
+/// confined to [`BACKGROUND_PATCH`] around that pixel and everything else is
+/// this constant, deliberately dim, near-neutral colour.
+const BACKDROP: Colour = Colour::new(24, 24, 28);
+
+/// The side of the patch of cycling background colour, in pixels.
+///
+/// Large enough that the pixel `decode` samples is comfortably inside it even
+/// if a capture is off by a few pixels, and small enough that the part of the
+/// window changing colour every frame is a rounding error of its area.
+const BACKGROUND_PATCH: u32 = CELL * 2;
 
 /// The marker square's colour: white, which is in neither the palette nor
 /// anything else the pattern draws outside the header.
@@ -473,7 +497,17 @@ pub fn render(target: &mut SurfaceMut<'_>, index: u32) -> Result<(), PatternErro
         });
     }
 
-    target.fill(0, 0, target.width, target.height, background(index));
+    target.fill(0, 0, target.width, target.height, BACKDROP);
+    // Only this patch cycles. It surrounds the single pixel `decode` samples,
+    // in the bottom-right corner; painting the whole window with it made the
+    // application a full-screen strobe (issue #162).
+    target.fill(
+        target.width - BACKGROUND_PATCH,
+        target.height - BACKGROUND_PATCH,
+        BACKGROUND_PATCH,
+        BACKGROUND_PATCH,
+        background(index),
+    );
 
     for (cell, colour) in MAGIC.iter().enumerate() {
         target.fill(cell as u32 * CELL, 0, CELL, CELL, *colour);
@@ -1196,6 +1230,104 @@ mod tests {
                     "{what}: {one} and {other} are within the decoder's tolerance of \
                      each other, so one can be read as the other"
                 );
+            }
+        }
+    }
+
+    /// The fraction of the window that may change between consecutive frames.
+    ///
+    /// This is an accessibility bound, not a performance one. The pattern used
+    /// to repaint the entire window in a new saturated colour every frame,
+    /// which at 60 fps is a full-screen strobe and a photosensitive-seizure
+    /// risk; it was reported by a person sitting next to a test run
+    /// (issue #162). What changes now is the marker's two positions, the
+    /// counter cells that flipped, and the small background patch — a little
+    /// over one per cent at the sizes the application runs at.
+    ///
+    /// Five per cent leaves room for a wider marker or a taller header without
+    /// this becoming a nuisance, while still being far below anything that
+    /// could read as a flash.
+    const MAX_CHANGING_FRACTION: f64 = 0.05;
+
+    /// Counts the pixels that differ between two frames within a band of rows.
+    fn changed_pixels(before: &Frame, after: &Frame, from_y: u32, to_y: u32) -> u64 {
+        let (first, second) = (before.surface(), after.surface());
+        let mut changed = 0;
+        for y in from_y..to_y {
+            for x in 0..before.width {
+                let a = first.pixel(x, y).expect("inside the frame");
+                let b = second.pixel(x, y).expect("inside the frame");
+                if a != b {
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+
+    #[test]
+    fn the_body_of_the_window_does_not_change_colour_between_frames() {
+        // The hazard is a large area changing colour *in place*. The marker is
+        // a small square translating, which is not a flash, and the header
+        // cells are one cell tall; both are bounded and are excluded by
+        // measuring only the rows beneath them. What is left is the body of the
+        // window, and the only thing in it that may change is the background
+        // patch — anything more means the cycling colour has escaped back out
+        // across the window (issue #162).
+        let body_top = MARKER_TOP + MARKER;
+        let patch = u64::from(BACKGROUND_PATCH) * u64::from(BACKGROUND_PATCH);
+
+        for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (1280, 752), (2560, 1440)] {
+            let mut previous = Frame::new(width, height, 0);
+            previous.draw(900).expect("the pattern fits");
+
+            for index in 901..=908 {
+                let mut current = Frame::new(width, height, 0);
+                current.draw(index).expect("the pattern fits");
+
+                let changed = changed_pixels(&previous, &current, body_top, height);
+                assert!(
+                    changed <= patch,
+                    "{changed} pixels changed in the body of a {width}x{height} window between \
+                     frames {} and {index}, but only the {BACKGROUND_PATCH}x{BACKGROUND_PATCH} \
+                     background patch ({patch} pixels) is allowed to. Repainting the body every \
+                     frame makes this application a strobe at the frame rate, which is a seizure \
+                     risk (issue #162).",
+                    index - 1,
+                );
+
+                previous = current;
+            }
+        }
+    }
+
+    #[test]
+    fn most_of_a_realistic_window_is_still_between_frames() {
+        // The bound above says the cycling colour stays in its patch. This one
+        // says the whole picture is calm at the sizes the application actually
+        // runs at, marker and header included.
+        for (width, height) in [(1280, 752), (2560, 1440)] {
+            let mut previous = Frame::new(width, height, 0);
+            previous.draw(900).expect("the pattern fits");
+
+            for index in 901..=908 {
+                let mut current = Frame::new(width, height, 0);
+                current.draw(index).expect("the pattern fits");
+
+                let changed = changed_pixels(&previous, &current, 0, height);
+                let total = u64::from(width) * u64::from(height);
+                let fraction = changed as f64 / total as f64;
+                assert!(
+                    fraction <= MAX_CHANGING_FRACTION,
+                    "{changed} of {total} pixels ({:.1}%) change between frames {} and {index} at \
+                     {width}x{height}, above the {:.0}% this application holds itself to \
+                     (issue #162).",
+                    fraction * 100.0,
+                    index - 1,
+                    MAX_CHANGING_FRACTION * 100.0,
+                );
+
+                previous = current;
             }
         }
     }
