@@ -370,11 +370,20 @@ fn dropping_a_session_gives_back_every_amf_object_it_held() {
     // the encoder is dropped, so that the objects survive teardown and can be
     // asked what is left. Giving that reference back must take the count to
     // zero: anything else is a reference the session kept.
-    // The one thing that has to be arranged first: a session releases the AMF
-    // module when it is dropped, and objects whose code lives in that module
-    // cannot be asked anything afterwards. So this test pins the module for its
-    // own use, which is exactly the invariant the session upholds by releasing
-    // every object before its runtime goes.
+    let Some(gpu) = TestGpu::open() else {
+        return;
+    };
+    let Some(encoder) = gpu.encoder_for(Codec::H264) else {
+        return;
+    };
+
+    // One thing has to be arranged before the encoder is dropped: a session
+    // releases the AMF module when it goes, and objects whose code lives in that
+    // module cannot be asked anything afterwards. So this test pins the module
+    // for its own use — which is exactly the invariant the session upholds by
+    // releasing every object before its runtime goes. It is loaded here rather
+    // than at the top of the test because a machine with no AMD driver has no
+    // such library, and this must skip there rather than fail.
     let library: Vec<u16> = "amfrt64.dll"
         .encode_utf16()
         .chain(core::iter::once(0))
@@ -389,18 +398,7 @@ fn dropping_a_session_gives_back_every_amf_object_it_held() {
             LOAD_LIBRARY_SEARCH_SYSTEM32,
         )
     }
-    .expect("a machine with an AMD GPU has amfrt64.dll");
-
-    let Some(gpu) = TestGpu::open() else {
-        // SAFETY: the reference taken above is given back exactly once, here.
-        let _ = unsafe { FreeLibrary(module) };
-        return;
-    };
-    let Some(encoder) = gpu.encoder_for(Codec::H264) else {
-        // SAFETY: as above.
-        let _ = unsafe { FreeLibrary(module) };
-        return;
-    };
+    .expect("the session above opened, so its runtime is loadable");
 
     let session = encoder.session.as_ref().expect("the session is open");
     let context = session.context.cast::<sys::AMFInterface>();
