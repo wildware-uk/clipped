@@ -229,7 +229,14 @@ standard `encoder` field ([logging.md](logging.md)).
 The report distinguishes what was **measured on this machine** from what was
 **inferred** from published limits, and marks every inferred value `(i)`. That
 distinction is the point of the command rather than a detail of it: codec
-support is measured, and the numeric limits beside it are not.
+support is measured, and the numeric limits beside it are not. A limit shown as
+`—` is one the report declines to state, because the codec's support is unknown
+and a limit beside that word reads as a promise.
+
+An encoder counts as **available** when its vendor runtime loads, because that
+is the library Clipped will encode through. A driver that registers media
+transforms without installing its encode runtime is reported as unavailable,
+with the transforms listed underneath as the evidence.
 [encoder-capabilities.md](encoder-capabilities.md) explains how each answer is
 arrived at, what the cache does and when it is thrown away.
 

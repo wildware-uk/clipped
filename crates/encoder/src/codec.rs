@@ -123,27 +123,6 @@ impl EncoderKind {
     /// How this encoder is written in the `encoder` field of a diagnostic
     /// (docs/logging.md, "Standard fields").
     ///
-    /// The vocabulary distinguishes software encoders by codec and hardware
-    /// encoders by family, so this takes the codec and is total for every pair
-    /// the report can produce. `None` means the log format has no word for the
-    /// combination — software AV1, which nothing in this project plans to
-    /// build — and a field with no word is left off the line rather than
-    /// invented, which is what docs/logging.md asks for.
-    #[must_use]
-    pub const fn log_encoder(self, codec: Codec) -> Option<VideoEncoder> {
-        match (self, codec) {
-            (Self::Nvenc, _) => Some(VideoEncoder::Nvenc),
-            (Self::Amf, _) => Some(VideoEncoder::AmdAmf),
-            (Self::QuickSync, _) => Some(VideoEncoder::IntelQuickSync),
-            (Self::Software, Codec::H264) => Some(VideoEncoder::SoftwareH264),
-            (Self::Software, Codec::Hevc) => Some(VideoEncoder::SoftwareH265),
-            (Self::Software, Codec::Av1) => None,
-        }
-    }
-
-    /// The `encoder` field word for a diagnostic about the family as a whole,
-    /// rather than about one codec.
-    ///
     /// The logging vocabulary distinguishes software encoders by codec and
     /// hardware encoders by family, so a line about "the software encoder" has
     /// to pick one of its two words. It picks H.264, which is the software
@@ -279,12 +258,6 @@ impl Resolution {
     pub const fn luma_samples(self) -> u64 {
         self.width as u64 * self.height as u64
     }
-
-    /// Whether a picture this size fits inside `limit` in both dimensions.
-    #[must_use]
-    pub const fn fits_within(self, limit: Self) -> bool {
-        self.width <= limit.width && self.height <= limit.height
-    }
 }
 
 impl fmt::Display for Resolution {
@@ -321,35 +294,32 @@ mod tests {
 
     #[test]
     fn log_values_match_the_logging_field_vocabulary() {
+        // `log_encoder_family` is the function `detection::log_report` calls
+        // for every line it writes, so it is the one asserted here: a test of
+        // some other mapping would keep passing while the field a user
+        // searches for drifted.
+        //
         // Compared against the real enumeration rather than against strings
         // copied out of it: a log search for `encoder=nvenc` has to find both
         // this crate's detection lines and a session's, and two
         // hand-maintained lists of the same words drift apart
         // (docs/logging.md, "Standard fields").
         for kind in EncoderKind::ALL {
-            for codec in Codec::EFFICIENCY_ORDER {
-                // Exhaustive on purpose: a new pair has to state its
-                // counterpart here, or say why it has none.
-                let expected = match (kind, codec) {
-                    (EncoderKind::Nvenc, _) => Some("nvenc"),
-                    (EncoderKind::Amf, _) => Some("amd_amf"),
-                    (EncoderKind::QuickSync, _) => Some("intel_quicksync"),
-                    (EncoderKind::Software, Codec::H264) => Some("software_h264"),
-                    (EncoderKind::Software, Codec::Hevc) => Some("software_h265"),
-                    // The log format has no word for a software AV1 encoder
-                    // because nothing plans to build one, and a word in the
-                    // format promising an encoder that does not exist is worse
-                    // than a missing field.
-                    (EncoderKind::Software, Codec::Av1) => None,
-                };
+            // Exhaustive on purpose: a new encoder family has to state its
+            // counterpart here.
+            let expected = match kind {
+                EncoderKind::Nvenc => "nvenc",
+                EncoderKind::Amf => "amd_amf",
+                EncoderKind::QuickSync => "intel_quicksync",
+                EncoderKind::Software => "software_h264",
+            };
 
-                assert_eq!(
-                    kind.log_encoder(codec).map(|encoder| encoder.to_string()),
-                    expected.map(str::to_owned),
-                    "{kind} with {codec} is logged as one word here and another by \
-                     clipped-logging, so no log search finds both"
-                );
-            }
+            assert_eq!(
+                kind.log_encoder_family().to_string(),
+                expected,
+                "{kind} is logged as one word here and another by clipped-logging, so no \
+                 log search finds both"
+            );
         }
     }
 
@@ -374,11 +344,10 @@ mod tests {
     }
 
     #[test]
-    fn a_resolution_knows_its_luma_samples_and_whether_it_fits_a_limit() {
+    fn a_resolution_knows_its_luma_samples() {
+        // What every codec level limit is expressed against, and what
+        // `reference::framerate_ceiling` divides into.
         assert_eq!(Resolution::HD_1080P.luma_samples(), 1920 * 1080);
-        assert!(Resolution::HD_1080P.fits_within(Resolution::UHD_4K));
-        assert!(!Resolution::UHD_4K.fits_within(Resolution::HD_1080P));
-        // Neither dimension may exceed the limit, even when the area does fit.
-        assert!(!Resolution::new(4096, 100).fits_within(Resolution::UHD_4K));
+        assert_eq!(Resolution::UHD_4K.luma_samples(), 3840 * 2160);
     }
 }

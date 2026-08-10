@@ -416,7 +416,7 @@ fn detect_encoder(kind: EncoderKind, facts: &SystemFacts) -> EncoderReport {
     EncoderReport {
         kind,
         availability,
-        adapter: choose_adapter(&adapters, &hardware_encoders),
+        adapter: choose_adapter(&adapters),
         signals,
         codecs,
     }
@@ -424,12 +424,21 @@ fn detect_encoder(kind: EncoderKind, facts: &SystemFacts) -> EncoderReport {
 
 /// Decides whether a hardware encoder is usable.
 ///
-/// Two independent measurements can say yes, and either is enough. The vendor
-/// runtime loading says the library this project will encode through is
-/// installed and works; Windows listing a hardware encoder says the display
-/// driver registered one. A machine can have the second without the first — a
-/// driver that ships its media transforms but not its encode SDK runtime — and
-/// reporting the encoder as absent in that case would be wrong.
+/// **The vendor runtime decides.** Issues #15 to #17 encode through
+/// `nvEncodeAPI64.dll`, `amfrt64.dll` and Intel's media runtime, not through
+/// the Media Foundation transforms, so a library that will not load is an
+/// encoder that will not work whatever else the system says about it — which is
+/// the rule `crate::windows::runtime` states and this function applies.
+///
+/// A driver that registers its media transforms without installing its encode
+/// SDK runtime is therefore reported as unavailable, with the reason. That is
+/// the deliberate choice: the transforms are real, and a recording made through
+/// them is not something this project can offer, so calling the encoder
+/// available would promise a capability the recording would not have.
+///
+/// The transforms are still a measurement, of a different question — which
+/// codecs the installed driver registers an encoder for — and they are kept as
+/// [`Signal`]s and used for [`codec_support`] whether or not the runtime loads.
 fn availability(
     adapters: &[&Adapter],
     runtimes: &[&RuntimeObservation],
@@ -438,7 +447,7 @@ fn availability(
     if adapters.is_empty() && hardware_encoders.is_empty() {
         return Availability::Unavailable(Unavailable::NoVendorAdapter);
     }
-    if runtimes.iter().any(|observation| observation.loaded()) || !hardware_encoders.is_empty() {
+    if runtimes.iter().any(|observation| observation.loaded()) {
         return Availability::Available;
     }
     if runtimes
@@ -452,27 +461,20 @@ fn availability(
 
 /// Picks the adapter an encoder runs on.
 ///
-/// Windows reports the adapter behind a hardware encoder on recent versions,
-/// and that is the authoritative answer; where it does not, the vendor's own
-/// adapter is used, preferring the one with the most video memory of its own,
-/// which is right whenever a machine has one card per vendor. A machine with
-/// two cards from one vendor and only one of them encoding is beyond what this
-/// can tell, and the report says which adapter it picked rather than implying
-/// it knew.
-fn choose_adapter(
-    adapters: &[&Adapter],
-    hardware_encoders: &[&HardwareEncoder],
-) -> Option<AdapterId> {
-    hardware_encoders
+/// Always a guess, and worth saying so plainly: nothing this crate measures
+/// says which GPU a hardware encoder belongs to. Media Foundation documents
+/// `MFT_ENUM_ADAPTER_LUID` as an input filter for `MFTEnum2` rather than as an
+/// attribute on an activation object, and it is absent from every transform on
+/// the machine this was written on, so attribution is the vendor's own adapter,
+/// preferring the one with the most video memory of its own. That is right
+/// whenever a machine has one card per vendor, and a machine with two cards
+/// from one vendor and only one of them encoding is beyond what this can tell.
+/// The report prints which adapter it picked rather than implying it knew.
+fn choose_adapter(adapters: &[&Adapter]) -> Option<AdapterId> {
+    adapters
         .iter()
-        .find_map(|encoder| encoder.adapter())
-        .filter(|id| adapters.iter().any(|adapter| adapter.id() == *id))
-        .or_else(|| {
-            adapters
-                .iter()
-                .max_by_key(|adapter| adapter.dedicated_video_memory())
-                .map(|adapter| adapter.id())
-        })
+        .max_by_key(|adapter| adapter.dedicated_video_memory())
+        .map(|adapter| adapter.id())
 }
 
 /// Builds the per-codec table: measured where Windows answered, from the
@@ -596,11 +598,12 @@ fn log_report(report: &CapabilityReport) {
 
     for encoder in report.encoders() {
         let kind = encoder.kind();
-        let measured: Vec<&str> = encoder
-            .codecs()
-            .iter()
-            .filter(|support| support.supported().is_measured_true())
-            .map(|support| support.codec().log_value())
+        // The same list a settings screen would offer, from the same function,
+        // so that a log line and a menu cannot disagree about what was
+        // measured.
+        let measured: Vec<&str> = crate::recommendation::measured_codecs(encoder)
+            .into_iter()
+            .map(Codec::log_value)
             .collect();
 
         tracing::info!(
@@ -767,7 +770,6 @@ mod tests {
                 .with_runtime(nvenc_runtime(RuntimeOutcome::Loaded))
                 .with_hardware_encoder(HardwareEncoder::new(
                     Vendor::Nvidia,
-                    None,
                     Codec::H264,
                     "NVIDIA H.264 Encoder MFT",
                 )),
@@ -790,24 +792,42 @@ mod tests {
     }
 
     #[test]
-    fn a_driver_with_media_transforms_but_no_runtime_is_still_available() {
+    fn a_driver_with_media_transforms_but_no_runtime_is_not_available() {
+        // The rule this crate exists to enforce, in its least obvious case.
+        // Windows lists an HEVC encoder, so something on this machine can
+        // encode HEVC — but issues #15 to #17 encode through the vendor
+        // runtime, and that is not installed, so Clipped cannot. Reporting
+        // "available" here would promise a capability the recording would not
+        // have, which is the failure the whole crate is shaped around.
         let facts = SystemFacts::new(
             vec![nvidia_card()],
             EncoderObservations::none()
                 .with_runtime(nvenc_runtime(RuntimeOutcome::NotFound))
                 .with_hardware_encoder(HardwareEncoder::new(
                     Vendor::Nvidia,
-                    None,
                     Codec::Hevc,
                     "NVIDIA HEVC Encoder MFT",
                 )),
         );
+        let report = detect(&facts);
+        let nvenc = report
+            .encoder(EncoderKind::Nvenc)
+            .expect("nvenc is reported");
 
         assert_eq!(
-            detect(&facts)
-                .encoder(EncoderKind::Nvenc)
-                .map(EncoderReport::availability),
-            Some(Availability::Available)
+            nvenc.availability(),
+            Availability::Unavailable(Unavailable::RuntimeNotInstalled)
+        );
+        // The transform is still evidence, and is still shown: the report has
+        // to be able to explain why a machine with a visible HEVC encoder is
+        // being told it has none.
+        assert!(
+            nvenc.signals().iter().any(|signal| matches!(
+                signal,
+                Signal::HardwareEncoder(encoder) if encoder.codec() == Codec::Hevc
+            )),
+            "the transform Windows listed must still be reported: {:?}",
+            nvenc.signals()
         );
     }
 
@@ -847,8 +867,14 @@ mod tests {
     }
 
     #[test]
-    fn the_adapter_windows_names_wins_over_the_guess() {
-        let second_card = Adapter::new(
+    fn two_cards_from_one_vendor_are_attributed_to_the_larger_one_because_nothing_says_which() {
+        // Attribution is a guess and this is its rule. Nothing measured says
+        // which of two NVIDIA cards holds the encoder — Media Foundation's
+        // `MFT_ENUM_ADAPTER_LUID` is an input filter for `MFTEnum2`, not an
+        // attribute on the transforms, and no transform on the development
+        // machine carries it — so the card with the most video memory of its
+        // own is named, and the report shows which one it picked.
+        let smaller_card = Adapter::new(
             AdapterId::from_luid(9, 0),
             "NVIDIA GeForce RTX 3060",
             Vendor::Nvidia,
@@ -857,20 +883,23 @@ mod tests {
             false,
         );
         let facts = SystemFacts::new(
-            vec![nvidia_card(), second_card.clone()],
-            EncoderObservations::none().with_hardware_encoder(HardwareEncoder::new(
-                Vendor::Nvidia,
-                Some(second_card.id()),
-                Codec::H264,
-                "NVIDIA H.264 Encoder MFT",
-            )),
+            // The smaller card first, so that a rule which merely kept DXGI's
+            // order would fail here.
+            vec![smaller_card, nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(nvenc_runtime(RuntimeOutcome::Loaded))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Nvidia,
+                    Codec::H264,
+                    "NVIDIA H.264 Encoder MFT",
+                )),
         );
 
         assert_eq!(
             detect(&facts)
                 .encoder(EncoderKind::Nvenc)
                 .and_then(EncoderReport::adapter),
-            Some(second_card.id())
+            Some(nvidia_card().id())
         );
     }
 

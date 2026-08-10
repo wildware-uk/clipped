@@ -15,6 +15,14 @@
 //! maximum resolutions — those need a live transform — so those come from the
 //! reference table and are labelled inferred (`docs/encoder-capabilities.md`).
 //!
+//! Nor does it say which adapter a transform belongs to. `MFT_ENUM_ADAPTER_LUID`
+//! is documented as an input filter for `MFTEnum2` — "use this attribute when
+//! calling MFTEnum2 to enumerate MFTs associated with a specific adapter" — and
+//! it is absent from every one of the seven activation objects on the machine
+//! this was written on. So a transform is attributed to its vendor, which it
+//! always publishes, and the GPU is inferred from the adapters in
+//! `crate::detection`.
+//!
 //! # Ownership
 //!
 //! `MFTEnumEx` hands back a task-allocated array of interface pointers, and
@@ -30,14 +38,12 @@ use windows::Win32::Media::MediaFoundation::{
     IMFActivate, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx,
     MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_AV1,
     MFVideoFormat_H264, MFVideoFormat_HEVC, MFSTARTUP_NOSOCKET, MFT_CATEGORY_VIDEO_ENCODER,
-    MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_REGISTER_TYPE_INFO, MF_VERSION,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
 };
 
-use crate::adapter::AdapterId;
 use crate::codec::{Codec, Vendor};
 use crate::probe::{HardwareEncoder, ProbeError};
 
@@ -111,7 +117,7 @@ fn encoders_for(codec: Codec, subtype: GUID) -> Result<Vec<HardwareEncoder>, Pro
                 // A driver may register the same transform more than once —
                 // AMD's registers its H.264 encoder twice on the machine this
                 // was written on — and two entries that agree about vendor,
-                // adapter, codec and name say nothing the first did not. They
+                // codec and name say nothing the first did not. They
                 // are dropped here rather than in the report so that the count
                 // a caller sees is a count of encoders.
                 if !encoders.contains(&encoder) {
@@ -140,7 +146,7 @@ fn describe(activate: &IMFActivate, codec: Codec) -> Option<HardwareEncoder> {
     let name = string_attribute(activate, &MFT_FRIENDLY_NAME_Attribute)
         .unwrap_or_else(|| format!("{vendor} hardware encoder"));
 
-    Some(HardwareEncoder::new(vendor, adapter(activate), codec, name))
+    Some(HardwareEncoder::new(vendor, codec, name))
 }
 
 /// The PCI vendor behind a transform, from `MFT_ENUM_HARDWARE_VENDOR_ID`.
@@ -150,23 +156,6 @@ fn vendor(activate: &IMFActivate) -> Option<Vendor> {
     u32::from_str_radix(digits, 16)
         .ok()
         .map(Vendor::from_pci_id)
-}
-
-/// The adapter a transform belongs to, where Windows reports one.
-///
-/// `MFT_ENUM_ADAPTER_LUID` is not set by every driver or on every Windows
-/// version, and its absence is ordinary: attribution then falls back to the
-/// vendor, which is always present.
-fn adapter(activate: &IMFActivate) -> Option<AdapterId> {
-    let mut luid = [0_u8; 8];
-    // SAFETY: the key is a `'static` constant from the projection and the
-    // buffer is exactly the eight bytes a `LUID` occupies; `GetBlob` fails
-    // rather than writing past a buffer that is too small.
-    unsafe { activate.GetBlob(&MFT_ENUM_ADAPTER_LUID, &mut luid, None) }.ok()?;
-
-    let low = u32::from_le_bytes([luid[0], luid[1], luid[2], luid[3]]);
-    let high = i32::from_le_bytes([luid[4], luid[5], luid[6], luid[7]]);
-    Some(AdapterId::from_luid(low, high))
 }
 
 /// Reads a string attribute, freeing what Media Foundation allocated for it.

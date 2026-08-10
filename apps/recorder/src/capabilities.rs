@@ -21,9 +21,8 @@ use std::error::Error;
 use std::fmt;
 
 use clipped_encoder::{
-    detect_cached, Adapter, CapabilityCache, CapabilityReport, Claim, Codec, CodecSupport,
-    Detection, DetectionSource, EncoderKind, EncoderReport, ProbeError, Recommendation, Resolution,
-    SystemProbe,
+    detect_cached, Adapter, CapabilityCache, CapabilityReport, Claim, CodecSupport, Detection,
+    DetectionSource, EncoderKind, EncoderReport, ProbeError, Resolution, Signal, SystemProbe,
 };
 
 use crate::cli::CapabilitiesArgs;
@@ -34,6 +33,13 @@ use crate::cli::CapabilitiesArgs;
 /// readable in an 80-column console, and a value nobody can see past is a value
 /// nobody reads.
 pub const INFERRED_MARKER: &str = "(i)";
+
+/// What stands in a cell the report declines to fill.
+///
+/// Used for the limits beside a codec whose support is unknown: they are
+/// inferred from the encoder family's documentation, and a limit for a codec
+/// that may not be there reads as a promise that it is.
+const UNSTATED: &str = "—";
 
 /// The resolution framerate ceilings are quoted at.
 ///
@@ -193,11 +199,18 @@ fn encoder_lines(encoder: &EncoderReport, report: &CapabilityReport) -> String {
         out.push_str(&format!("    on {}\n", adapter.description()));
     }
 
-    // One measured fact per line rather than a sentence of them: a machine with
-    // three codecs registered produces six of these, and a single line long
-    // enough to hold them all is a line nobody reads.
+    // One fact per line rather than a sentence of them: a machine with three
+    // codecs registered produces six of these, and a single line long enough to
+    // hold them all is a line nobody reads.
     for signal in encoder.signals() {
-        out.push_str(&format!("    measured: {signal}\n"));
+        // `NoHardwareRequired` is a definition, not a measurement: the software
+        // encoder needs no adapter and no runtime, so nothing was asked. In a
+        // report whose whole premise is that distinction, calling it "measured"
+        // would spend the word on the one line that did not earn it.
+        out.push_str(&match signal {
+            Signal::NoHardwareRequired => format!("    {signal}\n"),
+            measured => format!("    measured: {measured}\n"),
+        });
     }
 
     if !encoder.codecs().is_empty() {
@@ -221,7 +234,25 @@ fn encoder_lines(encoder: &EncoderReport, report: &CapabilityReport) -> String {
 }
 
 /// One codec's row.
+///
+/// A codec whose support is unknown prints no limits. The limits are inferred
+/// from published documentation for the encoder family, so printing
+/// `unknown  8192x4352 (i)  …  yes (i)` puts a 10-bit ceiling beside a codec
+/// that may not exist on this machine at all, and the eye reads the row as a
+/// promise. The support column is the one the rest depends on.
 fn codec_line(support: &CodecSupport) -> String {
+    if matches!(support.supported(), Claim::Unknown) {
+        return format!(
+            "    {:<7}{:<12}{:<17}{:<22}{:<11}{}\n",
+            support.codec().to_string(),
+            "unknown",
+            UNSTATED,
+            UNSTATED,
+            UNSTATED,
+            UNSTATED
+        );
+    }
+
     format!(
         "    {:<7}{:<12}{:<17}{:<22}{:<11}{}\n",
         support.codec().to_string(),
@@ -254,8 +285,9 @@ fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
         "{INFERRED_MARKER} inferred from published limits, not measured on this machine. \
          A value without it\n    was measured here. Codec support is measured when Windows \
          reports a hardware\n    encoder for that codec; the framerate ceiling is what the \
-         codec's level allows,\n    not what the silicon can sustain. See \
-         docs/encoder-capabilities.md.\n\n"
+         codec's level allows,\n    not what the silicon can sustain. A cell reading \
+         {UNSTATED} is a limit left unstated,\n    because a codec whose support is unknown \
+         has no limits worth quoting. See\n    docs/encoder-capabilities.md.\n\n"
     ));
 
     out.push_str(&format!(
@@ -302,26 +334,11 @@ fn yes_or_no(value: &bool) -> String {
     if *value { "yes" } else { "no" }.to_owned()
 }
 
-/// The codecs the report measured, for a one-line summary elsewhere.
-#[must_use]
-pub fn measured_codec_names(encoder: &EncoderReport) -> Vec<&'static str> {
-    clipped_encoder::measured_codecs(encoder)
-        .into_iter()
-        .map(Codec::log_value)
-        .collect()
-}
-
-/// The first choice "Automatic" would make, if there is one.
-#[must_use]
-pub fn automatic_choice(report: &CapabilityReport) -> Option<Recommendation> {
-    clipped_encoder::recommend(report).first().copied()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use clipped_encoder::{
-        detect, EncoderObservations, HardwareEncoder, RuntimeObservation, RuntimeOutcome,
+        detect, Codec, EncoderObservations, HardwareEncoder, RuntimeObservation, RuntimeOutcome,
         SystemFacts, Vendor,
     };
 
@@ -372,7 +389,6 @@ mod tests {
                 ))
                 .with_hardware_encoder(HardwareEncoder::new(
                     Vendor::Nvidia,
-                    None,
                     Codec::Av1,
                     "NVIDIA AV1 Encoder MFT",
                 )),
@@ -396,6 +412,55 @@ mod tests {
         assert!(
             av1.contains(INFERRED_MARKER),
             "the inferred limits must keep their marker: {av1}"
+        );
+    }
+
+    #[test]
+    fn a_codec_whose_support_is_unknown_is_not_given_limits() {
+        // The AMD AV1 row on the development machine: the driver registers no
+        // AV1 transform, so support is unknown. Printing `8192x4352 (i)` and
+        // `yes (i)` for 10-bit beside that word invites the reading that
+        // 10-bit AV1 is available here, which is exactly the promise this
+        // report exists not to make.
+        let facts = SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none().with_runtime(RuntimeObservation::new(
+                EncoderKind::Nvenc,
+                "nvEncodeAPI64.dll",
+                RuntimeOutcome::Loaded,
+            )),
+        );
+        let output = rendered(&facts);
+        let av1 = output
+            .lines()
+            .find(|line| line.trim_start().starts_with("AV1"))
+            .expect("AV1 has a row");
+
+        assert!(av1.contains("unknown"), "AV1 support is unknown: {av1}");
+        assert!(
+            !av1.contains(INFERRED_MARKER),
+            "a codec that may not exist must not be given limits: {av1}"
+        );
+        assert!(
+            av1.contains(UNSTATED),
+            "the unstated limits need a mark of their own: {av1}"
+        );
+    }
+
+    #[test]
+    fn the_software_encoder_does_not_call_its_definition_a_measurement() {
+        // "measured: runs on the CPU, so needs no adapter or driver" spends
+        // the word this whole report is built to keep precise on the one line
+        // where nothing was asked.
+        let output = rendered(&SystemFacts::new(Vec::new(), EncoderObservations::none()));
+        let line = output
+            .lines()
+            .find(|line| line.contains("runs on the CPU"))
+            .expect("the software encoder says why it needs nothing");
+
+        assert!(
+            !line.contains("measured:"),
+            "nothing was measured to arrive at this: {line}"
         );
     }
 

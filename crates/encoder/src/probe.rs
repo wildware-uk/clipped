@@ -31,7 +31,7 @@ use std::error::Error;
 
 use serde::{Deserialize, Serialize};
 
-use crate::adapter::{Adapter, AdapterId};
+use crate::adapter::Adapter;
 use crate::codec::{Codec, EncoderKind, Vendor};
 
 /// Why the machine could not be asked.
@@ -170,30 +170,24 @@ impl fmt::Display for RuntimeObservation {
 /// output codec. Windows answering "there is an AV1 encoder from vendor 0x10DE"
 /// is a measurement of the driver actually installed, which is the property a
 /// table keyed on a GPU model cannot have.
+/// The vendor is the whole of the attribution. Media Foundation does not say
+/// which adapter a transform belongs to — `MFT_ENUM_ADAPTER_LUID` is documented
+/// as a filter for `MFTEnum2`, not as an attribute on an activation object —
+/// so which GPU an encoder runs on is inferred from the adapters instead
+/// (`crate::detection`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HardwareEncoder {
     vendor: Vendor,
-    adapter: Option<AdapterId>,
     codec: Codec,
     name: String,
 }
 
 impl HardwareEncoder {
     /// Records one.
-    ///
-    /// `adapter` is the GPU the transform belongs to where the operating system
-    /// reported it, which it does not on every Windows version; the vendor is
-    /// always available and is what attribution falls back to.
     #[must_use]
-    pub fn new(
-        vendor: Vendor,
-        adapter: Option<AdapterId>,
-        codec: Codec,
-        name: impl Into<String>,
-    ) -> Self {
+    pub fn new(vendor: Vendor, codec: Codec, name: impl Into<String>) -> Self {
         Self {
             vendor,
-            adapter,
             codec,
             name: name.into(),
         }
@@ -203,12 +197,6 @@ impl HardwareEncoder {
     #[must_use]
     pub const fn vendor(&self) -> Vendor {
         self.vendor
-    }
-
-    /// The adapter it runs on, where that was reported.
-    #[must_use]
-    pub const fn adapter(&self) -> Option<AdapterId> {
-        self.adapter
     }
 
     /// The codec it produces.

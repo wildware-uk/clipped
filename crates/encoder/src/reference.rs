@@ -38,6 +38,13 @@
 //!   guaranteed to be accepted; only opening a session settles that, and
 //!   sessions are issues #15 to #18.
 //!
+//! Issue #14 asked for these four — maximum resolution, framerate, B-frames and
+//! HDR — to be *detected* per encoder, and this table infers them instead.
+//! Measuring them needs a live encoder session, which needs a backend, so
+//! [issue #133](https://github.com/wildware-uk/clipped/issues/133) tracks
+//! replacing the inferred values here with queried ones once one exists. Until
+//! then every value from this module is labelled inferred wherever it is shown.
+//!
 //! HDR here means 10-bit encoding, which is the necessary condition for it. The
 //! colour signalling that makes a 10-bit stream an HDR one belongs to the muxer
 //! (issue #21).
@@ -178,18 +185,25 @@ pub(crate) const fn limits(kind: EncoderKind, codec: Codec) -> ReferenceLimits {
             hdr: Claim::Inferred(true),
         },
 
-        // The software encoder. These are claims about what this project will
-        // build, not about the machine, which is why H.264 is a confident yes
-        // and the other two are unknown: issue #18 has not chosen, and the
-        // obvious software HEVC encoder is GPL-2.0, which deny.toml forbids in
-        // an MPL-2.0 application. There is no luma rate because the ceiling for
-        // a CPU encoder is the CPU, and this table has no measurement of that.
+        // The software encoder. This row is a claim about what this project
+        // will build rather than about the machine, which is why H.264 is a
+        // confident yes and the other two are unknown: issue #18 has not
+        // chosen, and the obvious software HEVC encoder is GPL-2.0, which
+        // deny.toml forbids in an MPL-2.0 application.
+        //
+        // Everything else here is `Unknown`, and that is the discipline rather
+        // than an omission. Every other inferred number in this table cites a
+        // vendor's published limit; this row has no vendor and no library yet,
+        // so there is nothing to infer from — a maximum resolution or a
+        // B-frame claim here would be a guess wearing the word "inferred".
+        // There is no luma rate for the same reason the CPU has no level: the
+        // ceiling is the machine, and this table measures nothing.
         (EncoderKind::Software, Codec::H264) => ReferenceLimits {
             supported: Claim::Inferred(true),
-            max_resolution: Claim::Inferred(Resolution::new(8192, 4352)),
+            max_resolution: Claim::Unknown,
             max_luma_samples_per_second: Claim::Unknown,
-            b_frames: Claim::Inferred(true),
-            hdr: Claim::Inferred(false),
+            b_frames: Claim::Unknown,
+            hdr: Claim::Unknown,
         },
         (EncoderKind::Software, Codec::Hevc | Codec::Av1) => ReferenceLimits::unknown(),
     }
@@ -238,6 +252,31 @@ mod tests {
                 Claim::Inferred(true),
                 "{kind} should fall back to H.264 when nothing measured it"
             );
+        }
+    }
+
+    #[test]
+    fn the_software_row_infers_nothing_it_has_no_source_for() {
+        // Every inferred number in this table cites a vendor's published
+        // limit. The software encoder has no vendor and, until issue #18
+        // chooses a library, no published anything — so the only claim it may
+        // make is that whatever gets built will encode H.264.
+        for codec in Codec::EFFICIENCY_ORDER {
+            let entry = limits(EncoderKind::Software, codec);
+            for (field, stated) in [
+                ("max_resolution", entry.max_resolution.value().is_some()),
+                ("b_frames", entry.b_frames.value().is_some()),
+                ("hdr", entry.hdr.value().is_some()),
+                (
+                    "max_luma_samples_per_second",
+                    entry.max_luma_samples_per_second.value().is_some(),
+                ),
+            ] {
+                assert!(
+                    !stated,
+                    "the software {codec} row states a {field} that no vendor documents"
+                );
+            }
         }
     }
 

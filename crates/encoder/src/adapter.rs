@@ -12,9 +12,10 @@ use crate::codec::Vendor;
 
 /// The locally unique identifier Windows gives an adapter.
 ///
-/// Stable for as long as the adapter is present, and the value Media Foundation
-/// reports for the adapter behind a hardware encoder, which is what lets an
-/// encoder be attributed to the GPU it actually runs on.
+/// Stable for as long as the adapter is present, which is what makes it usable
+/// in a cache key and in a log line. It is how one adapter is told from
+/// another; it is not evidence about which adapter an encoder runs on, because
+/// nothing this crate measures says that (see `crate::detection`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AdapterId(u64);
 
@@ -23,13 +24,6 @@ impl AdapterId {
     #[must_use]
     pub const fn from_luid(low: u32, high: i32) -> Self {
         Self(((high as u32 as u64) << 32) | low as u64)
-    }
-
-    /// The identifier as one number, which is how it is written to the cache
-    /// and to a log line.
-    #[must_use]
-    pub const fn as_u64(self) -> u64 {
-        self.0
     }
 }
 
@@ -55,12 +49,6 @@ impl DriverVersion {
     #[must_use]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
-    }
-
-    /// The packed value, for the cache key.
-    #[must_use]
-    pub const fn as_u64(self) -> u64 {
-        self.0
     }
 
     /// The four parts, most significant first, as a driver is normally quoted:
@@ -340,8 +328,14 @@ mod tests {
 
     #[test]
     fn an_adapter_identifier_is_the_two_halves_of_a_luid() {
+        // The high half is signed and negative here, which is the case a
+        // sign-extending shift would get wrong: it must occupy the top 32 bits
+        // and leave the low half alone.
         let id = AdapterId::from_luid(0x0000_1234, -1);
-        assert_eq!(id.as_u64(), 0xFFFF_FFFF_0000_1234);
         assert_eq!(id.to_string(), "ffffffff00001234");
+        assert_eq!(
+            AdapterId::from_luid(0x0000_1234, 0).to_string(),
+            "0000000000001234"
+        );
     }
 }

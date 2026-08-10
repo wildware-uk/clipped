@@ -393,13 +393,11 @@ mod tests {
                 .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll"))
                 .with_hardware_encoder(HardwareEncoder::new(
                     Vendor::Nvidia,
-                    None,
                     Codec::H264,
                     "NVIDIA H.264 Encoder MFT",
                 ))
                 .with_hardware_encoder(HardwareEncoder::new(
                     Vendor::Nvidia,
-                    None,
                     Codec::Av1,
                     "NVIDIA AV1 Encoder MFT",
                 )),
@@ -457,7 +455,6 @@ mod tests {
                 .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll"))
                 .with_hardware_encoder(HardwareEncoder::new(
                     Vendor::Nvidia,
-                    None,
                     Codec::Hevc,
                     "NVIDIA HEVC Encoder MFT",
                 )),

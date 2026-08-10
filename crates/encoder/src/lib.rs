@@ -86,7 +86,7 @@ mod windows;
 pub use adapter::{Adapter, AdapterId, AdapterKind, DriverVersion};
 pub use cache::{
     CacheError, CacheState, CapabilityCache, HardwareSignature, StaleReason, CACHE_FILE_NAME,
-    CACHE_FORMAT,
+    CACHE_FORMAT, DETECTION_REVISION,
 };
 pub use claim::{Claim, Evidence};
 pub use codec::{Codec, EncoderKind, Resolution, Vendor};

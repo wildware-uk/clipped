@@ -10,13 +10,22 @@
 //!
 //! # What invalidates it
 //!
-//! A [`HardwareSignature`]: every adapter's vendor, device and locally unique
-//! identifier, and its **driver version**. A driver update changes the last of
-//! those, and a driver update is exactly the event that adds or removes a
-//! codec — AV1 encoding reached hardware that had already shipped — so a cache
-//! that ignored it would keep answering with last month's capabilities for as
-//! long as the machine kept its GPU. Adding, removing or swapping a card
-//! changes the rest.
+//! Two things, because two things can make a stored answer wrong.
+//!
+//! The machine changing, as a [`HardwareSignature`]: every adapter's vendor,
+//! device and locally unique identifier, and its **driver version**. A driver
+//! update changes the last of those, and a driver update is exactly the event
+//! that adds or removes a codec — AV1 encoding reached hardware that had
+//! already shipped — so a cache that ignored it would keep answering with last
+//! month's capabilities for as long as the machine kept its GPU. Adding,
+//! removing or swapping a card changes the rest.
+//!
+//! Clipped changing, as [`DETECTION_REVISION`]. The reference table and the
+//! rules that read it are this project's own content, and correcting either
+//! changes the report a machine produces without changing the machine — so
+//! without that number, the one thing guaranteed to change would be the one
+//! thing that could never invalidate the file, and every existing installation
+//! would serve the old answer until its GPU was replaced.
 //!
 //! The signature is computed from the cheap half of a probe, so checking it
 //! costs a DXGI enumeration rather than a Media Foundation startup.
@@ -53,11 +62,27 @@ pub const CACHE_FILE_NAME: &str = "encoder-capabilities.json";
 
 /// The layout version of the cache file.
 ///
-/// Bumped whenever the stored shape changes. An older or newer number is
+/// Bumped whenever the stored **shape** changes. An older or newer number is
 /// treated as a miss rather than as an error: a cache is a derived artefact,
 /// and the correct response to one this build cannot read is to detect again
 /// and overwrite it.
-pub const CACHE_FORMAT: u32 = 1;
+pub const CACHE_FORMAT: u32 = 2;
+
+/// The revision of the answers this crate gives.
+///
+/// [`CACHE_FORMAT`] covers the shape of the file and [`HardwareSignature`]
+/// covers the machine. This covers the third thing that can make a stored
+/// report wrong: Clipped itself. The published limits in [`crate::reference`]
+/// and the rules in [`crate::detection`] are content, not layout, so correcting
+/// a maximum resolution or tightening an availability rule changes the report
+/// for a machine that has not changed at all — and every installation that had
+/// already cached the old answer would go on serving it, because neither the
+/// hardware nor the file's shape moved.
+///
+/// **Increment this in any change that would make detection produce a different
+/// report for the same machine.** It costs one re-probe per installation, which
+/// is the cheaper of the two mistakes (AGENTS.md section 17).
+pub const DETECTION_REVISION: u32 = 1;
 
 /// The directory name Clipped uses under `%LOCALAPPDATA%`.
 ///
@@ -135,6 +160,12 @@ pub enum StaleReason {
         /// The format number found in the file.
         found: u32,
     },
+    /// It was written by a build whose detection would answer differently, so
+    /// the machine is the same and the answer is not.
+    DetectionChanged {
+        /// The revision found in the file.
+        found: u32,
+    },
     /// It could not be read.
     Unreadable(String),
     /// It is not the JSON this build expects, which normally means a truncated
@@ -154,6 +185,12 @@ impl fmt::Display for StaleReason {
             Self::FormatChanged { found } => write!(
                 formatter,
                 "the cache was written in format {found} and this build reads {CACHE_FORMAT}"
+            ),
+            Self::DetectionChanged { found } => write!(
+                formatter,
+                "the cache was written by detection revision {found} and this build is \
+                 {DETECTION_REVISION}, so the stored answer is not the one this build \
+                 would give"
             ),
             Self::Unreadable(error) => write!(formatter, "the cache could not be read: {error}"),
             Self::Unparsable(error) => write!(formatter, "the cache is not readable JSON: {error}"),
@@ -223,6 +260,8 @@ impl From<serde_json::Error> for CacheError {
 struct CacheFile {
     /// The layout version, first so that it is the first thing a reader sees.
     format: u32,
+    /// The revision of the detection that produced the report.
+    detection_revision: u32,
     /// The hardware this report describes.
     signature: String,
     /// When it was measured, in seconds since the Unix epoch. A plain number
@@ -323,6 +362,11 @@ impl CapabilityCache {
         if file.format != CACHE_FORMAT {
             return CacheState::Stale(StaleReason::FormatChanged { found: file.format });
         }
+        if file.detection_revision != DETECTION_REVISION {
+            return CacheState::Stale(StaleReason::DetectionChanged {
+                found: file.detection_revision,
+            });
+        }
         if file.signature != signature.as_str() {
             return CacheState::Stale(StaleReason::HardwareChanged);
         }
@@ -337,7 +381,10 @@ impl CapabilityCache {
     ///
     /// Written to a neighbouring temporary file and renamed into place, so an
     /// interrupted write leaves the previous answer rather than a truncated
-    /// one.
+    /// one. The temporary name carries the process identifier, because two
+    /// processes detecting at once — which the recorder's own integration tests
+    /// produce — would otherwise share one temporary file and could rename a
+    /// half-written copy of it into place.
     ///
     /// # Errors
     ///
@@ -357,6 +404,7 @@ impl CapabilityCache {
 
         let file = CacheFile {
             format: CACHE_FORMAT,
+            detection_revision: DETECTION_REVISION,
             signature: signature.as_str().to_owned(),
             detected_at_unix_seconds: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -372,11 +420,21 @@ impl CapabilityCache {
             fs::create_dir_all(directory)?;
         }
 
-        let temporary = path.with_extension("json.tmp");
+        let temporary = temporary_path(path);
         fs::write(&temporary, serde_json::to_vec_pretty(&file)?)?;
         fs::rename(&temporary, path)?;
         Ok(())
     }
+}
+
+/// The temporary file [`CapabilityCache::store`] writes before renaming.
+///
+/// One per process. A fixed name would be shared by every process writing the
+/// same cache, and two of them interleaving write and rename can leave a
+/// truncated file where the finished one should be — which the documented
+/// atomicity promises will not happen.
+fn temporary_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("json.{}.tmp", std::process::id()))
 }
 
 /// Clipped's per-user data directory, by the same rule `clipped-logging` uses.
@@ -591,7 +649,54 @@ mod tests {
             .store(&HardwareSignature::of(&adapters), &report_for(adapters))
             .expect("the cache is written");
 
-        assert!(!cache_path(&cache).with_extension("json.tmp").exists());
+        assert!(!temporary_path(&cache_path(&cache)).exists());
+    }
+
+    #[test]
+    fn the_temporary_file_belongs_to_one_process() {
+        // Two processes writing the same cache must not write the same
+        // temporary file: interleaving their writes and renames is how a
+        // truncated report gets renamed into place, which is precisely what
+        // the atomicity in the documentation promises cannot happen.
+        let temporary = temporary_path(Path::new("C:/anywhere/encoder-capabilities.json"));
+        let name = temporary
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the temporary file has a name");
+
+        assert!(name.ends_with(".tmp"), "{name}");
+        assert!(
+            name.contains(&std::process::id().to_string()),
+            "the temporary name must be this process's own: {name}"
+        );
+    }
+
+    #[test]
+    fn a_cache_from_an_older_detection_is_a_miss_even_though_the_machine_is_the_same() {
+        // The invalidation the hardware signature cannot provide: same cards,
+        // same drivers, different Clipped. A build that corrected a published
+        // limit or an availability rule must not serve the answer the previous
+        // build gave.
+        let directory = TestDirectory::new("detection-revision");
+        let cache = directory.cache();
+        let adapters = vec![card(1)];
+        let signature = HardwareSignature::of(&adapters);
+        cache
+            .store(&signature, &report_for(adapters))
+            .expect("the cache is written");
+
+        let contents = fs::read_to_string(cache_path(&cache)).expect("the cache can be read");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&contents).expect("the cache is JSON");
+        value["detection_revision"] = serde_json::json!(DETECTION_REVISION - 1);
+        fs::write(cache_path(&cache), value.to_string()).expect("the file can be written");
+
+        assert_eq!(
+            cache.load(&signature),
+            CacheState::Stale(StaleReason::DetectionChanged {
+                found: DETECTION_REVISION - 1
+            })
+        );
     }
 
     #[test]
