@@ -356,7 +356,8 @@ source frames went by without one reaching the caller. Because the reference is
 the shortest interval *seen*, it is never shorter than the source's real
 interval, so the division cannot over-count — the figure is a lower bound, which
 is the right direction for a number a user reads as "your machine could not keep
-up". The same 200 ms run reports **474 frames missed against 50 delivered**.
+up". The same configuration, run again with this derivation in place, reports
+**515 frames missed against 50 delivered**.
 
 A gap only counts when the frame was already waiting in the pool the first time
 the acquisition looked. That is what separates a caller too slow to collect what
