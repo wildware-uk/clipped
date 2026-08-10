@@ -27,8 +27,10 @@ are all reached through Windows APIs.
 
 Linux is not supported and is not currently being worked on. Platform-specific
 code is kept in `clipped-windows` or in a `windows/` submodule of the crate that
-owns the behaviour, so that a second platform remains possible later without
-unpicking the whole engine (SPEC.md section 3).
+owns the behaviour (AGENTS.md section 5, and the module documentation in
+`crates/windows/src/lib.rs`), so that a second platform remains possible later
+without unpicking the whole engine. SPEC.md section 3 sets Windows as the
+initial target and asks that the architecture leave room for Linux.
 
 ## Building from source
 
@@ -93,9 +95,11 @@ docs/              Architecture, subsystem documentation and ADRs
 The recorder is a native Rust process that owns capture, encoding, muxing and
 session state. The desktop application is a client of that process over IPC, not
 a host for it, so closing or crashing the UI cannot interrupt a recording.
-[docs/architecture.md](docs/architecture.md) describes the subsystems and how
-they fit together; architecture decisions are recorded as ADRs under
-`docs/adr/`.
+[docs/architecture.md](docs/architecture.md) will describe the subsystems and
+how they fit together, and significant decisions are to be recorded as ADRs
+under `docs/adr/` (AGENTS.md section 48). Neither exists yet: both arrive with
+issue #6, and until then the crate-level documentation in each `lib.rs` is the
+authority.
 
 ### Dependency direction
 
@@ -113,9 +117,13 @@ without being placed in a layer.
 | 3 | `clipped-session` | layers 0–2 |
 | 4 | `clipped-recorder` (binary) | layers 0–3 |
 
-`clipped-logging` is the shared structured-logging setup: the tracing
-subscriber, the standard context fields and the log configuration every other
-crate initialises through, rather than each crate choosing its own.
+`clipped-logging` owns where diagnostics go and how much is recorded: it
+installs the process-wide `tracing` subscriber, resolves the log level from the
+environment and a configuration file without a rebuild, writes bounded rotating
+files under a documented per-user directory, and defines the standard context
+fields as types rather than loose strings. It deliberately does not own logging
+itself — every other crate depends on `tracing` and calls its macros directly,
+so no diagnostic has to be routed through a Clipped-specific wrapper.
 
 Two rules matter most:
 
@@ -142,6 +150,10 @@ is not responsible for, and where it sits in this stack.
 | [docs/architecture.md](docs/architecture.md) | Subsystems, boundaries and ADRs |
 | [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
+
+The four `docs/` entries are written under issues #3, #6, #8 and #5 and are
+listed here so those tickets do not each have to edit this table. The links
+resolve once milestone M0 is complete.
 
 ## Contributing
 

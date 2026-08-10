@@ -178,7 +178,9 @@ encoder in use. Please fill those in — they are the first three questions
 anybody triaging a capture problem will ask.
 
 Never attach recordings, logs or screenshots containing anything you would not
-want published. Clipped's own logs are designed not to include window contents,
-audio content or file contents ([docs/logging.md](docs/logging.md),
-[docs/privacy.md](docs/privacy.md)), but an attachment you add by hand is your
-own responsibility.
+want published. An attachment you add by hand is your own responsibility, so
+read it before you upload it. Keeping window contents, audio content and file
+contents out of Clipped's own logs is an acceptance criterion on issue #5 and
+will be documented in [docs/logging.md](docs/logging.md) and
+[docs/privacy.md](docs/privacy.md); it is an intention recorded there, not yet a
+property you should rely on.

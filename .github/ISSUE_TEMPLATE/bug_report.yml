@@ -64,8 +64,9 @@ body:
       label: Capture backend and encoder in use
       description: >
         For example "Windows Graphics Capture, NVENC AV1" or "Desktop
-        Duplication, software x264". The recorder logs both when a session
-        starts; if you are unsure, paste that line or write "unknown".
+        Duplication, software x264". The recorder will log both when a session
+        starts once recording exists; until then, write "unknown" if you do not
+        know.
     validations:
       required: true
 
