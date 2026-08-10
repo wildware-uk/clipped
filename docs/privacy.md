@@ -12,6 +12,12 @@ quietly broken within a year. So the policy is not a ban. It is a requirement
 that every instance is deliberate, opt-in, documented here, and visible in
 review.
 
+**Status.** Clipped is early in development. Detection, capture, the library and
+the editor described below are being built, not shipped, so this document states
+the policy the product is being built to and that every change is held to — not
+a description of finished behaviour. Where a section covers something that does
+not exist yet, it says so.
+
 Related standards: SPEC.md section 39, AGENTS.md sections 13 and 14.
 
 ## Contents
@@ -77,8 +83,12 @@ regression:
 - No recorded video, audio, screenshots or thumbnails uploaded, at any
   quality, for any purpose.
 - No window titles, chat contents, microphone audio or file contents in
-  anything transmitted — and, per AGENTS.md section 13, not in the logs
-  either.
+  anything transmitted. Separately, AGENTS.md section 13 keeps window contents,
+  microphone content, private message contents and file contents out of the
+  logs. Window titles are deliberately not on that list: a window title is how
+  the recorder identifies a game, and SPEC.md section 36 requires game detection
+  to be logged, so a title may well appear in a local log file. It is still
+  never transmitted.
 - No usage analytics, A/B testing, feature-flag service or remote
   configuration.
 
@@ -223,9 +233,10 @@ before the plugin runs.
 provides, not by opening their own sockets, so that requests can be checked
 against the declaration. A request outside the declaration is refused, logged
 and surfaced to the user, and the plugin is disabled until they decide what to
-do. Per AGENTS.md section 34 and SPEC.md section 22, none of this may affect
-the recording: a plugin that is refused, that hangs or that panics must not
-stall or stop capture.
+do. None of this may affect the recording: a plugin that is refused, that hangs
+or that panics must not stall or stop capture. That requirement comes from
+SPEC.md section 2, which says that background analysis must never interfere with
+the game, and from AGENTS.md sections 17 and 18.
 
 **What enforcement can honestly promise.** How strong that mediation is depends
 on the isolation model M9 chooses, and that choice is not yet made. For an
