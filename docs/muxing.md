@@ -259,3 +259,8 @@ Stated rather than left to be discovered (AGENTS.md section 54):
   written.
 - **Sessions are minutes, not hours.** AGENTS.md section 59 asks for long-run
   testing; the longest recording written so far is a few seconds.
+- **No colour signalling is written.** A 10-bit recording would not say what its
+  colours mean, and a player would guess. Left out deliberately rather than
+  forgotten — nothing here produces 10-bit output yet, so there is nothing to
+  test it against — and tracked as
+  [issue #146](https://github.com/wildware-uk/clipped/issues/146).
