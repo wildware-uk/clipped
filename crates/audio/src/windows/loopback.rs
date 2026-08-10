@@ -105,6 +105,8 @@ impl SystemAudioCapture {
 mod tests {
     use std::time::Instant;
 
+    use windows::Win32::Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED;
+
     use super::*;
     use crate::buffer::SampleOrigin;
     use crate::windows::endpoint_capture::testing::{skipped, Contiguity};
@@ -302,7 +304,12 @@ mod tests {
         // that grows without limit, and no audio.
         let Some(mut capture) = open() else { return };
         let format = capture.format();
-        capture.endpoint.fail_the_endpoint_from_now_on();
+        // The `HRESULT` a device that has gone returns, put in place of the one
+        // `GetNextPacketSize` would have returned, so the classification in
+        // `Stream::lost` runs on it exactly as it would on the real thing.
+        capture
+            .endpoint
+            .fail_every_endpoint_call_with(AUDCLNT_E_DEVICE_INVALIDATED);
 
         // Read on another thread, because the regression this guards against
         // is an infinite loop inside `read`, and a test that hangs reports

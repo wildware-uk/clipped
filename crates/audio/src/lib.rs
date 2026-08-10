@@ -73,7 +73,11 @@
 //!
 //! A fourth rule applies to the microphone alone: **its samples never leave
 //! this process except to the caller.** Nothing here writes them anywhere, and
-//! no log line is derived from their values (AGENTS.md section 13).
+//! no log line is derived from their values (AGENTS.md section 13). That is a
+//! property of the type rather than a convention followed at each call site:
+//! [`CapturedAudio`]'s [`Debug`] describes the buffer — frames, timestamp,
+//! format, origin — and cannot print what is in it, so a consumer that writes
+//! `tracing::debug!(?buffer)` still logs no audio.
 //!
 //! # Example
 //!

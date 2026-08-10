@@ -9,6 +9,7 @@
 
 use core::num::{NonZeroU16, NonZeroU32};
 
+use clipped_logging::AudioSource;
 use windows::core::{GUID, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::ERROR_NOT_FOUND;
@@ -92,13 +93,19 @@ impl SourceKind {
         }
     }
 
-    /// What the `source` field on this capture's log lines says, so that two
-    /// captures running in one recording can be told apart in a log
+    /// What the `audio_source` field on this capture's log lines says, so that
+    /// two captures running in one recording can be told apart in a log
     /// (AGENTS.md section 35).
-    pub(super) fn as_str(self) -> &'static str {
+    ///
+    /// `clipped-logging`'s enumeration rather than words chosen here: the
+    /// values `audio_source` may take are a closed list in `docs/logging.md`,
+    /// and the point of that list is that somebody searching a user's log
+    /// months later types one term rather than guessing which of several
+    /// spellings a crate used.
+    pub(super) fn audio_source(self) -> AudioSource {
         match self {
-            Self::SystemAudio => "system audio",
-            Self::Microphone => "microphone",
+            Self::SystemAudio => AudioSource::SystemAudio,
+            Self::Microphone => AudioSource::Microphone,
         }
     }
 }

@@ -342,11 +342,21 @@ impl MicrophoneCapture {
 mod tests {
     use std::time::Instant;
 
+    use windows::Win32::Foundation::E_FAIL;
+    use windows::Win32::Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED;
+
     use super::*;
     use crate::buffer::SampleOrigin;
-    use crate::windows::endpoint_capture::testing::{skipped, Contiguity};
+    use crate::windows::endpoint_capture::testing::{logged, skipped, Contiguity};
     use crate::windows::notifications::EndpointChange;
     use crate::windows::SystemAudioCapture;
+
+    /// The message `Stream::lost` writes when a failed WASAPI call is *not* one
+    /// it recognises.
+    ///
+    /// Matched as a substring of what the crate logged, so that the assertions
+    /// below are about the line a person reading a user's log would see.
+    const UNEXPLAINED_FAULT: &str = "the capture stream failed";
 
     /// Opens the default microphone, or reports why this machine cannot.
     ///
@@ -418,10 +428,19 @@ mod tests {
             .iter()
             .filter(|entry| entry.is_default())
             .count();
-        assert_eq!(
-            defaults, 1,
-            "exactly one of the listed microphones should be the one Windows records from"
+        // At most one, which is what this test is named for. Two would be this
+        // crate misreading the enumeration and would put a settings screen in a
+        // state a user cannot resolve. None is unusual but legitimate — a
+        // machine whose only input devices are disabled for the console role
+        // has microphones and no default — and is a reason to say so rather
+        // than to fail a build.
+        assert!(
+            defaults <= 1,
+            "{defaults} of the listed microphones claim to be the one Windows records from"
         );
+        if defaults == 0 {
+            skipped("this machine has microphones but no default input device");
+        }
 
         // The selection a chosen device produces has to be the device: this is
         // what a settings screen stores and hands back later.
@@ -479,17 +498,23 @@ mod tests {
         // The other half of issue #20's second acceptance criterion, and the
         // closer of the two to what unplugging a USB microphone actually does:
         // the client is invalidated and every call on it fails from then on.
-        // The failure is injected where WASAPI reports it, so the whole
-        // response — the stream torn down, the device tried again, the backing
-        // off when it fails at once, the gap becoming silence — is the code
-        // that runs when somebody stands up wearing a headset.
+        //
+        // `AUDCLNT_E_DEVICE_INVALIDATED` is returned in place of the `HRESULT`
+        // `GetNextPacketSize` would have returned, so what runs on it is the
+        // real path from the failed call onwards: `Stream::lost` deciding what
+        // the code means, the stream torn down, the device tried again, the
+        // backing off when it fails at once, the gap becoming silence. What is
+        // *not* covered is Windows returning that code in the first place,
+        // which needs a hand on a cable (issue #141).
         //
         // The recording must carry on: a microphone track of the right length,
         // made of silence, rather than a read that fails or a capture that
         // stops (AGENTS.md sections 16 and 17).
         let Some(mut capture) = open() else { return };
         let format = capture.format();
-        capture.endpoint.fail_the_endpoint_from_now_on();
+        capture
+            .endpoint
+            .fail_every_endpoint_call_with(AUDCLNT_E_DEVICE_INVALIDATED);
 
         let started = Instant::now();
         let mut frames = 0u64;
@@ -513,6 +538,66 @@ mod tests {
             capture.stats().synthesised_silence_frames > 0,
             "the gap a microphone that has gone leaves has to be filled with silence"
         );
+    }
+
+    #[test]
+    fn an_unplugged_microphone_is_recognised_rather_than_logged_as_an_unexplained_fault() {
+        // `Stream::lost` is what a physically unplugged microphone goes
+        // through: every failed WASAPI call ends the stream, and the only thing
+        // it decides is whether the failure is explained.
+        // `AUDCLNT_E_DEVICE_INVALIDATED` is the ordinary case — it is what
+        // unplugging the device produces — and must not appear in the log as a
+        // fault, because a `warn` for the commonest thing that happens to a
+        // headset is a `warn` nobody reads. Anything else must appear, because
+        // nothing else accounts for it.
+        //
+        // Asserted on what the crate actually logged, since that is the whole
+        // of the difference the classification makes. Deleting the
+        // `AUDCLNT_E_DEVICE_INVALIDATED` arm, or comparing against the wrong
+        // code, fails the first half; treating every failure as an expected
+        // unplug fails the second.
+        let Some(mut expected) = open() else { return };
+        let unplugged = logged(|| {
+            expected
+                .endpoint
+                .fail_every_endpoint_call_with(AUDCLNT_E_DEVICE_INVALIDATED);
+            read_for(&mut expected, Duration::from_millis(400));
+        });
+        assert!(
+            !unplugged.contains(UNEXPLAINED_FAULT),
+            "an unplugged microphone is expected, not a fault, but the log says: {unplugged}"
+        );
+
+        let Some(mut unexpected) = open() else { return };
+        let broken = logged(|| {
+            unexpected.endpoint.fail_every_endpoint_call_with(E_FAIL);
+            read_for(&mut unexpected, Duration::from_millis(400));
+        });
+        assert!(
+            broken.contains(UNEXPLAINED_FAULT),
+            "a failure this crate cannot explain has to be logged, but the log says: {broken}"
+        );
+        assert!(
+            broken.contains("asking for the next packet size"),
+            "the log line has to name the call that failed: {broken}"
+        );
+
+        // And whichever it was, the recording carried on: both captures are
+        // still producing a track rather than having failed a read.
+        assert!(expected.stats().frames > 0 && unexpected.stats().frames > 0);
+    }
+
+    /// Reads `capture` for `duration`, discarding everything it produces.
+    ///
+    /// The samples are the room; what these tests are about is what the capture
+    /// did, which is in its statistics and in what it logged.
+    fn read_for(capture: &mut MicrophoneCapture, duration: Duration) {
+        let started = Instant::now();
+        while started.elapsed() < duration {
+            capture
+                .read(Duration::from_millis(100))
+                .expect("a microphone going away is handled, not an error");
+        }
     }
 
     #[test]

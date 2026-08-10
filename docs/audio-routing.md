@@ -157,6 +157,11 @@ The rule is that **a recording is worth more than the audio it is missing**. No
 device event ends a capture (AGENTS.md sections 16 and 17); the only thing that
 stops one is the caller.
 
+Every line below carries `audio_source=system_audio` or
+`audio_source=microphone`, which is how the two captures a recording runs are
+told apart in one log. The field and its permitted values are `docs/logging.md`,
+not words chosen here.
+
 | What happens | What the capture does |
 | --- | --- |
 | The default output device changes to another device with the same sample rate and channel count | reopens on it, logs one `info` line naming the reason, and fills the outage with silence |
@@ -257,7 +262,11 @@ is worth.
 A microphone hears the room, so its samples are the most private thing Clipped
 handles (AGENTS.md section 13). Nothing in `clipped-audio` writes them anywhere,
 and no log line is derived from their values: the diagnostics count frames, name
-devices and measure durations. The one number that comes from the samples is the
+devices and measure durations. `CapturedAudio` — the one type that carries the
+samples out of the crate — prints as a description of the buffer rather than as
+its contents, so the guarantee survives the first consumer that writes
+`tracing::debug!(?buffer)` instead of depending on nobody ever doing so. The one
+number that comes from the samples is the
 peak level `examples/microphone_probe.rs` prints once a second, which exists so
 that "the track is silent" can be told apart from "the track is quiet", is
 thrown away as soon as it is printed, and is never logged.
@@ -418,12 +427,21 @@ cargo test -p clipped-audio
   over a second and a half of real capture, with synthesised silence asserted to
   be zero; a device change not ending the recording; a device that stops
   answering — which is what unplugging a USB microphone does — still producing a
-  track of the right length, made of silence; a chosen device being reopened by
+  track of the right length, made of silence; that failure being *recognised*,
+  so that `AUDCLNT_E_DEVICE_INVALIDATED` does not appear in the log as an
+  unexplained fault while anything else does; a chosen device being reopened by
   its identifier rather than replaced; a microphone that is not connected being
   reported by name with something to do about it, which needs no audio hardware
-  and so runs in CI; the list of microphones naming exactly one default; and the
+  and so runs in CI; the list of microphones naming at most one default; and the
   microphone and system audio running at once on different devices without
   either disturbing the other.
+
+  The two tests that need a device to fail open a real endpoint and then return
+  a chosen `HRESULT` in place of the one
+  `IAudioCaptureClient::GetNextPacketSize` returned, so the classification in
+  `Stream::lost` and everything after it is the code a real unplug runs. What
+  no test covers is Windows returning that `HRESULT` in the first place — the
+  same gap as the notification callbacks, and the same issue: #141.
 - **What is not tested automatically**, and is the honest gap in issue #20: no
   test plays a known waveform *into* a microphone. Doing that needs a virtual
   input device, which is not installed on the machine this was written on and

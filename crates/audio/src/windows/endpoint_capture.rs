@@ -220,6 +220,13 @@ struct Stream {
     /// Only microphones ask: a muted microphone is the commonest reason a
     /// microphone track is silent and the stream itself cannot tell.
     mute: Option<EndpointMute>,
+    /// An `HRESULT` to return in place of the one the next WASAPI call on this
+    /// stream would have returned. Set only by
+    /// [`EndpointCapture::fail_every_endpoint_call_with`], and read in
+    /// [`Stream::next_packet_size`], so that [`Stream::lost`] classifies an
+    /// injected failure exactly as it classifies a real one.
+    #[cfg(test)]
+    injected_failure: Option<windows::core::HRESULT>,
 }
 
 /// What one look at the endpoint produced.
@@ -303,7 +310,7 @@ impl Stream {
             Err(error) => {
                 tracing::info!(
                     %error,
-                    source = source.kind.as_str(),
+                    audio_source = %source.kind.audio_source(),
                     "this audio device would not drive a stream from an event, so it is read \
                      on a timer instead"
                 );
@@ -351,6 +358,8 @@ impl Stream {
                 SourceKind::SystemAudio => None,
                 SourceKind::Microphone => EndpointMute::of(&device),
             },
+            #[cfg(test)]
+            injected_failure: None,
         }))
     }
 
@@ -360,9 +369,7 @@ impl Stream {
     /// interleaved `f32`. It keeps its capacity between calls, so a steady
     /// stream allocates nothing after the first packet.
     fn next_packet(&mut self, out: &mut Vec<f32>) -> Polled {
-        // SAFETY: `capture` is a live `IAudioCaptureClient` on a started
-        // stream.
-        let available = match unsafe { self.capture.GetNextPacketSize() } {
+        let available = match self.next_packet_size() {
             Ok(available) => available,
             Err(error) => return self.lost(&error, "asking for the next packet size"),
         };
@@ -429,6 +436,25 @@ impl Stream {
         }
     }
 
+    /// How many frames are queued, or the failure a test asked for in place of
+    /// the answer.
+    ///
+    /// The first call every look takes, and therefore the one place a stream
+    /// that has gone is normally found out. A test injects here rather than at
+    /// the caller so that what it replaces is the `HRESULT` WASAPI returned,
+    /// not the decision made about it: [`Stream::lost`] runs on an injected
+    /// failure exactly as it runs on a real one.
+    fn next_packet_size(&self) -> windows::core::Result<u32> {
+        #[cfg(test)]
+        if let Some(code) = self.injected_failure {
+            return Err(windows::core::Error::from_hresult(code));
+        }
+
+        // SAFETY: `capture` is a live `IAudioCaptureClient` on a started
+        // stream.
+        unsafe { self.capture.GetNextPacketSize() }
+    }
+
     /// Classifies a failed WASAPI call as the end of this stream.
     ///
     /// Every failure ends the stream, because there is no failure of these
@@ -443,7 +469,7 @@ impl Stream {
         tracing::warn!(
             %error,
             operation,
-            source = self.kind.as_str(),
+            audio_source = %self.kind.audio_source(),
             device = self.identity.name,
             "the capture stream failed; the endpoint will be opened again"
         );
@@ -570,11 +596,12 @@ pub(super) struct EndpointCapture {
     format_change: Option<AudioFormat>,
     closed: bool,
     stats: CaptureStats,
-    /// Makes every look at the endpoint report that the stream has been lost,
-    /// which is what a device that fails the moment it is opened does. Set only
-    /// by the test that checks such a device cannot spin.
+    /// The `HRESULT` every WASAPI call on this capture's stream returns instead
+    /// of doing anything, including on a stream opened after the current one is
+    /// torn down. Set only by
+    /// [`fail_every_endpoint_call_with`](Self::fail_every_endpoint_call_with).
     #[cfg(test)]
-    endpoint_always_fails: bool,
+    injected_failure: Option<windows::core::HRESULT>,
 }
 
 // SAFETY: `EndpointCapture` is `Send` so that a session can open it and move it
@@ -630,7 +657,7 @@ impl EndpointCapture {
         let opened = read_performance_counter(counter_frequency)?;
 
         tracing::info!(
-            source = source.kind.as_str(),
+            audio_source = %source.kind.audio_source(),
             device = stream.identity.name,
             device_id = stream.identity.id,
             sample_rate = format.sample_rate().get(),
@@ -660,7 +687,7 @@ impl EndpointCapture {
             closed: false,
             stats: CaptureStats::default(),
             #[cfg(test)]
-            endpoint_always_fails: false,
+            injected_failure: None,
         }))
     }
 
@@ -760,7 +787,7 @@ impl EndpointCapture {
             self.watch.set_captured(None);
             self.closed = true;
             tracing::info!(
-                source = self.source.kind.as_str(),
+                audio_source = %self.source.kind.audio_source(),
                 frames = self.timeline.frames_emitted(),
                 synthesised_silence_frames = self.stats.synthesised_silence_frames,
                 endpoint_changes = self.stats.endpoint_changes,
@@ -889,16 +916,21 @@ impl EndpointCapture {
 
     /// Looks at the endpoint, if there is one.
     fn poll_stream(&mut self) -> Polled {
+        // Carried onto the stream on every look rather than only when it is
+        // opened, so that a stream this capture opens *after* the injection —
+        // which is what a device failing over and over produces — fails too.
         #[cfg(test)]
-        {
-            if self.endpoint_always_fails && self.stream.is_some() {
-                return Polled::Lost(EndpointChange::CaptureEndpointInvalidated);
-            }
-        }
+        let injected_failure = self.injected_failure;
 
         let Self { stream, packet, .. } = self;
         match stream.as_mut() {
-            Some(stream) => stream.next_packet(packet),
+            Some(stream) => {
+                #[cfg(test)]
+                {
+                    stream.injected_failure = injected_failure;
+                }
+                stream.next_packet(packet)
+            }
             None => Polled::Empty,
         }
     }
@@ -909,7 +941,7 @@ impl EndpointCapture {
     /// stream may be torn down and rebuilt: the notification callbacks
     /// themselves only set a flag (`notifications.rs`).
     fn service_endpoint(&mut self) {
-        let source = self.source.kind.as_str();
+        let audio_source = self.source.kind.audio_source();
 
         if let Some(change) = self.watch.take_change() {
             // A stream that has only just been opened and has already failed on
@@ -933,7 +965,7 @@ impl EndpointCapture {
 
             if self.stream.is_some() {
                 tracing::info!(
-                    source,
+                    audio_source = %audio_source,
                     reason = change.as_str(),
                     device = self.device_name().unwrap_or("<none>"),
                     "the audio device being recorded changed; the capture is opening the \
@@ -949,7 +981,7 @@ impl EndpointCapture {
 
             if failed_at_once {
                 tracing::warn!(
-                    source,
+                    audio_source = %audio_source,
                     retry_in_seconds = ENDPOINT_RETRY.as_secs(),
                     "the audio device failed as soon as it was opened, so it is left alone \
                      for a moment rather than reopened at once. The recording continues, and \
@@ -968,7 +1000,7 @@ impl EndpointCapture {
         match Stream::open(&self.enumerator, &self.source, &self.watch) {
             Ok(Some(stream)) if self.format.is_interchangeable_with(&stream.format) => {
                 tracing::info!(
-                    source,
+                    audio_source = %audio_source,
                     device = stream.identity.name,
                     device_id = stream.identity.id,
                     "audio capture resumed"
@@ -984,7 +1016,7 @@ impl EndpointCapture {
                 // capture waits in case the user goes back to a device it can
                 // use.
                 tracing::warn!(
-                    source,
+                    audio_source = %audio_source,
                     device = stream.identity.name,
                     from = %self.format,
                     to = %stream.format,
@@ -997,7 +1029,7 @@ impl EndpointCapture {
             }
             Ok(None) => {
                 tracing::warn!(
-                    source,
+                    audio_source = %audio_source,
                     device = self.source.device_description(),
                     "the audio device this capture records is not available, so this track is \
                      silence until it comes back. The recording continues"
@@ -1007,7 +1039,7 @@ impl EndpointCapture {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    source,
+                    audio_source = %audio_source,
                     device = self.source.device_description(),
                     "could not open the audio device; this track is silence until it can be \
                      opened. The recording continues"
@@ -1042,19 +1074,25 @@ impl EndpointCapture {
         self.watch.request_reopen(change);
     }
 
-    /// Makes every look at the endpoint behave as though the device had been
-    /// invalidated.
+    /// Makes every WASAPI call on this capture's stream fail with `code`.
     ///
-    /// A device that opens and then fails on the first call is the one shape of
-    /// failure that cannot be reached from a healthy machine and cannot be left
-    /// untested: it is what a dying USB sound card does, and reopening it at
-    /// once is a loop with nothing to end it. The stream is opened for real and
-    /// the failure is injected where WASAPI would report it, so everything the
-    /// loop does in response — tearing down, backing off, filling the gap with
-    /// silence — is the code that would run.
+    /// A device that answers and then stops — the client invalidated by an
+    /// unplugged microphone, a dying USB sound card that fails on the first
+    /// call after it opens — cannot be reached from a healthy machine and
+    /// cannot be left untested. So the stream is opened on a real endpoint and
+    /// `code` is returned in place of the `HRESULT`
+    /// `IAudioCaptureClient::GetNextPacketSize` would have returned
+    /// ([`Stream::next_packet_size`]). What runs on it from there is the whole
+    /// of the real path: [`Stream::lost`] deciding what the `HRESULT` means,
+    /// the stream being torn down, the endpoint being tried again, the backing
+    /// off when it fails at once, and the gap becoming silence.
+    ///
+    /// What is *not* covered is Windows returning that `HRESULT` in the first
+    /// place, which needs a hand on a cable; see
+    /// [issue #141](https://github.com/wildware-uk/clipped/issues/141).
     #[cfg(test)]
-    pub(super) fn fail_the_endpoint_from_now_on(&mut self) {
-        self.endpoint_always_fails = true;
+    pub(super) fn fail_every_endpoint_call_with(&mut self, code: windows::core::HRESULT) {
+        self.injected_failure = Some(code);
     }
 }
 
@@ -1102,6 +1140,9 @@ fn read_performance_counter(frequency: NonZeroU64) -> Result<AudioTimestamp, Aud
 #[cfg(test)]
 pub(super) mod testing {
     use std::io::Write as _;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
 
     use super::{AudioFormat, AudioTimestamp, CapturedAudio};
 
@@ -1128,6 +1169,61 @@ pub(super) mod testing {
         }
         let _ = writeln!(std::io::stderr(), "SKIPPED (audio): {reason}");
         true
+    }
+
+    /// Collects what a subscriber writes, so a test can assert on it.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the buffer is not poisoned")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CapturedLog {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `body` with a subscriber local to this thread, and returns
+    /// everything this crate logged while it ran.
+    ///
+    /// The assertion is then on the log line that was rendered rather than on
+    /// the intention behind it, which matters for the one decision this crate
+    /// makes whose only outcome *is* a log line: whether a failed WASAPI call
+    /// is the ordinary end of a stream or a fault nobody expected
+    /// (`Stream::lost`).
+    ///
+    /// Thread-local rather than global, so tests running beside this one in the
+    /// same process neither see this subscriber nor write into its buffer.
+    pub(in crate::windows) fn logged(body: impl FnOnce()) -> String {
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, body);
+
+        let written = captured
+            .0
+            .lock()
+            .expect("the buffer is not poisoned")
+            .clone();
+        String::from_utf8(written).expect("the subscriber writes UTF-8")
     }
 
     /// Asserts that every buffer starts exactly where all the buffers before it

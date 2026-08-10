@@ -2,21 +2,30 @@
 //!
 //! # The problem this exists for
 //!
-//! WASAPI loopback delivers nothing at all while the endpoint is silent. Not
-//! silent buffers — nothing: `GetNextPacketSize` returns zero for as long as no
-//! application is rendering, and then, when a sound finally plays, packets
-//! resume as though no time had passed. A capture that simply concatenates what
-//! it is given therefore produces a track that is shorter than the recording by
-//! exactly the amount of silence in it, and every sound after the first gap
-//! appears earlier in the file than it happened. Because the loss is
-//! cumulative, the error grows all session: a two-hour recording with twenty
-//! minutes of quiet in it ends up twenty minutes out of step with its video by
-//! the end, having looked perfectly synchronised at the start.
+//! A WASAPI endpoint delivers nothing at all for periods it has nothing to say
+//! about. Not silent buffers — nothing: `GetNextPacketSize` returns zero, and
+//! then packets resume as though no time had passed. A capture that simply
+//! concatenates what it is given therefore produces a track that is shorter
+//! than the recording by exactly the amount of that quiet, and every sound
+//! after the first gap appears earlier in the file than it happened. Because
+//! the loss is cumulative, the error grows all session: a two-hour recording
+//! with twenty minutes of quiet in it ends up twenty minutes out of step with
+//! its video by the end, having looked perfectly synchronised at the start.
 //!
-//! It is the single most common way loopback capture is got wrong, and the fix
-//! is not subtle — fill the gap with silence — but the length of the fill has to
-//! come from the device's own clock or it merely replaces one drift with
-//! another.
+//! Both captures meet it, for different reasons, and the reasons are worth
+//! knowing because they decide how often it happens. A loopback stream is
+//! silent whenever no application is rendering, which on an idle machine is
+//! most of the time; it is the single most common way loopback capture is got
+//! wrong. A microphone normally produces packets continuously — a quiet room is
+//! quiet samples, not no samples — so the gaps are the device being unplugged,
+//! the stream being reopened, or the audio engine dropping data a stalled
+//! consumer did not collect. That makes them rarer and longer rather than
+//! absent, and a microphone track that skipped an unplugged headset would slide
+//! out of step with the video exactly the same way.
+//!
+//! The fix is not subtle — fill the gap with silence — but the length of the
+//! fill has to come from the device's own clock or it merely replaces one drift
+//! with another.
 //!
 //! # How
 //!
@@ -48,8 +57,8 @@
 //!
 //! # Why there is a deadband at all
 //!
-//! Measured on Windows 11 build 26200 against the default 48 kHz endpoint,
-//! consecutive loopback packets arrive 10 ms apart with their reported
+//! Measured on Windows 11 build 26200 against the default 48 kHz render
+//! endpoint, consecutive loopback packets arrive 10 ms apart with their reported
 //! positions varying by a few tens of microseconds. Correcting that would
 //! insert a one-frame silence or trim a frame from most packets in a recording
 //! — audible as a faint tick, and pointless. [`DEADBAND`] is far wider than the

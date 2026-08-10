@@ -13,6 +13,17 @@ authors.workspace = true
 # decides where they end up (docs/logging.md). MIT.
 tracing.workspace = true
 
+# The vocabulary of the `audio_source` log field, which docs/logging.md defines
+# as a closed enumeration precisely so that a capture's diagnostics can be
+# searched by source months later. Depending on the type rather than writing the
+# words here is what keeps the code and that table in step. `clipped-logging` is
+# layer 0 and `clipped-audio` is layer 1, so this is the direction
+# `tests/integration/tests/workspace_layering.rs` enforces. It is also what
+# `examples/loopback_probe.rs` and `examples/microphone_probe.rs` install to get
+# Clipped's own logging, so that endpoint-change lines appear exactly as they
+# will in a recording session. MPL-2.0.
+clipped-logging.workspace = true
+
 # WASAPI, the device enumerator whose notifications tell this crate that the
 # default endpoint moved, and the performance counter every timestamp is
 # expressed against. Target-specific so that the platform-neutral half of this
@@ -52,16 +63,13 @@ windows = { workspace = true, features = [
 # would not move when that one does.
 windows-core.workspace = true
 
-# `examples/loopback_probe.rs` and `examples/microphone_probe.rs` install
-# Clipped's own logging so that the endpoint-change lines appear exactly as they
-# will in a recording session, which is the point of running them (issue #19's
-# and issue #20's device-change criteria need a hand on a cable, so they are
-# verified by watching these). `clipped-logging`
-# is layer 0 and `clipped-audio` is layer 1, so an example-only dependency on it
-# does not bend the layering `tests/integration/tests/workspace_layering.rs`
-# enforces, and it forces nothing on a consumer of the library.
+# `src/windows/endpoint_capture.rs` has one decision whose only outcome is a log
+# line — whether a failed WASAPI call is an unplugged device or an unexplained
+# fault — so the test for it reads what was rendered rather than trusting the
+# branch. Test-only, and the same version `clipped-logging` builds its own
+# subscriber from. MIT.
 [dev-dependencies]
-clipped-logging.workspace = true
+tracing-subscriber = "0.3"
 
 # `tests/system_audio.rs` plays a tone it synthesises itself, so that the
 # frequency assertion has a known signal to find and the test needs no installed

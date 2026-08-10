@@ -259,10 +259,23 @@ impl IMMNotificationClient_Impl for NotificationClient_Impl {
     }
 
     fn OnDeviceAdded(&self, _device: &PCWSTR) -> windows::core::Result<()> {
-        // Deliberately nothing. A device appearing only matters if Windows
-        // makes it the default, and that arrives as `OnDefaultDeviceChanged`.
-        // Reopening for every device that appears would tear the stream down
-        // whenever a monitor with speakers woke up.
+        // Deliberately nothing, for two different reasons depending on the
+        // capture.
+        //
+        // A capture that follows the default is told about a new device that
+        // matters by `OnDefaultDeviceChanged`, so acting here as well would
+        // only tear the stream down twice — or tear it down once for a monitor
+        // with speakers waking up, which is not this capture's device at all.
+        //
+        // A capture on a *chosen* device gets no such notification: the device
+        // it is waiting for being plugged back in is precisely an `OnDeviceAdded`
+        // it ignores. It recovers anyway, because a capture with no stream looks
+        // for its endpoint every two seconds (`ENDPOINT_RETRY` in
+        // `endpoint_capture.rs`), so the cost of ignoring this is up to two
+        // seconds of extra silence in one track. Acting on it would mean
+        // comparing the identifier while holding a lock the audio service is
+        // waiting on, for a device that was unplugged by hand and will not be
+        // plugged back in twice in a second.
         Ok(())
     }
 

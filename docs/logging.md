@@ -154,12 +154,22 @@ INFO clipped_session{session_id=01H8XGJT4A game_id=counter-strike-2 capture_back
 | `game_id` | `GameId` | `[A-Za-z0-9._-]`, 1–64 characters |
 | `capture_backend` | `CaptureBackend` | `windows_graphics_capture`, `desktop_duplication` |
 | `encoder` | `VideoEncoder` | `nvenc`, `amd_amf`, `intel_quicksync`, `software_h264`, `software_h265` |
-| `audio_source` | `AudioSource` | `compatibility_mix`, `game`, `other_system`, `microphone`, `application` |
+| `audio_source` | `AudioSource` | `compatibility_mix`, `game`, `other_system`, `system_audio`, `microphone`, `application` |
 
 A field that is not yet known is absent from the log line rather than recorded
 as a placeholder, so `game_id` appearing at all means game detection had
 resolved one. Adding a value to one of the enumerations is a deliberate change
 to this table as well as to the code.
+
+`system_audio` was added that way, for
+[issue #20](https://github.com/wildware-uk/clipped/issues/20). The other
+`audio_source` values name tracks a session routes audio *into*; a capture of
+the output device in loopback mode is none of them, and it is what
+`clipped-audio` records today. That crate attaches `audio_source` to its own
+lines rather than waiting for a session span, because a recording runs two
+captures on two threads and the field is what tells their lines apart — but it
+attaches the same `AudioSource` values, so the concept has one vocabulary and
+not two.
 
 ## Privacy: what is and is not guaranteed
 

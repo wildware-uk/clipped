@@ -182,6 +182,15 @@ pub enum AudioSource {
     Game,
     /// System audio other than the game.
     OtherSystem,
+    /// Everything the machine is playing, captured from the output device in
+    /// loopback mode.
+    ///
+    /// Distinct from the three above, which are the tracks a session routes
+    /// audio into: this is one capture of one endpoint, before anything has
+    /// been attributed to a process or mixed. It is what `clipped-audio`
+    /// records today, and in M2 it becomes the source the others are separated
+    /// out of ([ADR 0003](../../../docs/adr/0003-process-specific-audio-capture.md)).
+    SystemAudio,
     /// The capture microphone.
     Microphone,
     /// A separately tracked application, such as a voice chat client.
@@ -194,6 +203,7 @@ impl fmt::Display for AudioSource {
             Self::CompatibilityMix => "compatibility_mix",
             Self::Game => "game",
             Self::OtherSystem => "other_system",
+            Self::SystemAudio => "system_audio",
             Self::Microphone => "microphone",
             Self::Application => "application",
         })

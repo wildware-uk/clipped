@@ -16,7 +16,8 @@ use std::error::Error;
 
 use crate::format::AudioFormat;
 
-/// System audio capture could not start, or could not continue.
+/// An audio capture — system audio or a microphone — could not start, or could
+/// not continue.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AudioError {

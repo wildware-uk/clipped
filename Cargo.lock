@@ -180,6 +180,7 @@ version = "0.1.0"
 dependencies = [
  "clipped-logging",
  "tracing",
+ "tracing-subscriber",
  "windows",
  "windows-core",
 ]
