@@ -12,12 +12,21 @@
     exit code and on the text a contributor would read.
 
     Every case is driven entirely by fixtures: stand-in commands, fixture pin
-    files, a registry key under HKCU, and a JSON description of the display
-    adapters. Nothing is read from the machine the tests happen to run on, so a
-    case that fails is a defect in the check rather than a statement about the
-    developer's toolchain (AGENTS.md section 25). That matters most on a clean
-    CI runner, where an outcome that depends on installed toolchains or on real
-    hardware would fail for reasons that have nothing to do with the change.
+    files, a registry key under HKCU, a fixture FFmpeg tree, and a JSON
+    description of the display adapters. Nothing is read from the machine the
+    tests happen to run on, so a case that fails is a defect in the check rather
+    than a statement about the developer's toolchain (AGENTS.md section 25).
+    That matters most on a clean CI runner, where an outcome that depends on
+    installed toolchains or on real hardware would fail for reasons that have
+    nothing to do with the change.
+
+    Some of the check's parameters default to environment variables rather than
+    to a command name, and a case that wants one of those absent expresses it by
+    omitting the parameter. Windows PowerShell drops an empty string argument on
+    its way to a native command, so passing "" would not mean what it looks
+    like. The variables are therefore cleared in this process before any case
+    runs, and restored afterwards, so what a child process inherits is decided
+    here and not by whoever is running the suite.
 
     Two shapes of wrongness are covered, because they are detected by different
     code and only one of them is easy:
@@ -63,6 +72,13 @@ $fixtureRegistryRoot = 'HKCU:\SOFTWARE\ClippedPrerequisiteCheckTests'
 $fixtureRustPin = '1.42.0'
 $fixtureNodePin = '20.11.1'
 
+# Cleared for the duration of the suite; see the description above.
+$inheritedEnvironment = [ordered]@{}
+foreach ($variable in @('LIBCLANG_PATH', 'FFMPEG_DIR', 'FFMPEG_INCLUDE_DIR', 'FFMPEG_LIBS_DIR', 'FFMPEG_LINK_MODE')) {
+    $inheritedEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable)
+    Remove-Item -LiteralPath "env:$variable" -ErrorAction SilentlyContinue
+}
+
 function New-Fixture {
     <#
     .SYNOPSIS
@@ -91,10 +107,12 @@ function New-StubCommand {
     #>
     param(
         [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [string[]] $Lines
+        [Parameter(Mandatory)] [string[]] $Lines,
+        [string] $Directory = ''
     )
 
-    $path = Join-Path $fixtureRoot "$Name.cmd"
+    if (-not $Directory) { $Directory = $fixtureRoot }
+    $path = Join-Path $Directory "$Name.cmd"
     Set-Content -LiteralPath $path -Value (@('@echo off') + $Lines) -Encoding Ascii
     $path
 }
@@ -191,6 +209,35 @@ channel = "$fixtureRustPin"
     New-Item -Path $sdkRegistryPath -Force | Out-Null
     New-ItemProperty -LiteralPath $sdkRegistryPath -Name 'KitsRoot10' -Value $sdkRoot `
         -PropertyType String -Force | Out-Null
+
+    # --- an LLVM install, and an FFmpeg build that has been fetched ---------
+
+    # Only the file's name and location matter to the check: it reports where
+    # bindgen would load libclang.dll from, and never opens it.
+    $llvmDirectory = Join-Path $fixtureRoot 'LLVM\bin'
+    New-Item -ItemType Directory -Path $llvmDirectory -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $llvmDirectory 'libclang.dll') `
+        -Value 'not a real DLL' -Encoding Ascii
+
+    # A clang that answers from the same directory as the DLL, which is how a
+    # real LLVM install is laid out and the path the check takes when
+    # LIBCLANG_PATH is not set.
+    $clangBesideLibclang = New-StubCommand -Name 'clipped-stub-clang' -Directory $llvmDirectory -Lines @(
+        'echo clang version 20.1.8',
+        'exit /b 0'
+    )
+
+    # The shape scripts/fetch-ffmpeg.ps1 leaves behind: a prefix with bin,
+    # include and lib. The files are empty because the check only asks whether
+    # the build is there, never what is in it.
+    $ffmpegPrefix = Join-Path $fixtureRoot 'ffmpeg-n0.0-fixture-win64-lgpl-shared'
+    New-Item -ItemType Directory -Path (Join-Path $ffmpegPrefix 'bin') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $ffmpegPrefix 'include\libavformat') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $ffmpegPrefix 'lib') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $ffmpegPrefix 'include\libavformat\avformat.h') `
+        -Value '/* fixture */' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $ffmpegPrefix 'lib\avformat.lib') `
+        -Value 'fixture' -Encoding Ascii
 
     # --- display adapters ---------------------------------------------------
 
@@ -300,6 +347,10 @@ channel = "$fixtureRustPin"
             Every case passes every parameter, so a case only differs from a
             satisfied machine in the one thing it is about. Leaving a parameter
             at its default would let the machine decide part of the outcome.
+
+            An override of $null omits the parameter instead of passing it,
+            which is how a case expresses "this environment variable is not
+            set"; the variables themselves were cleared before any case ran.
         #>
         param([hashtable] $Override = @{})
 
@@ -308,6 +359,16 @@ channel = "$fixtureRustPin"
             CargoCommand             = $cargoSatisfied
             NodeCommand              = $nodePinned
             FfprobeCommand           = $ffprobePresent
+            # LIBCLANG_PATH is the only thing satisfying libclang by default, so
+            # a case that removes it is genuinely testing absence rather than
+            # falling through to whatever LLVM this machine has.
+            ClangCommand             = 'clipped-no-such-clang'
+            LibclangPath             = $llvmDirectory
+            LibclangSearchDirectory  = $absentPath
+            FfmpegDir                = $ffmpegPrefix
+            FfmpegIncludeDir         = (Join-Path $ffmpegPrefix 'include')
+            FfmpegLibsDir            = (Join-Path $ffmpegPrefix 'lib')
+            FfmpegLinkMode           = 'dynamic'
             VsWherePath              = $vswherePresent
             WindowsKitsRegistryPath  = $sdkRegistryPath
             RustToolchainFile        = $pinFile
@@ -327,6 +388,7 @@ channel = "$fixtureRustPin"
 
         $arguments = @()
         foreach ($key in $settings.Keys) {
+            if ($null -eq $settings[$key]) { continue }
             $arguments += "-$key"
             $arguments += [string] $settings[$key]
         }
@@ -383,7 +445,85 @@ channel = "$fixtureRustPin"
         -ExpectedExitCode 0 `
         -ExpectedText @('[WARN] Node.js', 'optional prerequisite(s) need attention', 'https://nodejs.org')
 
+    # Neither LLVM nor a fetched FFmpeg is on a fresh machine, and both are
+    # needed before crates/muxer will build. Without these two checks the
+    # contributor meets "Unable to find libclang" or "No linking method set!"
+    # from inside a dependency's build script, several minutes in, with no
+    # mention of LLVM or of the script that fetches FFmpeg.
+    Assert-Case -Name 'missing LLVM and missing FFmpeg are both named, with what to run' `
+        -Arguments (New-Arguments @{
+            LibclangPath     = $null
+            FfmpegDir        = $null
+            FfmpegIncludeDir = $null
+            FfmpegLibsDir    = $null
+            FfmpegLinkMode   = $null
+        }) `
+        -ExpectedExitCode 1 `
+        -ExpectedText @(
+        '[FAIL] LLVM (libclang)',
+        'no libclang.dll found',
+        'winget install LLVM.LLVM',
+        '[FAIL] FFmpeg libraries',
+        'FFMPEG_DIR, FFMPEG_INCLUDE_DIR, FFMPEG_LIBS_DIR, FFMPEG_LINK_MODE not set in this shell',
+        'scripts/fetch-ffmpeg.ps1',
+        '2 required prerequisite(s) are missing:'
+    )
+
+    # LLVM installed the ordinary way puts libclang.dll beside clang.exe, and
+    # nobody in that state has LIBCLANG_PATH set. Finding it there is what makes
+    # the check pass for the majority of contributors.
+    Assert-Case -Name 'libclang beside clang on PATH is found without LIBCLANG_PATH' `
+        -Arguments (New-Arguments @{
+            LibclangPath = $null
+            ClangCommand = $clangBesideLibclang
+        }) `
+        -ExpectedExitCode 0 `
+        -ExpectedText @('[ OK ] LLVM (libclang)', 'libclang.dll', 'All required prerequisites are present.')
+
     # === present, but wrong =================================================
+
+    # LIBCLANG_PATH pointing at the wrong directory is a different fault to LLVM
+    # being absent, and it has a different fix: nothing needs installing.
+    Assert-Case -Name 'LIBCLANG_PATH pointing somewhere without the DLL is reported as itself' `
+        -Arguments (New-Arguments @{ LibclangPath = $fixtureRoot }) `
+        -ExpectedExitCode 1 `
+        -ExpectedText @(
+        '[FAIL] LLVM (libclang)',
+        "LIBCLANG_PATH is set to $fixtureRoot, which holds no libclang.dll",
+        'set LIBCLANG_PATH to the directory containing it'
+    )
+
+    # An FFMPEG_DIR left over from a pin whose directory has since been deleted
+    # is set, so the "not set" branch does not catch it, and the failure it
+    # produces later is a linker error listing unresolved av* symbols.
+    Assert-Case -Name 'FFmpeg variables pointing at a build that is not there are reported' `
+        -Arguments (New-Arguments @{
+            FfmpegDir        = $absentPath
+            FfmpegIncludeDir = $absentPath
+            FfmpegLibsDir    = $absentPath
+        }) `
+        -ExpectedExitCode 1 `
+        -ExpectedText @(
+        '[FAIL] FFmpeg libraries',
+        'the FFmpeg variables are set but these are missing',
+        'avformat.h (FFMPEG_INCLUDE_DIR)',
+        'avformat.lib (FFMPEG_LIBS_DIR)',
+        'scripts/fetch-ffmpeg.ps1'
+    )
+
+    # Static is the binding's default, so this is the state of anyone who set
+    # the variables by hand. It builds, and it quietly changes the licence
+    # position of every binary that machine produces (ADR 0004), which is why it
+    # is a failure and not a warning.
+    Assert-Case -Name 'FFmpeg linked statically is a failure, not a preference' `
+        -Arguments (New-Arguments @{ FfmpegLinkMode = 'static' }) `
+        -ExpectedExitCode 1 `
+        -ExpectedText @(
+        '[FAIL] FFmpeg libraries',
+        "FFMPEG_LINK_MODE is 'static', not 'dynamic'",
+        'docs/adr/0004-ffmpeg-dependency-strategy.md'
+    )
+
 
     # Visual Studio installed without the "Desktop development with C++"
     # workload is one of the most common states on a contributor machine, and it
@@ -515,6 +655,12 @@ channel = "$fixtureRustPin"
 } finally {
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fixtureRegistryRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+    foreach ($variable in $inheritedEnvironment.Keys) {
+        $value = $inheritedEnvironment[$variable]
+        if ($null -eq $value) { Remove-Item -LiteralPath "env:$variable" -ErrorAction SilentlyContinue }
+        else { Set-Item -LiteralPath "env:$variable" -Value $value }
+    }
 }
 
 Write-Host ''

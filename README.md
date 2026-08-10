@@ -41,6 +41,8 @@ You need:
 - The MSVC build tools and Windows SDK that the `msvc` target links against —
   in practice, Visual Studio Build Tools with the "Desktop development with
   C++" workload.
+- LLVM, for the `libclang.dll` that generates the FFmpeg bindings at build time
+  (`winget install LLVM.LLVM`).
 
 [docs/prerequisites.md](docs/prerequisites.md) has the full list, including the
 versions the project is tested against.
@@ -48,12 +50,18 @@ versions the project is tested against.
 ```text
 git clone https://github.com/wildware-uk/clipped.git
 cd clipped
+powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment
 cargo build --workspace
 cargo test --workspace
 ```
 
-No environment variables, local configuration or generated files are required
-to build: a clean clone plus the toolchain above is enough.
+The one step beyond the toolchain is that FFmpeg build. Clipped links against a
+pinned, LGPL-only FFmpeg rather than vendoring or compiling one, so the script
+downloads it, verifies its checksum into the gitignored `third-party/ffmpeg/`,
+and sets the environment variables the build reads — open a new shell after it
+runs. Nothing else is required: no local configuration and no generated files.
+[docs/ffmpeg.md](docs/ffmpeg.md) covers it, and
+`scripts/check-prerequisites.ps1` reports whether it has been done.
 
 ## Development setup
 

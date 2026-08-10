@@ -27,6 +27,24 @@ tracing = "0.1"
 # code for a usage error. That only holds if they share one version of clap.
 # Dual MIT/Apache-2.0.
 clap = { version = "4.5", features = ["derive"] }
+# The FFmpeg binding, pinned here rather than in the crate that uses it because
+# its version and the prebuilt FFmpeg that scripts/fetch-ffmpeg.ps1 downloads
+# have to move together: `0.17.0+ffmpeg.8.1` is the release built and tested
+# against the FFmpeg 8.1 headers the fetch script installs, and the `ffmpeg8_1`
+# feature is what tells it which FFmpeg API to expect. Every crate that later
+# reaches for FFmpeg - the encoder, thumbnails, waveform extraction - uses this
+# one entry, so there is a single place to change when the pin moves
+# (docs/adr/0004-ffmpeg-dependency-strategy.md).
+#
+# MIT. It is a raw `-sys` binding: it links FFmpeg and generates the FFI, and
+# nothing above that. The safe wrappers live in crates/muxer, deliberately, so
+# that the FFmpeg surface Clipped depends on stays small and visible. ADR 0004
+# records why the higher-level `ffmpeg-the-third` was rejected - it is WTFPL,
+# which deny.toml does not allow - and why `rsmpeg` was too.
+#
+# FFmpeg itself is LGPL v3 and is not vendored here; it is fetched by
+# scripts/fetch-ffmpeg.ps1 and linked dynamically.
+rusty_ffmpeg = { version = "0.17.0", features = ["ffmpeg8_1"] }
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }

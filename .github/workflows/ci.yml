@@ -99,48 +99,19 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
 
-      # Issue #3 asks for the documented prerequisites to be verified on a
-      # machine that has never built the project. A GitHub-hosted runner is
-      # exactly that, every single run. Its output is copied into the run
-      # summary so that a drift in the documentation is visible without opening
-      # the log.
-      #
-      # Invoked the way docs/prerequisites.md says to invoke it, including the
-      # Windows PowerShell 5.1 host, so that what CI exercises is what a
-      # contributor pastes.
-      - name: Check documented prerequisites
-        shell: powershell
-        run: |
-          # GitHub prepends `$ErrorActionPreference = 'stop'` to a `powershell`
-          # step. Under Windows PowerShell 5.1, merging a native executable's
-          # stderr into the success stream with `2>&1` wraps each stderr line in
-          # a NativeCommandError ErrorRecord, which is terminating under Stop.
-          # So the first time the script below wrote anything to stderr, this
-          # step would throw before `$output` was ever assigned: no log, no run
-          # summary, no `exit $code`. That is precisely the unhappy path this
-          # step exists to report on, so stderr is captured with the preference
-          # relaxed and the exit code is decided by the script, not by the host.
-          $ErrorActionPreference = 'Continue'
-          $output = & powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host $output
-          "## Prerequisite check on a clean runner`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          exit $code
-
-      # crates/muxer links against the FFmpeg C libraries (issue #7), and the
-      # Rust FFmpeg bindings generate their headers with bindgen, which loads
-      # libclang.dll at build time. Without LIBCLANG_PATH pointing at a
-      # directory containing that DLL, the build fails with "Unable to find
-      # libclang" - a message that names neither FFmpeg nor the step that should
-      # have set it up.
+      # crates/muxer links against the FFmpeg C libraries (issue #7), and
+      # `rusty_ffmpeg` generates their FFI with bindgen, which loads libclang.dll
+      # at build time. Without LIBCLANG_PATH pointing at a directory containing
+      # that DLL, the build fails with "Unable to find libclang" - a message
+      # that names neither FFmpeg nor the step that should have set it up.
       #
       # The runner image is widely said to ship LLVM at C:\Program Files\LLVM.
       # This step does not assume that: it reports every location it looked in
       # and what it found, so the log answers the question rather than the
-      # comment doing it. It never fails the job - nothing in the workspace
-      # needs libclang until #7 lands, and once it does the honest failure is
-      # the build error naming the missing DLL, not a red step here.
+      # comment doing it. It fails the job when nothing is found, because the
+      # workspace now genuinely cannot build without it, and a red step naming
+      # LLVM is a better thing to read than a build error from a dependency's
+      # build script several minutes later.
       - name: Locate libclang for bindgen
         run: |
           $candidates = @(
@@ -182,36 +153,93 @@ jobs:
               Write-Host 'clang is not on PATH.'
           }
 
-          if ($found) {
-              "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if (-not $found) {
+              $message = "libclang.dll was not found in any known location on this runner. crates/muxer cannot build without it. Install LLVM in this step - the image is expected to ship it, so its absence is a change in the image rather than in this repository."
               Write-Host ''
-              Write-Host "LIBCLANG_PATH=$found for the rest of this job."
-              "> libclang: found at ``$found``, LIBCLANG_PATH set.`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          }
-          else {
-              $message = "libclang.dll was not found in any known location on this runner. LIBCLANG_PATH is left unset. Nothing in the workspace needs it yet; when crates/muxer starts linking FFmpeg (issue #7) this step will need to install LLVM rather than merely locate it."
-              Write-Host ''
-              Write-Host $message -ForegroundColor Yellow
+              Write-Host $message -ForegroundColor Red
               "> $message`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              exit 1
           }
 
-      # A sibling change (issue #7) adds scripts/fetch-ffmpeg.ps1 and an
-      # FFmpeg-linked crates/muxer. Until it lands there is nothing to fetch,
-      # and the guard says so out loud rather than quietly doing nothing:
-      # a step that silently succeeds without running is indistinguishable from
-      # one that ran, which is how a build ends up trusted for the wrong reason.
+          "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host ''
+          Write-Host "LIBCLANG_PATH=$found for the rest of this job."
+          "> libclang: found at ``$found``, LIBCLANG_PATH set.`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      # The FFmpeg build is pinned to one immutable release asset, so the cache
+      # key is the asset name and a hit is always the right bytes. The fetch
+      # script installs each pin into its own directory under third-party/ffmpeg,
+      # which is what makes that true: moving the pin changes the key and lands
+      # the new build beside the old one rather than over it.
+      #
+      # The key comes out of the script rather than being repeated here. A second
+      # copy of the asset name in this file would be a second thing to update
+      # when the pin moves, and getting it wrong would silently restore the wrong
+      # build - which the linkage tests would catch, but only after several
+      # minutes and with a confusing message.
+      - name: Read the pinned FFmpeg asset name
+        id: ffmpeg-pin
+        run: |
+          $match = Select-String -Path scripts/fetch-ffmpeg.ps1 `
+              -Pattern '^\s*\[string\]\s*\$Asset\s*=\s*''([^'']+)''' |
+              Select-Object -First 1
+          if (-not $match) {
+              Write-Host 'Could not read the pinned FFmpeg asset name from scripts/fetch-ffmpeg.ps1.' -ForegroundColor Red
+              exit 1
+          }
+          $asset = $match.Matches[0].Groups[1].Value
+          Write-Host "Pinned FFmpeg asset: $asset"
+          "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Cache the pinned FFmpeg build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third-party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg-pin.outputs.asset }}
+
+      # Unconditional, and cheap on a cache hit: the script verifies the recorded
+      # pin, touches no network and exits. It appends FFMPEG_DIR,
+      # FFMPEG_INCLUDE_DIR, FFMPEG_LIBS_DIR and FFMPEG_LINK_MODE to GITHUB_ENV,
+      # so every later step - including the prerequisite check below - inherits
+      # them.
       - name: Fetch FFmpeg
         run: |
-          $script = 'scripts/fetch-ffmpeg.ps1'
-          if (Test-Path -LiteralPath $script) {
-              & powershell -ExecutionPolicy Bypass -File $script
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          else {
-              $message = "SKIPPED - FFmpeg fetch: $script does not exist yet, so there is nothing to fetch. The FFmpeg dependency strategy is issue #7; this step starts running by itself when that script appears."
-              Write-Host $message -ForegroundColor Yellow
-              "> $message`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          }
+          & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Issue #3 asks for the documented prerequisites to be verified on a
+      # machine that has never built the project. A GitHub-hosted runner is
+      # exactly that, every single run. Its output is copied into the run
+      # summary so that a drift in the documentation is visible without opening
+      # the log.
+      #
+      # It runs after the two steps above rather than before them, because it
+      # now checks for libclang and for the fetched FFmpeg. Those are set up by
+      # this workflow, not by the image, so checking first would only ever
+      # report the state of a job that had not started yet.
+      #
+      # Invoked the way docs/prerequisites.md says to invoke it, including the
+      # Windows PowerShell 5.1 host, so that what CI exercises is what a
+      # contributor pastes.
+      - name: Check documented prerequisites
+        shell: powershell
+        run: |
+          # GitHub prepends `$ErrorActionPreference = 'stop'` to a `powershell`
+          # step. Under Windows PowerShell 5.1, merging a native executable's
+          # stderr into the success stream with `2>&1` wraps each stderr line in
+          # a NativeCommandError ErrorRecord, which is terminating under Stop.
+          # So the first time the script below wrote anything to stderr, this
+          # step would throw before `$output` was ever assigned: no log, no run
+          # summary, no `exit $code`. That is precisely the unhappy path this
+          # step exists to report on, so stderr is captured with the preference
+          # relaxed and the exit code is decided by the script, not by the host.
+          $ErrorActionPreference = 'Continue'
+          $output = & powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          "## Prerequisite check on a clean runner`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit $code
 
       # Restores the cargo registry, the git checkouts and target/, keyed on the
       # lockfile and the toolchain, and prunes artefacts that no longer belong

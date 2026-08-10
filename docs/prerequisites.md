@@ -11,10 +11,17 @@ powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1
 ```
 
 It prints one line per prerequisite and exits non-zero listing exactly what is
-missing and how to install it. The point is that you find out the Windows SDK is
-absent from this script, not from a linker error several minutes into a build.
+missing and what to do about it. The point is that you find out the Windows SDK
+is absent from this script, not from a linker error several minutes into a
+build.
 
-Once it passes:
+Most of what it reports is something to install. Two are not: FFmpeg is fetched
+into the repository by `scripts/fetch-ffmpeg.ps1`, and it is the only
+prerequisite that also needs environment variables set in the shell you build
+from — the fetch script prints them, and `-PersistEnvironment` makes them stick.
+[docs/ffmpeg.md](ffmpeg.md) is the page for that, and the check names it.
+
+Once the check passes in the shell you are going to build in:
 
 ```text
 cargo fmt --all --check
@@ -31,9 +38,11 @@ cargo test --workspace
 | Visual Studio Build Tools | 2022, "Desktop development with C++" | check script |
 | Windows SDK | any Windows 10/11 SDK | check script |
 | Rust | exactly the channel in `rust-toolchain.toml` | rustup, check script |
+| LLVM (`libclang`) | any recent release | check script |
+| FFmpeg libraries | the pin in `scripts/fetch-ffmpeg.ps1` | check script; see [FFmpeg libraries](#ffmpeg-libraries) |
 | Node | major version from `.nvmrc` | check script; see [Node](#node) |
 | GPU driver | vendor-current | reported, not enforced |
-| FFmpeg (`ffprobe`) | any recent build | check script, warning only |
+| `ffprobe` (test tool) | any recent build | check script, warning only |
 
 Required prerequisites fail the check. Ones that only matter for parts of the
 project that do not exist yet, or that only affect recording quality, produce a
@@ -152,6 +161,69 @@ The first command reads `rust-toolchain.toml` and fetches exactly what it names.
 A toolchain installed before the pin existed may be missing the components,
 which is what the second command covers.
 
+## LLVM
+
+Clipped contains no C or C++ of its own, but `crates/muxer` links against the
+FFmpeg C libraries, and the Rust binding to them generates its FFI from FFmpeg's
+own headers while the workspace builds. That is `bindgen`, which loads
+`libclang.dll` at run time — so LLVM is a build requirement. Without it,
+`cargo build --workspace` fails inside the `rusty_ffmpeg` build script with
+`Unable to find libclang`, a message that mentions neither FFmpeg nor LLVM.
+
+Check:
+
+```text
+clang --version
+```
+
+Any recent release will do; no version is pinned. LLVM's Windows installer puts
+`libclang.dll` beside `clang.exe`, which is where the binding looks first.
+
+Fix:
+
+```text
+winget install LLVM.LLVM
+```
+
+If `libclang.dll` lives somewhere the build cannot find — an LLVM distributed
+inside another toolchain, for instance — point `LIBCLANG_PATH` at the directory
+containing it rather than moving the file. The check script reads the same
+variable, so it agrees with the build about where libclang came from.
+
+## FFmpeg libraries
+
+This is the one prerequisite that is fetched rather than installed. Clipped
+links dynamically against a prebuilt, LGPL-only FFmpeg pinned to one immutable
+release asset and verified by checksum; the decision is
+[ADR 0004](adr/0004-ffmpeg-dependency-strategy.md) and the contributor page is
+[docs/ffmpeg.md](ffmpeg.md).
+
+Fix, from the repository root:
+
+```text
+powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment
+```
+
+That downloads about 60 MB into the gitignored `third-party/ffmpeg/`, verifies
+its SHA-256, and sets four environment variables. `-PersistEnvironment` writes
+them to your user environment, so open a new shell afterwards; without it they
+last only for that run and you set them yourself.
+
+Check:
+
+```text
+$env:FFMPEG_DIR, $env:FFMPEG_INCLUDE_DIR, $env:FFMPEG_LIBS_DIR, $env:FFMPEG_LINK_MODE
+```
+
+`FFMPEG_LINK_MODE` must be `dynamic`. It is not the binding's default, and it is
+not a performance preference: dynamic linking is how Clipped satisfies the
+LGPL's relinking requirement, so a machine set to `static` would produce
+binaries the project cannot distribute. The check script fails on it for that
+reason.
+
+Re-running the fetch script is cheap and safe. Over an intact installation it
+verifies the recorded pin, touches no network and re-prints the variables.
+
 ## Node
 
 `.nvmrc` pins the Node version. Node is not needed to build or test the Rust
@@ -217,11 +289,15 @@ Fix: install the current driver from
 Prefer the vendor's own package over the one Windows Update offers, which can lag
 behind.
 
-## FFmpeg
+## ffprobe
 
 `ffprobe` is used by tests to inspect generated recordings — that a container
 opens, that the expected streams exist, that timestamps look sane (AGENTS.md
 section 22). It is not needed to build, so the check script only warns.
+
+It has nothing to do with [FFmpeg libraries](#ffmpeg-libraries) above. This is
+whatever FFmpeg is on your `PATH`, used as a command-line tool by tests; that is
+a pinned build linked into the recorder.
 
 Check:
 
@@ -252,9 +328,11 @@ powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 `
 `scripts/test-check-prerequisites.ps1` is the test for it. It runs the real
 script as a child process and asserts the exit code and the reported text a
 contributor would read. Every case is driven by fixtures — stand-in commands, a
-registry key under `HKCU`, a JSON description of the display adapters — so no
-case can pass or fail because of what happens to be installed on the machine
-running it.
+registry key under `HKCU`, a stand-in LLVM and FFmpeg tree, a JSON description of
+the display adapters — so no case can pass or fail because of what happens to be
+installed on the machine running it. The environment variables the FFmpeg and
+libclang checks read are cleared for the duration of the suite for the same
+reason.
 
 Two shapes of wrongness are covered, because they are detected by different code
 and only one of them is easy:

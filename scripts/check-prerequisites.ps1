@@ -39,6 +39,34 @@
 .PARAMETER FfprobeCommand
     Name or path of the ffprobe executable, used by the media tests.
 
+.PARAMETER ClangCommand
+    Name or path of the clang executable. Only its location is wanted: LLVM
+    installs libclang.dll beside clang.exe, and libclang is what the FFmpeg
+    binding's bindgen step loads.
+
+.PARAMETER LibclangPath
+    Directory holding libclang.dll, defaulting to the LIBCLANG_PATH environment
+    variable that bindgen itself reads.
+
+.PARAMETER LibclangSearchDirectory
+    Further directories to look in for libclang.dll when neither LIBCLANG_PATH
+    nor clang on PATH found it. These are the default LLVM install locations.
+
+.PARAMETER FfmpegDir
+    Root of the fetched FFmpeg build, defaulting to the FFMPEG_DIR environment
+    variable that scripts/fetch-ffmpeg.ps1 exports.
+
+.PARAMETER FfmpegIncludeDir
+    FFmpeg header directory, defaulting to FFMPEG_INCLUDE_DIR.
+
+.PARAMETER FfmpegLibsDir
+    FFmpeg import library directory, defaulting to FFMPEG_LIBS_DIR.
+
+.PARAMETER FfmpegLinkMode
+    Link mode the FFmpeg binding is configured with, defaulting to
+    FFMPEG_LINK_MODE. Must be `dynamic`: see
+    docs/adr/0004-ffmpeg-dependency-strategy.md.
+
 .PARAMETER VsWherePath
     Path to vswhere.exe, the Visual Studio installer's own query tool. It is
     installed at a fixed location by any Visual Studio or Build Tools install,
@@ -88,6 +116,16 @@ param(
     [string] $CargoCommand = 'cargo',
     [string] $NodeCommand = 'node',
     [string] $FfprobeCommand = 'ffprobe',
+    [string] $ClangCommand = 'clang',
+    [string] $LibclangPath = $env:LIBCLANG_PATH,
+    [string[]] $LibclangSearchDirectory = @(
+        'C:\Program Files\LLVM\bin',
+        'C:\Program Files (x86)\LLVM\bin'
+    ),
+    [string] $FfmpegDir = $env:FFMPEG_DIR,
+    [string] $FfmpegIncludeDir = $env:FFMPEG_INCLUDE_DIR,
+    [string] $FfmpegLibsDir = $env:FFMPEG_LIBS_DIR,
+    [string] $FfmpegLinkMode = $env:FFMPEG_LINK_MODE,
     [string] $VsWherePath = (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
     [string] $WindowsKitsRegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots',
     [string] $RustToolchainFile = '',
@@ -685,6 +723,162 @@ function Test-GraphicsAdapter {
         -Detail "$detail - $($notes -join '; ')" -Fix ($fixes -join ' ')
 }
 
+function Test-Libclang {
+    <#
+    .SYNOPSIS
+        Checks for the libclang.dll that the FFmpeg binding's bindgen step loads.
+    .DESCRIPTION
+        Clipped contains no C or C++, but crates/muxer links FFmpeg through
+        `rusty_ffmpeg`, which generates its FFI from FFmpeg's own headers while
+        the workspace builds. That is bindgen, and bindgen loads libclang.dll at
+        run time. Without it, `cargo build --workspace` fails several minutes in
+        with "Unable to find libclang", which names neither FFmpeg nor LLVM.
+
+        Three places are looked at, in the order bindgen itself would resolve
+        them: LIBCLANG_PATH, the directory clang.exe is in - LLVM ships the DLL
+        beside the executable - and the default install locations. The first hit
+        is reported, because that is the one that will be used.
+    .PARAMETER Clang
+        Name or path of clang.exe, used only to locate its directory.
+    .PARAMETER ConfiguredPath
+        Value of LIBCLANG_PATH, which may name the DLL itself or its directory.
+    .PARAMETER SearchDirectory
+        Fallback directories to look in.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Clang,
+        [string] $ConfiguredPath = '',
+        [string[]] $SearchDirectory = @()
+    )
+
+    $name = 'LLVM (libclang)'
+    $fix = 'Run "winget install LLVM.LLVM". If libclang.dll lives somewhere else - inside another toolchain, say - set LIBCLANG_PATH to the directory containing it.'
+
+    # LIBCLANG_PATH is documented as a directory but bindgen also accepts the
+    # file, so a contributor who set it either way is told the truth about what
+    # they have rather than being sent to reinstall LLVM.
+    if ($ConfiguredPath) {
+        if ((Test-Path -LiteralPath $ConfiguredPath -PathType Leaf) -and
+            ([System.IO.Path]::GetFileName($ConfiguredPath) -ieq 'libclang.dll')) {
+            return New-CheckResult -Name $name -Status 'Pass' `
+                -Detail "$ConfiguredPath (LIBCLANG_PATH)"
+        }
+
+        $configuredDll = Join-Path $ConfiguredPath 'libclang.dll'
+        if (Test-Path -LiteralPath $configuredDll -PathType Leaf) {
+            return New-CheckResult -Name $name -Status 'Pass' `
+                -Detail "$configuredDll (LIBCLANG_PATH)"
+        }
+
+        return New-CheckResult -Name $name -Status 'Fail' `
+            -Detail "LIBCLANG_PATH is set to $ConfiguredPath, which holds no libclang.dll" `
+            -Fix $fix
+    }
+
+    $candidates = @()
+    $clangProbe = Invoke-Probe -Command $Clang -Arguments @('--version')
+    if ($clangProbe.Found) { $candidates += (Split-Path -Parent $clangProbe.Path) }
+    $candidates += $SearchDirectory
+
+    foreach ($directory in $candidates) {
+        if (-not $directory) { continue }
+        $dll = Join-Path $directory 'libclang.dll'
+        if (Test-Path -LiteralPath $dll -PathType Leaf) {
+            return New-CheckResult -Name $name -Status 'Pass' -Detail $dll
+        }
+    }
+
+    $looked = @($candidates | Where-Object { $_ }) -join ', '
+    if (-not $looked) { $looked = 'nowhere - clang is not on PATH and no search directory was given' }
+
+    New-CheckResult -Name $name -Status 'Fail' `
+        -Detail "no libclang.dll found (looked in $looked)" -Fix $fix
+}
+
+function Test-FfmpegBuild {
+    <#
+    .SYNOPSIS
+        Checks that the pinned FFmpeg build has been fetched and pointed at.
+    .DESCRIPTION
+        crates/muxer links against a prebuilt FFmpeg that
+        scripts/fetch-ffmpeg.ps1 downloads
+        (docs/adr/0004-ffmpeg-dependency-strategy.md). Three environment
+        variables tell the binding where it is and how to link it, and the fetch
+        script writes all three. Their absence is the single most likely reason
+        a clean clone fails to build, and the failure it produces is
+        "!!!!!!! rusty_ffmpeg: No linking method set!" from a dependency's build
+        script, which names no script anybody can run.
+
+        The directories are checked for the files that are actually needed, not
+        merely for existing: a half-deleted build, or a variable left pointing at
+        an older pin that has since been removed, is a state worth telling
+        someone about before the linker does.
+
+        FFMPEG_LINK_MODE is checked as strictly as the rest because it is not a
+        build detail. `dynamic` is how Clipped satisfies the LGPL's relinking
+        requirement; the binding's default is static, which would quietly change
+        the licence position of every binary produced from that machine.
+    .PARAMETER Prefix
+        FFMPEG_DIR - the root of the fetched build, which crates/muxer's build
+        script reads to find the runtime DLLs.
+    .PARAMETER IncludeDirectory
+        FFMPEG_INCLUDE_DIR - where bindgen reads the FFmpeg headers.
+    .PARAMETER LibrariesDirectory
+        FFMPEG_LIBS_DIR - where the linker finds the import libraries.
+    .PARAMETER LinkMode
+        FFMPEG_LINK_MODE, which must be `dynamic`.
+    #>
+    param(
+        [string] $Prefix = '',
+        [string] $IncludeDirectory = '',
+        [string] $LibrariesDirectory = '',
+        [string] $LinkMode = ''
+    )
+
+    $name = 'FFmpeg libraries'
+    $fix = 'Run "powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment", then open a new shell. See docs/ffmpeg.md.'
+
+    $unset = @()
+    if (-not $Prefix) { $unset += 'FFMPEG_DIR' }
+    if (-not $IncludeDirectory) { $unset += 'FFMPEG_INCLUDE_DIR' }
+    if (-not $LibrariesDirectory) { $unset += 'FFMPEG_LIBS_DIR' }
+    if (-not $LinkMode) { $unset += 'FFMPEG_LINK_MODE' }
+
+    if ($unset.Count -gt 0) {
+        return New-CheckResult -Name $name -Status 'Fail' `
+            -Detail "$($unset -join ', ') not set in this shell" -Fix $fix
+    }
+
+    # One header, one import library and the runtime library directory: enough
+    # to tell a fetched build from a variable pointing at nothing, without
+    # restating the fetch script's own layout check.
+    $required = [ordered]@{
+        "$IncludeDirectory\libavformat\avformat.h" = 'FFMPEG_INCLUDE_DIR'
+        "$LibrariesDirectory\avformat.lib"         = 'FFMPEG_LIBS_DIR'
+        "$Prefix\bin"                              = 'FFMPEG_DIR'
+    }
+
+    $missing = @()
+    foreach ($path in $required.Keys) {
+        if (-not (Test-Path -LiteralPath $path)) { $missing += "$path ($($required[$path]))" }
+    }
+
+    if ($missing.Count -gt 0) {
+        return New-CheckResult -Name $name -Status 'Fail' `
+            -Detail "the FFmpeg variables are set but these are missing: $($missing -join '; ')" `
+            -Fix $fix
+    }
+
+    if ($LinkMode -ne 'dynamic') {
+        return New-CheckResult -Name $name -Status 'Fail' `
+            -Detail "FFMPEG_LINK_MODE is '$LinkMode', not 'dynamic'" `
+            -Fix 'Clipped links FFmpeg dynamically to satisfy the LGPL (docs/adr/0004-ffmpeg-dependency-strategy.md). Re-run scripts/fetch-ffmpeg.ps1, which sets this correctly.'
+    }
+
+    New-CheckResult -Name $name -Status 'Pass' `
+        -Detail "$(Split-Path -Leaf $Prefix), linked dynamically"
+}
+
 function Test-Ffprobe {
     <#
     .SYNOPSIS
@@ -773,6 +967,12 @@ $results = @(
             Test-RustToolchain -Rustup $RustupCommand -PinnedVersion $pinnedRust -RepositoryPath $repositoryRoot }),
     (Invoke-PrerequisiteCheck -Name 'rustfmt and clippy' -Check {
             Test-RustComponents -Cargo $CargoCommand }),
+    (Invoke-PrerequisiteCheck -Name 'LLVM (libclang)' -Check {
+            Test-Libclang -Clang $ClangCommand -ConfiguredPath $LibclangPath `
+                -SearchDirectory $LibclangSearchDirectory }),
+    (Invoke-PrerequisiteCheck -Name 'FFmpeg libraries' -Check {
+            Test-FfmpegBuild -Prefix $FfmpegDir -IncludeDirectory $FfmpegIncludeDir `
+                -LibrariesDirectory $FfmpegLibsDir -LinkMode $FfmpegLinkMode }),
     (Invoke-PrerequisiteCheck -Name 'Node.js' -Check {
             Test-Node -Node $NodeCommand -PinnedVersion $pinnedNode -Required $nodeRequired }),
     (Invoke-PrerequisiteCheck -Name 'GPU and driver' -Check {

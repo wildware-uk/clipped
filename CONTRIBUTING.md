@@ -169,11 +169,10 @@ compiler by construction.
 
 Parts of the project do not exist yet, and the workflow says so rather than
 passing silently. The desktop UI steps skip until `apps/desktop/package.json`
-appears, and the FFmpeg fetch skips until `scripts/fetch-ffmpeg.ps1` appears;
-both print a `SKIPPED - …` line into the log and the run summary explaining
-what is missing. When you add the missing piece, the steps start running on
-their own — but read the skip notice first, because a step that has never
-executed has never been tested either.
+appears, printing a `SKIPPED - …` line into the log and the run summary
+explaining what is missing. When you add the missing piece, the steps start
+running on their own — but read the skip notice first, because a step that has
+never executed has never been tested either.
 
 Hardware-dependent capture and encoder tests are **not** run in CI. A hosted
 runner has no GPU and nothing to record, so those tests would be measuring the
