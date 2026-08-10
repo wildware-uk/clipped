@@ -68,6 +68,16 @@ serde_json = "1"
 # trading for opting individual crates back into `std`.
 # Dual MIT/Apache-2.0.
 windows = "0.62"
+# The COM plumbing `windows` is built on, pinned here rather than in the crate
+# that names it for exactly the reason above: it *is* the COM plumbing, and two
+# majors of it in one binary is the failure that entry describes. A crate names
+# it only when it implements a COM interface rather than only calling them —
+# `clipped-audio` does, because `IMMNotificationClient` is how Windows says an
+# audio device has gone, and the `#[implement]` macro generates code rooted at
+# `::windows_core`. Keep this version in step with `windows` above: `windows
+# 0.62` re-exports `windows-core 0.62`, and the two moving separately is what
+# produces a second copy. Dual MIT/Apache-2.0.
+windows-core = "0.62"
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }
