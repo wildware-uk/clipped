@@ -17,8 +17,8 @@
 //!
 //! # Apartments and devices
 //!
-//! COM apartment initialisation ([`apartment`]) and Direct3D device creation
-//! ([`device`]) live here rather than in `clipped-windows` because
+//! COM apartment initialisation (`apartment.rs`) and Direct3D device creation
+//! (`device.rs`) live here rather than in `clipped-windows` because
 //! `clipped-windows` is still a documentation-only crate and this is the first
 //! code in the workspace that needs either. Both are small and self-contained
 //! precisely so that moving them down a layer, when a second subsystem needs
