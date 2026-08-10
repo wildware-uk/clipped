@@ -56,7 +56,7 @@ time = { version = "0.3", default-features = false, features = [
 # Ctrl+C to a real child process. Test-only, so no Win32 reaches the shipped
 # binary. Dual MIT/Apache-2.0.
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
 ] }
