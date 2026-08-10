@@ -45,9 +45,10 @@ clipped-logging.workspace = true
 # and `swscale-9.dll`, which pull in `swresample-6.dll`. Windows resolves
 # imports before `main` runs, so `clipped-recorder` will not start at all
 # without those four beside it or on PATH — not `record`, but `--help`,
-# `capabilities` and `list-windows` too, each exiting with STATUS_DLL_NOT_FOUND
-# (0xC0000135) and no message of its own. Before this crate named the binding,
-# only `clipped-muxer`'s dependents were in that position.
+# `capabilities` and `list-windows` too, each exiting 0xC0000135
+# (STATUS_DLL_NOT_FOUND) from `cmd` with no message of any kind. Before this
+# crate named the binding, only `clipped-muxer`'s dependents were in that
+# position.
 #
 # Distributing the libraries was already required (ADR 0004, and #123 for the
 # LGPL obligations); what is new is that they are required for every subcommand

@@ -937,18 +937,21 @@ depends on `clipped-encoder` now imports `avcodec-62.dll`, `avutil-60.dll` and
 `swscale-9.dll`**, which pull in `swresample-6.dll`. Windows resolves imports
 before `main` runs, so the process does not start without those four beside it
 or on `PATH`. Measured on this branch, with a copy of `clipped-recorder.exe`
-alone in an empty directory:
+alone in an empty directory. Run from `cmd`, `clipped-recorder.exe --help`
+prints nothing at all and exits `0xC0000135` — `STATUS_DLL_NOT_FOUND`. A shell
+that diagnoses the loader failure for you, such as Git Bash, says which library
+is missing:
 
 ```text
-clipped-recorder.exe: error while loading shared libraries: swscale-9.dll:
-cannot open shared object file: No such file or directory
+clipped-recorder.exe: error while loading shared libraries: swscale-9.dll: cannot open shared object file: No such file or directory
 ```
 
 That is `--help`, not `record`: `capabilities` and `list-windows` fail the same
-way, before any argument is parsed, with `STATUS_DLL_NOT_FOUND` (0xC0000135) and
-no message of the recorder's own. Adding the four libraries makes `--help` exit
-0 again. Before this crate named the binding, only `clipped-muxer`'s dependents
-were in that position, and `clipped-recorder` is not one of them.
+way, before any argument is parsed. Adding the four libraries makes `--help`
+exit 0 again. Before this crate named the binding, only `clipped-muxer`'s
+dependents were in that position, and `clipped-recorder` is not one of them —
+which is why nobody would find this by running the recorder from a target
+directory.
 
 Shipping the FFmpeg libraries alongside Clipped was already required
 ([ADR 0004](adr/0004-ffmpeg-dependency-strategy.md), and
