@@ -115,15 +115,18 @@ without being placed in a layer.
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
-| 4 | `clipped-recorder` (binary) | layers 0–3 |
+| 4 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–3 |
 
 `clipped-logging` owns where diagnostics go and how much is recorded: it
 installs the process-wide `tracing` subscriber, resolves the log level from the
 environment and a configuration file without a rebuild, writes bounded rotating
 files under a documented per-user directory, and defines the standard context
 fields as types rather than loose strings. It deliberately does not own logging
-itself — every other crate depends on `tracing` and calls its macros directly,
-so no diagnostic has to be routed through a Clipped-specific wrapper.
+itself. The rule is that a crate wanting to emit events adds
+`tracing.workspace = true` and calls the `tracing` macros directly, so no
+diagnostic is routed through a Clipped-specific wrapper. `clipped-logging` is
+so far the only crate that has taken that dependency, because the others are
+still documentation-only stubs.
 
 Two rules matter most:
 
