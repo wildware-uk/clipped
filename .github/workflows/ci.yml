@@ -167,10 +167,11 @@ jobs:
           "> libclang: found at ``$found``, LIBCLANG_PATH set.`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       # The FFmpeg build is pinned to one immutable release asset, so the cache
-      # key is the asset name and a hit is always the right bytes. The fetch
-      # script installs each pin into its own directory under third-party/ffmpeg,
-      # which is what makes that true: moving the pin changes the key and lands
-      # the new build beside the old one rather than over it.
+      # key is the asset name and a hit is always the right bytes. Moving the pin
+      # changes the key, so a run on the new pin starts from an empty cache
+      # rather than from the previous build; the fetch script would replace it
+      # anyway, because it checks the pin record it wrote rather than the
+      # directory name.
       #
       # The key comes out of the script rather than being repeated here. A second
       # copy of the asset name in this file would be a second thing to update
@@ -198,10 +199,12 @@ jobs:
           key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg-pin.outputs.asset }}
 
       # Unconditional, and cheap on a cache hit: the script verifies the recorded
-      # pin, touches no network and exits. It appends FFMPEG_DIR,
-      # FFMPEG_INCLUDE_DIR, FFMPEG_LIBS_DIR and FFMPEG_LINK_MODE to GITHUB_ENV,
-      # so every later step - including the prerequisite check below - inherits
-      # them.
+      # pin, touches no network and exits. It exports nothing, and nothing here
+      # has to. FFMPEG_DIR, FFMPEG_INCLUDE_DIR, FFMPEG_LIBS_DIR and
+      # FFMPEG_LINK_MODE come from the checked-out .cargo/config.toml, so the
+      # runner is configured by the same file and the same commit a contributor
+      # builds with - which is the only way this job can be evidence that the
+      # documented steps work.
       - name: Fetch FFmpeg
         run: |
           & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1

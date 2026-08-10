@@ -10,7 +10,7 @@ one — is [ADR 0004](adr/0004-ffmpeg-dependency-strategy.md).
 
 ## Setting up a clean clone
 
-Three steps, once.
+Two steps, once.
 
 **1. Install LLVM.** The FFmpeg binding generates its bindings from FFmpeg's own
 headers at build time, which needs `libclang.dll`.
@@ -19,26 +19,32 @@ headers at build time, which needs `libclang.dll`.
 winget install LLVM.LLVM
 ```
 
-**2. Fetch the pinned FFmpeg build.** About 60 MB, extracted into
-`third-party/ffmpeg/`, which is gitignored.
+**2. Fetch the pinned FFmpeg build.** A 67 MB download, 168 MB extracted into
+`third-party/ffmpeg/current`, which is gitignored.
 
 ```text
-powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment
+powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
 ```
 
-`-PersistEnvironment` writes the four FFmpeg environment variables to your user
-environment so new shells find them. Without it the script only prints them, and
-you set them yourself.
-
-**3. Open a new shell and build.**
+Then build, in the same shell:
 
 ```text
 cargo build --workspace
 cargo test --workspace
 ```
 
-`scripts/check-prerequisites.ps1` reports both of the above, so run it first if
-anything is unclear about the state of the machine.
+There is no third step. The fetch script sets nothing in your environment,
+because nothing it set could reach the shell that invoked it; the committed
+`.cargo/config.toml` names the four variables instead, and Cargo reads it before
+it runs anything under the repository.
+
+Expect `target/debug` to grow by about 409 MB the first time you build: the
+seven FFmpeg DLLs are 136 MB and `crates/muxer/build.rs` copies them beside the
+binaries, the test executables and the examples. A release build costs the same
+again.
+
+`scripts/check-prerequisites.ps1` reports both of the steps above, so run it
+first if anything is unclear about the state of the machine.
 
 `cargo test -p clipped-muxer` is the one to run if you want to confirm the link
 specifically: it loads the libraries and asserts that what loaded is the pinned
@@ -48,10 +54,10 @@ build.
 
 | Symptom | Cause and remedy |
 | --- | --- |
-| `!!!!!!! rusty_ffmpeg: No linking method set!` while building `rusty_ffmpeg` | `FFMPEG_LIBS_DIR` is not set in this shell. Re-run the fetch script, or open a new shell if you used `-PersistEnvironment`. |
-| `FFmpeg include dir: ... doesn't exits` | `FFMPEG_INCLUDE_DIR` points somewhere the headers are not. It must be the `include` directory *inside* the fetched build. |
+| `!!!!!!! rusty_ffmpeg: No linking method set!` while building `rusty_ffmpeg` | `FFMPEG_LIBS_DIR` reached the build empty. Either `.cargo/config.toml` is missing from the checkout, or you are building from outside the repository — Cargo reads that file from the directory it runs in and its ancestors. |
+| `FFmpeg include dir: ... doesn't exits` | The headers are not where the build was told to look. If the path is inside `third-party/ffmpeg/current`, the fetch script has not run; otherwise an `FFMPEG_INCLUDE_DIR` set in your shell is overriding the workspace. |
 | `Unable to find libclang` | LLVM is not installed, or not on `PATH`. Install it, or set `LIBCLANG_PATH` to the directory containing `libclang.dll`. |
-| The linker cannot find `avformat.lib`, or reports unresolved `av*` symbols | `FFMPEG_LIBS_DIR` points at a build that is not the shared one, or `FFMPEG_LINK_MODE` is not `dynamic`. All four variables should come from the fetch script rather than be set by hand. |
+| The linker cannot find `avformat.lib`, or reports unresolved `av*` symbols | `FFMPEG_LIBS_DIR` points at a build that is not the shared one, or `FFMPEG_LINK_MODE` is not `dynamic`. Unset any FFmpeg variables in your shell and let `.cargo/config.toml` answer. |
 | `The code execution cannot proceed because avformat-62.dll was not found` | The DLLs beside the binary were deleted or never copied. Build again: `crates/muxer/build.rs` declares each copy as an input, so a missing one makes the build script re-run and restore it. |
 | A test fails saying it linked against a different FFmpeg to the pinned one | The FFmpeg variables point at some other FFmpeg — a system-wide install, or a build left over from an older pin. |
 
@@ -78,7 +84,8 @@ this pin was verified against.
 ## How it links
 
 `scripts/fetch-ffmpeg.ps1` extracts a normal FFmpeg prefix — `bin`, `include`,
-`lib` — and sets four variables from it:
+`lib` — into `third-party/ffmpeg/current`, and the workspace's
+`.cargo/config.toml` names four variables from that one path:
 
 | Variable | Read by | Meaning |
 | --- | --- | --- |
@@ -86,6 +93,26 @@ this pin was verified against.
 | `FFMPEG_LIBS_DIR` | `rusty_ffmpeg` | Import libraries the linker resolves against. |
 | `FFMPEG_LINK_MODE` | `rusty_ffmpeg` | `dynamic`. Not the default, and not optional: static linking of an LGPL build carries obligations Clipped does not intend to take on (ADR 0004). |
 | `FFMPEG_DIR` | `crates/muxer/build.rs` | The prefix, so the DLLs in `bin` can be found. |
+
+They live in that file rather than in your shell for a plain reason: a script
+cannot export a variable into the shell that ran it. The alternative was to have
+the fetch script write them to your user environment and to tell you to open a
+new terminal — which works, but only for the next terminal, and not for the one
+holding the instructions you are reading. Cargo's `[env]` table has none of that
+problem, and it keeps the variables attached to the checkout rather than to the
+machine.
+
+The entries are not `force`d, so a variable set in your shell still wins. That
+is the escape hatch for building against an FFmpeg you built yourself — and it
+is also how `FFMPEG_LINK_MODE=static` gets set by accident, which is why
+`scripts/check-prerequisites.ps1` reads the environment first, this file second,
+and fails on anything but `dynamic`.
+
+The build directory has a fixed name rather than the asset's, so moving the pin
+does not touch `.cargo/config.toml` and old builds do not pile up at 168 MB
+each. Which build is installed is recorded in
+`third-party/ffmpeg/current/.clipped-ffmpeg-pin.json`, and the prerequisite
+check reads it back.
 
 From there:
 
@@ -137,17 +164,19 @@ build even though it reports identical version numbers, which is exactly the
 mistake worth catching: `gpl-shared` and `lgpl-shared` differ by one word in a
 file name.
 
-Older builds are left on disk when the pin moves — the fetch script names them
-so you can delete them.
+`.cargo/config.toml` is deliberately not on that list: it names
+`third-party/ffmpeg/current`, which is where every pin is installed. The
+previous build is replaced rather than left beside the new one, so nothing
+accumulates and nothing has to be deleted by hand.
 
 ## Using it from CI
 
-The script is non-interactive and safe to run unconditionally. Under GitHub
-Actions it appends its four variables to `GITHUB_ENV`, so later steps inherit
-them without any further wiring. Each pin extracts into its own directory named
-after the asset, so `.github/workflows/ci.yml` caches `third-party/ffmpeg` keyed
-on the asset name, and a cache hit turns the step into a no-op that touches no
-network.
+The script is non-interactive and safe to run unconditionally, and it needs no
+wiring into the job's environment: the workflow checks the repository out, so it
+has `.cargo/config.toml` for the same reason a contributor does.
+`.github/workflows/ci.yml` caches `third-party/ffmpeg` keyed on the pinned asset
+name read out of the fetch script, so moving the pin misses the cache and a hit
+turns the step into a no-op that touches no network.
 
 The runner also needs `libclang.dll`. GitHub's `windows-latest` image ships LLVM,
 and the workflow's "Locate libclang for bindgen" step finds it and exports

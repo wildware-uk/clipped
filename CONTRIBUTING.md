@@ -17,9 +17,10 @@ maintainer directly.
 
 [README.md](README.md) has the build, and
 [docs/prerequisites.md](docs/prerequisites.md) has the full toolchain list. In
-short: a clean clone plus a stable Rust toolchain and the MSVC build tools
-should be enough to run `cargo build --workspace`. If it is not, that is a bug
-in the documentation — please raise an issue.
+short: a clean clone, a stable Rust toolchain, the MSVC build tools, LLVM, and
+one run of `scripts/fetch-ffmpeg.ps1` should be enough to run
+`cargo build --workspace` — in that shell, with nothing else to set. If it is
+not, that is a bug in the documentation — please raise an issue.
 
 ## Issues and milestones
 

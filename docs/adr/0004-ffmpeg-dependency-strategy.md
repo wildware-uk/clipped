@@ -61,10 +61,10 @@ Concretely:
   `autobuild-2026-08-09-13-03`, asset
   `ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-shared-8.1.zip`, SHA-256
   `2936e544…0905`. `scripts/fetch-ffmpeg.ps1` downloads it, verifies the
-  checksum, extracts it into the gitignored `third-party/ffmpeg/`, and does
-  nothing at all on a second run. The tag is a dated one: `latest` moves daily,
-  and a fetch step that silently picks up a different build every run is not a
-  pin.
+  checksum, extracts it into the gitignored `third-party/ffmpeg/current`, and
+  does nothing at all on a second run. The tag is a dated one: `latest` moves
+  daily, and a fetch step that silently picks up a different build every run is
+  not a pin.
 - **The build is LGPL v3**, not v2.1, because it is configured with
   `--enable-version3`. It reports `LGPL version 3 or later` for itself, it is
   built with `--disable-libx264 --disable-libx265`, and it carries neither
@@ -83,12 +83,17 @@ Concretely:
   pinned artefact, that it is LGPL, and that it still contains the components
   later milestones depend on. Those assertions are how the licence position
   stays true rather than remaining a claim in this file.
-- Four environment variables, all written by the fetch script from one path:
-  `FFMPEG_INCLUDE_DIR` (headers for `bindgen`), `FFMPEG_LIBS_DIR` (import
-  libraries), `FFMPEG_LINK_MODE=dynamic` — **not** the binding's default, and
-  the basis of the whole LGPL position — and `FFMPEG_DIR`, which is Clipped's
-  own and names the prefix so `crates/muxer/build.rs` can copy the runtime DLLs
-  beside the binaries it builds.
+- Four environment variables, all derived from that one path in the committed
+  `.cargo/config.toml`: `FFMPEG_INCLUDE_DIR` (headers for `bindgen`),
+  `FFMPEG_LIBS_DIR` (import libraries), `FFMPEG_LINK_MODE=dynamic` — **not** the
+  binding's default, and the basis of the whole LGPL position — and `FFMPEG_DIR`,
+  which is Clipped's own and names the prefix so `crates/muxer/build.rs` can copy
+  the runtime DLLs beside the binaries it builds. They are configuration, not
+  shell state, because a fetch script cannot export a variable into the shell
+  that ran it: the first version of this decision asked contributors to persist
+  them and open a new terminal, and the documented build sequence did not work as
+  written. Cargo's `[env]` table has neither problem, resolves the paths relative
+  to the checkout, and still yields to a variable of the same name set by hand.
 - Contributors install LLVM (`winget install LLVM.LLVM`). The binding runs
   `bindgen` over the FFmpeg headers at build time, so `libclang.dll` is a hard
   prerequisite. `scripts/check-prerequisites.ps1` checks for it, and for the
@@ -199,8 +204,10 @@ compliance here is not optional.
 
 Note that this is not the binding's default: `rusty_ffmpeg` links statically
 unless `FFMPEG_LINK_MODE=dynamic` is set. The variable is therefore part of the
-licence position and not a build detail, which is why the fetch script writes it
-rather than leaving it to a contributor to remember.
+licence position and not a build detail, which is why it is committed in
+`.cargo/config.toml` rather than left to a contributor to remember, and why
+`scripts/check-prerequisites.ps1` fails on any other value it finds in the
+environment.
 
 ### A GPL FFmpeg build, with libx264 and libx265
 
@@ -280,15 +287,32 @@ that a person made.
   than surfacing in M1. This consequence is the reason this ADR had to be
   written before #18, not after.
 - **Distributing Clipped now carries LGPL v3 obligations**, and they are
-  concrete: ship the FFmpeg DLLs unmodified and separate from our own binaries,
-  include the FFmpeg licence text (`LICENSE.txt` in the fetched build), say in
-  the application which FFmpeg version is used, and offer the corresponding
+  concrete. Section 4 of the LGPL is the list, and a release has to satisfy all
+  of it:
+  - **4(a)** — a prominent notice with each copy that FFmpeg is used, and that
+    FFmpeg and its use are covered by the LGPL.
+  - **4(b)** — a copy of the GNU **GPL** as well as the LGPL. This is the item
+    easiest to miss, because the artefact does not contain it: LGPL v3 is
+    written as a set of additional permissions on top of GPL v3, so both texts
+    have to ship, and `LICENSE.txt` in the fetched build is the LGPL v3 text
+    alone. The GPL v3 text has to be added deliberately.
+  - **4(c)** — where copyright notices are displayed at run time, FFmpeg's must
+    be among them, with a pointer to those two licence texts. Clipped has no
+    about screen yet, so this becomes real when one is written.
+  - **4(d)(1)** — dynamic linking, which is why the DLLs ship unmodified and
+    separate from our own binaries, and why static linking is refused.
+  - **4(e)** does not bite: it only applies where section 6 of the GPL would
+    require Installation Information, and we take 4(d)(1) rather than 4(d)(0)
+    and ship no locked-down device.
+
+  On top of section 4, the DLLs are the Library itself being conveyed, so a
+  release must say which FFmpeg version it carries and offer the corresponding
   source for that exact build — the release tag and the FFmpeg commit named in
-  the artefact are enough to identify it, and mirroring the source archive
-  alongside a release is the simplest way to discharge the offer. Never link
-  statically, and never modify the DLLs without publishing the changes. This is
-  tracked as [issue #123](https://github.com/wildware-uk/clipped/issues/123)
-  rather than left to be rediscovered during packaging.
+  the artefact identify it, and mirroring the source archive alongside a release
+  is the simplest way to discharge the offer. Never modify the DLLs without
+  publishing the changes. All of this is tracked as
+  [issue #123](https://github.com/wildware-uk/clipped/issues/123) rather than
+  left to be rediscovered during packaging.
 - **Our own code is unaffected.** No FFmpeg source is copied into this
   repository, so MPL-2.0's file-level copyleft applies to Clipped's files and
   nothing else, and these crates stay usable by others under MPL-2.0.
@@ -298,16 +322,22 @@ that a person made.
   narrow it. So all seven DLLs are copied beside every binary and all seven ship
   in a release, and the LGPL obligations above cover all of them. Most of that
   set is wanted eventually — `swscale` and `swresample` for thumbnails and
-  waveforms — but `avdevice` and `avfilter` are carried for nothing today, at
-  about 60 MB of DLLs in total.
+  waveforms — but `avdevice` and `avfilter` are carried for nothing today: 32 MB
+  of the 136 MB the seven DLLs weigh. That 136 MB is copied into three
+  directories per profile, so a debug build of the workspace puts 409 MB under
+  `target/debug` on top of the 168 MB extracted under `third-party/ffmpeg`. The
+  contributor-facing pages say so rather than leaving it to be discovered.
 - **Two setup steps a contributor cannot skip**: an LLVM install and one run of
   `scripts/fetch-ffmpeg.ps1`. Both are checked by
   `scripts/check-prerequisites.ps1`, so the failure a contributor meets is a
   named prerequisite rather than "No linking method set!" from a build script.
 - **CI fetches FFmpeg on every run and caches it.** The fetch script is
-  non-interactive, no-ops on a warm cache without touching the network, exports
-  its variables through `GITHUB_ENV`, and installs each pin into its own
-  directory so the cache key is the asset name. The runner already ships LLVM.
+  non-interactive and no-ops on a warm cache without touching the network. It
+  exports nothing into the job, because the runner is configured by the same
+  checked-out `.cargo/config.toml` as a contributor's machine — which is what
+  makes a green CI run evidence that the documented steps work. The cache key is
+  the pinned asset name, read out of the fetch script. The runner already ships
+  LLVM.
 - **Moving the pin touches three places** and all three fail loudly if missed:
   the parameters in `scripts/fetch-ffmpeg.ps1`, the binding version in
   `[workspace.dependencies]` if the FFmpeg major changes, and the expected

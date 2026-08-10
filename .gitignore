@@ -22,7 +22,8 @@ dist/
 
 # Prebuilt FFmpeg, fetched by scripts/fetch-ffmpeg.ps1. It is pinned to an
 # immutable release asset and checksum-verified on every fetch, so the bytes are
-# reproducible without ~60 MB of them living in git history.
+# reproducible without a 67 MB download - 168 MB extracted - living in git
+# history.
 /third-party/ffmpeg/
 
 # Editor and OS noise

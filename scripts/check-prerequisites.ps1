@@ -52,19 +52,28 @@
     Further directories to look in for libclang.dll when neither LIBCLANG_PATH
     nor clang on PATH found it. These are the default LLVM install locations.
 
+.PARAMETER CargoConfigFile
+    Path to the workspace's .cargo/config.toml, whose [env] table is where the
+    four FFmpeg variables come from on a machine where nobody has set them by
+    hand. Defaults to the file in the repository root.
+
 .PARAMETER FfmpegDir
     Root of the fetched FFmpeg build, defaulting to the FFMPEG_DIR environment
-    variable that scripts/fetch-ffmpeg.ps1 exports.
+    variable. Left unset, the value is read from CargoConfigFile - the same
+    order Cargo resolves it in, since an environment variable overrides an [env]
+    entry.
 
 .PARAMETER FfmpegIncludeDir
-    FFmpeg header directory, defaulting to FFMPEG_INCLUDE_DIR.
+    FFmpeg header directory, defaulting to FFMPEG_INCLUDE_DIR and then to
+    CargoConfigFile.
 
 .PARAMETER FfmpegLibsDir
-    FFmpeg import library directory, defaulting to FFMPEG_LIBS_DIR.
+    FFmpeg import library directory, defaulting to FFMPEG_LIBS_DIR and then to
+    CargoConfigFile.
 
 .PARAMETER FfmpegLinkMode
     Link mode the FFmpeg binding is configured with, defaulting to
-    FFMPEG_LINK_MODE. Must be `dynamic`: see
+    FFMPEG_LINK_MODE and then to CargoConfigFile. Must be `dynamic`: see
     docs/adr/0004-ffmpeg-dependency-strategy.md.
 
 .PARAMETER VsWherePath
@@ -122,6 +131,7 @@ param(
         'C:\Program Files\LLVM\bin',
         'C:\Program Files (x86)\LLVM\bin'
     ),
+    [string] $CargoConfigFile = '',
     [string] $FfmpegDir = $env:FFMPEG_DIR,
     [string] $FfmpegIncludeDir = $env:FFMPEG_INCLUDE_DIR,
     [string] $FfmpegLibsDir = $env:FFMPEG_LIBS_DIR,
@@ -145,6 +155,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 if (-not $RustToolchainFile) { $RustToolchainFile = Join-Path $repositoryRoot 'rust-toolchain.toml' }
 if (-not $NvmrcFile) { $NvmrcFile = Join-Path $repositoryRoot '.nvmrc' }
 if (-not $DesktopManifest) { $DesktopManifest = Join-Path $repositoryRoot 'apps\desktop\package.json' }
+if (-not $CargoConfigFile) { $CargoConfigFile = Join-Path $repositoryRoot '.cargo\config.toml' }
 
 # Windows 10 21H2 is build 19044. SPEC.md section 3 targets "Windows 11 /
 # modern Windows 10"; 19044 is where that line is drawn, because it is the
@@ -795,40 +806,108 @@ function Test-Libclang {
         -Detail "no libclang.dll found (looked in $looked)" -Fix $fix
 }
 
+function Get-CargoConfiguredEnvironment {
+    <#
+    .SYNOPSIS
+        Reads the [env] table out of a Cargo configuration file.
+    .DESCRIPTION
+        The FFmpeg variables live in the workspace's .cargo/config.toml, which
+        is what lets `cargo build` work in the shell the fetch script was run
+        from. This check has to agree with Cargo about their values, so it reads
+        the same file rather than repeating the paths.
+
+        Only the two shapes that file uses are understood - a bare string, and
+        an inline table with a `value` and an optional `relative` - because
+        anything else in it would be a change somebody made deliberately, and
+        silently guessing at it would be worse than reporting nothing. A
+        `relative` value is resolved against the directory holding `.cargo`,
+        exactly as Cargo resolves it, so what comes back is comparable with what
+        the build will see.
+
+        Returns an empty hashtable when the file is absent or has no [env]
+        table; the caller reports that as the missing prerequisite it is.
+    .PARAMETER Path
+        The configuration file to read.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+
+    $values = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $values }
+
+    $configurationRoot = Split-Path -Parent (Split-Path -Parent $Path)
+    $inEnvironmentTable = $false
+
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[(.+)\]$') {
+            $inEnvironmentTable = $Matches[1] -eq 'env'
+            continue
+        }
+        if (-not $inEnvironmentTable) { continue }
+        if ($trimmed -notmatch '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$') { continue }
+
+        $variable = $Matches[1]
+        $assigned = $Matches[2]
+
+        if ($assigned -match '^"([^"]*)"') {
+            $values[$variable] = $Matches[1]
+            continue
+        }
+        if ($assigned -match 'value\s*=\s*"([^"]*)"') {
+            $value = $Matches[1]
+            if ($assigned -match 'relative\s*=\s*true') {
+                $value = Join-Path $configurationRoot $value
+            }
+            $values[$variable] = $value
+        }
+    }
+
+    $values
+}
+
 function Test-FfmpegBuild {
     <#
     .SYNOPSIS
-        Checks that the pinned FFmpeg build has been fetched and pointed at.
+        Checks that the pinned FFmpeg build has been fetched and is linkable.
     .DESCRIPTION
         crates/muxer links against a prebuilt FFmpeg that
         scripts/fetch-ffmpeg.ps1 downloads
-        (docs/adr/0004-ffmpeg-dependency-strategy.md). Three environment
-        variables tell the binding where it is and how to link it, and the fetch
-        script writes all three. Their absence is the single most likely reason
-        a clean clone fails to build, and the failure it produces is
-        "!!!!!!! rusty_ffmpeg: No linking method set!" from a dependency's build
-        script, which names no script anybody can run.
+        (docs/adr/0004-ffmpeg-dependency-strategy.md). Four variables tell the
+        build where it is and how to link it: three the binding reads, and
+        FFMPEG_DIR, which is Clipped's own and is read by
+        crates/muxer/build.rs. They are set by the workspace's
+        .cargo/config.toml, and an environment variable of the same name
+        overrides that file - so this check resolves them in that order too.
+
+        Not fetching the build is the single most likely reason a clean clone
+        fails to build, and what it fails with is
+        "!!!!!!! rusty_ffmpeg: No linking method set!", or a missing header,
+        from inside a dependency's build script that names nothing anybody can
+        run.
 
         The directories are checked for the files that are actually needed, not
-        merely for existing: a half-deleted build, or a variable left pointing at
-        an older pin that has since been removed, is a state worth telling
+        merely for existing: a half-deleted build, or a variable left pointing
+        at a build that has since been removed, is a state worth telling
         someone about before the linker does.
 
         FFMPEG_LINK_MODE is checked as strictly as the rest because it is not a
         build detail. `dynamic` is how Clipped satisfies the LGPL's relinking
         requirement; the binding's default is static, which would quietly change
         the licence position of every binary produced from that machine.
+    .PARAMETER CargoConfig
+        Path to the .cargo/config.toml the four values come from when the
+        environment does not override them.
     .PARAMETER Prefix
-        FFMPEG_DIR - the root of the fetched build, which crates/muxer's build
-        script reads to find the runtime DLLs.
+        FFMPEG_DIR from the environment, if it is set there.
     .PARAMETER IncludeDirectory
-        FFMPEG_INCLUDE_DIR - where bindgen reads the FFmpeg headers.
+        FFMPEG_INCLUDE_DIR from the environment, if it is set there.
     .PARAMETER LibrariesDirectory
-        FFMPEG_LIBS_DIR - where the linker finds the import libraries.
+        FFMPEG_LIBS_DIR from the environment, if it is set there.
     .PARAMETER LinkMode
-        FFMPEG_LINK_MODE, which must be `dynamic`.
+        FFMPEG_LINK_MODE from the environment, if it is set there.
     #>
     param(
+        [Parameter(Mandatory)] [string] $CargoConfig,
         [string] $Prefix = '',
         [string] $IncludeDirectory = '',
         [string] $LibrariesDirectory = '',
@@ -836,26 +915,39 @@ function Test-FfmpegBuild {
     )
 
     $name = 'FFmpeg libraries'
-    $fix = 'Run "powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment", then open a new shell. See docs/ffmpeg.md.'
+    $fix = 'Run "powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1" from the repository root. See docs/ffmpeg.md.'
 
-    $unset = @()
-    if (-not $Prefix) { $unset += 'FFMPEG_DIR' }
-    if (-not $IncludeDirectory) { $unset += 'FFMPEG_INCLUDE_DIR' }
-    if (-not $LibrariesDirectory) { $unset += 'FFMPEG_LIBS_DIR' }
-    if (-not $LinkMode) { $unset += 'FFMPEG_LINK_MODE' }
+    $configured = Get-CargoConfiguredEnvironment -Path $CargoConfig
+    $overridden = @()
+    foreach ($pair in @(
+            @{ Variable = 'FFMPEG_DIR'; Value = $Prefix },
+            @{ Variable = 'FFMPEG_INCLUDE_DIR'; Value = $IncludeDirectory },
+            @{ Variable = 'FFMPEG_LIBS_DIR'; Value = $LibrariesDirectory },
+            @{ Variable = 'FFMPEG_LINK_MODE'; Value = $LinkMode })) {
+        if ($pair.Value) {
+            $configured[$pair.Variable] = $pair.Value
+            $overridden += $pair.Variable
+        }
+    }
 
-    if ($unset.Count -gt 0) {
+    # An override says where the reader wants the build found; the file is the
+    # only thing that makes an un-overridden build work at all, so its absence
+    # is reported as itself rather than as a missing directory.
+    $unset = @('FFMPEG_DIR', 'FFMPEG_INCLUDE_DIR', 'FFMPEG_LIBS_DIR', 'FFMPEG_LINK_MODE') |
+        Where-Object { -not $configured.ContainsKey($_) }
+    if ($unset) {
         return New-CheckResult -Name $name -Status 'Fail' `
-            -Detail "$($unset -join ', ') not set in this shell" -Fix $fix
+            -Detail "$CargoConfig does not set $($unset -join ', ')" `
+            -Fix 'That file is what points Cargo at the fetched FFmpeg, and it is committed to the repository. Restore it ("git checkout -- .cargo/config.toml") or set the four variables in your shell. See docs/ffmpeg.md.'
     }
 
     # One header, one import library and the runtime library directory: enough
-    # to tell a fetched build from a variable pointing at nothing, without
-    # restating the fetch script's own layout check.
+    # to tell a fetched build from a path pointing at nothing, without restating
+    # the fetch script's own layout check.
     $required = [ordered]@{
-        "$IncludeDirectory\libavformat\avformat.h" = 'FFMPEG_INCLUDE_DIR'
-        "$LibrariesDirectory\avformat.lib"         = 'FFMPEG_LIBS_DIR'
-        "$Prefix\bin"                              = 'FFMPEG_DIR'
+        "$($configured.FFMPEG_INCLUDE_DIR)\libavformat\avformat.h" = 'FFMPEG_INCLUDE_DIR'
+        "$($configured.FFMPEG_LIBS_DIR)\avformat.lib"              = 'FFMPEG_LIBS_DIR'
+        "$($configured.FFMPEG_DIR)\bin"                            = 'FFMPEG_DIR'
     }
 
     $missing = @()
@@ -864,19 +956,30 @@ function Test-FfmpegBuild {
     }
 
     if ($missing.Count -gt 0) {
+        $source = 'the pinned FFmpeg build has not been fetched'
+        if ($overridden) {
+            $source = "the FFmpeg variables set in this shell ($($overridden -join ', ')) point at a build that is not there"
+        }
         return New-CheckResult -Name $name -Status 'Fail' `
-            -Detail "the FFmpeg variables are set but these are missing: $($missing -join '; ')" `
-            -Fix $fix
+            -Detail "$($source): $($missing -join '; ')" -Fix $fix
     }
 
-    if ($LinkMode -ne 'dynamic') {
+    if ($configured.FFMPEG_LINK_MODE -ne 'dynamic') {
         return New-CheckResult -Name $name -Status 'Fail' `
-            -Detail "FFMPEG_LINK_MODE is '$LinkMode', not 'dynamic'" `
-            -Fix 'Clipped links FFmpeg dynamically to satisfy the LGPL (docs/adr/0004-ffmpeg-dependency-strategy.md). Re-run scripts/fetch-ffmpeg.ps1, which sets this correctly.'
+            -Detail "FFMPEG_LINK_MODE is '$($configured.FFMPEG_LINK_MODE)', not 'dynamic'" `
+            -Fix 'Clipped links FFmpeg dynamically to satisfy the LGPL (docs/adr/0004-ffmpeg-dependency-strategy.md). Unset FFMPEG_LINK_MODE in this shell and the workspace .cargo/config.toml sets it correctly.'
     }
 
-    New-CheckResult -Name $name -Status 'Pass' `
-        -Detail "$(Split-Path -Leaf $Prefix), linked dynamically"
+    # The build directory has a fixed name, so what is in it is a question for
+    # the pin record the fetch script left there.
+    $installed = ''
+    $pin = Join-Path $configured.FFMPEG_DIR '.clipped-ffmpeg-pin.json'
+    if (Test-Path -LiteralPath $pin) {
+        try { $installed = (Get-Content -LiteralPath $pin -Raw | ConvertFrom-Json).asset } catch { $installed = '' }
+    }
+    if (-not $installed) { $installed = Split-Path -Leaf $configured.FFMPEG_DIR }
+
+    New-CheckResult -Name $name -Status 'Pass' -Detail "$installed, linked dynamically"
 }
 
 function Test-Ffprobe {
@@ -971,8 +1074,9 @@ $results = @(
             Test-Libclang -Clang $ClangCommand -ConfiguredPath $LibclangPath `
                 -SearchDirectory $LibclangSearchDirectory }),
     (Invoke-PrerequisiteCheck -Name 'FFmpeg libraries' -Check {
-            Test-FfmpegBuild -Prefix $FfmpegDir -IncludeDirectory $FfmpegIncludeDir `
-                -LibrariesDirectory $FfmpegLibsDir -LinkMode $FfmpegLinkMode }),
+            Test-FfmpegBuild -CargoConfig $CargoConfigFile -Prefix $FfmpegDir `
+                -IncludeDirectory $FfmpegIncludeDir -LibrariesDirectory $FfmpegLibsDir `
+                -LinkMode $FfmpegLinkMode }),
     (Invoke-PrerequisiteCheck -Name 'Node.js' -Check {
             Test-Node -Node $NodeCommand -PinnedVersion $pinnedNode -Required $nodeRequired }),
     (Invoke-PrerequisiteCheck -Name 'GPU and driver' -Check {

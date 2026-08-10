@@ -12,10 +12,11 @@
     exit code and on the text a contributor would read.
 
     Every case is driven entirely by fixtures: stand-in commands, fixture pin
-    files, a registry key under HKCU, a fixture FFmpeg tree, and a JSON
-    description of the display adapters. Nothing is read from the machine the
-    tests happen to run on, so a case that fails is a defect in the check rather
-    than a statement about the developer's toolchain (AGENTS.md section 25).
+    files, a registry key under HKCU, a fixture FFmpeg tree with the Cargo
+    configuration that points at it, and a JSON description of the display
+    adapters. Nothing is read from the machine the tests happen to run on, so a
+    case that fails is a defect in the check rather than a statement about the
+    developer's toolchain (AGENTS.md section 25).
     That matters most on a clean CI runner, where an outcome that depends on
     installed toolchains or on real hardware would fail for reasons that have
     nothing to do with the change.
@@ -228,9 +229,11 @@ channel = "$fixtureRustPin"
     )
 
     # The shape scripts/fetch-ffmpeg.ps1 leaves behind: a prefix with bin,
-    # include and lib. The files are empty because the check only asks whether
-    # the build is there, never what is in it.
-    $ffmpegPrefix = Join-Path $fixtureRoot 'ffmpeg-n0.0-fixture-win64-lgpl-shared'
+    # include and lib, and a pin record naming what is in it. The files are
+    # empty because the check only asks whether the build is there, never what
+    # is in it; the record is read, because the reported line quotes it.
+    $ffmpegBuild = 'ffmpeg-n0.0-fixture-win64-lgpl-shared'
+    $ffmpegPrefix = Join-Path $fixtureRoot $ffmpegBuild
     New-Item -ItemType Directory -Path (Join-Path $ffmpegPrefix 'bin') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $ffmpegPrefix 'include\libavformat') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $ffmpegPrefix 'lib') -Force | Out-Null
@@ -238,6 +241,37 @@ channel = "$fixtureRustPin"
         -Value '/* fixture */' -Encoding Ascii
     Set-Content -LiteralPath (Join-Path $ffmpegPrefix 'lib\avformat.lib') `
         -Value 'fixture' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $ffmpegPrefix '.clipped-ffmpeg-pin.json') `
+        -Value "{ `"asset`": `"$ffmpegBuild.zip`" }" -Encoding Ascii
+
+    # The workspace's .cargo/config.toml is where the FFmpeg variables come from
+    # on a machine where nobody has set them by hand, so the check reads one and
+    # the cases give it fixtures. Written in the shape the real file uses -
+    # relative paths, resolved against the directory holding .cargo - because a
+    # fixture with absolute paths would leave that resolution untested, and
+    # getting it wrong would have the check report on a directory the build
+    # never looks at.
+    $cargoConfig = Join-Path $fixtureRoot '.cargo\config.toml'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $cargoConfig) -Force | Out-Null
+    Set-Content -LiteralPath $cargoConfig -Encoding Ascii -Value @"
+[env]
+FFMPEG_DIR = { value = "$ffmpegBuild", relative = true }
+FFMPEG_INCLUDE_DIR = { value = "$ffmpegBuild/include", relative = true }
+FFMPEG_LIBS_DIR = { value = "$ffmpegBuild/lib", relative = true }
+FFMPEG_LINK_MODE = "dynamic"
+"@
+
+    # The same file on a clone where the fetch script has never been run: the
+    # paths are configured and there is nothing at the end of them.
+    $cargoConfigNotFetched = Join-Path $fixtureRoot 'not-fetched\.cargo\config.toml'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $cargoConfigNotFetched) -Force | Out-Null
+    Set-Content -LiteralPath $cargoConfigNotFetched -Encoding Ascii -Value @"
+[env]
+FFMPEG_DIR = { value = "third-party/ffmpeg/current", relative = true }
+FFMPEG_INCLUDE_DIR = { value = "third-party/ffmpeg/current/include", relative = true }
+FFMPEG_LIBS_DIR = { value = "third-party/ffmpeg/current/lib", relative = true }
+FFMPEG_LINK_MODE = "dynamic"
+"@
 
     # --- display adapters ---------------------------------------------------
 
@@ -365,10 +399,15 @@ channel = "$fixtureRustPin"
             ClangCommand             = 'clipped-no-such-clang'
             LibclangPath             = $llvmDirectory
             LibclangSearchDirectory  = $absentPath
-            FfmpegDir                = $ffmpegPrefix
-            FfmpegIncludeDir         = (Join-Path $ffmpegPrefix 'include')
-            FfmpegLibsDir            = (Join-Path $ffmpegPrefix 'lib')
-            FfmpegLinkMode           = 'dynamic'
+            # Left unset by default, because that is the state of a contributor
+            # who has run the fetch script and nothing else: the four values
+            # come from the Cargo configuration, and an environment variable
+            # only enters it when somebody sets one.
+            CargoConfigFile          = $cargoConfig
+            FfmpegDir                = $null
+            FfmpegIncludeDir         = $null
+            FfmpegLibsDir            = $null
+            FfmpegLinkMode           = $null
             VsWherePath              = $vswherePresent
             WindowsKitsRegistryPath  = $sdkRegistryPath
             RustToolchainFile        = $pinFile
@@ -408,7 +447,11 @@ channel = "$fixtureRustPin"
         '[ OK ] Rust toolchain',
         '[ OK ] Visual Studio C++ build tools',
         'Visual Studio Build Tools 2022 17.14.37411.7',
-        "$fixtureRustPin-x86_64-pc-windows-msvc"
+        "$fixtureRustPin-x86_64-pc-windows-msvc",
+        # Resolved from the fixture Cargo configuration, with nothing in the
+        # environment, and named from the pin record inside the build.
+        '[ OK ] FFmpeg libraries',
+        "$ffmpegBuild.zip, linked dynamically"
     )
 
     # The case the ticket exists for: none of the toolchain is present, and the
@@ -452,11 +495,8 @@ channel = "$fixtureRustPin"
     # mention of LLVM or of the script that fetches FFmpeg.
     Assert-Case -Name 'missing LLVM and missing FFmpeg are both named, with what to run' `
         -Arguments (New-Arguments @{
-            LibclangPath     = $null
-            FfmpegDir        = $null
-            FfmpegIncludeDir = $null
-            FfmpegLibsDir    = $null
-            FfmpegLinkMode   = $null
+            LibclangPath    = $null
+            CargoConfigFile = $cargoConfigNotFetched
         }) `
         -ExpectedExitCode 1 `
         -ExpectedText @(
@@ -464,9 +504,23 @@ channel = "$fixtureRustPin"
         'no libclang.dll found',
         'winget install LLVM.LLVM',
         '[FAIL] FFmpeg libraries',
-        'FFMPEG_DIR, FFMPEG_INCLUDE_DIR, FFMPEG_LIBS_DIR, FFMPEG_LINK_MODE not set in this shell',
+        'the pinned FFmpeg build has not been fetched',
+        'third-party\ffmpeg\current\include\libavformat\avformat.h (FFMPEG_INCLUDE_DIR)',
         'scripts/fetch-ffmpeg.ps1',
         '2 required prerequisite(s) are missing:'
+    )
+
+    # The file the four values come from is committed, and a checkout without it
+    # cannot link FFmpeg however successfully the fetch script ran. That is a
+    # different fault to a missing build and it has a different fix, so it is
+    # reported as itself rather than as a directory that is not there.
+    Assert-Case -Name 'a workspace without the Cargo configuration is reported as that' `
+        -Arguments (New-Arguments @{ CargoConfigFile = $absentPath }) `
+        -ExpectedExitCode 1 `
+        -ExpectedText @(
+        '[FAIL] FFmpeg libraries',
+        "$absentPath does not set FFMPEG_DIR, FFMPEG_INCLUDE_DIR, FFMPEG_LIBS_DIR, FFMPEG_LINK_MODE",
+        'git checkout -- .cargo/config.toml'
     )
 
     # LLVM installed the ordinary way puts libclang.dll beside clang.exe, and
@@ -493,10 +547,12 @@ channel = "$fixtureRustPin"
         'set LIBCLANG_PATH to the directory containing it'
     )
 
-    # An FFMPEG_DIR left over from a pin whose directory has since been deleted
-    # is set, so the "not set" branch does not catch it, and the failure it
-    # produces later is a linker error listing unresolved av* symbols.
-    Assert-Case -Name 'FFmpeg variables pointing at a build that is not there are reported' `
+    # An FFMPEG_DIR set in the shell wins over the Cargo configuration, exactly
+    # as it does for the build, so one left over from a build that has since
+    # been deleted breaks a workspace that would otherwise be fine. The failure
+    # it produces later is a linker error listing unresolved av* symbols, so the
+    # report has to name the environment as the thing that decided it.
+    Assert-Case -Name 'FFmpeg variables in the shell overriding the workspace are reported' `
         -Arguments (New-Arguments @{
             FfmpegDir        = $absentPath
             FfmpegIncludeDir = $absentPath
@@ -505,16 +561,17 @@ channel = "$fixtureRustPin"
         -ExpectedExitCode 1 `
         -ExpectedText @(
         '[FAIL] FFmpeg libraries',
-        'the FFmpeg variables are set but these are missing',
+        'the FFmpeg variables set in this shell (FFMPEG_DIR, FFMPEG_INCLUDE_DIR, FFMPEG_LIBS_DIR) point at a build that is not there',
         'avformat.h (FFMPEG_INCLUDE_DIR)',
         'avformat.lib (FFMPEG_LIBS_DIR)',
         'scripts/fetch-ffmpeg.ps1'
     )
 
     # Static is the binding's default, so this is the state of anyone who set
-    # the variables by hand. It builds, and it quietly changes the licence
-    # position of every binary that machine produces (ADR 0004), which is why it
-    # is a failure and not a warning.
+    # FFMPEG_LINK_MODE by hand rather than leaving it to the workspace. It
+    # builds, and it quietly changes the licence position of every binary that
+    # machine produces (ADR 0004), which is why it is a failure and not a
+    # warning.
     Assert-Case -Name 'FFmpeg linked statically is a failure, not a preference' `
         -Arguments (New-Arguments @{ FfmpegLinkMode = 'static' }) `
         -ExpectedExitCode 1 `

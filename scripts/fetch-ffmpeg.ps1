@@ -16,10 +16,14 @@
     the recorded pin and exits without touching the network, which is what makes
     it usable as an unconditional step in CI and in a contributor's shell alike.
 
-    Nothing here is interactive and nothing is written outside the destination
-    directory, except that -PersistEnvironment writes the FFmpeg environment
-    variables to the user environment and, under GitHub Actions, they are
-    appended to the file named by GITHUB_ENV so later steps inherit them.
+    Nothing here is interactive, nothing is written outside the destination
+    directory, and nothing is written to any shell's environment. Fetching is
+    all this script does: the workspace's .cargo/config.toml is what points
+    Cargo at the result, so `cargo build` works in the shell this was run from
+    rather than in a new one. That is deliberate - a script cannot export a
+    variable into the shell that invoked it, so an earlier version of this one
+    printed four variables and asked the reader to arrange them, which nobody
+    can do correctly from a child process.
 
     The upstream project publishes no checksums of its own. The checksum
     defaulted here was computed from the asset that was reviewed when the pin
@@ -47,24 +51,17 @@
 
 .PARAMETER Destination
     Directory the build is extracted into, defaulting to third-party/ffmpeg in
-    the repository. Each pinned build lands in its own subdirectory named after
-    the asset, so switching pins does not overwrite a working installation and
-    CI can cache this directory keyed on the asset name.
+    the repository. Whatever is pinned is installed into a "current"
+    subdirectory of it, which is the fixed path .cargo/config.toml names, and
+    the pin record inside says which build that is. A fixed name rather than one
+    per asset, because the alternative is a second place to change when the pin
+    moves and a pile of 168 MB directories nobody remembers to delete.
 
 .PARAMETER Force
     Re-download and re-extract even when the pinned build is already present.
 
-.PARAMETER PersistEnvironment
-    Also write the FFmpeg environment variables to the current user's
-    environment, so new shells find them without re-running this script. Off by
-    default because writing to a contributor's environment behind their back is
-    rude.
-
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
-
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment
 
 .OUTPUTS
     Exit code 0 when the pinned build is present and verified, 1 otherwise.
@@ -77,8 +74,7 @@ param(
     [string] $Sha256 = '2936e5449886641b4279ca3fc554b678c8e9a2d20dd0c0a34fe7208b254a0905',
     [string] $BaseUri = 'https://github.com/BtbN/FFmpeg-Builds/releases/download',
     [string] $Destination = '',
-    [switch] $Force,
-    [switch] $PersistEnvironment
+    [switch] $Force
 )
 
 Set-StrictMode -Version Latest
@@ -95,7 +91,11 @@ if (-not $Destination) { $Destination = Join-Path $repositoryRoot 'third-party\f
 $ProgressPreference = 'SilentlyContinue'
 
 $buildName = [System.IO.Path]::GetFileNameWithoutExtension($Asset)
-$buildRoot = Join-Path $Destination $buildName
+
+# The one path .cargo/config.toml points Cargo at. Which build is in it is a
+# question for the pin record inside, not for its name: a name per asset would
+# have to be repeated in that file and changed with every pin.
+$buildRoot = Join-Path $Destination 'current'
 $pinFile = Join-Path $buildRoot '.clipped-ffmpeg-pin.json'
 $downloadUri = "$BaseUri/$Tag/$Asset"
 
@@ -267,77 +267,33 @@ function Write-PinRecord {
     $record | ConvertTo-Json | Set-Content -LiteralPath $pinFile -Encoding UTF8
 }
 
-function Publish-FfmpegEnvironment {
+function Write-ReadyNotice {
     <#
     .SYNOPSIS
-        Reports the variables the build needs and, where asked to, persists them.
+        Says where the build is and what already knows how to find it.
     .DESCRIPTION
         `rusty_ffmpeg` takes one variable per question rather than one prefix:
-        FFMPEG_INCLUDE_DIR is where bindgen reads the headers,
-        FFMPEG_LIBS_DIR is where the linker finds the import libraries, and
-        FFMPEG_LINK_MODE selects dynamic linking - which is not the default, and
-        is the whole basis of Clipped's LGPL position
-        (docs/adr/0004-ffmpeg-dependency-strategy.md).
+        FFMPEG_INCLUDE_DIR is where bindgen reads the headers, FFMPEG_LIBS_DIR
+        is where the linker finds the import libraries, and FFMPEG_LINK_MODE
+        selects dynamic linking - which is not its default, and is the whole
+        basis of Clipped's LGPL position
+        (docs/adr/0004-ffmpeg-dependency-strategy.md). FFMPEG_DIR is Clipped's
+        own: crates/muxer/build.rs reads it to find the runtime DLLs in bin/ and
+        copy them beside the binaries.
 
-        FFMPEG_DIR is Clipped's own: it names the prefix, and
-        crates/muxer/build.rs reads it to find the runtime DLLs in bin/ and copy
-        them beside the binaries. All four are derived here from one path so
-        they cannot disagree.
+        This script sets none of them. All four are in the workspace's
+        .cargo/config.toml, derived from one fixed path, so Cargo has them
+        before it runs anything - including in the shell this script was invoked
+        from, which no variable exported by a child process can reach. A
+        variable of the same name set in the shell still overrides the file,
+        which is how somebody builds against an FFmpeg of their own.
 
-        PATH is deliberately left alone; the DLL copying is what makes it
-        unnecessary.
+        PATH is deliberately left alone; the DLL copying in
+        crates/muxer/build.rs is what makes it unnecessary.
     #>
-    $variables = [ordered]@{
-        FFMPEG_DIR         = $buildRoot
-        FFMPEG_INCLUDE_DIR = (Join-Path $buildRoot 'include')
-        FFMPEG_LIBS_DIR    = (Join-Path $buildRoot 'lib')
-        FFMPEG_LINK_MODE   = 'dynamic'
-    }
-
-    foreach ($name in $variables.Keys) {
-        Set-Item -LiteralPath "env:$name" -Value $variables[$name]
-    }
-
-    if ($PersistEnvironment) {
-        foreach ($name in $variables.Keys) {
-            [Environment]::SetEnvironmentVariable($name, $variables[$name], 'User')
-        }
-        Write-Step 'Wrote the FFmpeg variables to the user environment; new shells will pick them up.'
-    }
-
-    if ($env:GITHUB_ENV) {
-        foreach ($name in $variables.Keys) {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value "$name=$($variables[$name])"
-        }
-        Write-Step 'Exported the FFmpeg variables through GITHUB_ENV for later workflow steps.'
-    }
-
     Write-Host ''
-    Write-Host 'FFmpeg is ready. Set these before building, if they are not set already:'
-    Write-Host ''
-    foreach ($name in $variables.Keys) {
-        Write-Host "    `$env:$name = '$($variables[$name])'"
-    }
-    Write-Host ''
-    if (-not $PersistEnvironment) {
-        Write-Host 'Re-run with -PersistEnvironment to write them to your user environment once and stop thinking about it.'
-    }
-}
-
-function Write-StaleBuildNotice {
-    <#
-    .SYNOPSIS
-        Names previously fetched builds that the current pin has left behind.
-    #>
-    if (-not (Test-Path -LiteralPath $Destination)) { return }
-
-    $stale = @(Get-ChildItem -LiteralPath $Destination -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ne $buildName })
-    if ($stale.Count -eq 0) { return }
-
-    Write-Host ''
-    Write-Host "Older FFmpeg builds are still taking up space in $Destination and can be deleted:"
-    foreach ($directory in $stale) { Write-Host "    $($directory.Name)" }
+    Write-Host "FFmpeg is ready in $buildRoot"
+    Write-Host 'The workspace .cargo/config.toml already points Cargo at it, so "cargo build --workspace" works from here.'
 }
 
 # Failures below are contributor-facing rather than programmer-facing, so they
@@ -348,8 +304,7 @@ function Write-StaleBuildNotice {
 try {
     if ((Test-InstalledPin) -and -not $Force) {
         Write-Step "$buildName is already present and matches the pin; nothing to download."
-        Publish-FfmpegEnvironment
-        Write-StaleBuildNotice
+        Write-ReadyNotice
         exit 0
     }
 
@@ -366,8 +321,7 @@ try {
     Write-PinRecord
 
     Write-Step "Installed $buildName"
-    Publish-FfmpegEnvironment
-    Write-StaleBuildNotice
+    Write-ReadyNotice
     exit 0
 } catch {
     Write-Host ''

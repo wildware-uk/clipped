@@ -2,8 +2,8 @@
 //! will find them.
 //!
 //! Clipped links dynamically against a prebuilt FFmpeg (see
-//! `docs/adr/0004-ffmpeg-dependency-strategy.md`), so the variables
-//! `scripts/fetch-ffmpeg.ps1` exports are enough to *link*, but not enough to
+//! `docs/adr/0004-ffmpeg-dependency-strategy.md`), so the variables in the
+//! workspace's `.cargo/config.toml` are enough to *link*, but not enough to
 //! *run*: Windows resolves a DLL from the directory of the executable that
 //! needs it long before it consults anything else. The alternatives were
 //! putting the FFmpeg `bin` directory on `PATH` — which every contributor and
@@ -46,10 +46,12 @@ fn main() {
 
     let Some(ffmpeg_dir) = env::var_os("FFMPEG_DIR").map(PathBuf::from) else {
         // FFMPEG_DIR is Clipped's own variable, naming the prefix that
-        // `scripts/fetch-ffmpeg.ps1` installed. Reaching here means `rusty_ffmpeg`
-        // was pointed at FFmpeg some other way — vcpkg, or FFMPEG_LIBS_DIR set by
-        // hand — so it is not this script's business to say where the runtime
-        // libraries should have come from.
+        // `scripts/fetch-ffmpeg.ps1` installed and that `.cargo/config.toml`
+        // points at. Reaching here means the workspace configuration was not
+        // read — a build from outside the repository — or that `rusty_ffmpeg`
+        // was pointed at FFmpeg some other way, by vcpkg or by FFMPEG_LIBS_DIR
+        // set by hand. Either way it is not this script's business to say where
+        // the runtime libraries should have come from.
         return;
     };
 
@@ -106,8 +108,10 @@ fn collect_libraries(library_dir: &Path) -> Vec<PathBuf> {
 /// variable naming the profile directory directly.
 ///
 /// The cost is stated rather than hidden: the pinned build's seven DLLs are
-/// about 136 MB, so this is that much again per directory inside the target
-/// tree, including while `examples` is still empty. Copying unconditionally was
+/// 136 MB, so this is 409 MB inside the target tree per profile built,
+/// including while `examples` is still empty. `docs/ffmpeg.md` and
+/// `docs/prerequisites.md` say so too, because it is the contributor's disk it
+/// comes out of. Copying unconditionally was
 /// preferred to copying only where something has already been linked, because
 /// the alternative is a rule about when the libraries appear, and the symptom of
 /// getting that rule wrong is an executable that will not start.

@@ -1,0 +1,31 @@
+# Cargo configuration for this workspace.
+#
+# Cargo reads this file before it runs anything under the repository, and the
+# [env] table is what makes `cargo build` work immediately after
+# scripts/fetch-ffmpeg.ps1 - in the same shell, with nothing set by hand.
+#
+# crates/muxer links against a pinned, prebuilt FFmpeg
+# (docs/adr/0004-ffmpeg-dependency-strategy.md). `rusty_ffmpeg` takes one
+# variable per question rather than one prefix, and its default link mode is
+# static, which would quietly change Clipped's licence position. Leaving those
+# variables to the shell does not survive contact with a contributor: a script
+# cannot export a variable into the shell that invoked it, so the instruction
+# becomes "run the fetch script, then open a *new* shell", and building in the
+# shell they were already in fails inside a dependency's build script with
+# "!!!!!!! rusty_ffmpeg: No linking method set!".
+#
+# `relative = true` resolves each value against the directory that holds
+# `.cargo`, so what is named is this checkout rather than the machine the file
+# was written on. Nothing here is `force`d, so an environment variable of the
+# same name still wins - which is how somebody points the build at an FFmpeg of
+# their own, and why scripts/check-prerequisites.ps1 reads the environment
+# first and this file second.
+#
+# The path is fixed rather than named after the pin, so moving the pin does not
+# touch this file: scripts/fetch-ffmpeg.ps1 installs whatever is pinned into
+# third-party/ffmpeg/current and records there which build that is.
+[env]
+FFMPEG_DIR = { value = "third-party/ffmpeg/current", relative = true }
+FFMPEG_INCLUDE_DIR = { value = "third-party/ffmpeg/current/include", relative = true }
+FFMPEG_LIBS_DIR = { value = "third-party/ffmpeg/current/lib", relative = true }
+FFMPEG_LINK_MODE = "dynamic"

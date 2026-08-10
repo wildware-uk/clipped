@@ -50,17 +50,19 @@ versions the project is tested against.
 ```text
 git clone https://github.com/wildware-uk/clipped.git
 cd clipped
-powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment
+powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
 cargo build --workspace
 cargo test --workspace
 ```
 
 The one step beyond the toolchain is that FFmpeg build. Clipped links against a
 pinned, LGPL-only FFmpeg rather than vendoring or compiling one, so the script
-downloads it, verifies its checksum into the gitignored `third-party/ffmpeg/`,
-and sets the environment variables the build reads — open a new shell after it
-runs. Nothing else is required: no local configuration and no generated files.
-[docs/ffmpeg.md](docs/ffmpeg.md) covers it, and
+downloads it and verifies its checksum into the gitignored `third-party/ffmpeg/`
+— 67 MB to download and 168 MB on disk, plus 409 MB of DLLs copied beside the
+binaries in `target/debug`. Nothing has to be set afterwards and no new shell is
+needed: the committed `.cargo/config.toml` is what points Cargo at the result,
+and an environment variable of the same name still overrides it if you build
+against an FFmpeg of your own. [docs/ffmpeg.md](docs/ffmpeg.md) covers it, and
 `scripts/check-prerequisites.ps1` reports whether it has been done.
 
 ## Development setup

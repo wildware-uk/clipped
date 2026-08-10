@@ -15,13 +15,13 @@ missing and what to do about it. The point is that you find out the Windows SDK
 is absent from this script, not from a linker error several minutes into a
 build.
 
-Most of what it reports is something to install. Two are not: FFmpeg is fetched
-into the repository by `scripts/fetch-ffmpeg.ps1`, and it is the only
-prerequisite that also needs environment variables set in the shell you build
-from — the fetch script prints them, and `-PersistEnvironment` makes them stick.
-[docs/ffmpeg.md](ffmpeg.md) is the page for that, and the check names it.
+Most of what it reports is something to install. One is not: FFmpeg is fetched
+into the repository by `scripts/fetch-ffmpeg.ps1`, and the four environment
+variables it needs come from the committed `.cargo/config.toml` rather than from
+your shell. [docs/ffmpeg.md](ffmpeg.md) is the page for that, and the check
+names it.
 
-Once the check passes in the shell you are going to build in:
+Once the check passes:
 
 ```text
 cargo fmt --all --check
@@ -201,28 +201,33 @@ release asset and verified by checksum; the decision is
 Fix, from the repository root:
 
 ```text
-powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PersistEnvironment
+powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
 ```
 
-That downloads about 60 MB into the gitignored `third-party/ffmpeg/`, verifies
-its SHA-256, and sets four environment variables. `-PersistEnvironment` writes
-them to your user environment, so open a new shell afterwards; without it they
-last only for that run and you set them yourself.
+That downloads 67 MB into the gitignored `third-party/ffmpeg/current`, verifies
+its SHA-256 and extracts it — 168 MB on disk, and a further 409 MB in
+`target/debug` once the DLLs have been copied beside the binaries.
+
+Nothing has to be set afterwards, and no new shell is needed. The four variables
+the build reads are in the workspace's `.cargo/config.toml`, which Cargo reads
+before it runs anything under the repository; the fetch script only fetches,
+because a script cannot set a variable in the shell that ran it.
 
 Check:
 
 ```text
-$env:FFMPEG_DIR, $env:FFMPEG_INCLUDE_DIR, $env:FFMPEG_LIBS_DIR, $env:FFMPEG_LINK_MODE
+powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1
 ```
 
 `FFMPEG_LINK_MODE` must be `dynamic`. It is not the binding's default, and it is
 not a performance preference: dynamic linking is how Clipped satisfies the
 LGPL's relinking requirement, so a machine set to `static` would produce
 binaries the project cannot distribute. The check script fails on it for that
-reason.
+reason, and it reads your environment before the configuration file — because
+so does Cargo, and a variable you set yourself is what would decide the build.
 
 Re-running the fetch script is cheap and safe. Over an intact installation it
-verifies the recorded pin, touches no network and re-prints the variables.
+verifies the recorded pin, touches no network and says so.
 
 ## Node
 
@@ -295,9 +300,9 @@ behind.
 opens, that the expected streams exist, that timestamps look sane (AGENTS.md
 section 22). It is not needed to build, so the check script only warns.
 
-It has nothing to do with [FFmpeg libraries](#ffmpeg-libraries) above. This is
-whatever FFmpeg is on your `PATH`, used as a command-line tool by tests; that is
-a pinned build linked into the recorder.
+It has nothing to do with [FFmpeg libraries](#ffmpeg-libraries) above. This one
+is whatever FFmpeg is on your `PATH`, used as a command-line tool by tests; the
+other is a pinned build linked into the recorder.
 
 Check:
 
@@ -328,11 +333,11 @@ powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 `
 `scripts/test-check-prerequisites.ps1` is the test for it. It runs the real
 script as a child process and asserts the exit code and the reported text a
 contributor would read. Every case is driven by fixtures — stand-in commands, a
-registry key under `HKCU`, a stand-in LLVM and FFmpeg tree, a JSON description of
-the display adapters — so no case can pass or fail because of what happens to be
-installed on the machine running it. The environment variables the FFmpeg and
-libclang checks read are cleared for the duration of the suite for the same
-reason.
+registry key under `HKCU`, a stand-in LLVM and FFmpeg tree with the Cargo
+configuration that points at it, a JSON description of the display adapters — so
+no case can pass or fail because of what happens to be installed on the machine
+running it. The environment variables the FFmpeg and libclang checks read are
+cleared for the duration of the suite for the same reason.
 
 Two shapes of wrongness are covered, because they are detected by different code
 and only one of them is easy:
