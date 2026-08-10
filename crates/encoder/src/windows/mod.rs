@@ -22,11 +22,13 @@
 //! Media Foundation and COM are started and stopped inside the call that needs
 //! them, so a probe leaves the process's apartment state as it found it.
 
+mod amf;
 mod dxgi;
 mod media_foundation;
 mod nvenc;
 mod runtime;
 
+pub use amf::AmfEncoder;
 pub use nvenc::NvencEncoder;
 
 use crate::adapter::Adapter;

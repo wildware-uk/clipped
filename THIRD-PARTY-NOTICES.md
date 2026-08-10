@@ -13,6 +13,70 @@ so no FFmpeg code is redistributed here — see
 Notices for the files a *release build* ships alongside Clipped belong with the
 packaging work, which does not exist yet.
 
+## AMD Advanced Media Framework headers (AMF SDK)
+
+**Where:** `crates/encoder/src/windows/amf/sys.rs`
+
+**What:** Rust FFI bindings generated with
+[bindgen](https://github.com/rust-lang/rust-bindgen) 0.72.1 from the public
+headers of AMD's AMF SDK. The file is a derivative of those headers — AMD's type
+names, field names, enumerators and constant values — so their licence and
+notices travel with it.
+
+**Source:**
+[GPUOpen-LibrariesAndSDKs/AMF](https://github.com/GPUOpen-LibrariesAndSDKs/AMF),
+tag `v1.4.30`, commit `a118570647cfa579af8875c3955a314c3ddd7058`, the headers
+under `amf/public/include/`. The bindings are generated from `core/Factory.h`,
+`core/Surface.h`, `core/Buffer.h`, `components/VideoEncoderVCE.h`,
+`components/VideoEncoderHEVC.h`, `components/ColorSpace.h` and
+`components/VideoConverter.h`, and from everything those include.
+
+**Licence:** MIT, as reproduced below from the headers themselves. The notice
+regarding standards above it is AMD's and is part of the same header block, so
+it is carried too.
+
+**How it was generated, and what was changed:** the command is recorded in
+[docs/encoder-pipeline.md](docs/encoder-pipeline.md#the-amf-bindings-and-their-licence)
+and repeated in the file's own header comment. Nothing in the generated output
+is edited by hand; the only modifications are the ones the command asks for
+(comments stripped) and the attribution comment added at the top of the file.
+The identifiers bindgen cannot generate — the property-name and component-name
+macros, which are wide string literals, the interface identifiers, which are
+static inline functions, and the version-packing macro — are transcribed by hand
+into `settings.rs` and `api.rs`, each beside a comment naming what it came from.
+
+```text
+Notice Regarding Standards.  AMD does not provide a license or sublicense to
+any Intellectual Property Rights relating to any standards, including but not
+limited to any audio and/or video codec technologies such as MPEG-2, MPEG-4;
+AVC/H.264; HEVC/H.265; AAC decode/FFMPEG; AAC encode/FFMPEG; VC-1; and MP3
+(collectively, the "Media Technologies"). For clarity, you will pay any
+royalties due for such third party technologies, which may include the Media
+Technologies that are owed as a result of AMD providing the Software to you.
+
+MIT license
+
+Copyright (c) 2018 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## NVIDIA Video Codec SDK header (`nvEncodeAPI.h`)
 
 **Where:** `crates/encoder/src/windows/nvenc/sys.rs`
