@@ -22,6 +22,7 @@ name = "clipped-recorder"
 path = "src/main.rs"
 
 [dependencies]
+clipped-encoder.workspace = true
 clipped-logging.workspace = true
 clipped-session.workspace = true
 # Window and monitor enumeration for `list-windows`, and the target selection

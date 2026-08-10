@@ -171,8 +171,9 @@ large:
   authoritative statement of a crate's remit and this document defers to them.
 - `apps/recorder` has a command line: `record` parses and validates every
   argument and installs its Ctrl+C handler, then reports that this build has no
-  capture engine and exits 3, and `list-windows` lists what could be captured.
-  See [recorder-cli.md](recorder-cli.md).
+  capture engine and exits 3; `list-windows` lists what could be captured; and
+  `capabilities` reports the graphics adapters and encoders it found. See
+  [recorder-cli.md](recorder-cli.md).
 - `apps/desktop` and `packages/` are README placeholders.
 - The tests assert the behaviour that exists: the workspace layering test,
   `clipped-logging`'s unit and integration tests, `clipped-capture`'s tests for
@@ -190,13 +191,17 @@ cargo build --workspace
 cargo run -p clipped-recorder
 ```
 
-With no arguments that prints the help and exits 2. It has two subcommands.
+With no arguments that prints the help and exits 2. It has three subcommands.
 `list-windows` lists the windows that could be captured, and works today.
-`record` validates its arguments and then reports that this build cannot record,
-because the capture engine does not exist yet. The first useful invocation —
-capture a window, encode it, produce a playable MKV — is the M1 milestone:
+`capabilities` reports the graphics adapters and encoders it found, which is
+detection rather than encoding
+([encoder-capabilities.md](encoder-capabilities.md)). `record` validates its
+arguments and then reports that this build cannot record, because the capture
+engine does not exist yet. The first useful invocation — capture a window,
+encode it, produce a playable MKV — is the M1 milestone:
 
 ```text
+clipped-recorder capabilities
 clipped-recorder record --window <window>
 ```
 
@@ -284,19 +289,22 @@ contributor working in it needs.
 | Document | Covers | Filled in by |
 | --- | --- | --- |
 | [capture-pipeline.md](capture-pipeline.md) | Frame capture, backend selection and fallback, the capture clock, the path from frame to encoded packet | M1 |
+| [encoder-capabilities.md](encoder-capabilities.md) | Adapter and encoder detection, what is measured against what is inferred, the capability cache, what "Automatic" chooses | M1 |
 | [audio-routing.md](audio-routing.md) | Per-source capture, application-to-track routing, drift correction, the compatibility mix | M2 |
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 
-All but [capture-pipeline.md](capture-pipeline.md) are stubs today, stating what
+All but [capture-pipeline.md](capture-pipeline.md) and
+[encoder-capabilities.md](encoder-capabilities.md) are stubs today, stating what
 they will cover and which milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
 policy exist, so the interface, the ownership and threading rules, the timestamp
 model and the selection policy are documented there, and the sections that would
 describe an unwritten encoder path are listed at the end of it as still to be
-written. The rest stay stubs on purpose: describing a capture pipeline that has
-not been written produces documentation that is wrong on the day it is
-committed.
+written. `encoder-capabilities.md` covers detection, which is written, and says
+plainly what detection cannot tell you until an encoder backend exists. The rest
+stay stubs on purpose: describing a capture pipeline that has not been written
+produces documentation that is wrong on the day it is committed.
 
 Supporting documents that are not subsystems:
 

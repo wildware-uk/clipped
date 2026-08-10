@@ -14,10 +14,11 @@
 //!
 //! # What the recorder can do today
 //!
-//! Parse and validate a `record` invocation, and stop cleanly when asked to.
-//! It cannot record: the capture, encoder, audio and muxer crates are
-//! documentation-only stubs, so `record` reports that and exits. See
-//! [`record`] and [`shutdown`] for exactly where the pipeline plugs in.
+//! Parse and validate a `record` invocation, stop cleanly when asked to, and
+//! report what this machine can encode. It cannot record: the capture, audio
+//! and muxer crates are documentation-only stubs and no encoder backend is
+//! implemented, so `record` reports that and exits. See [`record`] and
+//! [`shutdown`] for exactly where the pipeline plugs in.
 //!
 //! # Modules
 //!
@@ -28,8 +29,10 @@
 //! | [`config`] | Validating arguments into a [`config::RecordingConfig`] |
 //! | [`record`] | The `record` subcommand |
 //! | [`list_windows`] | The `list-windows` subcommand |
+//! | [`capabilities`] | The `capabilities` subcommand |
 //! | [`shutdown`] | Ctrl+C, and the finalisation seam a recording ends through |
 
+pub mod capabilities;
 pub mod cli;
 pub mod config;
 pub mod list_windows;
@@ -68,6 +71,8 @@ pub enum RunError {
     Record(record::RecordError),
     /// `list-windows` failed.
     ListWindows(list_windows::ListWindowsError),
+    /// `capabilities` failed.
+    Capabilities(capabilities::CapabilitiesError),
 }
 
 impl RunError {
@@ -82,6 +87,11 @@ impl RunError {
             // line to fix; a desktop that could not be enumerated is not.
             Self::ListWindows(list_windows::ListWindowsError::Resolution(_)) => EXIT_USAGE,
             Self::ListWindows(list_windows::ListWindowsError::Enumeration(_)) => EXIT_FAILURE,
+            // Not `EXIT_NOT_IMPLEMENTED`, even though no encoder is
+            // implemented: detection itself is implemented, and this code means
+            // the machine could not be asked. A machine with no encoder at all
+            // is a successful run that says so.
+            Self::Capabilities(_) => EXIT_FAILURE,
         }
     }
 
@@ -103,6 +113,7 @@ impl fmt::Display for RunError {
         match self {
             Self::Record(error) => write!(formatter, "{error}"),
             Self::ListWindows(error) => write!(formatter, "{error}"),
+            Self::Capabilities(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -112,6 +123,7 @@ impl Error for RunError {
         match self {
             Self::Record(error) => Some(error),
             Self::ListWindows(error) => Some(error),
+            Self::Capabilities(error) => Some(error),
         }
     }
 }
@@ -128,6 +140,12 @@ impl From<list_windows::ListWindowsError> for RunError {
     }
 }
 
+impl From<capabilities::CapabilitiesError> for RunError {
+    fn from(error: capabilities::CapabilitiesError) -> Self {
+        Self::Capabilities(error)
+    }
+}
+
 /// Runs the subcommand the command line selected.
 ///
 /// A new subcommand is a variant on [`Command`] and an arm here.
@@ -140,6 +158,7 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
     match &cli.command {
         Command::Record(args) => record::run(args).map_err(RunError::from),
         Command::ListWindows(args) => list_windows::run(args).map_err(RunError::from),
+        Command::Capabilities(args) => capabilities::run(args).map_err(RunError::from),
     }
 }
 

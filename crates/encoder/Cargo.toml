@@ -8,5 +8,38 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+tracing.workspace = true
+# The capability report is cached on disk between runs (src/cache.rs), and the
+# structures it caches are the ones the rest of the crate already works in.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+# Detection reports itself through the `encoder` field of the standard logging
+# vocabulary rather than through words of its own, so it needs the real
+# enumeration (docs/logging.md, "Standard fields"). clipped-logging is layer 0
+# and this crate is layer 1, so this follows the dependency direction.
+clipped-logging.workspace = true
+
+# Adapter enumeration and encoder detection are Windows API calls, and only the
+# `windows/` submodule makes them. Everything above that submodule — the
+# vocabulary, the ranking, the cache and the report — is platform-neutral and
+# compiles and tests anywhere.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    # `IDXGIFactory1::EnumAdapters1`, `DXGI_ADAPTER_DESC1` and
+    # `IDXGIAdapter1::CheckInterfaceSupport`, which is where the driver version
+    # the cache is keyed on comes from.
+    "Win32_Graphics_Dxgi",
+    # `MFTEnumEx`, which is what measures per-codec hardware encoder support.
+    "Win32_Media_MediaFoundation",
+    # `CoInitializeEx`/`CoTaskMemFree`, which Media Foundation enumeration needs
+    # around it.
+    "Win32_System_Com",
+    # `LoadLibraryExW`, which is how a vendor encoder runtime is measured to be
+    # loadable rather than merely present on disk.
+    "Win32_System_LibraryLoader",
+]
+
 [lints]
 workspace = true

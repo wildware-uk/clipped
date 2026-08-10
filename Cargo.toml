@@ -45,6 +45,12 @@ clap = { version = "4.5", features = ["derive"] }
 # FFmpeg itself is LGPL v3 and is not vendored here; it is fetched by
 # scripts/fetch-ffmpeg.ps1 and linked dynamically.
 rusty_ffmpeg = { version = "0.17.0", features = ["ffmpeg8_1"] }
+# Serialisation, pinned here because more than one crate will persist state:
+# the encoder capability cache today, the recording library and per-game
+# settings later. Two copies of serde in one binary means two derive macros and
+# two versions of every trait, so a crate takes it from here. Dual MIT/Apache-2.0.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Microsoft's generated bindings to the Windows API, pinned here for a reason
 # specific to them: more than one crate has to reach Windows — `clipped-windows`
 # enumerates windows and monitors today, and capture, audio and encoding each
@@ -52,8 +58,10 @@ rusty_ffmpeg = { version = "0.17.0", features = ["ffmpeg8_1"] }
 # binary means two incompatible `HWND` types and two copies of the COM plumbing,
 # which produces type errors a contributor has no way to interpret. Each crate
 # still chooses its own `features`, because the crate is enormous and only the
-# namespaces a crate names are compiled. Dual MIT/Apache-2.0.
-windows = "0.62"
+# namespaces a crate names are compiled. This entry deliberately enables none
+# by default, so a crate pays only for the headers it actually calls.
+# Dual MIT/Apache-2.0.
+windows = { version = "0.62", default-features = false }
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }
