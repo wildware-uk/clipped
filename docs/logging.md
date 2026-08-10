@@ -15,10 +15,10 @@ tracing.workspace = true
 
 `tracing` is pinned once in the root manifest's `[workspace.dependencies]`, so
 every crate that adopts it gets the same version and the same callsite registry.
-At the time of writing `clipped-logging` and `clipped-recorder` are the only
-packages that have taken the dependency; the rest of `crates/` is still
-documentation-only stubs. A crate takes it in the change that gives it
-something to log.
+At the time of writing `clipped-logging`, `clipped-encoder` and
+`clipped-recorder` are the packages that have taken the dependency; most of the
+rest of `crates/` is still documentation-only stubs. A crate takes it in the
+change that gives it something to log.
 
 The crate sits at layer 0 and depends on no other `clipped-*` crate, so
 platform primitives and application logic alike can use it.

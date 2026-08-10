@@ -8,15 +8,19 @@
 //!
 //! # Adding a subcommand
 //!
-//! Add a variant to [`Command`] and a match arm to [`crate::run`]. One more is
-//! already specified and deliberately absent:
+//! Add a variant to [`Command`] and a match arm to [`crate::run`]. Two
+//! subcommands that were previously specified here as absent are now both
+//! declared below:
 //!
+//! - `list-windows` — enumerate capturable windows
+//!   ([issue #10](https://github.com/wildware-uk/clipped/issues/10)).
 //! - `capabilities` — report detected encoders and codecs
 //!   ([issue #14](https://github.com/wildware-uk/clipped/issues/14)).
 //!
-//! It is not declared here. A subcommand that parses arguments and then does
-//! nothing is a control that silently does nothing, which AGENTS.md section 27
-//! rules out for a command line as much as for a window.
+//! Nothing is currently specified without being declared here. A subcommand
+//! that parses arguments and then does nothing is a control that silently
+//! does nothing, which AGENTS.md section 27 rules out for a command line as
+//! much as for a window — so a new one stays undeclared until it works.
 
 use std::path::PathBuf;
 
@@ -72,6 +76,13 @@ pub enum Command {
 
     /// List the windows that can be captured.
     ListWindows(ListWindowsArgs),
+
+    /// Report the encoders and codecs detected on this machine.
+    ///
+    /// Says which answers were measured here and which were inferred from
+    /// published limits, because acting on the second kind is how a recording
+    /// fails at the encoder rather than in the settings screen.
+    Capabilities(CapabilitiesArgs),
 }
 
 /// The mutually exclusive ways of naming one window to `list-windows`.
@@ -196,6 +207,19 @@ fn parse_window_handle(value: &str) -> Result<WindowHandle, String> {
     }
 
     Ok(WindowHandle::from_raw(handle))
+}
+
+/// Arguments to `clipped-recorder capabilities`.
+#[derive(Debug, Default, Args)]
+pub struct CapabilitiesArgs {
+    /// Ignore the cached report and ask the machine again. [default: off]
+    ///
+    /// The report is cached in `%LOCALAPPDATA%\Clipped` and invalidated
+    /// automatically when an adapter or a driver version changes, so this is
+    /// for the case where that has gone wrong — or where you want to see what
+    /// detection costs. The fresh answer replaces the cached one.
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 /// Arguments to `clipped-recorder record`.
@@ -430,7 +454,10 @@ mod tests {
 
     #[test]
     fn an_unknown_subcommand_is_a_usage_error_rather_than_a_panic() {
-        let error = parse(&["capabilities"]).unwrap_err();
+        // `capabilities` used to be this test's example of an unknown
+        // subcommand; it is a real one now (issue #14), so a name that is
+        // still nobody's subcommand is used instead.
+        let error = parse(&["frobnicate"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
 

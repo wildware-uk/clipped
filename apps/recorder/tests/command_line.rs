@@ -86,14 +86,9 @@ fn help_lists_the_subcommands_that_exist() {
     assert!(output.status.success(), "{}", stderr(&output));
 
     let help = stdout(&output);
-    assert!(help.contains("record"), "{help}");
-    assert!(help.contains("list-windows"), "{help}");
-    // The subcommands that do not exist yet must not appear: a command listed
-    // in the help is a promise (AGENTS.md section 27).
-    assert!(
-        !help.contains("capabilities"),
-        "help advertises a subcommand that has not been written: {help}"
-    );
+    for subcommand in ["record", "list-windows", "capabilities"] {
+        assert!(help.contains(subcommand), "{subcommand} is missing: {help}");
+    }
 }
 
 #[test]
@@ -185,6 +180,72 @@ fn list_windows_rejects_a_handle_that_is_not_one_before_enumerating_anything() {
     assert!(
         message.contains("--help"),
         "a value clap rejected should point at the help: {message}"
+    );
+}
+
+#[test]
+fn capabilities_reports_encoders_and_codecs() {
+    // The acceptance criterion for issue #14, checked through the binary
+    // because that is where it is claimed: `capabilities` prints what was
+    // detected and exits successfully. What it *finds* depends on the machine,
+    // so what is asserted is the shape — every encoder family, the codecs, the
+    // legend that separates a measurement from an inference, and the standing
+    // note that nothing can encode yet.
+    let output = recorder(&["capabilities"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let report = stdout(&output);
+    for expected in [
+        "Adapters",
+        "Encoders",
+        "NVIDIA NVENC",
+        "AMD AMF",
+        "Intel Quick Sync",
+        "Software (CPU)",
+        "H.264",
+        "HEVC",
+        "AV1",
+        "Automatic would choose",
+        "No encoder is implemented in this build",
+    ] {
+        assert!(
+            report.contains(expected),
+            "the report should mention {expected}:\n{report}"
+        );
+    }
+    assert!(
+        report.contains("inferred from published limits"),
+        "the report must explain which answers were not measured:\n{report}"
+    );
+}
+
+#[test]
+fn capabilities_refreshes_without_the_cache_and_agrees_with_itself() {
+    // The cached and the freshly probed answer have to be the same answer, or
+    // the cache is not a cache. Run in this order deliberately: the first call
+    // populates or reuses the cache, the second ignores it and probes.
+    let cached = recorder(&["capabilities"]);
+    let refreshed = recorder(&["capabilities", "--refresh"]);
+    assert!(cached.status.success() && refreshed.status.success());
+
+    // Everything up to the footer, which differs by design: it says where the
+    // answer came from and how long it took.
+    let body = |output: &Output| {
+        stdout(output)
+            .split_once("(i) inferred")
+            .expect("the report has a legend")
+            .0
+            .to_owned()
+    };
+    assert_eq!(
+        body(&cached),
+        body(&refreshed),
+        "a cached report and a probed one describe the same machine"
+    );
+    assert!(
+        stdout(&refreshed).contains("probed just now"),
+        "--refresh must actually probe:\n{}",
+        stdout(&refreshed)
     );
 }
 

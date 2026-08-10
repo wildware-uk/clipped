@@ -23,8 +23,9 @@
 //! # What is here and what is not
 //!
 //! The signal, the hook and the guarantee are implemented and tested. There is
-//! no capture pipeline to put between them yet — `crates/capture`,
-//! `crates/encoder` and `crates/muxer` are documentation-only stubs — so today
+//! no capture pipeline to put between them yet — `crates/capture` has no
+//! backend, `crates/muxer` is a documentation-only stub and no encoder backend
+//! is implemented — so today
 //! the recorder's own use of this module runs a body that reports capture is
 //! not implemented. Acceptance criterion 3 of
 //! [issue #9](https://github.com/wildware-uk/clipped/issues/9), "Ctrl+C during

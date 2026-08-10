@@ -14,8 +14,11 @@ product this is being built towards, and the
 [issue tracker](https://github.com/wildware-uk/clipped/issues) for what is
 actually being worked on.
 
-`cargo build --workspace` produces a `clipped-recorder` binary, but it has no
-capture commands yet; the recording engine is milestone M1.
+`cargo build --workspace` produces a `clipped-recorder` binary. It cannot record
+yet — the recording engine is milestone M1 — but
+`clipped-recorder capabilities` reports the graphics adapters and hardware
+encoders it found on your machine
+([docs/encoder-capabilities.md](docs/encoder-capabilities.md)).
 
 Installation instructions and screenshots are pending a shippable build.
 
@@ -134,9 +137,10 @@ files under a documented per-user directory, and defines the standard context
 fields as types rather than loose strings. It deliberately does not own logging
 itself. The rule is that a crate wanting to emit events adds
 `tracing.workspace = true` and calls the `tracing` macros directly, so no
-diagnostic is routed through a Clipped-specific wrapper. `clipped-logging` and
-`clipped-recorder` are so far the only packages that have taken that
-dependency; the rest of `crates/` is still documentation-only stubs.
+diagnostic is routed through a Clipped-specific wrapper. `clipped-logging`,
+`clipped-encoder` and `clipped-recorder` have taken that dependency so far; a
+crate takes it in the change that gives it something to log, and most of
+`crates/` is still documentation-only stubs.
 
 Two rules matter most:
 

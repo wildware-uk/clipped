@@ -5,10 +5,11 @@
 //! installs the Ctrl+C handler, runs the shutdown seam with a finalisation hook
 //! — and then reports that there is no capture engine to put between them.
 //!
-//! There genuinely is not one. `crates/capture`, `crates/encoder`,
-//! `crates/audio` and `crates/muxer` contain module documentation and no code,
-//! and the backend interface they will be built on is
-//! [issue #11](https://github.com/wildware-uk/clipped/issues/11). Printing
+//! There genuinely is not one. `crates/audio` and `crates/muxer` contain module
+//! documentation and no code, `crates/capture` has an interface with no backend
+//! behind it, and `crates/encoder` can detect an encoder without being able to
+//! drive one — see [`crate::capabilities`], which is what that detection is
+//! good for today. Printing
 //! "recording…" and producing nothing, or writing an empty file, would be worse
 //! than saying so (AGENTS.md sections 27 and 54).
 

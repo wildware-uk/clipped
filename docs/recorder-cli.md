@@ -10,9 +10,10 @@ good rather than a reason to treat it as scaffolding.
 
 **The recorder cannot record yet.** `record` parses and validates its arguments,
 resolves them into a configuration, installs its Ctrl+C handler and then reports
-that there is no capture engine, because there is not one: `crates/capture`,
-`crates/encoder`, `crates/audio` and `crates/muxer` contain module documentation
-and no code.
+that there is no capture engine, because there is not one: `crates/capture`
+holds a backend interface with no backend behind it, `crates/encoder` detects
+encoders without being able to drive one, and `crates/audio` and `crates/muxer`
+contain module documentation and no code.
 
 It produces no recording, and leaves nothing behind on the way to not producing
 one: no output file, and no recordings directory. It is not silent, though. The
@@ -22,8 +23,8 @@ files under `%LOCALAPPDATA%\Clipped\logs` that every Clipped process writes
 probe, described under [defaults that touch the disk](#defaults-that-touch-the-disk),
 and it is removed again immediately.
 
-What works today is the argument surface, `list-windows`, and the shutdown path.
-The pipeline between them is milestone M1 — capture backend
+What works today is the argument surface, `list-windows`, `capabilities`, and
+the shutdown path. The pipeline between them is milestone M1 — capture backend
 [#11](https://github.com/wildware-uk/clipped/issues/11), Windows Graphics
 Capture [#12](https://github.com/wildware-uk/clipped/issues/12), encoders
 [#15](https://github.com/wildware-uk/clipped/issues/15)–[#18](https://github.com/wildware-uk/clipped/issues/18),
@@ -42,14 +43,13 @@ there is nothing to hand a resolved window to.
 ```text
 clipped-recorder record --window <TITLE>
 clipped-recorder list-windows [--all] [<selector>]
+clipped-recorder capabilities [--refresh]
 ```
 
-One more is specified and deliberately absent until it does something
-(AGENTS.md section 27):
-
-| Command | What it will do | Issue |
-| --- | --- | --- |
-| `capabilities` | Report detected encoders, codecs and limits | [#14](https://github.com/wildware-uk/clipped/issues/14) |
+Nothing is currently specified without being declared: `record`,
+`list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)) and
+`capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)) are
+all implemented below (AGENTS.md section 27).
 
 Adding one is a variant on `Command` in `apps/recorder/src/cli.rs` and an arm in
 `clipped_recorder::run`. Nothing else has to move.
@@ -211,6 +211,45 @@ Long lists are unremarkable — the desktop these examples came from had 424
 top-level windows and 8 that could be captured — which is why the exclusion
 reasons exist rather than a filter that quietly drops them.
 
+## `capabilities`
+
+```text
+clipped-recorder capabilities
+```
+
+Prints the display adapters in the machine, the encoders on them, the codecs
+each encoder supports, and the order "Automatic" would try them in. It writes
+the report to standard output and the same findings to the log, through the
+standard `encoder` field ([logging.md](logging.md)).
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--refresh` | off | Ignore the cached report, ask the machine again, and store the new answer |
+
+The report distinguishes what was **measured on this machine** from what was
+**inferred** from published limits, and marks every inferred value `(i)`. That
+distinction is the point of the command rather than a detail of it: codec
+support is measured, and the numeric limits beside it are not. A limit shown as
+`—` is one the report declines to state, because the codec's support is unknown
+and a limit beside that word reads as a promise.
+
+An encoder counts as **available** when its vendor runtime loads, because that
+is the library Clipped will encode through. A driver that registers media
+transforms without installing its encode runtime is reported as unavailable,
+with the transforms listed underneath as the evidence.
+[encoder-capabilities.md](encoder-capabilities.md) explains how each answer is
+arrived at, what the cache does and when it is thrown away.
+
+Detection does not open an encoder session, so running this while a game is
+recording cannot take a session slot from it.
+
+**No encoder is implemented**, so a report full of supported codecs still
+describes a build that cannot encode. The footer says so and names the issues:
+NVENC [#15](https://github.com/wildware-uk/clipped/issues/15), AMF
+[#16](https://github.com/wildware-uk/clipped/issues/16), Quick Sync
+[#17](https://github.com/wildware-uk/clipped/issues/17), software
+[#18](https://github.com/wildware-uk/clipped/issues/18).
+
 ## Exit codes
 
 | Code | Meaning |
@@ -229,6 +268,10 @@ command line is what has to change, and the message already lists the windows
 that could have been meant. It exits 1 only when Windows refused to describe the
 desktop at all.
 
+`capabilities` exits 0 even on a machine with no hardware encoder — that is a
+report, not a failure — and 1 only when the adapters could not be enumerated at
+all.
+
 ## Diagnostics
 
 The recorder uses `clipped-logging`, so log files are under
@@ -240,9 +283,9 @@ CLIPPED_LOG=debug clipped-recorder record --window "Counter-Strike 2"
 ```
 
 Standard output is left for a command's result — `list-windows` prints its
-listing there, and `capabilities` will — so errors and progress go to standard
-error. A `list-windows` run piped into another program therefore carries the
-table and nothing else.
+listing there and `capabilities` writes its report there — so errors and
+progress go to standard error. A `list-windows` run piped into another program
+therefore carries the table and nothing else.
 
 The resolved configuration is logged once, at `info`, before anything uses it.
 The output path is redacted to its file name and a digest of the whole path

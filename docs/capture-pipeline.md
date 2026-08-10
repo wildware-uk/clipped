@@ -6,8 +6,10 @@ picks a backend and reports which one it picked. Nothing in this repository can
 currently produce a frame: Windows Graphics Capture is
 [issue #12](https://github.com/wildware-uk/clipped/issues/12) and Desktop
 Duplication is [issue #13](https://github.com/wildware-uk/clipped/issues/13),
-both in M1, and neither has landed. The encoder and the muxer are likewise still
-documentation-only crates.
+both in M1, and neither has landed. The muxer is likewise still a
+documentation-only crate, and `clipped-encoder` can say what this machine could
+encode with ([encoder-capabilities.md](encoder-capabilities.md)) without being
+able to encode anything.
 
 So this document describes an *interface* and the rules a backend has to obey.
 Where it describes behaviour that does not exist yet it says so, because a
