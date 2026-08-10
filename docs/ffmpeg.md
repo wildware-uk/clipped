@@ -187,5 +187,13 @@ and the workflow's "Locate libclang for bindgen" step finds it and exports
 `docs/prerequisites.md` also mentions `ffprobe`, and that is unrelated to any of
 the above. It is a *test* tool: media tests assert on finished files with it
 (AGENTS.md section 22), which has none of the constraints that made the library
-link necessary. It is whatever FFmpeg happens to be on your `PATH`, it is not
-pinned, and it is not linked into anything.
+link necessary. It is not linked into anything, and nothing in the recorder
+shells out to it.
+
+The muxer's media tests run the `ffprobe.exe` that ships inside the pinned build,
+in `third-party/ffmpeg/current/bin`, rather than whichever one is on `PATH`. The
+fetch script installs it on every machine that builds this workspace, CI
+included, so those tests run everywhere the crate compiles instead of passing,
+failing or quietly skipping depending on what somebody happened to install. An
+`ffprobe` on your `PATH` is still useful for looking at a file by hand, and
+`docs/prerequisites.md` still suggests having one; it is not what the tests use.

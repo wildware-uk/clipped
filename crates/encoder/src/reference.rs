@@ -47,7 +47,8 @@
 //!
 //! HDR here means 10-bit encoding, which is the necessary condition for it. The
 //! colour signalling that makes a 10-bit stream an HDR one belongs to the muxer
-//! (issue #21).
+//! and is not written yet
+//! ([issue #146](https://github.com/wildware-uk/clipped/issues/146)).
 
 use crate::claim::Claim;
 use crate::codec::{Codec, EncoderKind, Resolution};

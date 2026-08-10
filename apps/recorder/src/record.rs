@@ -47,7 +47,7 @@ impl fmt::Display for RecordError {
                 formatter,
                 "the arguments are valid, but this build cannot record: the capture engine \
                  is not implemented yet. It is milestone {CAPTURE_MILESTONE} — capture \
-                 backend issue #11, encoder issue #15, muxer issue #21, at \
+                 backend issue #11, encoder issue #15, at \
                  https://github.com/wildware-uk/clipped/issues. No recording was written."
             ),
         }

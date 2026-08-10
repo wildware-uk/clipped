@@ -27,9 +27,61 @@
 //!
 //! The binding, `rusty_ffmpeg`, is a `-sys` crate and offers no safe API, so the
 //! safe wrappers over FFmpeg are written here and every other crate reaches
-//! FFmpeg through them rather than through the raw FFI. The container writing
-//! itself is not implemented yet
-//! ([issue #21](https://github.com/wildware-uk/clipped/issues/21)); what exists
-//! today is [`linkage`], which reports and probes the FFmpeg actually loaded.
+//! FFmpeg through them rather than through the raw FFI.
+//!
+//! # What is here today
+//!
+//! [`MkvWriter`] writes a recording — one video track and any number of named
+//! audio tracks — into Matroska as the packets arrive, and [`linkage`] reports
+//! and probes the FFmpeg actually loaded. Remuxing to MP4
+//! ([issue #92](https://github.com/wildware-uk/clipped/issues/92)) is not
+//! written yet, and neither is the replay buffer's segment writing.
+//!
+//! `docs/muxing.md` is the subsystem document: what the container guarantees
+//! when a recording is interrupted, how timestamps are converted, and how the
+//! output is validated.
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use clipped_muxer::{
+//!     AudioCodec, AudioTrack, EncodedPacket, MkvWriter, PacketTimestamp, RecordingLayout,
+//!     TrackId, VideoCodec, VideoTrack,
+//! };
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let sequence_header: Vec<u8> = Vec::new();
+//! # let frame: Vec<u8> = Vec::new();
+//! let layout = RecordingLayout::new(
+//!     VideoTrack::new(VideoCodec::H264, 2560, 1440).with_codec_private(sequence_header),
+//! )
+//! .with_audio_track(
+//!     AudioTrack::new(AudioCodec::PcmS16Le, 48_000, 2)
+//!         .with_name("Compatibility Mix")
+//!         .as_default(),
+//! )
+//! .with_audio_track(AudioTrack::new(AudioCodec::PcmS16Le, 48_000, 2).with_name("Game"));
+//!
+//! let mut writer = MkvWriter::create(Path::new("recording.mkv"), &layout)?;
+//! writer.write_packet(
+//!     &EncodedPacket::new(TrackId::Video, PacketTimestamp::from_nanos(0), &frame)
+//!         .with_keyframe(true),
+//! )?;
+//! let summary = writer.finish()?;
+//! # Ok(())
+//! # }
+//! ```
 
+pub mod error;
 pub mod linkage;
+pub mod packet;
+mod timeline;
+pub mod track;
+pub mod writer;
+
+pub use crate::error::{AvError, MuxError};
+pub use crate::packet::{EncodedPacket, PacketTimestamp};
+pub use crate::track::{
+    AudioCodec, AudioTrack, FrameRate, InvalidLanguage, Language, RecordingLayout, TrackId,
+    VideoCodec, VideoTrack,
+};
+pub use crate::writer::{MkvWriter, RecordingSummary};
