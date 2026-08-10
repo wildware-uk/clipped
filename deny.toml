@@ -1,0 +1,122 @@
+# cargo-deny policy for Clipped.
+#
+# Two questions are asked of every crate in the dependency graph, on every pull
+# request (.github/workflows/ci.yml):
+#
+#   1. Is its licence compatible with shipping it inside an MPL-2.0 application?
+#   2. Does it have a known security advisory against it?
+#
+# Both are cheap to answer automatically and expensive to answer by hand once a
+# transitive dependency has been in the tree for a year, which is the whole
+# reason this file exists rather than a line in CONTRIBUTING.md asking people to
+# be careful.
+#
+# Run it locally exactly as CI does:
+#
+#   cargo deny --all-features check
+#
+# Install it with `cargo install cargo-deny --locked`.
+
+[graph]
+# Clipped is a Windows application (SPEC.md section 3) and rust-toolchain.toml
+# pins this triple, so the graph is evaluated for it alone. Without this,
+# cargo-deny would also weigh up the Linux and macOS branches of every
+# cfg-gated dependency, and would report licence and advisory problems in
+# crates that are never compiled into anything we ship.
+targets = ["x86_64-pc-windows-msvc"]
+
+# Optional features pull in optional dependencies, and an optional dependency
+# with a GPL licence is still a GPL licence the moment somebody turns the
+# feature on. Checking the union of all features means the answer does not
+# depend on which feature set happened to be built.
+all-features = true
+
+[advisories]
+# The RustSec advisory database is the source; the defaults point at it.
+# A yanked crate in Cargo.lock is a build that will stop reproducing as soon as
+# a cache expires, so it is an error rather than a warning.
+yanked = "deny"
+
+# Advisories that have been reviewed and consciously accepted go here, each with
+# the issue that records the decision. Empty is the correct state; an entry
+# added without a linked issue is a policy failure, not a workaround.
+ignore = []
+
+[licenses]
+# Clipped is MPL-2.0 (LICENSE, CONTRIBUTING.md "Licensing and dependencies").
+# MPL-2.0 is file-level copyleft: our own files stay open, and we may link
+# against permissive code and against LGPL FFmpeg, but we may not absorb code
+# whose licence would impose its terms on the combined work.
+#
+# This list is therefore the complete set of licences a dependency may carry.
+# cargo-deny denies everything that is not listed, so GPL-2.0, GPL-3.0,
+# AGPL-3.0 and anything else unlisted fail the check by construction - there is
+# no separate deny list to keep in sync with this one, and no way for a new
+# copyleft licence to arrive unnoticed because nobody thought to name it.
+#
+# Adding a licence here is a licensing decision about the project and needs the
+# same review as adding the dependency that prompted it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # The Rust standard library's own dependencies carry the LLVM exception;
+    # it only ever grants more permission than bare Apache-2.0.
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    # The Unicode data licence, carried by unicode-ident and its relatives.
+    # Both spellings appear in the ecosystem depending on how recently a crate
+    # updated its metadata.
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+
+# A crate's licence has to be readable from its metadata or its licence file.
+# The default threshold accepts a fairly loose textual match against a known
+# licence; raising it means an unusual or modified licence text is reported for
+# a human to look at instead of being guessed at.
+confidence-threshold = 0.93
+
+# cargo-deny does not check the licences of dev-dependencies unless asked to.
+# Verified against cargo-deny 0.20.2: a GPL-3.0-or-later crate added under
+# [dev-dependencies] passed the licence check with this line removed, and was
+# rejected with it in place. A test-only dependency is still code the project
+# pulls onto every contributor's machine, and "it was only a dev-dependency" is
+# not an argument anybody wants to be making about a copyleft licence later, so
+# they are held to the same list.
+include-dev = true
+
+# The list above states which licences the project accepts, not which ones its
+# current dependency graph happens to contain. Clipped's graph is small today,
+# so most of the list is unmatched and cargo-deny would otherwise print a
+# warning per entry on every run - training everyone to ignore its output, for
+# no gain, because the correct response to "ISC is unused" is not to delete ISC
+# from the policy.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Clipped's own crates are `publish = false` where they are not published and
+# all declare `license = "MPL-2.0"`, so there is nothing to ignore here. Left
+# explicit so that turning it on later is a visible decision.
+ignore = false
+
+[bans]
+# Two versions of the same crate in one binary is a size and compile-time cost
+# and often a sign of a dependency lagging behind, but it is routine in the Rust
+# ecosystem and usually not actionable by us. Reported, not fatal.
+multiple-versions = "warn"
+
+# A wildcard version requirement means the build is not reproducible: a
+# different day resolves a different crate. That is fatal.
+wildcards = "deny"
+
+[sources]
+# Everything comes from crates.io. A dependency pulled straight from a git
+# repository has no publication process behind it and no yank mechanism, so
+# adding one is a deliberate decision that has to be recorded here.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

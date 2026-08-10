@@ -129,6 +129,67 @@ request and on the issue. Partial honest work is welcome; a ticket closed over
 an unverified claim is not. Never disable a test, delete an assertion or
 substitute mock data to make a change look finished (AGENTS.md section 54).
 
+## Continuous integration
+
+Every pull request, and every push to `main`, runs
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) on a GitHub-hosted
+**Windows** runner. Clipped is a Windows application, so a green build anywhere
+else would not tell us much.
+
+Three jobs run in parallel, and all three have to pass before a pull request can
+be merged:
+
+| Job | What it runs |
+| --- | --- |
+| **Rust (format, lint, build, test)** | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`, `cargo test --workspace` |
+| **Dependencies (licences and advisories)** | `cargo deny --all-features check` |
+| **Desktop UI (lint and build)** | `npm ci`, `npm run lint`, `npm run build` in `apps/desktop` |
+
+The Rust job runs exactly the four commands in [What "done"
+means](#what-done-means), so there is nothing CI checks that you cannot check
+first. It also runs `scripts/check-prerequisites.ps1` on the runner: a
+GitHub-hosted image is a machine that has never built Clipped, so it is the
+honest test of whether [docs/prerequisites.md](docs/prerequisites.md) is still
+accurate, and its output is copied into the run summary.
+
+The compiler is not installed by the workflow. CI runs `rustup toolchain
+install`, which reads `rust-toolchain.toml`, so CI and your machine use the same
+compiler by construction.
+
+### Steps that skip themselves
+
+Parts of the project do not exist yet, and the workflow says so rather than
+passing silently. The desktop UI steps skip until `apps/desktop/package.json`
+appears, and the FFmpeg fetch skips until `scripts/fetch-ffmpeg.ps1` appears;
+both print a `SKIPPED - …` line into the log and the run summary explaining
+what is missing. When you add the missing piece, the steps start running on
+their own — but read the skip notice first, because a step that has never
+executed has never been tested either.
+
+Hardware-dependent capture and encoder tests are **not** run in CI. A hosted
+runner has no GPU and nothing to record, so those tests would be measuring the
+runner. They stay on a documented manual path.
+
+### Dependency licences and advisories
+
+[`deny.toml`](deny.toml) is the machine-readable form of the policy in the next
+section. It holds the list of licences a dependency may carry, and
+[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) rejects anything
+that is not on it — so GPL, AGPL and any other unlisted licence fail the check
+without anyone having to notice. The same run checks the RustSec advisory
+database, wildcard version requirements, and that every crate came from
+crates.io.
+
+Run it yourself before adding a dependency:
+
+```text
+cargo install cargo-deny --locked
+cargo deny --all-features check
+```
+
+Adding a licence to the allow-list is a licensing decision about the project,
+not a way to get a build green. Raise it on the issue.
+
 ## Licensing and dependencies
 
 Clipped is licensed under the [Mozilla Public License 2.0](LICENSE). It was
