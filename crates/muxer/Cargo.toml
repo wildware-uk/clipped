@@ -8,5 +8,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The raw FFmpeg FFI, and nothing above it. This crate is the only place in the
+# workspace that names it: the safe wrappers over FFmpeg are written here, and
+# everything else in Clipped goes through them
+# (docs/adr/0004-ffmpeg-dependency-strategy.md).
+rusty_ffmpeg.workspace = true
+
 [lints]
 workspace = true

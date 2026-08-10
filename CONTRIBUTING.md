@@ -17,9 +17,10 @@ maintainer directly.
 
 [README.md](README.md) has the build, and
 [docs/prerequisites.md](docs/prerequisites.md) has the full toolchain list. In
-short: a clean clone plus a stable Rust toolchain and the MSVC build tools
-should be enough to run `cargo build --workspace`. If it is not, that is a bug
-in the documentation — please raise an issue.
+short: a clean clone, a stable Rust toolchain, the MSVC build tools, LLVM, and
+one run of `scripts/fetch-ffmpeg.ps1` should be enough to run
+`cargo build --workspace` — in that shell, with nothing else to set. If it is
+not, that is a bug in the documentation — please raise an issue.
 
 ## Issues and milestones
 
@@ -169,11 +170,10 @@ compiler by construction.
 
 Parts of the project do not exist yet, and the workflow says so rather than
 passing silently. The desktop UI steps skip until `apps/desktop/package.json`
-appears, and the FFmpeg fetch skips until `scripts/fetch-ffmpeg.ps1` appears;
-both print a `SKIPPED - …` line into the log and the run summary explaining
-what is missing. When you add the missing piece, the steps start running on
-their own — but read the skip notice first, because a step that has never
-executed has never been tested either.
+appears, printing a `SKIPPED - …` line into the log and the run summary
+explaining what is missing. When you add the missing piece, the steps start
+running on their own — but read the skip notice first, because a step that has
+never executed has never been tested either.
 
 Hardware-dependent capture and encoder tests are **not** run in CI. A hosted
 runner has no GPU and nothing to record, so those tests would be measuring the
