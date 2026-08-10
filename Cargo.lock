@@ -238,13 +238,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-media-validation"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "clipped-muxer"
 version = "0.1.0"
 dependencies = [
  "clap",
  "clipped-logging",
+ "clipped-media-validation",
  "rusty_ffmpeg",
- "serde_json",
  "tracing",
 ]
 

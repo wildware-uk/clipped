@@ -20,11 +20,19 @@ use serde_json::Value;
 /// added without being placed here.
 const LAYERS: &[&[&str]] = &[
     // Platform primitives and shared vocabulary, which depend on nothing else.
+    //
+    // `clipped-media-validation` is here rather than with the test-only
+    // packages further up for one reason: every crate that *produces* media
+    // takes it as a dev-dependency to check its output (AGENTS.md section 22,
+    // docs/testing.md), so it has to sit below all of them. It depends on
+    // nothing in this workspace, which is what makes that placement sound, and
+    // only a `[dev-dependencies]` entry may ever name it.
     &[
         "clipped-windows",
         "clipped-events",
         "clipped-storage",
         "clipped-logging",
+        "clipped-media-validation",
     ],
     // Subsystems built directly on a platform or persistence layer.
     &[

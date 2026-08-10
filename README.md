@@ -124,7 +124,7 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-media-validation` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
@@ -136,6 +136,13 @@ Layers 5 and 6 are the controlled test applications in `test-apps/`, which
 capture tests point at instead of an installed game
 ([docs/testing.md](docs/testing.md)). They are at the top of the stack because
 nothing in the product may depend on one.
+
+`clipped-media-validation` (`tests/media`) is a test-only package too, but it
+sits at the *bottom* rather than the top, and deliberately: it is what every
+crate that writes media checks its output with, so it has to be reachable from
+all of them as a dev-dependency. It is never published, never linked into the
+recorder, and depends on nothing in this workspace — which is what makes
+sitting at layer 0 sound rather than convenient.
 
 `clipped-logging` owns where diagnostics go and how much is recorded: it
 installs the process-wide `tracing` subscriber, resolves the log level from the

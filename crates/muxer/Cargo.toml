@@ -32,10 +32,13 @@ rusty_ffmpeg.workspace = true
 # executable in this workspace presents the same argument syntax and the same
 # usage errors (the root manifest says why).
 clap.workspace = true
-# `ffprobe` reports in JSON, and the media tests assert on what it says
-# (AGENTS.md section 22). Parsing it by hand would make a test fail for reasons
-# that have nothing to do with the recording.
-serde_json.workspace = true
+# What the recordings this crate writes are checked with: the container opens,
+# the streams are the ones that were declared, the duration is plausible, the
+# timestamps increase and the tracks are in sync (AGENTS.md section 22). It is
+# the workspace's one media validator rather than this crate's — every crate
+# that produces media uses it, and it is tested against files that are broken as
+# well as files that are not (tests/media, docs/testing.md).
+clipped-media-validation.workspace = true
 
 [lints]
 workspace = true
