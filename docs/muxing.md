@@ -222,14 +222,16 @@ this workspace:
 
 ```powershell
 $ffmpeg = "third-party\ffmpeg\current\bin\ffmpeg.exe"
-& $ffmpeg -f lavfi -i testsrc2=size=320x240:rate=30 -t 30 -c:v libopenh264 -g 300 -y default.mkv
-& $ffmpeg -f lavfi -i testsrc2=size=320x240:rate=30 -t 30 -c:v libopenh264 -g 300 `
+& $ffmpeg -v error -f lavfi -i testsrc2=size=320x240:rate=30 -t 30 -c:v libopenh264 -g 300 `
+    -y default.mkv
+& $ffmpeg -v error -f lavfi -i testsrc2=size=320x240:rate=30 -t 30 -c:v libopenh264 -g 300 `
     -cluster_time_limit 1000 -y limited.mkv
 
 # Matroska's Cluster element id is 1F 43 B6 75, and nothing in the FFmpeg tools
 # prints element structure, so count the ids:
 foreach ($file in "default.mkv", "limited.mkv") {
-    $bytes = [IO.File]::ReadAllBytes($file)
+    # Resolved because .NET does not share PowerShell's working directory.
+    $bytes = [IO.File]::ReadAllBytes((Resolve-Path $file))
     $count = 0
     for ($i = 0; $i -lt $bytes.Length - 3; $i++) {
         if ($bytes[$i] -eq 0x1F -and $bytes[$i + 1] -eq 0x43 -and
