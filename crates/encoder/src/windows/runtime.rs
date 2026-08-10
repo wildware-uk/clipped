@@ -28,21 +28,24 @@ use crate::probe::{RuntimeObservation, RuntimeOutcome};
 
 /// The libraries each encoder family is reached through.
 ///
-/// Quick Sync has two entries because Intel's media stack was renamed: the
-/// Media SDK runtime is `libmfxhw64.dll` and oneVPL, which replaced it, is
-/// `libvpl.dll`. A machine with either can encode, so both are tried and
-/// whichever answers decides.
+/// Quick Sync has several names because Intel's media stack was renamed twice
+/// and the driver's file names followed, and the list is not written out here:
+/// it is [`quicksync::LIBRARIES`](crate::windows::quicksync::LIBRARIES), the
+/// same constant the backend loads from. Detection reporting a family
+/// unavailable while the backend would have opened it — or the reverse — is
+/// what two hand-maintained copies of a file-name list eventually produce, and
+/// "Automatic" silently skipping an encoder that works is the shape that bug
+/// would take.
 ///
 /// **Unverified on real hardware.** There is no Intel GPU on the machine this
 /// was written on, so the Quick Sync rows have never returned
 /// [`RuntimeOutcome::Loaded`] here — only `NotFound`, which is the correct
 /// answer for this machine and tells us nothing about a machine where the
 /// library exists (issue #14).
-pub(super) const LIBRARIES: &[(EncoderKind, &str)] = &[
-    (EncoderKind::Nvenc, "nvEncodeAPI64.dll"),
-    (EncoderKind::Amf, "amfrt64.dll"),
-    (EncoderKind::QuickSync, "libmfxhw64.dll"),
-    (EncoderKind::QuickSync, "libvpl.dll"),
+pub(super) const LIBRARIES: &[(EncoderKind, &[&str])] = &[
+    (EncoderKind::Nvenc, &["nvEncodeAPI64.dll"]),
+    (EncoderKind::Amf, &["amfrt64.dll"]),
+    (EncoderKind::QuickSync, super::quicksync::LIBRARIES),
 ];
 
 /// Windows error for a file that is not there.
@@ -129,12 +132,29 @@ mod tests {
     #[test]
     fn every_encoder_family_that_needs_a_runtime_has_one_listed() {
         for kind in EncoderKind::ALL {
-            let listed = LIBRARIES.iter().any(|(listed, _)| *listed == kind);
+            let listed = LIBRARIES
+                .iter()
+                .any(|(listed, libraries)| *listed == kind && !libraries.is_empty());
             assert_eq!(
                 listed,
                 kind.is_hardware(),
                 "{kind} should have a runtime listed if and only if it is hardware"
             );
         }
+    }
+
+    #[test]
+    fn detection_probes_exactly_the_libraries_the_quick_sync_backend_loads() {
+        // The two lists were once written out separately, and the day they
+        // disagree is the day a machine is told Quick Sync is unavailable while
+        // the backend would have opened it — or worse, the reverse. They are
+        // one constant now, and this is what says so out loud.
+        let probed: Vec<&str> = LIBRARIES
+            .iter()
+            .filter(|(kind, _)| *kind == EncoderKind::QuickSync)
+            .flat_map(|(_, libraries)| libraries.iter().copied())
+            .collect();
+
+        assert_eq!(probed, crate::windows::quicksync::LIBRARIES);
     }
 }

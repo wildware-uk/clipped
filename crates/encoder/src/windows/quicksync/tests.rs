@@ -9,6 +9,8 @@
 //!
 //! - the configuration is refused before a device is touched, for every reason
 //!   it can be refused for;
+//! - each codec is initialised with the extension buffers whose settings apply
+//!   to it and with no others;
 //! - a Direct3D 11 device created on a *different* vendor's adapter is refused
 //!   by name, which is the whole of this backend's hybrid-graphics behaviour and
 //!   is exercised here on a real NVIDIA or AMD device;
@@ -16,7 +18,9 @@
 //!   encoders that do work are still recommended.
 //!
 //! The translation from Clipped's configuration to oneVPL's structures is
-//! tested in `settings.rs`, and the runtime search in `api.rs`.
+//! tested in `settings.rs`, the runtime search in `api.rs`, and the frame
+//! allocator in `allocator.rs` — where the Direct3D 11 half really does
+//! allocate and release textures, on whatever GPU is present.
 //!
 //! # Why a missing Intel GPU is not a failure under `CLIPPED_REQUIRE_ENCODER`
 //!
@@ -39,6 +43,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1};
 
+use crate::backend::VideoEncoder as _;
 use crate::codec::{Codec, EncoderKind, Resolution, Vendor};
 use crate::config::{BitRate, EncoderConfig, FrameRate, RateControl, SurfaceFormat};
 use crate::detection::{detect, Availability, Unavailable};
@@ -47,7 +52,7 @@ use crate::frame::{DeviceKind, GraphicsDevice};
 use crate::probe::probe;
 use crate::recommendation::recommend;
 
-use super::QuickSyncEncoder;
+use super::{sys, InitParams, QuickSyncEncoder};
 
 /// A configuration the tests vary one thing at a time from.
 fn config(codec: Codec, resolution: Resolution) -> EncoderConfig {
@@ -153,6 +158,48 @@ fn a_null_device_is_refused_before_anything_dereferences_it() {
 }
 
 // ---------------------------------------------------------------------------
+// What each codec is initialised with
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_codec_is_only_given_the_extension_buffers_its_settings_apply_to() {
+    // `mfxExtCodingOption2::RepeatPPS` is documented in `mfxstructures.h` as an
+    // AVC control, so attaching that buffer to an HEVC or AV1 initialisation
+    // would claim a setting the codec does not have — and is a plausible
+    // MFX_ERR_UNSUPPORTED from `MFXVideoENCODE_Init` for nothing in return.
+    // What each codec does about in-band parameter sets is on
+    // `settings::coding_option2`.
+    #[allow(clippy::cast_sign_loss)]
+    let signal = sys::MFX_EXTBUFF_VIDEO_SIGNAL_INFO as sys::mfxU32;
+    #[allow(clippy::cast_sign_loss)]
+    let options = sys::MFX_EXTBUFF_CODING_OPTION2 as sys::mfxU32;
+    #[allow(clippy::cast_sign_loss)]
+    let av1 = sys::MFX_EXTBUFF_AV1_BITSTREAM_PARAM as sys::mfxU32;
+
+    for (codec, expected) in [
+        (Codec::H264, vec![signal, options]),
+        (Codec::Hevc, vec![signal]),
+        (Codec::Av1, vec![signal, av1]),
+    ] {
+        let mut params = InitParams::new(&config(codec, Resolution::new(1920, 1080)));
+        let video = params.video();
+
+        // SAFETY: `params` owns the structure and outlives this borrow, and
+        // every pointer in its extension array addresses one of its own fields.
+        let attached: Vec<sys::mfxU32> = unsafe {
+            (0..usize::from((*video).NumExtParam))
+                .map(|index| (*(*(*video).ExtParam.add(index))).BufferId)
+                .collect()
+        };
+
+        assert_eq!(
+            attached, expected,
+            "{codec} is initialised with the wrong extension buffers"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Adapter selection, which is the whole of the hybrid-graphics behaviour
 // ---------------------------------------------------------------------------
 
@@ -212,11 +259,23 @@ fn a_recording_cannot_start_on_this_machine_and_says_why() {
     match QuickSyncEncoder::open(&handle, config(Codec::H264, Resolution::new(1280, 720))) {
         Ok(encoder) => {
             // Only reachable on a machine whose first hardware adapter is
-            // Intel, which is not the machine this was written on. Nothing here
-            // asserts on the encode path, because this test has never seen it.
+            // Intel, which is not the machine this was written on. Nothing
+            // asserts on encoding, because no frame is submitted here — but a
+            // session that opened and produced no SPS/PPS is a session that
+            // cannot be muxed, and that is worth catching on the hardware this
+            // backend most needs coverage from rather than letting the branch
+            // pass with no assertion at all.
+            assert_eq!(encoder.encoder(), EncoderKind::QuickSync);
+            assert!(
+                !encoder.parameter_sets().is_empty(),
+                "an H.264 session opened and read back no sequence or picture parameter set, so \
+                 nothing could store them out of band: {encoder:?}"
+            );
             let _ = writeln!(
                 std::io::stderr(),
-                "a Quick Sync session opened on this machine: {encoder:?}"
+                "a Quick Sync session opened on this machine: {encoder:?}, {} bytes of parameter \
+                 sets",
+                encoder.parameter_sets().len()
             );
         }
         Err(error) => {

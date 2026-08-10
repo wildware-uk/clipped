@@ -82,7 +82,14 @@ pub const CACHE_FORMAT: u32 = 2;
 /// **Increment this in any change that would make detection produce a different
 /// report for the same machine.** It costs one re-probe per installation, which
 /// is the cheaper of the two mistakes (AGENTS.md section 17).
-pub const DETECTION_REVISION: u32 = 1;
+///
+/// Revision 2: the Quick Sync backend
+/// ([#17](https://github.com/wildware-uk/clipped/issues/17)) made detection
+/// probe the same list of Intel runtime names the backend loads from, which
+/// added `libmfx64.dll` to the two already there — so a machine that has not
+/// changed gets an extra measured line, and one that installs only that name
+/// changes availability outright.
+pub const DETECTION_REVISION: u32 = 2;
 
 /// The directory name Clipped uses under `%LOCALAPPDATA%`.
 ///

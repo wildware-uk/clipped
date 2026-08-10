@@ -6,10 +6,15 @@
 //! every line below that needs one has never run. What *has* been exercised is
 //! everything that does not: the configuration translation in `settings.rs`,
 //! the runtime search in `api.rs` finding nothing and saying so, the refusal to
-//! open on a non-Intel adapter, and detection reporting Quick Sync as
-//! unavailable. The rest is written from Intel's headers and documentation and
-//! is honestly unverified — `docs/encoder-pipeline.md` says which paths those
-//! are, and issue
+//! open on a non-Intel adapter, the Direct3D 11 half of the frame allocator in
+//! [`allocator`] — which allocates and releases real textures on whatever GPU
+//! the machine has — and detection reporting Quick Sync as unavailable.
+//!
+//! The rest is written from Intel's headers and documentation. Every statement
+//! in this module about what a oneVPL runtime *does* is therefore read from a
+//! document rather than measured, and is written that way: where a comment says
+//! the header documents something, the header is quoted.
+//! `docs/encoder-pipeline.md` lists which paths have never executed, and issue
 //! [#160](https://github.com/wildware-uk/clipped/issues/160) is where they get
 //! checked on real hardware.
 //!
@@ -68,24 +73,33 @@
 //!                         MFXVideoCORE_SyncOperation ─→ bytes for the muxer
 //! ```
 //!
-//! The picture never enters system memory. The encoded bitstream does, into a
-//! buffer this backend owns, and that is the point: at 2560x1440 a captured
-//! frame is 14 MB and the encoded version of it is around 80 KB.
+//! The captured picture never enters system memory. The encoded bitstream does,
+//! into a buffer this backend owns, and that is the point: at 2560x1440 a
+//! captured frame is 14 MB and the encoded version of it is around 80 KB.
+//!
+//! What the diagram leaves out is the encoder's *own* surfaces — the
+//! reconstructed pictures every inter-coded frame is predicted from — which
+//! `mfxvideo.h` makes the application's allocator responsible for once one is
+//! registered. [`allocator`] is where that is answered, and its documentation
+//! is where the header is quoted.
 //!
 //! # Ownership
 //!
 //! [`QuickSyncEncoder`] owns the loaded runtime, the oneVPL session, the
-//! encoder inside it, the frame allocator it registered and every output
-//! buffer. All of it is released by [`Session::drop`], which runs from
-//! `shut_down` and from an unwind, so a panic on the encoding thread cannot
-//! leak a session (AGENTS.md section 58).
+//! encoder inside it, the frame allocator it registered — and therefore every
+//! reconstruction surface allocated through it — and every output buffer. All
+//! of it is released by [`Session::drop`], which runs from `shut_down` and from
+//! an unwind, so a panic on the encoding thread cannot leak a session
+//! (AGENTS.md section 58).
 //!
-//! It owns no texture. What oneVPL is given per frame is a surface descriptor
-//! pointing at the caller's texture, and it lives inside a single
+//! It owns no *captured* texture. What oneVPL is given per frame is a surface
+//! descriptor pointing at the caller's texture, and it lives inside a single
 //! [`Session::submit`] call: describe, encode, wait for the coded picture, and
 //! return — at which point the runtime holds nothing derived from the texture
 //! and the capture backend may recycle it, which is what
-//! [`crate::frame::SourceTexture`] promises it may.
+//! [`crate::frame::SourceTexture`] promises it may. What makes that true on the
+//! path where the runtime buffers a picture anyway is spelled out on
+//! [`Session::submit`].
 
 #[allow(
     dead_code,
@@ -107,8 +121,13 @@
 )]
 mod sys;
 
+mod allocator;
 mod api;
 mod settings;
+
+/// The libraries this backend loads oneVPL from, which is also the list
+/// detection probes — see [`api::LIBRARIES`].
+pub(super) use api::LIBRARIES;
 
 #[cfg(test)]
 mod tests;
@@ -222,12 +241,13 @@ pub struct QuickSyncEncoder {
 // SAFETY: `VideoEncoder` is `Send` so that a session can be opened on one
 // thread and moved to the encoding thread, and this type has to satisfy it.
 //
-// What crosses the boundary is a set of raw pointers: the oneVPL session, the
-// module handle, and the allocator this backend registered. None of them is
-// thread-bound. oneVPL sessions have no thread affinity — the library's own
-// samples create a session on one thread and encode on another — the Direct3D
-// 11 device the session was pinned to is free-threaded, and a module handle
-// belongs to the process.
+// What crosses the boundary is a set of raw pointers and one COM reference: the
+// oneVPL session, the module handle, the allocator this backend registered, and
+// inside that allocator the caller's Direct3D 11 device and the textures it
+// created. None of them is thread-bound. oneVPL sessions have no thread
+// affinity — the library's own samples create a session on one thread and
+// encode on another — a Direct3D 11 device and its resources are free-threaded,
+// and a module handle belongs to the process.
 //
 // What is *not* claimed is that two threads may use one encoder at once. They
 // may not, and nothing here makes that possible: `VideoEncoder` is not `Sync`,
@@ -529,8 +549,9 @@ struct Session {
     /// teardown has an encoder to close.
     encoder_open: bool,
     /// The allocator oneVPL was given, which it may keep a pointer to for the
-    /// life of the session. Boxed so that its address does not move.
-    allocator: Box<sys::mfxFrameAllocator>,
+    /// life of the session, and which owns every surface it allocated through
+    /// it.
+    allocator: allocator::FrameAllocator,
     /// What each submitted surface says about itself, built once from the
     /// configuration.
     frame_info: sys::mfxFrameInfo,
@@ -584,6 +605,28 @@ impl Session {
         // submitted.
         let frame_info: sys::mfxFrameInfo = unsafe { mem::zeroed() };
 
+        // SAFETY: `device` is the caller's `ID3D11Device`, which
+        // `QuickSyncEncoder::open` has checked is non-null and answers as a
+        // DXGI device on an Intel adapter, and which the caller guarantees
+        // outlives the encoder. The allocator takes a counted reference of its
+        // own, so the textures it creates cannot outlive the device even if the
+        // caller breaks that promise.
+        let allocator = match unsafe { allocator::FrameAllocator::new(device) } {
+            Ok(allocator) => allocator,
+            Err(detail) => {
+                // The session is open and nothing owns it yet, so it is closed
+                // here rather than leaked.
+                // SAFETY: the session was created above and is closed exactly
+                // once, here.
+                let status = unsafe { (runtime.functions().MFXClose)(session) };
+                log_release_failure(status, "MFXClose");
+                return Err(EncodeError::new(
+                    context,
+                    EncodeErrorKind::Configuration { detail },
+                ));
+            }
+        };
+
         // From here the session exists, so every failure has to close it, which
         // is what building `Self` before the remaining calls arranges: the
         // early return of a `?` below drops this local, and `Session::drop`
@@ -593,7 +636,7 @@ impl Session {
             session,
             context,
             encoder_open: false,
-            allocator: Box::new(allocator()),
+            allocator,
             frame_info,
             outputs: Vec::new(),
             free: Vec::new(),
@@ -617,14 +660,12 @@ impl Session {
         };
         opened.check(status, "MFXVideoCORE_SetHandle")?;
 
-        // SAFETY: the session is live and the allocator is boxed, so its
-        // address is stable for as long as this session is; it is dropped after
-        // `MFXClose` in `Drop`.
+        let allocator = opened.allocator.interface();
+        // SAFETY: the session is live and the allocator's callbacks are boxed,
+        // so their address is stable for as long as this session is; the
+        // allocator is dropped after `MFXClose` in `Drop`.
         let status = unsafe {
-            (opened.runtime.functions().MFXVideoCORE_SetFrameAllocator)(
-                opened.session,
-                &raw mut *opened.allocator,
-            )
+            (opened.runtime.functions().MFXVideoCORE_SetFrameAllocator)(opened.session, allocator)
         };
         opened.check(status, "MFXVideoCORE_SetFrameAllocator")?;
 
@@ -667,11 +708,14 @@ impl Session {
 
     /// Asks the runtime whether it can encode what it is about to be asked for.
     ///
-    /// `MFXVideoENCODE_Query` is oneVPL's "would this work": it answers with a
-    /// corrected copy of the parameters in which every field the implementation
-    /// cannot support has been set to zero. That is the only way to find out —
-    /// before spending a session on it — whether this particular Intel
-    /// generation encodes this codec and takes BGRA surfaces.
+    /// `MFXVideoENCODE_Query` is oneVPL's "would this work". `mfxvideo.h`
+    /// documents it as answering with a corrected copy of the parameters in
+    /// which every field the implementation cannot support has been zeroed,
+    /// which is what the checks below read — the documented contract, not a
+    /// measured one, because no runtime has answered this call here (issue
+    /// #17). It is the only way to find out, before spending a session on it,
+    /// whether this particular Intel generation encodes this codec and takes
+    /// BGRA surfaces.
     fn check_support(&self, config: &EncoderConfig) -> Result<(), EncodeError> {
         let mut wanted = settings::video_params(config);
         // SAFETY: plain data; the runtime fills it in.
@@ -800,9 +844,10 @@ impl Session {
     /// The sequence and picture parameter sets, for a container that stores
     /// them out of band.
     ///
-    /// Empty for AV1: oneVPL has no extension buffer that hands back a
-    /// sequence header, and AV1 carries one in the bitstream at every keyframe
-    /// anyway, which is what `settings::av1_bitstream_param` keeps true by
+    /// Empty for AV1: the 2.15 headers define no extension buffer that hands
+    /// back a sequence header, and AV1 carries one in the bitstream at every
+    /// keyframe anyway — a property of the format rather than of Intel's
+    /// encoder — which is what `settings::av1_bitstream_param` keeps true by
     /// switching the IVF wrapper off.
     fn parameter_sets(&self, codec: Codec) -> Result<Vec<u8>, EncodeError> {
         if codec == Codec::Av1 {
@@ -866,10 +911,33 @@ impl Session {
     /// The whole of the encoder's business with the caller's texture happens
     /// here, which is what the interface promises
     /// ([`crate::frame::SourceTexture`]): describe the surface, submit it, wait
-    /// for the coded picture, and return. When this returns — by any path —
-    /// oneVPL holds nothing derived from the texture, so the capture backend
-    /// may recycle it immediately.
+    /// for the coded picture, and return. The capture backend may recycle the
+    /// texture the moment this returns, and two different things make that safe
+    /// on the two paths out:
+    ///
+    /// - On the ordinary path the picture is coded and synchronised before the
+    ///   call returns, so there is nothing left to hold it.
+    /// - On the path where the runtime buffered the picture instead —
+    ///   [`deferred_picture`](Self::deferred_picture) — the surface's `Locked`
+    ///   count is what decides. It is flushed, then the encoder is closed, then
+    ///   the session is closed, and each step re-reads the count; whichever step
+    ///   brings it to zero is where it stops. A session that is closed holds
+    ///   nothing by construction, so the promise holds at the cost of the
+    ///   recording rather than at the cost of the texture.
+    ///
+    /// `Locked` is oneVPL's own reference count on a surface, documented in
+    /// `mfxstructures.h` as the number of operations that still hold it. No
+    /// runtime has ever set it here (issue #17), so what is verified is that
+    /// this code reads it and escalates on it, not that a real runtime clears
+    /// it when the encoder closes.
     fn submit(&mut self, frame: &SourceFrame<'_>) -> Result<(), EncodeError> {
+        if self.session.is_null() {
+            // Only reachable after `deferred_picture` closed the session to
+            // reclaim a texture: the encoder is finished, and every later call
+            // says so rather than dereferencing a closed session.
+            return Err(EncodeError::new(self.context, EncodeErrorKind::NotRunning));
+        }
+
         let output = self.free.pop().ok_or_else(|| {
             EncodeError::new(
                 self.context,
@@ -997,9 +1065,22 @@ impl Session {
     /// is reported; the flushed pictures are discarded, because `submit`
     /// promises a packet per frame through `next_packet` and half a frame of
     /// video is not worth an interface that can hand back pictures out of
-    /// order. If flushing does not release it, the encoder is closed, which
-    /// does — a session that cannot be trusted with a texture is worth less
-    /// than the recording it would corrupt.
+    /// order.
+    ///
+    /// Each step re-reads `Data.Locked`, which is the runtime's own count of
+    /// how many operations still hold the surface, and stops at the first step
+    /// that brings it to zero:
+    ///
+    /// 1. flush the encoder;
+    /// 2. close the encoder, which by `MFXVideoENCODE_Close`'s contract ends
+    ///    every operation it started;
+    /// 3. close the session, which destroys the runtime state entirely.
+    ///
+    /// The escalation exists because step 2's contract is read from the header
+    /// rather than measured — no runtime has ever reached this branch here
+    /// (issue #17) — and `submit` promises the caller a texture nothing is
+    /// holding. A recording is worth less than the corruption or the device
+    /// removal that recycling a texture the GPU is still reading would cause.
     fn deferred_picture(&mut self, surface: &mut sys::mfxFrameSurface1) -> EncodeError {
         let mut discarded = 0;
         while surface.Data.Locked != 0 && discarded < OUTPUT_BUFFERS {
@@ -1012,10 +1093,24 @@ impl Session {
         if surface.Data.Locked != 0 {
             tracing::error!(
                 encoder = %EncoderKind::QuickSync.log_encoder_family(),
+                locked = surface.Data.Locked,
                 "the Intel runtime is still holding a frame the caller owns, so the encoder is \
                  being closed to release it"
             );
             self.close_encoder();
+        }
+
+        if surface.Data.Locked != 0 {
+            // Closing the encoder did not do it. Nothing weaker is left, and
+            // reporting a failure while the runtime still holds the caller's
+            // texture would hand back a texture the GPU may still be reading.
+            tracing::error!(
+                encoder = %EncoderKind::QuickSync.log_encoder_family(),
+                locked = surface.Data.Locked,
+                "the Intel runtime still holds the frame after MFXVideoENCODE_Close, so the whole \
+                 session is being closed (https://github.com/wildware-uk/clipped/issues/160)"
+            );
+            self.close_session();
         }
 
         EncodeError::new(
@@ -1136,6 +1231,12 @@ impl Session {
     /// proper drain anyway, because "in practice" is a property of the runtime
     /// rather than of this code.
     fn finish(&mut self) -> Result<(), EncodeError> {
+        if self.session.is_null() {
+            // As in `submit`: the session was closed to reclaim a texture, and
+            // there is nothing left to flush.
+            return Err(EncodeError::new(self.context, EncodeErrorKind::NotRunning));
+        }
+
         loop {
             let Some(output) = self.free.pop() else {
                 // Every buffer is holding a picture the caller has not drained,
@@ -1232,7 +1333,7 @@ impl Session {
 
     /// Closes the encoder, leaving the session open.
     fn close_encoder(&mut self) {
-        if !self.encoder_open {
+        if !self.encoder_open || self.session.is_null() {
             return;
         }
         self.encoder_open = false;
@@ -1241,6 +1342,25 @@ impl Session {
         // exactly once, here.
         let status = unsafe { (self.runtime.functions().MFXVideoENCODE_Close)(self.session) };
         log_release_failure(status, "MFXVideoENCODE_Close");
+    }
+
+    /// Closes the encoder and the session behind it.
+    ///
+    /// Idempotent, and what [`Drop`] does;
+    /// [`deferred_picture`](Self::deferred_picture) also reaches for it early,
+    /// to reclaim a texture nothing weaker would release. Every later call
+    /// finds a null session and reports [`EncodeErrorKind::NotRunning`].
+    fn close_session(&mut self) {
+        self.close_encoder();
+
+        if !self.session.is_null() {
+            // SAFETY: the session was created by `Session::open` and is closed
+            // exactly once — the pointer is nulled below — after the encoder
+            // inside it.
+            let status = unsafe { (self.runtime.functions().MFXClose)(self.session) };
+            log_release_failure(status, "MFXClose");
+            self.session = ptr::null_mut();
+        }
     }
 
     /// Turns a status into `Ok(())` or an error carrying this session's
@@ -1262,26 +1382,21 @@ impl Session {
 impl Drop for Session {
     /// Releases everything, in the order the runtime requires.
     ///
-    /// Runs from `QuickSyncEncoder::shut_down` and from an unwind, and is the
-    /// only place any of this is released — there is no path that frees a
-    /// session without going through here (AGENTS.md section 58).
+    /// Runs from `QuickSyncEncoder::shut_down` and from an unwind, and releases
+    /// through [`close_session`](Session::close_session), which is idempotent —
+    /// so a session `deferred_picture` already closed is not closed twice
+    /// (AGENTS.md section 58).
     fn drop(&mut self) {
         // Nothing derived from a caller's texture can be outstanding here:
-        // `submit` waits for every picture before it returns. What is left is
-        // the encoder, the session and the module behind them.
-        self.close_encoder();
-
-        if !self.session.is_null() {
-            // SAFETY: the session was created by `Session::open` and is closed
-            // exactly once, here, after the encoder inside it.
-            let status = unsafe { (self.runtime.functions().MFXClose)(self.session) };
-            log_release_failure(status, "MFXClose");
-            self.session = ptr::null_mut();
-        }
+        // `submit` returns only once the picture is coded, or having closed
+        // whatever was still holding the surface (see `deferred_picture`). What
+        // is left is the encoder, the session, and the module behind them.
+        self.close_session();
 
         // The allocator and the runtime are dropped after this, by field order:
-        // the allocator's callbacks and the module's code both have to outlive
-        // the session that could still call into them.
+        // the allocator's callbacks and the reconstruction surfaces it owns,
+        // and the module's code, all have to outlive the session that could
+        // still call into them.
     }
 }
 
@@ -1319,12 +1434,17 @@ impl InitParams {
 
         // The pointers are taken after the box exists, so each addresses a
         // field at its final location.
-        let mut pointers = vec![
-            (&raw mut inner.signal).cast::<sys::mfxExtBuffer>(),
-            (&raw mut inner.options).cast::<sys::mfxExtBuffer>(),
-        ];
-        if config.codec() == Codec::Av1 {
-            pointers.push((&raw mut inner.av1).cast::<sys::mfxExtBuffer>());
+        let mut pointers = vec![(&raw mut inner.signal).cast::<sys::mfxExtBuffer>()];
+        match config.codec() {
+            // `mfxExtCodingOption2` is attached for H.264 and for nothing else:
+            // the only field this backend sets in it, `RepeatPPS`, is
+            // documented as an AVC control, and attaching a buffer an encoder
+            // has no use for is a plausible `MFX_ERR_UNSUPPORTED` from
+            // `MFXVideoENCODE_Init` for no gain (see `settings::coding_option2`
+            // for what covers the other two codecs).
+            Codec::H264 => pointers.push((&raw mut inner.options).cast::<sys::mfxExtBuffer>()),
+            Codec::Av1 => pointers.push((&raw mut inner.av1).cast::<sys::mfxExtBuffer>()),
+            Codec::Hevc => {}
         }
         inner.pointers = pointers;
 
@@ -1458,134 +1578,6 @@ fn control_for(frame: &SourceFrame<'_>) -> sys::mfxEncodeCtrl {
             (sys::MFX_FRAMETYPE_I | sys::MFX_FRAMETYPE_IDR | sys::MFX_FRAMETYPE_REF) as sys::mfxU16;
     }
     control
-}
-
-/// The frame allocator oneVPL is given.
-///
-/// # What it does, and what it deliberately does not
-///
-/// oneVPL reaches an application's video-memory surface through this: the
-/// surface carries an opaque `MemId`, and the runtime asks the allocator to
-/// turn it into a graphics handle. This backend's `MemId` *is* the address of
-/// an [`mfxHDLPair`](sys::mfxHDLPair) holding the caller's texture, so
-/// [`get_hdl`] hands it straight back and no surface is ever allocated here.
-///
-/// [`alloc`] therefore refuses. The runtime allocates its own internal
-/// surfaces — the reconstructed pictures an encoder needs — with its default
-/// allocator, and Clipped has no Direct3D device of its own to allocate from:
-/// the one it is given belongs to the capture backend. If a runtime asks this
-/// allocator to allocate anyway, the refusal is logged with the request in it,
-/// which is the diagnostic that would identify the problem on hardware nobody
-/// here has (issue #160).
-fn allocator() -> sys::mfxFrameAllocator {
-    // SAFETY: plain data — reserved integers, a context pointer and five
-    // function pointers, which bindgen represents as `Option` and for which
-    // all-zeroes is `None`.
-    let mut allocator: sys::mfxFrameAllocator = unsafe { mem::zeroed() };
-    allocator.pthis = ptr::null_mut();
-    allocator.Alloc = Some(alloc);
-    allocator.Lock = Some(lock);
-    allocator.Unlock = Some(unlock);
-    allocator.GetHDL = Some(get_hdl);
-    allocator.Free = Some(free);
-    allocator
-}
-
-/// Refuses to allocate; see [`allocator`].
-///
-/// # Safety
-///
-/// Called by oneVPL with the pointers its interface documents. Nothing is
-/// dereferenced here except `request`, which the runtime guarantees.
-unsafe extern "C" fn alloc(
-    _pthis: sys::mfxHDL,
-    request: *mut sys::mfxFrameAllocRequest,
-    _response: *mut sys::mfxFrameAllocResponse,
-) -> sys::mfxStatus {
-    let (kind, frames) = if request.is_null() {
-        (0, 0)
-    } else {
-        // SAFETY: the runtime passes a live request; it is read and not kept.
-        unsafe { ((*request).Type, (*request).NumFrameSuggested) }
-    };
-
-    tracing::error!(
-        request_type = format!("{kind:#06x}"),
-        frames,
-        "the Intel runtime asked Clipped to allocate encoder surfaces, which it cannot do: the \
-         only surfaces it has are the capture backend's textures \
-         (https://github.com/wildware-uk/clipped/issues/160)"
-    );
-    sys::MFX_ERR_UNSUPPORTED
-}
-
-/// Refuses to map a surface into system memory; see [`allocator`].
-///
-/// # Safety
-///
-/// Called by oneVPL. Nothing is dereferenced.
-unsafe extern "C" fn lock(
-    _pthis: sys::mfxHDL,
-    _mid: sys::mfxMemId,
-    _ptr: *mut sys::mfxFrameData,
-) -> sys::mfxStatus {
-    // The surfaces this backend hands over live in video memory and are never
-    // read by the processor. A runtime that wants to read one is asking for a
-    // copy this pipeline exists to avoid.
-    sys::MFX_ERR_UNSUPPORTED
-}
-
-/// The counterpart of [`lock`], which never succeeded.
-///
-/// # Safety
-///
-/// Called by oneVPL. Nothing is dereferenced.
-unsafe extern "C" fn unlock(
-    _pthis: sys::mfxHDL,
-    _mid: sys::mfxMemId,
-    _ptr: *mut sys::mfxFrameData,
-) -> sys::mfxStatus {
-    sys::MFX_ERR_UNSUPPORTED
-}
-
-/// Turns a surface's memory identifier back into the graphics handle it is.
-///
-/// # Safety
-///
-/// `mid` must be an identifier this backend put on a surface — the address of
-/// an [`mfxHDLPair`](sys::mfxHDLPair) that is still alive — and `handle` must be
-/// a live out-parameter. Both hold when oneVPL calls this during an encode that
-/// `Session::submit` is inside, which is the only time it is called at all.
-unsafe extern "C" fn get_hdl(
-    _pthis: sys::mfxHDL,
-    mid: sys::mfxMemId,
-    handle: *mut sys::mfxHDL,
-) -> sys::mfxStatus {
-    if mid.is_null() || handle.is_null() {
-        return sys::MFX_ERR_INVALID_HANDLE;
-    }
-
-    // SAFETY: `handle` is a live out-parameter per this function's contract.
-    // The identifier is handed back unchanged: oneVPL's D3D11 convention is
-    // that the handle for a video-memory surface is a pointer to an
-    // `mfxHDLPair` of texture and subresource index, and that is exactly what
-    // `Session::submit` put in the `MemId`.
-    unsafe {
-        *handle = mid;
-    }
-    sys::MFX_ERR_NONE
-}
-
-/// De-allocates nothing, because [`alloc`] allocated nothing.
-///
-/// # Safety
-///
-/// Called by oneVPL. Nothing is dereferenced.
-unsafe extern "C" fn free(
-    _pthis: sys::mfxHDL,
-    _response: *mut sys::mfxFrameAllocResponse,
-) -> sys::mfxStatus {
-    sys::MFX_ERR_NONE
 }
 
 /// Maps a oneVPL status onto the platform-neutral failure it represents.

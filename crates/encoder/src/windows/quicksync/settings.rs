@@ -96,11 +96,17 @@ pub(super) const fn target_usage(preset: EncodePreset) -> sys::mfxU16 {
 /// Whether to ask for the fixed-function encoder rather than the one that also
 /// uses the execution units.
 ///
-/// On for AV1, which Intel only implements on the fixed-function path, and
-/// unspecified for the rest so the runtime picks what the silicon prefers. The
-/// fixed-function path is also the one that leaves the shader cores to the game
-/// (AGENTS.md section 18), so a future measurement may well turn this on
-/// everywhere — that is a change that wants Intel hardware to justify it.
+/// On for AV1 and unspecified for the rest, so the runtime picks what the
+/// silicon prefers. Intel's documentation is where the AV1 half comes from — it
+/// describes AV1 encoding as available on the low-power path only — and not
+/// from any run of this code, which has never opened a session (issue #17); a
+/// runtime that disagrees answers `MFXVideoENCODE_Query` with the codec zeroed
+/// and the session is refused by name.
+///
+/// The fixed-function path is also the one that leaves the shader cores to the
+/// game (AGENTS.md section 18), so a future measurement may well turn this on
+/// everywhere — that is a change that wants Intel hardware to justify it
+/// ([#160](https://github.com/wildware-uk/clipped/issues/160)).
 pub(super) const fn low_power(codec: Codec) -> sys::mfxU16 {
     (match codec {
         Codec::Av1 => sys::MFX_CODINGOPTION_ON,
@@ -345,13 +351,31 @@ pub(super) fn video_signal_info(colour: ColourSpace) -> sys::mfxExtVideoSignalIn
     }
 }
 
-/// The second block of coding options, which is where repeating the parameter
-/// sets lives.
+/// The second block of coding options, which is where repeating the picture
+/// parameter set lives.
 ///
-/// A clip cut from the middle of a recording begins at a keyframe, and a
-/// decoder handed a keyframe with no parameter sets in front of it cannot start
-/// (SPEC.md section 7). oneVPL repeats them by default; saying so explicitly
-/// means the recording does not depend on a default staying what it is.
+/// **H.264 only.** `mfxstructures.h` documents `RepeatPPS` as controlling
+/// "picture parameter set repetition in AVC encoder", so it says nothing about
+/// HEVC or AV1 and this buffer is attached to an H.264 initialisation and to no
+/// other (see `InitParams` in `mod.rs`). What the other two codecs do about
+/// in-band parameter sets:
+///
+/// - **HEVC**: nothing here asks for repetition, because oneVPL exposes no
+///   field that would. Intel's encoder is understood to write VPS, SPS and PPS
+///   before every IDR, which is what a stream needs to be cut into clips
+///   (SPEC.md section 7) — understood from Intel's documentation rather than
+///   measured, like everything else in this backend that needs an Intel GPU,
+///   and listed for checking on
+///   [#160](https://github.com/wildware-uk/clipped/issues/160).
+/// - **AV1**: the sequence header travels in the bitstream at every keyframe by
+///   construction, which [`av1_bitstream_param`] keeps true by switching the
+///   IVF wrapper off.
+///
+/// The reason for asking at all is that a clip cut from the middle of a
+/// recording begins at a keyframe, and a decoder handed a keyframe with no
+/// parameter sets in front of it cannot start. oneVPL repeats them by default;
+/// saying so explicitly means the recording does not depend on a default
+/// staying what it is.
 pub(super) fn coding_option2() -> sys::mfxExtCodingOption2 {
     // SAFETY: `mfxExtCodingOption2` is plain data — integers only — for which
     // all-zeroes is a valid value, and zero is `MFX_CODINGOPTION_UNKNOWN` for
@@ -404,12 +428,19 @@ pub(super) fn parameter_set_request() -> sys::mfxExtCodingOptionSPSPPS {
 /// Saturating rather than wrapping: a `Duration` beyond six million years
 /// cannot happen in a recording, and if it somehow did, clamping keeps
 /// timestamps monotonic where wrapping would send them back to zero.
+///
+/// It saturates one tick below the top because the top *is* a sentinel:
+/// `MFX_TIMESTAMP_UNKNOWN` is `(mfxU64)-1`, so a timestamp clamped to
+/// `mfxU64::MAX` would reach the runtime as "this picture has no timestamp"
+/// rather than as a very large one.
 pub(super) fn timestamp_90khz(time: Duration) -> sys::mfxU64 {
     const TICKS_PER_SECOND: u128 = 90_000;
     const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
     let ticks = time.as_nanos() * TICKS_PER_SECOND / NANOS_PER_SECOND;
-    sys::mfxU64::try_from(ticks).unwrap_or(sys::mfxU64::MAX)
+    sys::mfxU64::try_from(ticks)
+        .unwrap_or(sys::mfxU64::MAX)
+        .min(sys::mfxU64::MAX - 1)
 }
 
 /// The other direction: a timestamp oneVPL reported, as a duration.
@@ -723,8 +754,11 @@ mod tests {
 
     #[test]
     fn av1_asks_for_the_fixed_function_encoder() {
-        // Intel implements AV1 encoding only on the low-power path, so an AV1
-        // session that does not ask for it is refused by the runtime.
+        // Intel's documentation describes AV1 encoding as available on the
+        // low-power path only, so an AV1 session that does not ask for it
+        // should expect to be refused. What this test checks is that the
+        // request is made; whether a runtime would refuse without it is on
+        // https://github.com/wildware-uk/clipped/issues/160.
         assert_eq!(
             low_power(Codec::Av1),
             sys::MFX_CODINGOPTION_ON as sys::mfxU16
@@ -758,7 +792,22 @@ mod tests {
         // `Session::collect`).
         assert_eq!(timestamp_90khz(Duration::from_nanos(16_666_667)), 1_500);
         assert_eq!(timestamp_90khz(Duration::from_nanos(16_666_666)), 1_499);
-        assert_eq!(timestamp_90khz(Duration::MAX), sys::mfxU64::MAX);
+    }
+
+    #[test]
+    fn a_saturated_timestamp_is_not_the_one_that_means_unknown() {
+        // Unreachable in a recording — six million years — but the value it
+        // would clamp to is `MFX_TIMESTAMP_UNKNOWN`, which the runtime reads as
+        // "this picture has no timestamp". Clamping one tick lower keeps the
+        // saturated value a timestamp.
+        #[allow(clippy::cast_sign_loss)]
+        let unknown = sys::MFX_TIMESTAMP_UNKNOWN as sys::mfxU64;
+        assert_eq!(unknown, sys::mfxU64::MAX, "the sentinel is the top value");
+
+        let saturated = timestamp_90khz(Duration::MAX);
+        assert_eq!(saturated, sys::mfxU64::MAX - 1);
+        assert_ne!(saturated, unknown);
+        assert!(duration_from_90khz(saturated).is_some());
     }
 
     #[test]

@@ -58,12 +58,14 @@ impl fmt::Display for Codec {
 /// A way of encoding video: three hardware families and the CPU (SPEC.md
 /// section 9).
 ///
-/// This names a *family*, not an implementation. A variant existing here does
-/// not mean this build can encode with it:
-/// [`is_implemented`](Self::is_implemented) is what says so, and
-/// [`backend_issue`](Self::backend_issue) names the issue that did the work or
-/// still has to. Both are here rather than in the report that prints them, so
-/// that the sentence a user reads follows the code as the backends land.
+/// This names a *family*, not a proven implementation. A variant existing here
+/// does not mean this build can encode with it, and neither does a type that
+/// implements [`VideoEncoder`](crate::backend::VideoEncoder) existing for it:
+/// [`is_implemented`](Self::is_implemented) is what says a backend is written
+/// *and* trusted, and [`backend_issue`](Self::backend_issue) names the issue
+/// that did the work or is still finishing it. Both are here rather than in
+/// the report that prints them, so that the sentence a user reads follows the
+/// code as the backends land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncoderKind {
@@ -105,7 +107,8 @@ impl EncoderKind {
         !matches!(self, Self::Software)
     }
 
-    /// Whether this build has a backend for this encoder.
+    /// Whether this build has a backend proven to encode with, not merely one
+    /// that compiles.
     ///
     /// Detection reports every family in [`ALL`](Self::ALL) whether or not
     /// Clipped can encode with it, so something has to separate "your GPU can
@@ -119,10 +122,18 @@ impl EncoderKind {
     /// NVENC is implemented, in [`NvencEncoder`](crate::NvencEncoder); so is
     /// AMF, in [`AmfEncoder`](crate::AmfEncoder); and so is the software
     /// fallback, in [`SoftwareEncoder`](crate::SoftwareEncoder)
-    /// (`docs/encoder-pipeline.md`). Quick Sync is not, so a machine with only
-    /// an Intel GPU encodes on the CPU. This says nothing about *recording*:
-    /// nothing yet connects any backend to a capture or a container, so no
-    /// build records anything.
+    /// (`docs/encoder-pipeline.md`) — each measured encoding real frames on
+    /// real hardware. Quick Sync has a backend too,
+    /// [`QuickSyncEncoder`](crate::QuickSyncEncoder), and it does not count
+    /// here: there is no Intel GPU on the machine it was written on, so
+    /// nothing has ever seen it encode a frame, and a backend nobody has seen
+    /// produce a frame is a claim rather than support (AGENTS.md section 54) —
+    /// the same reason AV1 is refused on AMF. The verification is
+    /// [#160](https://github.com/wildware-uk/clipped/issues/160); see
+    /// `docs/encoder-pipeline.md#the-quick-sync-backend` for exactly what has
+    /// and has not run. This says nothing about *recording*: nothing yet
+    /// connects any backend to a capture or a container, so no build records
+    /// anything.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         match self {
@@ -134,7 +145,14 @@ impl EncoderKind {
     /// The issue that implements this encoder.
     ///
     /// For a family [`is_implemented`](Self::is_implemented) rejects, this is
-    /// where the work is tracked; for the other three it is where it was done.
+    /// where the remaining work is tracked; for the other three it is where
+    /// the work was done. Quick Sync is the family where those are not the
+    /// same thing: #17 already produced
+    /// [`QuickSyncEncoder`](crate::QuickSyncEncoder), and what keeps #17 open
+    /// is the verification [`is_implemented`](Self::is_implemented)'s doc
+    /// names — encoding a real frame on real Intel hardware, tracked at
+    /// [#160](https://github.com/wildware-uk/clipped/issues/160).
+    ///
     /// The report prints the first kind so that "your GPU can do AV1, and
     /// Clipped cannot yet" is one sentence with a link in it, rather than a
     /// silence the reader has to interpret (AGENTS.md section 27).
@@ -320,27 +338,39 @@ mod tests {
         );
     }
 
-    /// An encoder that claims a backend has to have one that compiles.
+    /// An encoder that claims a backend has to have one that compiles — and
+    /// `is_implemented` claiming `false` is not permission to have none.
     ///
     /// `is_implemented` is a hand-written match, and this is what keeps it
     /// honest in the one direction a test can reach: naming the backend types
     /// as implementations of [`VideoEncoder`](crate::backend::VideoEncoder)
     /// means a backend removed or renamed fails to build here rather than
     /// leaving the capability report telling a user this build can encode with
-    /// something it cannot. The other direction — that Quick Sync has no
-    /// backend — is the absence of a type, which nothing can assert.
+    /// something it cannot. Quick Sync is named here too even though
+    /// `is_implemented` rejects it: the type exists and compiles, and what
+    /// `is_implemented` withholds is the claim that it has ever encoded a real
+    /// frame, not the claim that it exists. The direction nothing here can
+    /// assert is a family with no backend type at all — today there is none of
+    /// those left.
     #[cfg(windows)]
     #[test]
     fn an_encoder_that_claims_a_backend_has_one() {
         const fn implements_the_trait<E: crate::backend::VideoEncoder>() {}
         implements_the_trait::<crate::windows::NvencEncoder>();
         implements_the_trait::<crate::windows::AmfEncoder>();
+        implements_the_trait::<crate::windows::QuickSyncEncoder>();
         implements_the_trait::<crate::software::SoftwareEncoder>();
 
         assert!(EncoderKind::Nvenc.is_implemented());
         assert!(EncoderKind::Amf.is_implemented());
         assert!(EncoderKind::Software.is_implemented());
-        assert!(!EncoderKind::QuickSync.is_implemented());
+        assert!(
+            !EncoderKind::QuickSync.is_implemented(),
+            "QuickSyncEncoder exists and compiles, but nothing has ever seen it \
+             encode a frame on real Intel hardware — is_implemented must stay false \
+             until #160 verifies it, however tidy `true` would look now that the type \
+             is here"
+        );
     }
 
     #[test]

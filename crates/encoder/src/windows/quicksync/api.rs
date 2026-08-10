@@ -58,15 +58,14 @@ use super::sys;
 /// first because a machine that has one has it because something installed a
 /// full oneVPL stack.
 ///
-/// Two of these are the ones `crate::windows::runtime` probes when it reports
-/// whether Quick Sync exists at all. `libmfx64.dll` is the third and is not in
-/// that list, so a machine that has only that one would be reported as having
-/// no Quick Sync runtime and would still encode. Making the two lists agree is
-/// on [#160](https://github.com/wildware-uk/clipped/issues/160), together with
-/// finding out which of the names a current driver actually installs — which is
-/// what the answer should be based on, rather than on adding names to both
-/// lists blind.
-pub(super) const LIBRARIES: &[&str] = &["libvpl.dll", "libmfx64.dll", "libmfxhw64.dll"];
+/// This is also the list `crate::windows::runtime` probes when detection
+/// reports whether Quick Sync exists at all, rather than a second copy of it:
+/// a machine whose driver installs a name only one of the two lists knows would
+/// be told Quick Sync is unavailable while the backend could have opened it, or
+/// the reverse. Which names a current driver actually installs is still an open
+/// question ([#160](https://github.com/wildware-uk/clipped/issues/160)); what
+/// this constant settles is that both answers come from the same place.
+pub(crate) const LIBRARIES: &[&str] = &["libvpl.dll", "libmfx64.dll", "libmfxhw64.dll"];
 
 /// [`LIBRARIES`] as one sentence, for the error that names what was looked for.
 ///
@@ -77,18 +76,22 @@ pub(super) const LIBRARY_LIST: &str = "libvpl.dll, libmfx64.dll or libmfxhw64.dl
 
 /// The entry point every candidate library is required to export.
 ///
-/// `MFXInitialize` is the oneVPL 2.x session entry point. A library that loads
-/// and does not export it is a Media SDK 1.x runtime, which this backend does
-/// not drive — see [`LoadFailure::NoOneVplRuntime`].
+/// `MFXInitialize` is the oneVPL 2.x session entry point, introduced in 2.0. A
+/// library that loads and does not export it is taken to be a Media SDK 1.x
+/// runtime, which this backend does not drive — see
+/// [`LoadFailure::NoOneVplRuntime`]. That inference is from the headers'
+/// version history; no such library has been found on this machine to check it
+/// against (issue #17).
 pub(super) const ENTRY_INITIALIZE: &str = "MFXInitialize";
 
 /// The oneVPL API version these bindings were generated from.
 ///
-/// The 2.x API is additive: structures are fixed-size with reserved fields and
-/// never change layout, so a newer header against an older runtime is safe as
-/// long as no field the older runtime does not know about is written. Nothing
-/// here writes one — see `settings.rs`, which fills in fields present since
-/// 2.0.
+/// Intel documents the 2.x API as additive: structures are fixed-size with
+/// reserved fields and do not change layout, so — on that documented
+/// guarantee rather than on any run of this code — a newer header against an
+/// older runtime is safe as long as no field the older runtime does not know
+/// about is written. Nothing here writes one; see `settings.rs`, which fills in
+/// fields present since 2.0.
 pub(super) const API_MAJOR: u16 = 2;
 
 /// The minor version of the headers, for diagnostics.
@@ -247,6 +250,7 @@ impl QuickSyncRuntime {
     pub(super) fn load() -> Result<Self, LoadFailure> {
         let mut last_loader_error = String::from("no candidate library was tried");
         let mut loaded_without_onevpl = None;
+        let mut incomplete = None;
 
         for library in LIBRARIES {
             let module = match load_library(library) {
@@ -273,7 +277,19 @@ impl QuickSyncRuntime {
 
             // SAFETY: as above — the module is live for the rest of this
             // iteration, and `resolve` only reads exports from it.
-            let functions = unsafe { resolve(module) }?;
+            let functions = match unsafe { resolve(module) } {
+                Ok(functions) => functions,
+                Err(failure) => {
+                    // Keep looking, for the reason a missing `MFXInitialize`
+                    // does: a partial or third-party `libvpl.dll` on the
+                    // machine — applications do ship one — must not mask a
+                    // working runtime in System32. The first such failure is
+                    // remembered so that a machine where *every* candidate is
+                    // incomplete still says which export was missing.
+                    incomplete.get_or_insert(failure);
+                    continue;
+                }
+            };
 
             return Ok(Self {
                 module: guard.take(),
@@ -282,12 +298,14 @@ impl QuickSyncRuntime {
             });
         }
 
-        Err(loaded_without_onevpl.map_or(
-            LoadFailure::NotFound {
-                detail: last_loader_error,
-            },
-            |library| LoadFailure::NoOneVplRuntime { library },
-        ))
+        Err(incomplete.unwrap_or_else(|| {
+            loaded_without_onevpl.map_or(
+                LoadFailure::NotFound {
+                    detail: last_loader_error,
+                },
+                |library| LoadFailure::NoOneVplRuntime { library },
+            )
+        }))
     }
 
     /// The entry points. Every call into oneVPL goes through them.

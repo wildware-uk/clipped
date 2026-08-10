@@ -622,10 +622,22 @@ libmfxhw64.dll  the name the hardware runtime has carried since the Media SDK
 ```
 
 Each is loaded from System32 in that order, and the first that exports
-`MFXInitialize` wins. A library that loads and does not export it is a Media SDK
-1.x runtime, and the user is told to update the driver rather than given a
-status code. **Which of those names a current Intel driver actually installs is
-the single biggest unverified assumption in this backend.**
+`MFXInitialize` — and every other entry point this backend calls — wins; a
+candidate that is missing one of them is skipped rather than ending the search,
+because a partial `libvpl.dll` from some other application must not mask a
+working runtime in System32. A library that loads and exports no `MFXInitialize`
+at all is taken to be a Media SDK 1.x runtime, and the user is told to update
+the driver rather than given a status code. **Which of those names a current
+Intel driver actually installs is the single biggest unverified assumption in
+this backend.**
+
+That list is one constant,
+`crates/encoder/src/windows/quicksync/api.rs::LIBRARIES`, and detection
+([encoder-capabilities.md](encoder-capabilities.md)) probes the same one rather
+than a copy of it. Two copies would eventually disagree, and the visible
+symptom would be a machine told Quick Sync is unavailable while the backend
+could have opened it — with "Automatic" quietly never choosing an encoder that
+works.
 
 ### The bindings, and their licence
 
@@ -709,20 +721,78 @@ a Direct3D 11 device on the NVIDIA adapter is refused with the message above, in
 | Setting | What the backend does |
 | --- | --- |
 | Input | `MFX_FOURCC_RGB4`, which is `DXGI_FORMAT_B8G8R8A8_UNORM` — the captured texture goes straight in and the encoder converts to 4:2:0 as part of encoding. `MFXVideoENCODE_Query` is asked first, and a runtime that answers with the FourCC zeroed gets a refusal naming the format rather than a failure later. |
-| Memory | `MFX_IOPATTERN_IN_VIDEO_MEMORY` with the caller's texture behind an `mfxHDLPair`, and an allocator that resolves that identifier and allocates nothing. |
+| Memory | `MFX_IOPATTERN_IN_VIDEO_MEMORY` with the caller's texture behind an `mfxHDLPair`, and a frame allocator that resolves that identifier — and allocates the encoder's own reconstruction surfaces from the caller's device. See [The frame allocator](#the-frame-allocator). |
 | Picture size | Rounded up to a multiple of 16 for the surface, with the real size in the crop rectangle — which is what the stream carries. |
 | Preset | `EncodePreset::Speed`, `Balanced` and `Quality` map to target usages 7, 4 and 1. |
 | Rate control | `RateControl::Bitrate` with no peak becomes CBR with a one-second buffer, the same choice the NVENC backend makes; with a peak it becomes VBR. `RateControl::Quality` becomes ICQ, whose 1-to-51 scale is the scale `QualityTarget` already speaks. Rates above 65535 kbit/s are divided down by `BRCParamMultiplier`, because oneVPL counts bit rates in 16 bits. |
 | Keyframes | `GopPicSize` is the interval and `IdrInterval` is zero, so every I-frame is an IDR and therefore a point a clip can start from. |
-| Parameter sets | `RepeatPPS` is on, and the sets are read back with `mfxExtCodingOptionSPSPPS` (plus `mfxExtCodingOptionVPS` for HEVC) for a container that stores them out of band. AV1 has no such buffer and carries its sequence header in the bitstream. |
+| Parameter sets | Read back with `mfxExtCodingOptionSPSPPS` (plus `mfxExtCodingOptionVPS` for HEVC) for a container that stores them out of band. AV1 has no such buffer and carries its sequence header in the bitstream. In-band repetition at keyframes is asked for **only for H.264**, with `mfxExtCodingOption2::RepeatPPS`, which `mfxstructures.h` documents as an AVC control; see below. |
 | Colour | Primaries, transfer function, matrix and range go into `mfxExtVideoSignalInfo` as ITU-T H.273 code points. |
 | B-frames | Off (`GopRefDist` is 1). Beyond the reason NVENC has — reordered output the muxer would have to undo — an encoder that reorders holds input surfaces it does not own. |
-| AV1 | `WriteIVFHeaders` is off, because this interface produces elementary streams and IVF headers would be muxed into the file as though they were video. `LowPower` is on, which is the only path Intel implements AV1 on. |
+| AV1 | `WriteIVFHeaders` is off, because this interface produces elementary streams and IVF headers would be muxed into the file as though they were video. `LowPower` is on, which Intel's documentation describes as the only path it implements AV1 on. |
+
+Each codec is initialised with the extension buffers whose settings apply to it
+and with no others — `mfxExtVideoSignalInfo` for all three,
+`mfxExtCodingOption2` for H.264 alone and `mfxExtAV1BitstreamParam` for AV1
+alone. Attaching a buffer an encoder has no use for claims a setting the codec
+does not have, and is a plausible `MFX_ERR_UNSUPPORTED` at
+`MFXVideoENCODE_Init` for nothing in return.
 
 **One configured thing is not honoured.** `RateControl::Quality` with a ceiling:
 Quick Sync's ICQ mode spends what the quality needs and has no field for a
 maximum, so the ceiling is logged as not applied rather than silently dropped.
 Carrying both would mean QVBR, which is on
+[#160](https://github.com/wildware-uk/clipped/issues/160).
+
+**One thing is asked for on one codec only.** `RepeatPPS` puts the picture
+parameter set in front of every keyframe, so that a clip cut from the middle of
+a recording can be decoded (SPEC.md section 7). `mfxstructures.h` documents it
+as controlling "picture parameter set repetition in AVC encoder", so it is asked
+for on H.264 and nowhere else. For HEVC nothing here asks — oneVPL exposes no
+field that would, and Intel's encoder is understood to write VPS, SPS and PPS
+before every IDR, which is understood from documentation rather than measured
+and is listed on [#160](https://github.com/wildware-uk/clipped/issues/160). For
+AV1 the sequence header travels in the bitstream at every keyframe by
+construction.
+
+### The frame allocator
+
+An encoder has two pools of surfaces and only one of them is the caller's.
+
+The **input** surfaces are the captured textures. This backend allocates none of
+them: a submitted `mfxFrameSurface1` carries a `MemId` that *is* the address of
+an `mfxHDLPair` holding the caller's texture, and the allocator's `GetHDL` hands
+it straight back. That is the whole of the zero-copy path.
+
+The **reconstructed** surfaces are the encoder's own — every inter-coded picture
+is predicted from a decoded copy of an earlier one — and `mfxvideo.h` is
+explicit about whose job they are, in the comment on
+`mfxFrameAllocator::Alloc`:
+
+> For encoders, MFXVideoENCODE_Init calls Alloc twice: once for the input
+> surfaces and again for the internal reconstructed surfaces.
+
+Registering an external allocator is what the video-memory input path requires,
+because nothing else can interpret the application's `MemId` — and once one is
+registered the runtime allocates *through it*. So `Alloc` creates Direct3D 11
+textures on the caller's device, which is the device the session is pinned to
+with `MFXVideoCORE_SetHandle` and therefore the only device whose textures this
+encoder can read. NV12 and P010 surfaces are created as decoder targets and BGRA
+ones as render targets, following Intel's own sample allocator. `Lock` and
+`Unlock` refuse: nothing in this pipeline reads a surface with the processor,
+and a runtime that wants to is asking for a copy per picture.
+
+An earlier version of this backend refused to allocate at all, on the reading
+that the runtime would use its own default allocator for the reconstruction
+pool. The header above says otherwise, and on that reading `MFXVideoENCODE_Init`
+would have failed on every Intel GPU rather than on none.
+
+The Direct3D half of this **is** exercised on the development machine: the tests
+in `crates/encoder/src/windows/quicksync/allocator.rs` allocate a pool of four
+NV12 surfaces on whatever GPU the machine has, resolve every identifier back to
+a texture, free the response and check the pool is gone. What has never happened
+here is a *oneVPL runtime* calling any of it — which memory types it asks for,
+and in what order, is on
 [#160](https://github.com/wildware-uk/clipped/issues/160).
 
 ### Submitting a frame
@@ -748,8 +818,13 @@ Two conditions the interface documents are handled rather than assumed away:
 - `MFX_ERR_MORE_DATA` means the encoder buffered the picture. The configuration
   forbids it, so reaching that branch means the runtime is holding a texture the
   caller owns: the stream is flushed until it lets go, the flushed pictures are
-  discarded, and the failure is reported. If flushing does not release it the
-  encoder is closed, which does.
+  discarded, and the failure is reported. Each step re-reads the surface's
+  `Locked` count and escalates while it is not zero — flush, then close the
+  encoder, then close the whole session, which holds nothing by construction. A
+  recording is worth less than the corruption or the device removal that
+  recycling a texture the GPU is still reading would cause, and the escalation
+  exists because `MFXVideoENCODE_Close`'s contract is read from the header
+  rather than measured.
 
 ### What has been checked, and what has not
 
@@ -763,20 +838,26 @@ Checked, on the development machine, by
   message, on a real NVIDIA device.
 - A null device is refused before anything dereferences it.
 - The runtime search finds nothing on this machine and says so, naming every
-  library it looked for.
+  library it looked for, and detection probes the same list the backend loads.
 - The whole translation from `EncoderConfig` to oneVPL's structures: alignment
   and cropping, the bit-rate multiplier, rate control modes, the group of
-  pictures, colour, extension buffer sizes, timestamps and frame types.
+  pictures, colour, extension buffer sizes, timestamps and frame types — and
+  which extension buffers each codec is initialised with.
+- The frame allocator's Direct3D 11 half, on a real device: a pool of NV12
+  surfaces is allocated, every identifier resolves back to a texture, the
+  response is recognised again at `Free`, a response that was never allocated is
+  refused, and a layout this backend cannot make is refused rather than guessed
+  at.
 - Detection still reports Quick Sync as unavailable with a reason, and the
   encoders that do work are still recommended.
 
 **Not checked, because it needs an Intel GPU** — everything from `MFXInitialize`
 onwards. In the order it would run: runtime discovery finding a real library;
-session initialisation and `MFXVideoCORE_SetHandle`; the frame allocator, whose
-`Alloc` refuses on the reading that the runtime allocates its own internal
-surfaces; whether Intel's encoders accept RGB4 input on a given generation;
-parameter set extraction; encoding and synchronisation, including the two
-branches above; and teardown. Each is listed with what would falsify it on
+session initialisation and `MFXVideoCORE_SetHandle`; a oneVPL runtime calling
+the frame allocator at all, and which memory types it asks for; whether Intel's
+encoders accept RGB4 input on a given generation; parameter set extraction;
+encoding and synchronisation, including the two branches above; and teardown.
+Each is listed with what would falsify it on
 [#160](https://github.com/wildware-uk/clipped/issues/160).
 
 The tests that would need Intel hardware report their absence on standard error
