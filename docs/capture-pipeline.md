@@ -1,26 +1,23 @@
 # Capture pipeline
 
-**Status: the interface exists, and one backend does.** `crates/capture` defines
-the capture backend trait, the frame and timestamp vocabulary, the policy that
-picks a backend and reports which one it picked, and — since
-[issue #12](https://github.com/wildware-uk/clipped/issues/12) — the Windows
-Graphics Capture backend that implements all of it. A Windows build can produce
-GPU frames from a window or a display today, and `clipped-encoder` can say what
-this machine could encode with
+**Status: the interface exists, and both Windows backends do.**
+`crates/capture` defines the capture backend trait, the frame and timestamp
+vocabulary, the policy that picks a backend and reports which one it picked,
+and — since [issue #12](https://github.com/wildware-uk/clipped/issues/12) and
+[issue #13](https://github.com/wildware-uk/clipped/issues/13) — the Windows
+Graphics Capture and Desktop Duplication backends that implement all of it. A
+Windows build can produce GPU frames from a window or a display today, by either
+method, and `clipped-encoder` can say what this machine could encode with
 ([encoder-capabilities.md](encoder-capabilities.md)) without being able to
 encode anything yet.
 
-What is still missing is everything downstream and one backend beside it.
-Desktop Duplication is
-[issue #13](https://github.com/wildware-uk/clipped/issues/13) and is not built,
-so a Windows build has exactly one capture backend and there is nothing to fall
-back to. `clipped-encoder`, `clipped-muxer` and `clipped-session` are still
-documentation-only crates, so nothing consumes a frame: `recorder record` still
-reports that the capture engine is not implemented, because a pipeline needs
-more than its first stage.
+What is still missing is everything downstream. `clipped-encoder`,
+`clipped-muxer` and `clipped-session` are still documentation-only crates, so
+nothing consumes a frame: `recorder record` still reports that the capture
+engine is not implemented, because a pipeline needs more than its first stage.
 
 So this document describes an interface, the rules a backend has to obey, and
-the one backend that obeys them. Where it describes behaviour that does not
+the two backends that obey them. Where it describes behaviour that does not
 exist yet it says so, because a document that quietly describes intentions as
 facts is worse than a short one (AGENTS.md section 7). It answers the questions
 AGENTS.md section 47 asks of a subsystem, and the sections still marked as
@@ -264,11 +261,12 @@ adds the logging variant in the same change.
 
 ## Windows Graphics Capture
 
-The one implemented backend. It lives in `crates/capture/src/windows/`, behind
-`#[cfg(windows)]`, and is the only Windows code in the crate; `registered_backends`
-in `crates/capture/src/registry.rs` is the single place that says a build has it.
-On any other platform that list is empty and `select` reports "this build
-registered no capture backends at all" rather than pretending.
+The preferred implemented backend. It lives in `crates/capture/src/windows/`,
+behind `#[cfg(windows)]`, which is where all the Windows code in the crate is;
+`registered_backends` in `crates/capture/src/registry.rs` is the single place
+that says a build has it. On any other platform that list is empty and `select`
+reports "this build registered no capture backends at all" rather than
+pretending.
 
 ### How it works
 
@@ -492,13 +490,245 @@ applications exist
 
 ### Runtime fallback is not built
 
-Falling back *after* a backend fails mid-recording — black frames, no frames,
-access lost — is [issue #97](https://github.com/wildware-uk/clipped/issues/97)
-in M13, and none of it exists. No seam had to be invented for it: because
-selection is a pure function of the candidate list, falling back is calling
-`select` again with the failed method removed. What #97 has to add is the part
-that is genuinely missing, which is deciding *when* a backend has failed and
-remembering the answer per game.
+Falling back to a *different backend* after one fails mid-recording — black
+frames, no frames — is
+[issue #97](https://github.com/wildware-uk/clipped/issues/97) in M13, and none of
+it exists. (Desktop Duplication losing access to its display is a different
+thing, and that one is handled: it rebuilds its own duplication rather than
+asking anybody to choose another backend. See below.) No seam had to be invented
+for #97: because selection is a pure function of the candidate list, falling back
+is calling `select` again with the failed method removed. What it has to add is
+the part that is genuinely missing, which is deciding *when* a backend has failed
+and remembering the answer per game.
+
+## Desktop Duplication
+
+The fallback, and the second implemented backend
+([issue #13](https://github.com/wildware-uk/clipped/issues/13)). It lives beside
+the other one in `crates/capture/src/windows/desktop_duplication.rs` and is
+registered in the same list, so `select` reaches it whenever Windows Graphics
+Capture declines a target or is missing from the system, and a user can pin it
+with `CaptureMethodSetting::Forced(CaptureMethod::DesktopDuplication)`:
+
+```text
+Capture method: Desktop Duplication
+Current method: Desktop Duplication
+```
+
+### How it works
+
+DXGI's `IDXGIOutputDuplication` hands over a duplicate of one *display output* as
+a Direct3D 11 texture. It predates Windows Graphics Capture, needs no compositor
+cooperation, and is what remains when `GraphicsCaptureSession::IsSupported` says
+no.
+
+The device it duplicates with is created on **the adapter that owns the output**,
+found by walking `IDXGIFactory1::EnumAdapters1` and `IDXGIAdapter::EnumOutputs`
+and matching `DXGI_OUTPUT_DESC::Monitor` against the target's `HMONITOR`. This is
+not a detail: `DuplicateOutput` refuses a device created on any other adapter,
+and on a machine with a discrete and an integrated GPU — most laptops, and this
+project's development machine — the *default* adapter is frequently the wrong
+one. That is also why this backend does not use the `CaptureDevice` in
+`device.rs`, which is deliberately the default adapter plus a WinRT view that
+DXGI has no use for.
+
+A **monitor** target is zero copy. The caller is handed DXGI's own desktop image,
+and the frame stays outstanding until the next acquisition, exactly as the
+ownership rules above require.
+
+A **window** target is that image cropped. Every frame, the window's client area
+is read with `GetClientRect` and `ClientToScreen`, converted into the output's
+coordinates, and `CopySubresourceRegion`'d into a texture this backend owns. One
+GPU-to-GPU copy per frame is the price of reaching a window through an API that
+only knows about screens; there is still no `Map`, no staging texture and no
+system-memory round trip. The client area rather than the whole window, which is
+the same choice `clipped_windows::WindowGeometry` makes and for the same reason:
+the frame, the title bar and the drop shadow are not what a game renders.
+
+Because the crop is recomputed per frame, a window that is dragged is followed.
+A window that is dragged to *another display* is followed too: the backend
+notices that `MonitorFromWindow` now answers differently and rebuilds the
+duplication against the new output, which takes a few milliseconds and happens
+once per crossing.
+
+### A window that straddles two displays
+
+It is captured from the display showing most of it — Windows' own answer, via
+`MonitorFromWindow`, which is what every other API agrees with — and the part
+hanging over the edge is **black**. The frame stays the size of the window's
+client area throughout, so dragging a window across a boundary does not
+reconfigure the encoder every few pixels; what changes is how much of the frame
+has pixels behind it. `place_window_in_output` clamps the copy to the output and
+returns where in the frame it lands, and the uncovered part is cleared before
+each copy — only while the window straddles, so an ordinary capture pays nothing
+for it. Without that clear the strip would keep showing the part of the window
+that *used* to be there, scrolling as the window moves, which is worse than
+black because it looks deliberate.
+
+As the majority crosses the boundary, the duplication switches to the other
+output and the black strip moves to the other side of the frame. Windows Graphics
+Capture has no equivalent problem, which is one more reason it is preferred.
+
+### Timestamps
+
+`DXGI_OUTDUPL_FRAME_INFO::LastPresentTime` is a performance-counter reading, so
+the conversion is `CaptureTimestamp::from_performance_counter(ticks, frequency)`
+with the frequency read once from `QueryPerformanceFrequency`, and the clock is
+declared as `SourceClock::PerformanceCounter` — the same clock, and therefore
+comparable with, what the Windows Graphics Capture backend reports. Nothing here
+reads a clock.
+
+A frame whose `LastPresentTime` is zero, or whose `AccumulatedFrames` is zero, is
+released without being delivered: DXGI wakes an acquisition for a pointer move as
+well as for a desktop update, and those two fields are how it says which happened.
+Delivering a pointer-only wake-up would be delivering the previous frame again,
+with no timestamp of its own to carry.
+
+### Dropped frames
+
+`AccumulatedFrames` is a **real count** from the source, not an estimate:
+"the number of frames the operating system accumulated in the desktop image since
+the calling application processed the last desktop frame". So
+`CapturedFrame::frames_missed` is `AccumulatedFrames - 1` — one means the caller
+kept up — and none of the timestamp arithmetic the Windows Graphics Capture
+backend needs applies here. That difference is the reason
+`CapturedFrame::with_frames_missed` exists rather than the interface computing
+anything itself.
+
+For a window target the figure counts updates to the whole *display*, not to the
+window, because that is what the duplication is of. It is still the number of
+source frames that did not reach the caller; it is just measured against a larger
+source.
+
+### Access lost, and why the recording does not end
+
+`DXGI_ERROR_ACCESS_LOST` is what a mode change, a full-screen transition, a
+driver reset or a session switch does to a duplication, and the only correct
+response is to release everything and build a new one. That happens inside
+`acquire`: the session — device, duplication, destination texture — is dropped,
+a new output is found, a new duplication is made, and the acquisition carries on.
+The caller sees no error. If the display came back a different size, it sees
+`Acquisition::SizeChanged` and resizes, which is the ordinary path it already
+has.
+
+Three refinements, each of which exists because the obvious version is wrong:
+
+- **`DXGI_ERROR_DEVICE_REMOVED`, `DXGI_ERROR_DEVICE_RESET` and
+  `DXGI_ERROR_SESSION_DISCONNECTED` are treated the same way.** They are the same
+  event seen from further away, and rebuilding the whole session — including the
+  Direct3D device — is what covers a driver reset as well as a mode change.
+- **A `ReleaseFrame` that fails means the duplication is finished.** This is not
+  theory: measured on Windows 11 build 26200, changing `\\.\DISPLAY1` from
+  2560x1440 to 1280x720 mid-capture makes `ReleaseFrame` fail, after which every
+  `AcquireNextFrame` on that duplication answers `DXGI_ERROR_INVALID_CALL`
+  (`0x887A0001`) rather than `DXGI_ERROR_ACCESS_LOST` — for ever, because the
+  frame DXGI is waiting for can never be given back. An earlier version of this
+  backend ignored the failed release, and the recording ended at the mode change
+  with an unclassified backend error. The failure is now remembered and treated
+  as what it is.
+- **A display that is missing from the enumeration is not immediately a lost
+  target.** It is absent for a moment in the middle of the very topology change
+  that caused the access loss. It has to stay absent for five seconds before the
+  recording is told `CaptureError::TargetLost`. Rebuilding is retried every 100 ms
+  in the meantime, and the failure is logged the first time and then every five
+  seconds rather than ten times a second.
+
+A display that is *attached* but cannot be duplicated is retried for as long as
+it stays that way, with no time limit. That is deliberate: the tempting
+alternative — give up after a while — ends a recording because a UAC prompt was
+on screen for six seconds, which is precisely what `DXGI_ERROR_ACCESS_DENIED`
+means here and precisely what a game recorder has to survive. Acquisitions report
+`Acquisition::Timeout` throughout, and the log says why every five seconds. The
+one case that cannot be retried away is a display rotated mid-recording, which is
+refused every time until it is rotated back
+([issue #138](https://github.com/wildware-uk/clipped/issues/138)).
+
+### What it will not do
+
+| | |
+| --- | --- |
+| The cursor | Never appears. Desktop Duplication does not draw the pointer into the desktop image; it reports the position and shape separately for an application to composite. So `CaptureConfig::capture_cursor` cannot be honoured in either direction, `BackendCapabilities::is_cursor_optional` is false, and asking for a cursor logs that there will not be one. |
+| Occlusion | Anything drawn over the target is in the recording, because this is a duplicate of the screen. `is_occlusion_independent` is false, and this is the main reason SPEC.md section 8 ranks the method below Windows Graphics Capture. |
+| A rotated display | Refused, with `CaptureError::UnsupportedTarget`. DXGI hands over a rotated display's image *unrotated*, so a portrait display would record sideways, and a window cropped out of it would be cropped from the wrong pixels entirely. [Issue #138](https://github.com/wildware-uk/clipped/issues/138) owns rotation. |
+| A minimised window | Waited out, like the other backend: acquisitions report `Acquisition::Timeout` until it comes back, rather than cropping the rectangle at (-32000, -32000) where Windows parks it. |
+| A protected window | Declined at `availability`, like the other backend. `WDA_MONITOR` renders the window black and `WDA_EXCLUDEFROMCAPTURE` leaves whatever is behind it in the frame; neither is the recording anybody asked for. |
+| A machine with no display output | Declined at `initialise` with `UnsupportedTarget`, naming the case: a remote session, a headless server or a virtual machine with no display. A basic display driver that has outputs but cannot duplicate them is declined the same way, naming that instead. |
+| Two captures of one display in one process | Not possible. DXGI gives a process **one duplication per output**; a second `DuplicateOutput` for a display this process is already duplicating fails with `E_INVALIDARG` (`0x80070057`). One target per session is already an assumption of this pipeline, but it is a hard limit here rather than a design choice, and it is why the tests that duplicate a display take a mutex. |
+
+The crop also assumes the process is **per-monitor DPI aware** — window
+positions and the duplicated image have to be in the same units. A recorder calls
+`clipped_windows::enable_per_monitor_dpi_awareness` once at start-up; if it has
+not, the backend notices that the output's desktop rectangle and its duplicated
+image are different widths and says so in the log rather than cropping the wrong
+part of the screen in silence.
+
+### Ownership and threading
+
+`Running` owns the capture; `Session` owns the part access loss throws away — the
+Direct3D device, the duplication, the destination texture and the outstanding
+frame. Releasing a `Session` gives the outstanding frame back before dropping the
+duplication, which is what lets other applications duplicate that output again;
+leaking one would be a fault a user could only clear by ending the process.
+`shut_down` is `self.running = None` and `Drop` calls `shut_down`, so an unwind
+releases exactly what a clean stop would.
+
+There are no callbacks and no second thread. `AcquireNextFrame` blocks with its
+own timeout, so unlike the Windows Graphics Capture backend there is no event
+handler and no condition variable. The wait is sliced at 100 ms so that a window
+target's "has it closed, been minimised, or moved to the other display?" checks
+happen about ten times a second however long the caller's timeout is. The one
+place this backend sleeps is between failed rebuild attempts, where there is no
+frame to wait for and the alternative is spinning on `DuplicateOutput` for the
+length of a display transition.
+
+### How to test it
+
+Unlike the other backend, this one's real behaviour is exercised by tests rather
+than by a probe example, because it can be: the tests paint a window a colour
+nothing produces by accident, capture it, and read the pixel back out of the
+captured texture through a one-pixel staging copy. A frame of the right size
+proves nothing about *which* display it came from; a pixel does.
+
+```text
+cargo test -p clipped-capture desktop_duplication
+```
+
+Two things are opt-in:
+
+- `CLIPPED_REQUIRE_CAPTURE=1` turns "this machine could not run the test" from a
+  skip into a failure, as it does for the other backend. CI sets it.
+- `CLIPPED_ALLOW_DISPLAY_CHANGES=1` enables
+  `access_lost_is_recovered_from_without_ending_the_recording`, which changes a
+  display's mode for a few seconds to provoke a real `DXGI_ERROR_ACCESS_LOST`.
+  It is off by default because an unattended `cargo test` should not change the
+  resolution of the display somebody is working on. It uses `CDS_FULLSCREEN`, so
+  Windows restores the mode when the process exits even if the test never gets to
+  its own restore. Every test that creates a window puts it on a non-primary
+  display where there is one, topmost and never activated.
+
+Measured on Windows 11 build 26200 with an RTX 4090 and two 2560x1440 displays:
+the marker window on `\\.\DISPLAY1` is found in `\\.\DISPLAY1`'s capture and
+absent from `\\.\DISPLAY2`'s; a mode change from 2560x1440 to 1280x720 and back
+produced two access losses, two `SizeChanged` reports, and 260 then 586 frames
+either side of them, with no error reaching the caller; and a caller that let the
+display update six times between acquisitions was told it had missed 8, 5 and 8
+updates.
+
+### What is not covered
+
+- **Dirty rectangles.** `GetFrameDirtyRects` could tell a window capture that
+  nothing inside the window changed, saving a copy. It is not used: the copy is
+  cheap and the encoder wants frames at a steady rate anyway.
+- **HDR**, as for the other backend
+  ([issue #99](https://github.com/wildware-uk/clipped/issues/99)). The
+  duplication is created through `IDXGIOutput1::DuplicateOutput`, which is always
+  `B8G8R8A8`; `IDXGIOutput5::DuplicateOutput1` is what will take a format list.
+- **Rotation** ([issue #138](https://github.com/wildware-uk/clipped/issues/138)),
+  refused rather than recorded wrongly, as above.
+- **Rebuilding changes the Direct3D device**, so a future encoder that has bound
+  itself to the capture device has to notice. Nothing consumes frames yet, and
+  the seam for it is the same `SizeChanged`/reconfigure path; it is written down
+  here rather than discovered later.
 
 `CaptureError`'s variants are split by what a caller can do about them —
 `TargetLost` means the recording is over, `Interrupted` means reinitialise this
@@ -561,9 +791,15 @@ platform actually exists is a question for then.
    that a backend author has to state why the texture outlives the frame
    (AGENTS.md section 58).
 7. **Test it for real.** Selection logic is unit tested; a backend cannot be.
-   `crates/capture/examples/wgc_probe.rs` is the pattern: a controlled test
-   window, a real capture of it, and measured pacing, dropped frames and
-   resource usage. The shared test applications
+   There are two patterns to follow, and which one fits depends on what the
+   backend can be asked. `crates/capture/examples/wgc_probe.rs` is a controlled
+   test window, a real capture of it, and measured pacing, dropped frames and
+   resource usage — a measurement somebody reads. The Desktop Duplication tests
+   in `crates/capture/src/windows/desktop_duplication.rs` are assertions a
+   machine reads: a window painted a colour nothing produces by accident, and the
+   captured pixel read back to prove which display, and which part of it, the
+   frame came from. Prefer the second where the behaviour has a right answer.
+   The shared test applications
    ([issue #23](https://github.com/wildware-uk/clipped/issues/23)) and the media
    validation harness
    ([issue #24](https://github.com/wildware-uk/clipped/issues/24)) will replace

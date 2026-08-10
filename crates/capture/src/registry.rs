@@ -19,7 +19,10 @@ use crate::{BackendDeclaration, CaptureBackendFactory, CaptureMethod};
 /// all, and [`select`](crate::select) reports "this build registered no capture
 /// backends" rather than inventing a reason a backend that does not exist gave.
 #[cfg(windows)]
-static REGISTERED: &[&dyn CaptureBackendFactory] = &[&crate::windows::WindowsGraphicsCapture];
+static REGISTERED: &[&dyn CaptureBackendFactory] = &[
+    &crate::windows::WindowsGraphicsCapture,
+    &crate::windows::DesktopDuplication,
+];
 
 /// Every capture backend compiled into this build. Empty off Windows: nothing
 /// in this workspace captures anything anywhere else, and saying so is more
@@ -113,15 +116,15 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn a_windows_build_registers_windows_graphics_capture() {
+    fn a_windows_build_registers_both_windows_capture_backends() {
         assert!(
             registered_backend(CaptureMethod::WindowsGraphicsCapture).is_some(),
             "issue #12 added this backend; a Windows build without it is a regression"
         );
         assert!(
-            registered_backend(CaptureMethod::DesktopDuplication).is_none(),
-            "Desktop Duplication is issue #13 and is not implemented; registering a \
-             candidate for it would make selection report a backend that does not exist"
+            registered_backend(CaptureMethod::DesktopDuplication).is_some(),
+            "issue #13 added this backend; without it a Windows build has nothing to fall \
+             back to when Windows Graphics Capture is unavailable (SPEC.md section 8)"
         );
         assert!(
             registered_backend(CaptureMethod::GameCapture).is_none(),

@@ -5,12 +5,10 @@
 //! characteristics and the user never has to know which API is involved
 //! (SPEC.md section 8).
 //!
-//! One backend exists: Windows Graphics Capture, in the `windows` submodule,
-//! compiled only on Windows and reachable through [`registered_backends`].
-//! Desktop Duplication is
-//! [issue #13](https://github.com/wildware-uk/clipped/issues/13) and is not
-//! built, so a Windows build has exactly one capture backend and a build for
-//! any other platform has none.
+//! Two backends exist, both in the `windows` submodule, compiled only on
+//! Windows and reachable through [`registered_backends`]: Windows Graphics
+//! Capture, which is preferred, and Desktop Duplication, which is what a target
+//! it declines falls back to. A build for any other platform has none.
 //!
 //! # Responsibilities
 //!
@@ -20,7 +18,8 @@
 //!   over the backends this build has: [`registered_backends`].
 //! - The vocabulary frames arrive in: [`CapturedFrame`], [`FrameFormat`],
 //!   [`CaptureTimestamp`].
-//! - Capturing, on Windows: [`windows::WindowsGraphicsCapture`].
+//! - Capturing, on Windows: [`windows::WindowsGraphicsCapture`] and
+//!   [`windows::DesktopDuplication`].
 //!
 //! # Not responsible for
 //!
