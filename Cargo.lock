@@ -200,6 +200,7 @@ name = "clipped-encoder"
 version = "0.1.0"
 dependencies = [
  "clipped-logging",
+ "rusty_ffmpeg",
  "serde",
  "serde_json",
  "tracing",
