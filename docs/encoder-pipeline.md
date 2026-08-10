@@ -103,8 +103,10 @@ frames (AGENTS.md section 20).
 A submission does not always produce a packet. An encoder that reorders pictures
 holds frames back until it has enough of them, so `None` is ordinary; the packets
 appear after a later submission or after `finish`. The NVENC backend is
-configured without B-frames, so in practice each submission produces exactly one
-packet and every packet's decode timestamp equals its presentation timestamp.
+configured so that it cannot do that — no B-frames and no lookahead, because a
+picture the encoder holds is a texture the caller cannot release — so each
+submission produces exactly one packet and every packet's decode timestamp equals
+its presentation timestamp.
 
 ### There is no factory
 
@@ -124,8 +126,16 @@ to (AGENTS.md section 1).
    unwind on the encoding thread cannot leak a session.
 2. **The encoder owns nothing it is given.** The graphics device belongs to the
    caller and the texture belongs to the capture backend. A `SourceFrame`
-   borrows the texture, and the encoder reads it only during `submit`; nothing
-   derived from the handle is stored.
+   borrows the texture, and everything an encoder does with it happens inside
+   `submit`: when `submit` returns, by any path including a failure, nothing
+   derived from the handle is still held, and the caller may recycle the frame.
+
+   This is an obligation on a backend, not an observation about one. A hardware
+   encoder has to hand the driver something derived from the texture — NVENC
+   registers and maps it — and releasing that may mean waiting inside `submit`
+   for the picture to be coded. That is the price, and it is worth paying: a
+   capture backend recycles frame pool surfaces, so an encoder still reading one
+   after `submit` returns produces corruption that nothing in any log explains.
 3. **A packet's bytes belong to the encoder** until the next `next_packet`,
    which is when the bitstream buffer is unlocked. The borrow of `&mut self`
    makes the compiler enforce it — the same contract `clipped-capture` uses for
@@ -168,6 +178,13 @@ header is NVIDIA's, published under the **MIT licence** through FFmpeg's
 makes it redistributable at all: the copy inside the Video Codec SDK carries
 NVIDIA's SDK agreement instead, and that is not a licence `deny.toml` accepts
 (AGENTS.md sections 11 and 12).
+
+The generated file is a derivative of that header, so it carries NVIDIA's
+copyright and the MIT permission notice at the top of itself, and the same
+notice is recorded in
+[THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) with the tag and checksum it
+came from. `cargo deny` does not cover this: it inspects the Cargo graph, not
+source committed into the tree.
 
 The generated file is committed rather than produced by a build script, so that
 building Clipped needs neither libclang nor a network fetch of a header, and so
@@ -241,24 +258,54 @@ frames of pure red, green and blue, decodes them with FFmpeg, and asserts the
 pixels come back the colours they went in as. Tagging BT.709 limited range —
 the default — passes on the hardware this was developed on.
 
+**What that test does not prove.** Tagging BT.601 in the VUI and re-running it
+was measured *not* to fail: NVENC appears to follow the configured matrix for its
+own conversion, so the tag and the conversion moved together and red stayed red.
+The round trip therefore shows that the description in the stream agrees with the
+conversion performed — which is the failure that ruins a recording — and not
+which matrix was chosen. Proving that needs a decode with the matrix forced,
+compared against a reference conversion, and there is no test for it yet
+([#147](https://github.com/wildware-uk/clipped/issues/147)).
+
 HDR is not supported. A 10-bit surface is refused by name, with the format that
 would work, rather than encoded into something wrong
 ([#99](https://github.com/wildware-uk/clipped/issues/99)).
 
-### Resource registration
+### Resource registration, and why `submit` waits
 
-Each frame is registered with `nvEncRegisterResource`, mapped, encoded, and then
-unmapped and unregistered once its packet has been unlocked. Registering per
-frame rather than caching a registration per texture is the simple, obviously
-correct version: a cache keyed on a texture pointer is only sound while the
-capture backend keeps that texture alive, and nothing in the interface promises
-it does.
+One `submit` does the whole of a frame:
 
-The cost of that decision is included in the measurements below — the
-submit-to-packet figure covers registration, mapping, encoding and locking — and
-if a later profile shows it matters, a registration cache belongs in a change
-that also gives the interface a way to say when a texture pool has been
-recycled.
+```text
+nvEncRegisterResource → nvEncMapInputResource → nvEncEncodePicture
+        → nvEncLockBitstream → nvEncUnmapInputResource → nvEncUnregisterResource
+```
+
+Locking is what waits: `doNotWait` is off, so `nvEncLockBitstream` returns once
+the hardware has finished the picture. That is also the earliest the header
+permits the input to be released — "the client must unmap the buffer after
+`NvEncLockBitstream()` API returns successfully for encode work submitted using
+the mapped input buffer" — and releasing it there is what lets `submit` promise
+that nothing derived from the texture outlives the call. The coded bitstream
+stays locked afterwards, which is what `next_packet` hands over and unlocks.
+
+Two settings exist to keep that promise true rather than usually true. B-frames
+are off, and lookahead is switched off whatever the preset returned, because the
+header is explicit that with lookahead "input frames must remain available to the
+encoder until encode completion". With both off, NVENC codes every picture on the
+submission that carries it. If it ever answers `NV_ENC_ERR_NEED_MORE_INPUT`
+anyway, `submit` flushes that picture out, releases the texture and reports the
+failure, rather than quietly holding a registration on a surface the caller has
+been told it may reuse.
+
+Registering per frame rather than caching a registration per texture is the
+simple, obviously correct version: a cache keyed on a texture pointer is only
+sound while the capture backend keeps that texture alive, and nothing in the
+interface promises it does.
+
+The cost of both decisions is inside the measurements below — the submit-to-packet
+figure covers registration, mapping, encoding, locking and release — and if a
+later profile shows it matters, a registration cache belongs in a change that
+also gives the interface a way to say when a texture pool has been recycled.
 
 ## Errors
 
@@ -295,7 +342,9 @@ fails before the user believes it started.
 Measured on the machine described below by the tests in
 `crates/encoder/src/windows/nvenc/tests.rs`, which encode a moving pattern and
 report submit-to-packet latency. That figure covers the whole path: registering
-the texture, mapping it, encoding, and locking the bitstream.
+the texture, mapping it, encoding, locking the bitstream, and releasing the
+texture again. The 2560x1440 runs are the same tests with `TEST_SIZE` and
+`TEST_FRAMES` raised for the measurement.
 
 | | |
 | --- | --- |
@@ -308,24 +357,25 @@ the texture, mapping it, encoding, and locking the bitstream.
 
 | Codec | Mean | Median | p95 | Worst | Bitstream |
 | --- | --- | --- | --- | --- | --- |
-| H.264 | 4.02 ms | 4.04 ms | 4.29 ms | 6.36 ms | 36.9 MB |
-| HEVC | 4.36 ms | 4.34 ms | 4.67 ms | 10.96 ms | 37.0 MB |
-| AV1 | 3.57 ms | 3.33 ms | 6.71 ms | 7.82 ms | 37.3 MB |
+| H.264 | 4.23 ms | 3.91 ms | 7.26 ms | 9.24 ms | 36.9 MB |
+| HEVC | 4.76 ms | 4.29 ms | 7.92 ms | 9.84 ms | 37.0 MB |
+| AV1 | 3.66 ms | 3.32 ms | 6.77 ms | 9.30 ms | 37.3 MB |
 
-**1280x720, 90 frames** (what the test suite runs by default): mean 1.45 ms
-(H.264), 1.58 ms (HEVC), 1.40 ms (AV1).
+**1280x720, 90 frames** (what the test suite runs by default): mean 1.35 ms
+(H.264), 1.44 ms (HEVC), 1.28 ms (AV1).
 
-At 2560x1440 and 60 frames a second, a mean of 4.02 ms is a quarter of the
-16.7 ms frame budget — so the encoder alone could sustain about 249 frames a
-second at that resolution, and encoding a 60 fps recording occupies it about 24%
+At 2560x1440 and 60 frames a second, a mean of 4.23 ms is about a quarter of the
+16.7 ms frame budget — so the encoder alone could sustain roughly 236 frames a
+second at that resolution, and encoding a 60 fps recording occupies it about 25%
 of the time.
 
 **Encoder utilisation**, sampled with `nvidia-smi --query-gpu=utilization.encoder`
-every 250 ms while the 2560x1440 runs above were executing back to back: peak
-23%, mean 20% over the samples where the encoder was busy at all. The test
-harness, not the encoder, is the limit in that run — it builds and uploads a new
-14 MB texture per frame from the CPU, which a real capture backend does not do —
-so this is a floor on what the hardware can take, not a ceiling.
+every 250 ms across a 50-second window covering the 2560x1440 runs: 200 samples,
+peak 25%. The 75 samples taken while a run was actually encoding average 20%; the
+other 125, between runs, sit at 1-6%. The test harness, not the encoder, is the
+limit here — it builds and uploads a new 14 MB texture per frame from the CPU,
+which a real capture backend does not do — so this is a floor on what the
+hardware can take, not a ceiling.
 
 ## Verification
 
@@ -337,23 +387,40 @@ and 53):
   for a sequence header and a keyframe, and `ffprobe` is asked what it sees. It
   reports the codec, 1280x720, `yuv420p` and 90 frames.
 - **Colour survives.** Red, green and blue frames are encoded, decoded with
-  FFmpeg and compared with what went in.
+  FFmpeg and compared with what went in. What that does and does not prove is
+  under [Colour](#colour) above.
+- **A texture can be reused the moment `submit` returns.** One surface is
+  overwritten immediately after each `submit`, the way a frame pool recycles
+  one, and the decoded pictures still have to be the colours that were
+  submitted. It is a guard rather than a reproduction: run against the previous
+  shape of this backend, which held the registration past `submit`, it passed
+  too — on driver 610.74 the encode finishes before a CPU write can land on the
+  surface. The code no longer depends on that timing.
 - **Keyframes land where they were asked to.** A one-second interval at 60 fps
   puts keyframes at frames 0 and 60 and nowhere else; a frame that asks to be a
   keyframe becomes one even when the interval says otherwise.
 - **Sessions are released.** Sixteen sessions are opened and dropped in turn.
   Removing the `nvEncDestroyEncoder` call makes it fail on the thirteenth, which
   is the concurrent session limit of the card it was run on.
+- **A full session table is survivable.** Sessions are opened until the card
+  refuses one, which has to arrive as `SessionLimitReached` rather than as a
+  status code; they are released and the same thing is done again, which has to
+  get at least as far. A failed open that kept driver-side state would show up
+  as a second pass that stops earlier.
 - **Bad input is refused, not encoded.** An odd picture size, a frame of the
   wrong size, a 10-bit surface, a timestamp that goes backwards, and use after
   shutdown each produce an error naming what was wrong.
 
-`ffprobe` and `ffmpeg` are development tools here and nothing else: the tests
-that use them skip when they are absent, and nothing in the recorder shells out
-to FFmpeg. The hardware tests skip on a machine with no NVIDIA GPU — which is
-every hosted CI runner — and setting `CLIPPED_REQUIRE_ENCODER=1` turns that skip
-into a failure, so "the encoder tests passed" cannot quietly mean "the encoder
-tests did nothing".
+`ffprobe` and `ffmpeg` are development tools here and nothing else: nothing in
+the recorder shells out to FFmpeg. The tests find them beside the pinned FFmpeg
+that `scripts/fetch-ffmpeg.ps1` installs, and then on the path.
+
+The hardware tests skip on a machine with no NVIDIA GPU — which is every hosted
+CI runner — and setting `CLIPPED_REQUIRE_ENCODER=1` turns that skip into a
+failure, so "the encoder tests passed" cannot quietly mean "the encoder tests did
+nothing". The lever covers a missing FFmpeg too, because what `ffprobe` reports
+*is* the acceptance criterion; the one skip it leaves alone is a codec the card
+cannot encode, which is a fact about the silicon rather than about the checkout.
 
 ## Not written yet
 
@@ -368,5 +435,8 @@ tests did nothing".
   a frame of a different size is refused, and the caller has to open a new
   encoder.
 - Recovering from a driver reset. A lost device is reported as
-  `EncodeErrorKind::DeviceLost`, and nothing yet acts on it.
+  `EncodeErrorKind::DeviceLost` and marked transient, and nothing yet acts on
+  it: there is no session loop to recover into
+  ([#148](https://github.com/wildware-uk/clipped/issues/148)). A full session
+  table, the other half of that scope bullet, is handled and tested.
 - B-frames, 10-bit and HDR, and lookahead.

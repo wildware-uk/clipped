@@ -41,13 +41,21 @@
 //!
 //! # Ownership
 //!
-//! [`NvencEncoder`] owns the loaded runtime, the encoder session, every output
-//! buffer, and every resource registration in flight. All of it is released by
-//! [`Session::drop`], which runs from `shut_down` and from `Drop`, so an unwind
-//! on the encoding thread cannot leak a session. That matters more here than in
-//! most places: consumer NVIDIA cards permit a small number of concurrent
-//! encoding sessions across the whole machine, and a leaked one is taken away
-//! from every application until the process exits (AGENTS.md section 58).
+//! [`NvencEncoder`] owns the loaded runtime, the encoder session and every
+//! output buffer. All of it is released by [`Session::drop`], which runs from
+//! `shut_down` and from `Drop`, so an unwind on the encoding thread cannot leak
+//! a session. That matters more here than in most places: consumer NVIDIA cards
+//! permit a small number of concurrent encoding sessions across the whole
+//! machine, and a leaked one is taken away from every application until the
+//! process exits (AGENTS.md section 58).
+//!
+//! It owns no texture. The registration and mapping NVENC makes from a
+//! submitted texture are the one thing here derived from a handle the caller
+//! owns, and they live inside a single [`Session::submit`] call: register, map,
+//! encode, lock the coded picture — which is what waits for the hardware — then
+//! unmap and unregister. A capture backend may therefore recycle the frame the
+//! moment `submit` returns, which is what [`crate::frame::SourceTexture`]
+//! promises it may.
 
 #[allow(
     dead_code,
@@ -395,24 +403,38 @@ fn validate(config: &EncoderConfig) -> Result<(), EncodeErrorKind> {
     Ok(())
 }
 
-/// One frame's worth of hardware state, from submission to the packet that
-/// comes out of it.
+/// What NVENC holds on the caller's texture between `nvEncRegisterResource` and
+/// the moment the picture has been coded.
 ///
 /// # Ownership
 ///
-/// Holds three things the session must release, in this order: the encoded
-/// bitstream is unlocked, the input resource is unmapped, and the registration
-/// is dropped. Doing it in any other order leaves the driver holding a
-/// reference to a texture the capture backend has already recycled.
-///
-/// It carries no timestamp: the one on the packet comes back from NVENC, which
-/// echoes the input timestamp it was given, so there is nothing here to keep in
-/// step with it.
+/// This is the only thing in the backend derived from a handle the encoder does
+/// not own, and it exists for the length of one [`Session::submit`] call and no
+/// longer. Every path out of that call releases it — mapping first, then
+/// registration — because the capture backend is free to recycle the texture
+/// the instant `submit` returns (see [`crate::frame::SourceTexture`]).
 #[derive(Debug, Clone, Copy)]
-struct Pending {
-    output: *mut c_void,
+struct Registration {
     registered: sys::NV_ENC_REGISTERED_PTR,
     mapped: sys::NV_ENC_INPUT_PTR,
+}
+
+/// A coded picture, locked in the output buffer that holds it.
+///
+/// The bitstream stays locked — and therefore readable, and the buffer
+/// unreusable — until [`Session::unlock`] releases it, which is the next
+/// `next_packet` or teardown.
+///
+/// The timestamp comes back from NVENC, which echoes the input timestamp it was
+/// given, so nothing here has to be kept in step with the submission.
+#[derive(Debug, Clone, Copy)]
+struct Coded {
+    output: *mut c_void,
+    /// Where NVENC put the bytes. Valid until the buffer is unlocked.
+    data: *const u8,
+    length: usize,
+    presentation: Duration,
+    picture: PictureKind,
 }
 
 /// The live NVENC session and everything it owns.
@@ -422,15 +444,13 @@ struct Session {
     context: EncodeContext,
     /// Every output buffer created, for teardown.
     outputs: Vec<*mut c_void>,
-    /// The output buffers not currently holding a frame.
+    /// The output buffers not currently holding a coded picture.
     free: Vec<*mut c_void>,
-    /// Submitted, and not yet known to have been encoded.
-    in_flight: VecDeque<Pending>,
-    /// Encoded and waiting to be handed over.
-    ready: VecDeque<Pending>,
+    /// Coded, locked, and waiting to be handed over.
+    ready: VecDeque<Coded>,
     /// The packet the caller is currently holding, which the next call
-    /// releases.
-    locked: Option<Pending>,
+    /// unlocks.
+    locked: Option<Coded>,
     encoded_frames: u64,
 }
 
@@ -481,11 +501,48 @@ impl Session {
                 );
                 EncodeErrorKind::SessionLimitReached
             } else {
-                // SAFETY: the session failed to open, so the only valid
-                // argument is a null encoder, which the runtime accepts.
-                let detail = unsafe { api::last_error(runtime.functions(), ptr::null_mut()) };
+                // Only ask the runtime what went wrong while there is a session
+                // to ask. `nvEncGetLastErrorString` takes "a pointer to the
+                // NvEncodeAPI interface" and the header says nothing about
+                // null, so a failed open that produced no handle gets no
+                // detail rather than a dereference of null inside error
+                // reporting.
+                let detail = if encoder.is_null() {
+                    String::new()
+                } else {
+                    // SAFETY: `encoder` is the handle this call just produced,
+                    // through `runtime`, and nothing has destroyed it yet.
+                    unsafe { api::last_error(runtime.functions(), encoder) }
+                };
                 classify(status, "nvEncOpenEncodeSessionEx", detail)
             };
+
+            // "If the creation of encoder session fails, the client must call
+            // ::NvEncDestroyEncoder API before exiting" (nvEncodeAPI.h,
+            // NvEncOpenEncodeSessionEx): a failed open may still have left a
+            // session behind, and a recorder that retries a transient
+            // `SessionLimitReached` would accumulate one per attempt for the
+            // life of the process (AGENTS.md section 58).
+            //
+            // Only a handle that came back. Measured on driver 610.74: a full
+            // session table fails the open with the out-parameter left null,
+            // and `nvEncDestroyEncoder(NULL)` answers
+            // `NV_ENC_ERR_INVALID_ENCODERDEVICE` — so calling it with null
+            // releases nothing and only logs noise. A driver that does hand
+            // back a partially built session is the case this catches.
+            if !encoder.is_null() {
+                if let Some(destroy) = runtime.functions().nvEncDestroyEncoder {
+                    // SAFETY: the handle came from the call above and is
+                    // destroyed exactly once, here; nothing was allocated from
+                    // it, because the session never reached the caller.
+                    let destroy_status = unsafe { destroy(encoder) };
+                    log_release_failure(
+                        destroy_status,
+                        "nvEncDestroyEncoder (after a failed open)",
+                    );
+                }
+            }
+
             return Err(EncodeError::new(context, kind));
         }
 
@@ -495,7 +552,6 @@ impl Session {
             context,
             outputs: Vec::new(),
             free: Vec::new(),
-            in_flight: VecDeque::new(),
             ready: VecDeque::new(),
             locked: None,
             encoded_frames: 0,
@@ -636,7 +692,7 @@ impl Session {
                 self.encoder,
                 settings::codec_guid(config.codec()),
                 settings::preset_guid(config.preset()),
-                settings::tuning_info(config.preset()),
+                settings::TUNING,
                 &raw mut preset,
             )
         };
@@ -702,7 +758,18 @@ impl Session {
         Ok(())
     }
 
-    /// Registers, maps and encodes one frame.
+    /// Registers, encodes and releases one frame.
+    ///
+    /// The whole of the encoder's business with the caller's texture happens
+    /// here, which is what the interface promises
+    /// ([`crate::frame::SourceTexture`]): register, map, encode, wait for the
+    /// coded picture by locking its bitstream, then unmap and unregister. When
+    /// this returns — by any path — NVENC holds nothing derived from the
+    /// texture, so the capture backend may recycle it immediately.
+    ///
+    /// The order is the header's: "The client must unmap the buffer after
+    /// ::NvEncLockBitstream() API returns successfully for encode work
+    /// submitted using the mapped input buffer".
     fn submit(
         &mut self,
         frame: &SourceFrame<'_>,
@@ -720,34 +787,77 @@ impl Session {
 
         // From here on the output buffer has been taken out of the free list,
         // so every failure path has to put it back.
-        let mut pending = match self.register_and_map(frame, format, resolution) {
-            Ok((registered, mapped)) => Pending {
-                output,
-                registered,
-                mapped,
-            },
+        let mut input = match self.register_and_map(frame, format, resolution) {
+            Ok(input) => input,
             Err(error) => {
                 self.free.push(output);
                 return Err(error);
             }
         };
 
-        match self.encode(&pending, frame, format, resolution) {
-            Ok(complete) => {
-                self.in_flight.push_back(pending);
-                if complete {
-                    // Every frame the encoder was holding has now been coded,
-                    // and their bitstreams can be locked.
-                    self.ready.append(&mut self.in_flight);
+        // And from here on the registration is derived from a texture this
+        // encoder does not own, so every path has to release it before
+        // returning.
+        let coded = self
+            .encode(&input, output, frame, format, resolution)
+            .and_then(|deferred| {
+                if deferred {
+                    Err(self.deferred_picture(output))
+                } else {
+                    self.lock(output)
                 }
+            });
+        self.release_input(&mut input);
+
+        match coded {
+            Ok(coded) => {
+                self.encoded_frames += 1;
+                self.ready.push_back(coded);
                 Ok(())
             }
             Err(error) => {
-                self.release(&mut pending, false);
                 self.free.push(output);
                 Err(error)
             }
         }
+    }
+
+    /// Deals with a picture NVENC decided to buffer rather than code.
+    ///
+    /// `NV_ENC_ERR_NEED_MORE_INPUT` means the encoder is holding this frame
+    /// back until it has more of them, which happens when B-frames or a
+    /// lookahead are configured — and the header is explicit that then "input
+    /// frames must remain available to the encoder until encode completion".
+    /// This backend configures neither, precisely so that a borrowed texture
+    /// never has to stay available past `submit` (see `settings::apply`), so
+    /// reaching here means the driver buffered a picture in a configuration
+    /// that forbids it.
+    ///
+    /// Rather than quietly keep the caller's texture registered, the stream is
+    /// flushed so that the picture completes and its input can be released, and
+    /// the failure is reported. The flushed picture is discarded: `submit`
+    /// promises a packet per frame through `next_packet`, and half a frame of
+    /// video is not worth an interface that can hand back pictures out of
+    /// order.
+    fn deferred_picture(&self, output: *mut c_void) -> EncodeError {
+        if self.end_of_stream().is_ok() {
+            if let Ok(coded) = self.lock(output) {
+                self.unlock(&coded);
+            }
+        }
+
+        EncodeError::new(
+            self.context,
+            EncodeErrorKind::Api {
+                operation: "nvEncEncodePicture",
+                status: sys::NV_ENC_ERR_NEED_MORE_INPUT,
+                status_name: api::status_name(sys::NV_ENC_ERR_NEED_MORE_INPUT),
+                detail: "the encoder buffered the picture, which it must not do with B-frames and \
+                         lookahead disabled, because the input texture belongs to the caller and \
+                         is released when this call returns"
+                    .to_owned(),
+            },
+        )
     }
 
     /// Hands the texture to NVENC without copying it.
@@ -756,7 +866,7 @@ impl Session {
         frame: &SourceFrame<'_>,
         format: sys::NV_ENC_BUFFER_FORMAT,
         resolution: Resolution,
-    ) -> Result<(sys::NV_ENC_REGISTERED_PTR, sys::NV_ENC_INPUT_PTR), EncodeError> {
+    ) -> Result<Registration, EncodeError> {
         let register_fn = self
             .runtime
             .functions()
@@ -785,9 +895,13 @@ impl Session {
         // SAFETY: the session is initialised and `register` is a live local.
         // `resourceToRegister` is the texture the caller promised is a live
         // `ID3D11Texture2D` on this session's device, and the promise holds for
-        // the whole of this call because the frame is borrowed for it. The
-        // registration it produces is released before `submit` returns to the
-        // caller, or by `Session::drop`.
+        // the whole of this call because the frame is borrowed for it.
+        //
+        // NVENC keeps book-keeping of its own against that texture until the
+        // registration is released, so the promise has to hold for that long
+        // too: `submit`, the only caller, releases both the mapping and the
+        // registration before it returns, on every path out of it. Nothing
+        // derived from the handle outlives the borrow.
         let status = unsafe { register_fn(self.encoder, &raw mut register) };
         self.check(status, "nvEncRegisterResource")?;
 
@@ -800,7 +914,10 @@ impl Session {
         // `registeredResource` came from the successful registration above.
         let status = unsafe { map_fn(self.encoder, &raw mut map) };
         match self.check(status, "nvEncMapInputResource") {
-            Ok(()) => Ok((register.registeredResource, map.mappedResource)),
+            Ok(()) => Ok(Registration {
+                registered: register.registeredResource,
+                mapped: map.mappedResource,
+            }),
             Err(error) => {
                 // The registration succeeded and the mapping did not, so the
                 // registration is this function's to release.
@@ -814,10 +931,11 @@ impl Session {
         }
     }
 
-    /// Encodes one mapped frame, and says whether the encoder produced output.
+    /// Encodes one mapped frame, and says whether the encoder deferred it.
     fn encode(
         &self,
-        pending: &Pending,
+        input: &Registration,
+        output: *mut c_void,
         frame: &SourceFrame<'_>,
         format: sys::NV_ENC_BUFFER_FORMAT,
         resolution: Resolution,
@@ -833,8 +951,8 @@ impl Session {
         params.version = api::PIC_PARAMS_VER;
         params.inputWidth = resolution.width;
         params.inputHeight = resolution.height;
-        params.inputBuffer = pending.mapped;
-        params.outputBitstream = pending.output;
+        params.inputBuffer = input.mapped;
+        params.outputBitstream = output;
         params.bufferFmt = format;
         params.pictureStruct = sys::NV_ENC_PIC_STRUCT_FRAME;
         // Nanoseconds, which is what comes back out on the packet. NVENC treats
@@ -850,26 +968,22 @@ impl Session {
         // both of which outlive the call.
         let status = unsafe { function(self.encoder, &raw mut params) };
         match status {
-            sys::NV_ENC_SUCCESS => Ok(true),
-            // Not a failure: the encoder is holding this frame back until it
-            // has enough of them, which is ordinary whenever pictures are
-            // reordered or a lookahead is configured.
-            sys::NV_ENC_ERR_NEED_MORE_INPUT => Ok(false),
+            sys::NV_ENC_SUCCESS => Ok(false),
+            // The encoder is holding this frame back until it has more of them.
+            // See `deferred_picture`: nothing this backend configures may
+            // produce it, and it is not something a borrowed texture can
+            // survive.
+            sys::NV_ENC_ERR_NEED_MORE_INPUT => Ok(true),
             _ => Err(self.error(status, "nvEncEncodePicture")),
         }
     }
 
-    /// Takes the next encoded packet, releasing whatever the caller was holding.
-    fn next_packet(&mut self) -> Result<Option<EncodedPacket<'_>>, EncodeError> {
-        if let Some(mut previous) = self.locked.take() {
-            self.release(&mut previous, true);
-            self.free.push(previous.output);
-        }
-
-        let Some(pending) = self.ready.pop_front() else {
-            return Ok(None);
-        };
-
+    /// Waits for the coded picture in `output` and locks its bitstream.
+    ///
+    /// Locking is what waits: `doNotWait` is off, so this returns once the
+    /// hardware has finished the picture, which is also the point at which the
+    /// header permits its input to be unmapped.
+    fn lock(&self, output: *mut c_void) -> Result<Coded, EncodeError> {
         let function = self
             .runtime
             .functions()
@@ -879,7 +993,7 @@ impl Session {
         // SAFETY: plain data.
         let mut lock: sys::NV_ENC_LOCK_BITSTREAM = unsafe { mem::zeroed() };
         lock.version = api::LOCK_BITSTREAM_VER;
-        lock.outputBitstream = pending.output;
+        lock.outputBitstream = output;
         // Wait for the hardware rather than poll it: the encoding thread has
         // nothing else to do, and a spin would take CPU from the game.
         lock.set_doNotWait(0);
@@ -888,18 +1002,37 @@ impl Session {
         // `outputBitstream` is a buffer this session created and has not
         // destroyed.
         let status = unsafe { function(self.encoder, &raw mut lock) };
-        if let Err(error) = self.check(status, "nvEncLockBitstream") {
-            let mut pending = pending;
-            self.release(&mut pending, false);
-            self.free.push(pending.output);
-            return Err(error);
-        }
-
-        self.encoded_frames += 1;
-        self.locked = Some(pending);
+        self.check(status, "nvEncLockBitstream")?;
 
         let length = lock.bitstreamSizeInBytes as usize;
         let data = if length == 0 || lock.bitstreamBufferPtr.is_null() {
+            ptr::null()
+        } else {
+            lock.bitstreamBufferPtr.cast::<u8>().cast_const()
+        };
+
+        Ok(Coded {
+            output,
+            data,
+            length,
+            presentation: Duration::from_nanos(lock.outputTimeStamp),
+            picture: picture_kind(lock.pictureType),
+        })
+    }
+
+    /// Takes the next coded packet, unlocking whatever the caller was holding.
+    fn next_packet(&mut self) -> Result<Option<EncodedPacket<'_>>, EncodeError> {
+        if let Some(previous) = self.locked.take() {
+            self.unlock(&previous);
+            self.free.push(previous.output);
+        }
+
+        let Some(coded) = self.ready.pop_front() else {
+            return Ok(None);
+        };
+        self.locked = Some(coded);
+
+        let data = if coded.data.is_null() {
             &[][..]
         } else {
             // SAFETY: NVENC guarantees `bitstreamBufferPtr` addresses
@@ -907,23 +1040,31 @@ impl Session {
             // unlocked, which happens in the next call to this method or in
             // `Drop`. The returned slice borrows `*self` for exactly that long,
             // so the compiler will not let a caller hold it across either.
-            unsafe { core::slice::from_raw_parts(lock.bitstreamBufferPtr.cast::<u8>(), length) }
+            unsafe { core::slice::from_raw_parts(coded.data, coded.length) }
         };
 
-        let presentation = Duration::from_nanos(lock.outputTimeStamp);
         Ok(Some(EncodedPacket::new(
             data,
-            presentation,
+            coded.presentation,
             // Equal to the presentation time by construction: the encoder is
             // configured without B-frames, so pictures come out in the order
             // they went in (see `settings::apply`).
-            presentation,
-            picture_kind(lock.pictureType),
+            coded.presentation,
+            coded.picture,
         )))
     }
 
     /// Flushes the encoder at the end of the stream.
+    ///
+    /// Every picture has already been coded and locked by the `submit` that
+    /// produced it, so this declares the end of the stream and nothing more.
     fn finish(&mut self) -> Result<(), EncodeError> {
+        self.end_of_stream()
+    }
+
+    /// Tells NVENC the stream has ended, which completes anything it is
+    /// holding.
+    fn end_of_stream(&self) -> Result<(), EncodeError> {
         let function = self
             .runtime
             .functions()
@@ -942,48 +1083,50 @@ impl Session {
         if status != sys::NV_ENC_SUCCESS {
             return Err(self.error(status, "nvEncEncodePicture (end of stream)"));
         }
-
-        // Everything the encoder was holding has now been coded.
-        self.ready.append(&mut self.in_flight);
         Ok(())
     }
 
-    /// Releases one frame's hardware state.
+    /// Releases the encoder's hold on one frame's input texture.
     ///
-    /// `unlock` says whether the bitstream is currently locked; unlocking one
-    /// that is not produces an error the caller cannot act on.
-    fn release(&self, pending: &mut Pending, unlock: bool) {
+    /// Mapping first, then registration, which is the order the header
+    /// requires; doing it the other way leaves the driver holding a reference
+    /// to a texture the capture backend is about to recycle.
+    fn release_input(&self, input: &mut Registration) {
         let functions = self.runtime.functions();
 
-        if unlock {
-            if let Some(unlock_fn) = functions.nvEncUnlockBitstream {
-                // SAFETY: the buffer belongs to this session and was locked by
-                // `next_packet`.
-                let status = unsafe { unlock_fn(self.encoder, pending.output) };
-                log_release_failure(status, "nvEncUnlockBitstream");
-            }
-        }
-
-        if !pending.mapped.is_null() {
+        if !input.mapped.is_null() {
             if let Some(unmap) = functions.nvEncUnmapInputResource {
                 // SAFETY: the pointer came from a successful
                 // `nvEncMapInputResource` on this session and has not been
                 // unmapped.
-                let status = unsafe { unmap(self.encoder, pending.mapped) };
+                let status = unsafe { unmap(self.encoder, input.mapped) };
                 log_release_failure(status, "nvEncUnmapInputResource");
             }
-            pending.mapped = ptr::null_mut();
+            input.mapped = ptr::null_mut();
         }
 
-        if !pending.registered.is_null() {
+        if !input.registered.is_null() {
             if let Some(unregister) = functions.nvEncUnregisterResource {
                 // SAFETY: the pointer came from a successful
                 // `nvEncRegisterResource` on this session and has not been
                 // unregistered.
-                let status = unsafe { unregister(self.encoder, pending.registered) };
+                let status = unsafe { unregister(self.encoder, input.registered) };
                 log_release_failure(status, "nvEncUnregisterResource");
             }
-            pending.registered = ptr::null_mut();
+            input.registered = ptr::null_mut();
+        }
+    }
+
+    /// Unlocks a coded picture's bitstream, after which its buffer can be
+    /// reused.
+    fn unlock(&self, coded: &Coded) {
+        if let Some(unlock) = self.runtime.functions().nvEncUnlockBitstream {
+            // SAFETY: the buffer belongs to this session and was locked by
+            // `lock`, exactly once, and is unlocked exactly once — either here
+            // or in `Drop`, never both, because a `Coded` is moved between the
+            // queues rather than copied out of them.
+            let status = unsafe { unlock(self.encoder, coded.output) };
+            log_release_failure(status, "nvEncUnlockBitstream");
         }
     }
 
@@ -1013,16 +1156,17 @@ impl Drop for Session {
     /// place any of this is released — there is no path that frees a session
     /// without going through here (AGENTS.md section 58).
     fn drop(&mut self) {
-        if let Some(mut locked) = self.locked.take() {
-            self.release(&mut locked, true);
-        }
-        let mut outstanding: Vec<Pending> = self
-            .ready
-            .drain(..)
-            .chain(self.in_flight.drain(..))
+        // Nothing derived from a caller's texture can be outstanding here:
+        // `submit` releases every registration before it returns. What is left
+        // is this session's own bitstream buffers, some of them still locked.
+        let outstanding: Vec<Coded> = self
+            .locked
+            .take()
+            .into_iter()
+            .chain(self.ready.drain(..))
             .collect();
-        for pending in &mut outstanding {
-            self.release(pending, false);
+        for coded in &outstanding {
+            self.unlock(coded);
         }
 
         if let Some(destroy) = self.runtime.functions().nvEncDestroyBitstreamBuffer {

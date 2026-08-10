@@ -140,13 +140,13 @@ pub(super) const fn profile_guid(codec: Codec) -> sys::GUID {
 
 /// The tuning NVENC should optimise for.
 ///
-/// Always high quality: Clipped writes to a local disk, so the latency tunings
-/// — which trade picture quality for a shorter pipeline — buy nothing. A
-/// streaming path would want `LOW_LATENCY`, and that is a decision for the
-/// ticket that adds streaming rather than a knob nobody can currently reach.
-pub(super) const fn tuning_info(_preset: EncodePreset) -> sys::NV_ENC_TUNING_INFO {
-    sys::NV_ENC_TUNING_INFO_HIGH_QUALITY
-}
+/// High quality for every preset, deliberately: Clipped writes to a local disk,
+/// so the latency tunings — which trade picture quality for a shorter pipeline
+/// — buy nothing. A streaming path would want `LOW_LATENCY`, and that is a
+/// decision for the ticket that adds streaming rather than a knob nobody can
+/// currently reach. `EncodePreset` still chooses the preset itself, which is
+/// where the speed-against-quality trade lives (see [`preset_guid`]).
+pub(super) const TUNING: sys::NV_ENC_TUNING_INFO = sys::NV_ENC_TUNING_INFO_HIGH_QUALITY;
 
 /// The NVENC buffer format for a captured surface layout, or [`None`] if this
 /// backend cannot take it.
@@ -187,6 +187,16 @@ pub(super) fn apply(settings: &EncoderConfig, config: &mut sys::NV_ENC_CONFIG) {
     // there is a muxer that does (issue #21), every packet this encoder
     // produces is in presentation order and pts equals dts.
     config.frameIntervalP = 1;
+
+    // No lookahead, whatever the preset returned. The header's own words about
+    // the flag are the reason: "if lookahead is enabled, input frames must
+    // remain available to the encoder until encode completion". The frames this
+    // backend is given are borrowed from a capture backend that recycles them
+    // as soon as `submit` returns, so an encoder that buffered them would read
+    // a surface that had been overwritten. With this off and `frameIntervalP`
+    // at 1, every picture is coded on the submission that carries it.
+    config.rcParams.set_enableLookahead(0);
+    config.rcParams.lookaheadDepth = 0;
 
     let gop = match settings.keyframe_interval() {
         KeyframeInterval::Frames(frames) => frames.get(),
@@ -272,9 +282,12 @@ const fn full_range_flag(colour: ColourSpace) -> u32 {
 }
 
 /// Translates the rate control policy.
+///
+/// `params.version` is deliberately left as `nvEncGetEncodePresetConfigEx`
+/// returned it. `NV_ENC_RC_PARAMS` is separately versioned — the header has an
+/// `NV_ENC_RC_PARAMS_VER` macro of its own — and NVIDIA's samples and FFmpeg
+/// both leave the preset's value alone rather than assert one here.
 fn apply_rate_control(rate_control: RateControl, params: &mut sys::NV_ENC_RC_PARAMS) {
-    params.version = 0; // Set by the enclosing NV_ENC_CONFIG, not separately.
-
     match rate_control {
         RateControl::Bitrate {
             average,
@@ -352,7 +365,7 @@ pub(super) fn initialise_params(
     params.encodeConfig = encode_config;
     params.maxEncodeWidth = resolution.width;
     params.maxEncodeHeight = resolution.height;
-    params.tuningInfo = tuning_info(settings.preset());
+    params.tuningInfo = TUNING;
     params
 }
 

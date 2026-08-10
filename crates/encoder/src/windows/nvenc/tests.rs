@@ -5,22 +5,33 @@
 //! The tests that need NVIDIA hardware skip on a machine that has none, which
 //! is every hosted CI runner (`.github/workflows/ci.yml`). Skipping silently
 //! would make "the encoder tests passed" and "the encoder tests ran" the same
-//! sentence, so each skip says why, and setting `CLIPPED_REQUIRE_ENCODER=1`
-//! turns a skip into a failure — the same lever `clipped-capture` uses for
-//! capture, and the one used to produce the evidence on issue #15.
+//! sentence, so each skip says why through [`skipped`], and setting
+//! `CLIPPED_REQUIRE_ENCODER=1` turns it into a failure — the same lever
+//! `clipped-capture` uses for capture, and the one used to produce the evidence
+//! on issue #15.
+//!
+//! That lever covers a missing FFmpeg as well as a missing GPU, because the
+//! acceptance criterion of issue #15 is what `ffprobe` reports: a machine with
+//! an NVIDIA card and no FFmpeg would otherwise run every hardware test and
+//! check none of the criterion. The only skip it does not turn into a failure
+//! is a codec this GPU genuinely cannot encode — AV1 arrived with Ada — which
+//! is a fact about the hardware rather than about the checkout.
 //!
 //! # What "verified" means here
 //!
 //! A successful call is not a valid recording (AGENTS.md section 22). The
 //! hardware tests therefore parse what came out — Annex B for H.264 and HEVC,
-//! OBUs for AV1 — and, where `ffprobe` is on the path, hand the file to it and
-//! assert on what it reports. `ffprobe` is a development tool here and nothing
-//! else: nothing in the recorder shells out to FFmpeg.
+//! OBUs for AV1 — and hand the file to `ffprobe` to assert on what it reports.
+//! `ffprobe` and `ffmpeg` are development tools here and nothing else: nothing
+//! in the recorder shells out to FFmpeg. They are looked for beside the pinned
+//! FFmpeg that `scripts/fetch-ffmpeg.ps1` installs, and then on the path.
 
 use core::ffi::c_void;
 use core::time::Duration;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
@@ -39,8 +50,9 @@ use crate::config::{
 };
 use crate::error::{EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice, SourceFrame, SourceTexture, SurfaceKind};
+use crate::packet::PictureKind;
 
-use super::NvencEncoder;
+use super::{classify, picture_kind, sys, NvencEncoder};
 
 /// The picture size the hardware tests encode at. Large enough to be a real
 /// encode rather than a toy one, and small enough that three codecs' worth of
@@ -112,6 +124,95 @@ fn a_surface_format_this_backend_cannot_bind_is_refused_by_name() {
         error.to_string().contains("BGRA8 unorm"),
         "the message does not say what would work: {error}"
     );
+}
+
+#[test]
+fn the_statuses_a_caller_can_act_on_are_classified_rather_than_passed_through() {
+    // `EncodeErrorKind` is what a session loop will branch on, so these
+    // mappings carry the whole of "session limits and driver reset are
+    // recognised". They need a status code and nothing else, so there is no
+    // reason for them to be exercised only on a machine with an NVIDIA GPU.
+    let detail = || "EncodeAPI Internal Error".to_owned();
+    let kind = |status| classify(status, "nvEncEncodePicture", detail());
+
+    // A driver reset or a device that vanished: transient, because plugging the
+    // display back in or waiting out the reset makes it work again.
+    assert!(matches!(
+        kind(sys::NV_ENC_ERR_DEVICE_NOT_EXIST),
+        EncodeErrorKind::DeviceLost
+    ));
+    assert!(matches!(
+        kind(sys::NV_ENC_ERR_INVALID_DEVICE),
+        EncodeErrorKind::DeviceLost
+    ));
+    assert!(EncodeError::new(
+        crate::error::EncodeContext::new(EncoderKind::Nvenc, Codec::H264, TEST_SIZE),
+        kind(sys::NV_ENC_ERR_DEVICE_NOT_EXIST)
+    )
+    .is_transient());
+
+    assert!(matches!(
+        kind(sys::NV_ENC_ERR_OUT_OF_MEMORY),
+        EncodeErrorKind::OutOfMemory
+    ));
+    assert!(matches!(
+        kind(sys::NV_ENC_ERR_UNSUPPORTED_PARAM),
+        EncodeErrorKind::CodecUnsupported
+    ));
+    assert!(matches!(
+        kind(sys::NV_ENC_ERR_UNIMPLEMENTED),
+        EncodeErrorKind::CodecUnsupported
+    ));
+
+    // Anything else keeps NVIDIA's own vocabulary, because a status this build
+    // has never seen is exactly the one whose name and number matter.
+    let other = kind(sys::NV_ENC_ERR_GENERIC);
+    let EncodeErrorKind::Api {
+        operation,
+        status,
+        status_name,
+        detail: reported,
+    } = other
+    else {
+        panic!("an unclassified status should arrive as EncodeErrorKind::Api, not {other:?}");
+    };
+    assert_eq!(operation, "nvEncEncodePicture");
+    assert_eq!(status, sys::NV_ENC_ERR_GENERIC);
+    assert_eq!(status_name, "NV_ENC_ERR_GENERIC");
+    assert_eq!(reported, detail());
+}
+
+#[test]
+fn an_idr_is_a_cut_point_and_a_plain_intra_picture_is_not() {
+    // The replay buffer cuts clips at keyframes, and only an IDR is one: an
+    // intra picture that is not an IDR may still be predicted across, so a clip
+    // starting there decodes into rubbish (see `crate::packet`). Swapping these
+    // two arms would leave every other test in this file green.
+    assert_eq!(
+        picture_kind(sys::NV_ENC_PIC_TYPE_IDR),
+        PictureKind::Keyframe
+    );
+    assert_eq!(picture_kind(sys::NV_ENC_PIC_TYPE_I), PictureKind::Intra);
+    assert_eq!(
+        picture_kind(sys::NV_ENC_PIC_TYPE_INTRA_REFRESH),
+        PictureKind::Intra
+    );
+    assert_eq!(picture_kind(sys::NV_ENC_PIC_TYPE_P), PictureKind::Predicted);
+    assert_eq!(
+        picture_kind(sys::NV_ENC_PIC_TYPE_NONREF_P),
+        PictureKind::Predicted
+    );
+    assert_eq!(
+        picture_kind(sys::NV_ENC_PIC_TYPE_B),
+        PictureKind::Bidirectional
+    );
+    assert_eq!(
+        picture_kind(sys::NV_ENC_PIC_TYPE_UNKNOWN),
+        PictureKind::Unknown
+    );
+
+    assert!(PictureKind::Keyframe.is_keyframe());
+    assert!(!PictureKind::Intra.is_keyframe());
 }
 
 // ---------------------------------------------------------------------------
@@ -284,18 +385,148 @@ fn many_sessions_can_be_opened_and_closed_in_turn() {
 }
 
 #[test]
-fn the_encoded_colour_survives_a_round_trip() {
-    // The frames going in are red, green and blue; the frames coming out are
-    // decoded back to red, green and blue. This is the end-to-end check that
-    // the colour description written into the stream describes the conversion
-    // NVENC actually performed — tag one thing and encode another, and every
-    // recording comes out washed out or oversaturated with nothing in any log
-    // to say so (AGENTS.md section 22).
+fn a_full_session_table_is_reported_and_leaves_nothing_behind() {
+    // Two things at once. That the session limit — the failure a recorder has
+    // to survive on a machine already streaming — arrives as
+    // `SessionLimitReached` rather than as a status code nobody can act on. And
+    // that a *failed* open leaves nothing behind: the header requires
+    // `nvEncDestroyEncoder` after one, and if a failure leaked driver-side
+    // state then the second pass below would not get as far as the first.
+    let Some(gpu) = TestGpu::open() else {
+        return;
+    };
+
+    // Holds every session it opened until it returns, so the table is full at
+    // the point of the failure and empty again immediately afterwards. The
+    // bound keeps a card with a large limit from opening sessions all day.
+    let exhaust = || -> Option<(usize, EncodeError)> {
+        let mut open = Vec::new();
+        for _ in 0..32 {
+            match gpu.open_encoder(config_for(Codec::H264, TEST_SIZE)) {
+                Ok(encoder) => open.push(encoder),
+                Err(error) => return Some((open.len(), error)),
+            }
+        }
+        None
+    };
+
+    let Some((first, error)) = exhaust() else {
+        unsupported_here("this GPU allows at least 32 concurrent sessions, so nothing was refused");
+        return;
+    };
+    assert!(
+        matches!(error.kind(), EncodeErrorKind::SessionLimitReached),
+        "a full session table should be recognised rather than passed through: {error}"
+    );
+
+    let Some((second, _)) = exhaust() else {
+        panic!("the second pass opened more sessions than the first, which cannot happen");
+    };
+    assert!(
+        second >= first,
+        "the first pass opened {first} sessions and the second only {second}, so the failed open \
+         in between kept something the driver never got back"
+    );
+}
+
+#[test]
+fn a_texture_can_be_reused_the_moment_submit_returns() {
+    // The contract every backend owes a capture backend: when `submit` returns,
+    // the encoder holds nothing derived from the texture, so the frame pool may
+    // put that surface straight back into rotation (see `crate::frame`).
+    //
+    // So this test does what a frame pool does — one texture, overwritten as
+    // soon as `submit` comes back — and asserts the coded pictures are the
+    // colours that were submitted rather than the ones that replaced them.
+    //
+    // Honesty about what it demonstrates: it was also run against the previous
+    // shape of this backend, which kept the registration and the mapping alive
+    // until a later `next_packet`, and it passed there too — on driver 610.74
+    // the encode of a 1280x720 frame finishes before an `UpdateSubresource` from
+    // the CPU can land on it. So this is a regression guard for a contract taken
+    // from `nvEncodeAPI.h` ("the client should not access any input buffer while
+    // they are mapped by the encoder"), not a reproduction of corruption. A
+    // timing this driver happens to make safe is not a guarantee, which is why
+    // the code no longer relies on it.
     let Some(gpu) = TestGpu::open() else {
         return;
     };
     let Some(ffmpeg) = tool("ffmpeg") else {
-        eprintln!("skipped: ffmpeg is not on the path, so nothing can decode the result");
+        skipped(
+            "ffmpeg is not beside the pinned FFmpeg or on the path, so nothing can decode the \
+             result. Run scripts/fetch-ffmpeg.ps1.",
+        );
+        return;
+    };
+
+    let colours: [[u8; 3]; 3] = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+    let config = config_for(Codec::H264, TEST_SIZE)
+        .with_colour_space(ColourSpace::BT709_LIMITED)
+        // Every frame a keyframe, so each colour is coded from scratch and a
+        // wrong one cannot be blamed on prediction from its neighbour.
+        .with_keyframe_interval(KeyframeInterval::every(
+            Duration::from_millis(1),
+            FrameRate::FPS_60,
+        ));
+    let mut encoder = gpu.open_encoder(config).expect("NVENC encodes H.264");
+
+    let surface = gpu.solid_texture(colours[0]);
+    let mut stream = Vec::new();
+
+    for (index, colour) in colours.iter().enumerate() {
+        if index > 0 {
+            gpu.overwrite(&surface, *colour);
+        }
+        encoder
+            .submit(&source_frame(&surface, index))
+            .expect("the frame is submitted");
+
+        // Recycled immediately, before a single packet has been drained.
+        gpu.overwrite(&surface, [40, 40, 40]);
+
+        while let Some(packet) = encoder.next_packet().expect("a packet is produced") {
+            stream.extend_from_slice(packet.data());
+        }
+    }
+    encoder.finish().expect("the stream can be finished");
+    while let Some(packet) = encoder.next_packet().expect("a packet is produced") {
+        stream.extend_from_slice(packet.data());
+    }
+
+    let decoded = decode_middle_pixels(&ffmpeg, &stream, colours.len());
+    for (index, expected) in colours.iter().enumerate() {
+        assert_colour_close(
+            decoded[index],
+            *expected,
+            &format!(
+                "frame {index} came back as the pixels that replaced it, so the encoder was still \
+                 reading the texture after `submit` returned"
+            ),
+        );
+    }
+}
+
+#[test]
+fn the_encoded_colour_survives_a_round_trip() {
+    // The frames going in are red, green and blue; the frames coming out are
+    // decoded back to red, green and blue. This is the end-to-end check that
+    // the colour description written into the stream agrees with the conversion
+    // NVENC performed — tag one thing and encode another, and every recording
+    // comes out washed out or oversaturated with nothing in any log to say so
+    // (AGENTS.md section 22).
+    //
+    // What it does not check is *which* matrix was chosen. Tagging BT.601 was
+    // measured not to fail this test: NVENC follows the configured matrix for
+    // its own conversion, so the tag and the conversion moved together. Proving
+    // the choice needs a decode with the matrix forced, which is issue #147.
+    let Some(gpu) = TestGpu::open() else {
+        return;
+    };
+    let Some(ffmpeg) = tool("ffmpeg") else {
+        skipped(
+            "ffmpeg is not beside the pinned FFmpeg or on the path, so nothing can decode the \
+             result. Run scripts/fetch-ffmpeg.ps1.",
+        );
         return;
     };
 
@@ -325,12 +556,29 @@ fn the_encoded_colour_survives_a_round_trip() {
         stream.extend_from_slice(packet.data());
     }
 
-    let file = TempFile::new("clipped-colour", "h264");
-    std::fs::write(file.path(), &stream).expect("the stream can be written");
+    let decoded = decode_middle_pixels(&ffmpeg, &stream, colours.len());
+    for (index, expected) in colours.iter().enumerate() {
+        assert_colour_close(
+            decoded[index],
+            *expected,
+            &format!(
+                "frame {index} decoded as a different colour: the colour description in the \
+                 stream does not match the conversion the encoder performed"
+            ),
+        );
+    }
+}
 
-    // Decode to raw RGB and read the first pixel of each frame back.
+/// Decodes an H.264 stream with FFmpeg and returns the middle pixel of each
+/// frame as red, green, blue.
+///
+/// The middle of the picture, away from any edge the codec may have padded.
+fn decode_middle_pixels(ffmpeg: &Path, stream: &[u8], frames: usize) -> Vec<[u8; 3]> {
+    let file = TempFile::new("clipped-colour", "h264");
+    std::fs::write(file.path(), stream).expect("the stream can be written");
+
     let decoded = TempFile::new("clipped-colour", "rgb");
-    let status = Command::new(&ffmpeg)
+    let status = Command::new(ffmpeg)
         .args(["-y", "-v", "error", "-i"])
         .arg(file.path())
         .args(["-pix_fmt", "rgb24", "-f", "rawvideo"])
@@ -343,27 +591,30 @@ fn the_encoded_colour_survives_a_round_trip() {
     let frame_bytes = (TEST_SIZE.width as usize) * (TEST_SIZE.height as usize) * 3;
     assert_eq!(
         raw.len(),
-        frame_bytes * colours.len(),
+        frame_bytes * frames,
         "the decoder did not produce one frame per submitted frame"
     );
 
-    for (index, expected) in colours.iter().enumerate() {
-        // The middle of the picture, away from any edge the codec may have
-        // padded.
-        let pixel = index * frame_bytes
-            + ((TEST_SIZE.height as usize / 2) * TEST_SIZE.width as usize
-                + TEST_SIZE.width as usize / 2)
-                * 3;
-        let got = [raw[pixel], raw[pixel + 1], raw[pixel + 2]];
+    (0..frames)
+        .map(|index| {
+            let pixel = index * frame_bytes
+                + ((TEST_SIZE.height as usize / 2) * TEST_SIZE.width as usize
+                    + TEST_SIZE.width as usize / 2)
+                    * 3;
+            [raw[pixel], raw[pixel + 1], raw[pixel + 2]]
+        })
+        .collect()
+}
 
-        for channel in 0..3 {
-            let difference = i32::from(got[channel]) - i32::from(expected[channel]);
-            assert!(
-                difference.abs() <= 12,
-                "frame {index} decoded as {got:?} rather than {expected:?}: the colour \
-                 description in the stream does not match the conversion the encoder performed"
-            );
-        }
+/// Fails unless a decoded colour is the one that was encoded, allowing for the
+/// rounding a trip through 4:2:0 costs.
+fn assert_colour_close(got: [u8; 3], expected: [u8; 3], because: &str) {
+    for channel in 0..3 {
+        let difference = i32::from(got[channel]) - i32::from(expected[channel]);
+        assert!(
+            difference.abs() <= 12,
+            "decoded {got:?} rather than {expected:?}: {because}"
+        );
     }
 }
 
@@ -385,7 +636,7 @@ fn encode_and_verify(codec: Codec) {
             // Not every NVIDIA GPU encodes every codec: AV1 arrived with Ada.
             // The report `recorder capabilities` prints says which, and this is
             // the same answer arriving through the encoder.
-            eprintln!("skipped: this GPU does not encode {codec}");
+            unsupported_here(&format!("this GPU does not encode {codec}"));
             return;
         }
         Err(error) => panic!("{error}"),
@@ -447,11 +698,11 @@ fn encode_and_verify(codec: Codec) {
         packets, TEST_FRAMES,
         "every submitted frame should produce exactly one packet"
     );
+    let expected_keyframes: Vec<Duration> = (0..TEST_FRAMES).step_by(60).map(frame_time).collect();
     assert_eq!(
-        keyframes,
-        vec![frame_time(0), frame_time(60)],
-        "a one-second keyframe interval over {TEST_FRAMES} frames at 60 fps puts a keyframe at \
-         the first frame and at the sixtieth, and nowhere else"
+        keyframes, expected_keyframes,
+        "a one-second keyframe interval at 60 fps puts a keyframe every sixtieth frame over the \
+         {TEST_FRAMES} submitted, and nowhere else"
     );
     check_structure(codec, &stream);
 
@@ -556,9 +807,12 @@ fn annex_b_units(stream: &[u8]) -> Vec<&[u8]> {
 /// on the path.
 fn probe(codec: Codec, path: &Path) {
     let Some(ffprobe) = tool("ffprobe") else {
-        eprintln!(
-            "skipped the ffprobe assertions: ffprobe is not on the path. The stream was still \
-             parsed in-process."
+        // The in-process parse checks a NAL type; it does not check that
+        // anything can decode the stream, which is what issue #15 asks for. So
+        // this is a skip of the acceptance criterion itself, not of an extra.
+        skipped(
+            "ffprobe is not beside the pinned FFmpeg or on the path, so nothing checked that the \
+             stream is decodable. Run scripts/fetch-ffmpeg.ps1.",
         );
         return;
     };
@@ -712,15 +966,74 @@ fn drain(encoder: &mut NvencEncoder) {
     {}
 }
 
-/// Looks for a development tool on the path.
+/// Looks for a development tool, beside the pinned FFmpeg first and then on the
+/// path.
+///
+/// `FFMPEG_DIR` is set for every process Cargo runs by `.cargo/config.toml`, so
+/// a checkout that has run `scripts/fetch-ffmpeg.ps1` — which is every checkout
+/// that can build `clipped-muxer` — has `ffprobe.exe` and `ffmpeg.exe` here
+/// without anybody adding them to `PATH`.
 fn tool(name: &str) -> Option<PathBuf> {
-    let extension = if cfg!(windows) { ".exe" } else { "" };
+    let file = format!("{name}{}", if cfg!(windows) { ".exe" } else { "" });
+
+    let bundled = std::env::var_os("FFMPEG_DIR")
+        .map(|directory| PathBuf::from(directory).join("bin").join(&file))
+        .filter(|candidate| candidate.is_file());
+    if bundled.is_some() {
+        return bundled;
+    }
+
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
-            .map(|directory| directory.join(format!("{name}{extension}")))
+            .map(|directory| directory.join(&file))
             .find(|candidate| candidate.is_file())
     })
 }
+
+/// Reports that a test could not run here, and returns whether the caller
+/// should give up.
+///
+/// Panics instead of skipping when `CLIPPED_REQUIRE_ENCODER` is set, so a
+/// machine that is meant to exercise the encoder cannot quietly stop doing it.
+/// Writes through `std::io::stderr()` rather than `eprintln!` because libtest
+/// captures the macro: a skip printed with `eprintln!` is invisible in a
+/// passing run, which is exactly the failure mode this guards against.
+fn skipped(reason: &str) -> bool {
+    assert!(
+        !env_is_set(REQUIRE_ENCODER),
+        "{REQUIRE_ENCODER} is set, so this must not be skipped: {reason}"
+    );
+    let _ = writeln!(std::io::stderr(), "SKIPPED (encoder): {reason}");
+    true
+}
+
+/// Reports a codec this GPU cannot encode.
+///
+/// Not a failure even under [`REQUIRE_ENCODER`]: which codecs a card offers is
+/// a property of the silicon — AV1 encoding arrived with Ada — and the same
+/// answer reaches a user through `recorder capabilities`. Everything the
+/// machine *can* encode is still checked.
+fn unsupported_here(reason: &str) -> bool {
+    let _ = writeln!(std::io::stderr(), "SKIPPED (encoder, hardware): {reason}");
+    true
+}
+
+/// The environment variable that turns "this machine could not run the test"
+/// from a pass into a failure.
+const REQUIRE_ENCODER: &str = "CLIPPED_REQUIRE_ENCODER";
+
+fn env_is_set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+/// Held for as long as a test is using encoding sessions.
+///
+/// The number of concurrent NVENC sessions is a property of the *machine*, not
+/// of a process, so two tests encoding at once are competing for it — and one of
+/// them fills it deliberately. libtest runs tests in parallel by default, so
+/// without this the suite would be a race whose outcome depends on which test
+/// reached the driver first (AGENTS.md section 25).
+static SESSIONS: Mutex<()> = Mutex::new(());
 
 /// A Direct3D 11 device on the NVIDIA adapter, and the textures the tests feed
 /// through it.
@@ -730,8 +1043,12 @@ fn tool(name: &str) -> Option<PathBuf> {
 /// Owns the device and every texture it creates; both are reference-counted COM
 /// interfaces released when this is dropped, which happens after the encoder
 /// under test — the encoder is created from it and dropped first in every test.
+///
+/// It also holds [`SESSIONS`] for its whole life, which is what serialises the
+/// tests that need the hardware.
 struct TestGpu {
     device: ID3D11Device,
+    _sessions: MutexGuard<'static, ()>,
 }
 
 impl TestGpu {
@@ -745,18 +1062,22 @@ impl TestGpu {
         match Self::try_open() {
             Ok(gpu) => Some(gpu),
             Err(reason) => {
-                assert!(
-                    std::env::var_os("CLIPPED_REQUIRE_ENCODER").is_none(),
-                    "CLIPPED_REQUIRE_ENCODER is set and the encoder could not be exercised: \
-                     {reason}"
-                );
-                eprintln!("skipped: {reason}");
+                skipped(&reason);
                 None
             }
         }
     }
 
     fn try_open() -> Result<Self, String> {
+        // A test that panicked while encoding poisoned the lock; the hardware
+        // is no worse for it, and refusing to run every later test because an
+        // earlier one failed would hide the rest of the suite behind the first
+        // failure.
+        let sessions = SESSIONS.lock().unwrap_or_else(|held| held.into_inner());
+        Self::try_open_device(sessions)
+    }
+
+    fn try_open_device(sessions: MutexGuard<'static, ()>) -> Result<Self, String> {
         let adapter = nvidia_adapter()?;
         let mut device: Option<ID3D11Device> = None;
 
@@ -781,7 +1102,10 @@ impl TestGpu {
         .map_err(|error| format!("no Direct3D 11 device on the NVIDIA adapter: {error}"))?;
 
         device
-            .map(|device| Self { device })
+            .map(|device| Self {
+                device,
+                _sessions: sessions,
+            })
             .ok_or_else(|| "D3D11CreateDevice reported success without a device".to_owned())
     }
 
@@ -818,18 +1142,37 @@ impl TestGpu {
 
     /// A texture of one solid colour, given as red, green, blue.
     fn solid_texture(&self, colour: [u8; 3]) -> ID3D11Texture2D {
-        let width = TEST_SIZE.width as usize;
-        let height = TEST_SIZE.height as usize;
-        let mut pixels = vec![0u8; width * height * 4];
+        self.texture_from(&solid_pixels(colour))
+    }
 
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[0] = colour[2];
-            pixel[1] = colour[1];
-            pixel[2] = colour[0];
-            pixel[3] = 255;
+    /// Overwrites a texture in place, the way a capture frame pool overwrites a
+    /// recycled surface.
+    fn overwrite(&self, texture: &ID3D11Texture2D, colour: [u8; 3]) {
+        let pixels = solid_pixels(colour);
+
+        // SAFETY: the device is live and the immediate context it hands back is
+        // released when the local goes out of scope.
+        let context = unsafe { self.device.GetImmediateContext() }
+            .expect("a device has an immediate context");
+
+        // SAFETY: `texture` was created by this device with `MipLevels: 1` and
+        // `ArraySize: 1`, so subresource 0 is the whole of it; the box is null,
+        // meaning the whole resource; and `pixels` holds `Width * Height * 4`
+        // bytes, which is what the row pitch declares.
+        unsafe {
+            context.UpdateSubresource(
+                texture,
+                0,
+                None,
+                pixels.as_ptr().cast::<c_void>(),
+                TEST_SIZE.width * 4,
+                0,
+            );
+            // Make the write reach the GPU now rather than whenever the driver
+            // next flushes: the point of the test is that the encoder has
+            // finished with the surface before this happens.
+            context.Flush();
         }
-
-        self.texture_from(&pixels)
     }
 
     /// Uploads pixels into a texture NVENC can bind.
@@ -867,6 +1210,19 @@ impl TestGpu {
 
         texture.expect("CreateTexture2D reported success without a texture")
     }
+}
+
+/// One solid colour, given as red, green, blue, as the BGRA bytes
+/// `DXGI_FORMAT_B8G8R8A8_UNORM` stores.
+fn solid_pixels(colour: [u8; 3]) -> Vec<u8> {
+    let mut pixels = vec![0u8; (TEST_SIZE.width as usize) * (TEST_SIZE.height as usize) * 4];
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[0] = colour[2];
+        pixel[1] = colour[1];
+        pixel[2] = colour[0];
+        pixel[3] = 255;
+    }
+    pixels
 }
 
 /// The first NVIDIA adapter in the machine.

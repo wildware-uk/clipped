@@ -198,3 +198,8 @@ MPL-2.0-compatible. MIT, Apache-2.0, BSD and ISC licensed crates are fine, as
 are MPL-2.0 ones; GPL-only dependencies are not, and a dependency with unclear
 licensing should not be added at all. See
 [CONTRIBUTING.md](CONTRIBUTING.md#licensing-and-dependencies).
+
+Third-party code that lives in this repository — currently the NVENC bindings
+generated from NVIDIA's MIT-licensed `nvEncodeAPI.h` — is listed with the
+notices its licence requires in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

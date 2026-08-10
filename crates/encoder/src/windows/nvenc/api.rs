@@ -115,6 +115,11 @@ pub(super) enum LoadFailure {
         /// The newest interface the driver offers, as `major.minor`.
         installed: (u32, u32),
     },
+    /// The driver would not say which interface version it supports.
+    VersionQuery {
+        /// The status the runtime returned.
+        status: sys::NVENCSTATUS,
+    },
     /// Creating the function table failed.
     CreateInstance {
         /// The status the runtime returned.
@@ -133,6 +138,11 @@ impl fmt::Display for LoadFailure {
                 formatter,
                 "the driver offers interface {}.{}",
                 installed.0, installed.1
+            ),
+            Self::VersionQuery { status } => write!(
+                formatter,
+                "NvEncodeAPIGetMaxSupportedVersion failed with {} ({status})",
+                status_name(*status)
             ),
             Self::CreateInstance { status } => write!(
                 formatter,
@@ -281,7 +291,7 @@ unsafe fn max_supported_version(module: HMODULE) -> Result<(u32, u32), LoadFailu
     // all the entry point requires.
     let status = unsafe { function(&raw mut version) };
     if status != sys::NV_ENC_SUCCESS {
-        return Err(LoadFailure::CreateInstance { status });
+        return Err(LoadFailure::VersionQuery { status });
     }
 
     // The driver packs the version as `(major << 4) | minor`.
@@ -409,6 +419,43 @@ mod tests {
         assert_eq!(PIC_PARAMS_VER, 0xF006_000C);
         assert_eq!(LOCK_BITSTREAM_VER, 0x7002_000C);
         assert_eq!(REGISTER_RESOURCE_VER, 0x7004_000C);
+    }
+
+    #[test]
+    fn a_load_failure_names_the_entry_point_that_failed() {
+        // The reader of a bug report goes looking for the function named in it.
+        // Naming `NvEncodeAPICreateInstance` for a version query that never got
+        // as far as creating an instance sends them to the wrong place
+        // (AGENTS.md section 15).
+        assert!(
+            LoadFailure::VersionQuery {
+                status: sys::NV_ENC_ERR_INVALID_VERSION,
+            }
+            .to_string()
+            .starts_with("NvEncodeAPIGetMaxSupportedVersion failed"),
+            "{}",
+            LoadFailure::VersionQuery {
+                status: sys::NV_ENC_ERR_INVALID_VERSION
+            }
+        );
+        assert!(
+            LoadFailure::CreateInstance {
+                status: sys::NV_ENC_ERR_INVALID_VERSION,
+            }
+            .to_string()
+            .starts_with("NvEncodeAPICreateInstance failed"),
+            "{}",
+            LoadFailure::CreateInstance {
+                status: sys::NV_ENC_ERR_INVALID_VERSION
+            }
+        );
+        assert_eq!(
+            LoadFailure::MissingEntryPoint {
+                name: "NvEncodeAPICreateInstance",
+            }
+            .to_string(),
+            "the library does not export NvEncodeAPICreateInstance"
+        );
     }
 
     #[test]

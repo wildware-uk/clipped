@@ -351,6 +351,12 @@ mod tests {
         // mode rather than against one, because the context is what makes a bug
         // report reproducible and a variant that quietly dropped it would look
         // fine in isolation.
+        //
+        // Every variant of `EncodeErrorKind` is in this list, and a new one
+        // belongs here too. The compiler cannot ask for that — the enum is
+        // `#[non_exhaustive]` and this is a list of values, not a match — so
+        // the second assertion below is what earns the list its keep: it fails
+        // on a variant that names the context and then says nothing.
         let kinds = [
             EncodeErrorKind::RuntimeUnavailable {
                 library: "nvEncodeAPI64.dll",
@@ -365,9 +371,25 @@ mod tests {
             EncodeErrorKind::ResolutionUnsupported {
                 maximum: Resolution::new(4096, 4096),
             },
+            EncodeErrorKind::SurfaceFormatUnsupported {
+                offered: SurfaceFormat::Rgb10A2Unorm,
+                supported: &[SurfaceFormat::Bgra8Unorm],
+            },
+            EncodeErrorKind::SurfaceKindUnsupported {
+                offered: SurfaceKind::D3d11Texture2D,
+                supported: &[SurfaceKind::D3d11Texture2D],
+            },
             EncodeErrorKind::SessionLimitReached,
             EncodeErrorKind::DeviceLost,
             EncodeErrorKind::OutOfMemory,
+            EncodeErrorKind::Configuration {
+                detail: "1919x1080 has an odd dimension".to_owned(),
+            },
+            EncodeErrorKind::TimestampWentBackwards {
+                previous_nanos: 2_000_000_000,
+                submitted_nanos: 1_000_000_000,
+            },
+            EncodeErrorKind::OutputBuffersExhausted { capacity: 8 },
             EncodeErrorKind::NotRunning,
             EncodeErrorKind::Api {
                 operation: "nvEncEncodePicture",

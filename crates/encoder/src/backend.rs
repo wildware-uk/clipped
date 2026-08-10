@@ -143,7 +143,16 @@ pub trait VideoEncoder: fmt::Debug + Send {
     /// Hands one frame to the encoder.
     ///
     /// The texture is read during this call and never afterwards, so the caller
-    /// may release the frame as soon as it returns.
+    /// may release or recycle the frame as soon as it returns, by any path
+    /// including a failure.
+    ///
+    /// That is an obligation on the implementation, not a description of one.
+    /// A hardware encoder typically has to hand the driver something derived
+    /// from the texture — NVENC registers and maps it — and whatever that is
+    /// must be released before this returns, even where it means waiting for
+    /// the picture to be coded. The alternative is an encoder reading a frame
+    /// pool slot the capture backend has already reused, which corrupts a
+    /// recording with nothing in any log to say so.
     ///
     /// # Errors
     ///
