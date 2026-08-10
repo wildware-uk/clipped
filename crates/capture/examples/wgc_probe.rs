@@ -75,6 +75,7 @@ use clipped_capture::{
     CaptureMethodSetting, CaptureTarget, CaptureTimestamp, FrameSize, TargetHandle, TargetKind,
     TargetProperties,
 };
+use clipped_windows::enumerate_monitors;
 
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -101,8 +102,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetSystemMetrics, IsIconic, IsWindowVisible, PeekMessageW, PostQuitMessage,
     RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
     CS_VREDRAW, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SW_MINIMIZE, SW_RESTORE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_VISIBLE,
 };
 
 /// How the test window is presented.
@@ -1002,12 +1003,26 @@ fn render_test_window(
 
     let (style, x, y, width, height) = window_geometry(options);
 
+    // Every mode except `Fullscreen` is created always-on-top, on a
+    // non-primary monitor when one exists (see `probe_window_origin` and
+    // `window_geometry`). Both exist for the same reason: "Minimising the
+    // window invalidates a run", above, and `WindowWatch` mean this window
+    // must never be minimised, and sitting on top of someone's work on the
+    // primary monitor is exactly what tempts a person to minimise it.
+    // `Fullscreen` already covers the whole display, so neither applies to it,
+    // and it keeps `Default::default()` deliberately.
+    let extended_style = if options.mode == Mode::Fullscreen {
+        Default::default()
+    } else {
+        WS_EX_TOPMOST
+    };
+
     // SAFETY: the class was registered immediately above, both strings are
     // static wide literals, and no parent, menu or creation parameter is
     // passed.
     let window = unsafe {
         CreateWindowExW(
-            Default::default(),
+            extended_style,
             class_name,
             w!("Clipped WGC probe"),
             style,
@@ -1206,6 +1221,69 @@ fn run_lifecycle_stage(window: HWND, elapsed: Duration, stage: &mut usize) -> bo
     false
 }
 
+/// Where the test window goes, for every mode except `Fullscreen`.
+///
+/// Always-on-top (set by the `CreateWindowExW` call in `render_test_window`)
+/// and a non-primary monitor exist for the same reason: whoever is running
+/// this probe has been interrupted by it before, because it used to appear
+/// over their work on the primary monitor, and minimising it to get their
+/// desktop back is exactly what contaminates the run — see "Minimising the
+/// window invalidates a run" at the top of this file and `WindowWatch`, which
+/// is what detects that after the fact. Occlusion does not have that problem
+/// — Windows Graphics Capture keeps delivering frames for a covered window,
+/// which is the whole reason SPEC.md section 8 prefers this method — so
+/// always-on-top is enough to remove the temptation to move the window at
+/// all, and a second monitor, when one exists, means there is nothing of the
+/// maintainer's to be over in the first place.
+///
+/// The first non-primary monitor is chosen, falling back to the primary one
+/// if that is all there is; the origin returned is a small inset inside its
+/// bounds. If enumeration itself fails, this falls back to the historical
+/// `(100, 100)` — a probe that refuses to start because it could not list
+/// monitors is worse than one placed slightly less conveniently — and either
+/// way the choice is printed so whoever reads the measurement knows where the
+/// window was.
+fn probe_window_origin() -> (i32, i32) {
+    const FALLBACK: (i32, i32) = (100, 100);
+    const INSET: i32 = 100;
+
+    let monitors = match enumerate_monitors() {
+        Ok(monitors) => monitors,
+        Err(error) => {
+            eprintln!(
+                "[WARN] could not enumerate monitors ({error}); placing the probe window at \
+                 (100, 100) instead"
+            );
+            return FALLBACK;
+        }
+    };
+
+    let Some(chosen) = monitors
+        .iter()
+        .find(|monitor| !monitor.is_primary())
+        .or_else(|| monitors.first())
+    else {
+        eprintln!(
+            "[WARN] EnumDisplayMonitors reported no displays; placing the probe window at \
+             (100, 100)"
+        );
+        return FALLBACK;
+    };
+
+    let bounds = chosen.bounds();
+    eprintln!(
+        "[INFO] placing the probe window on {} ({}){}",
+        chosen.device_name(),
+        bounds,
+        if chosen.is_primary() {
+            " - the only display found, so it is the primary one"
+        } else {
+            ""
+        }
+    );
+    (bounds.left() + INSET, bounds.top() + INSET)
+}
+
 /// Where and how big the test window is, for each mode.
 fn window_geometry(
     options: Options,
@@ -1232,15 +1310,19 @@ fn window_geometry(
             };
             // SAFETY: `rect` is a live local the call adjusts in place.
             let _ = unsafe { AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false) };
+            let (x, y) = probe_window_origin();
             (
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                100,
-                100,
+                x,
+                y,
                 rect.right - rect.left,
                 rect.bottom - rect.top,
             )
         }
-        Mode::Borderless => (WS_POPUP | WS_VISIBLE, 100, 100, width, height),
+        Mode::Borderless => {
+            let (x, y) = probe_window_origin();
+            (WS_POPUP | WS_VISIBLE, x, y, width, height)
+        }
         Mode::Fullscreen => {
             // SAFETY: reading system metrics takes no pointers.
             let (screen_width, screen_height) =

@@ -890,7 +890,7 @@ impl Drop for Running {
 /// It is not once per composed frame, and nothing here may be used as though it
 /// were. When the pool has no free buffer the compositor does not compose and
 /// raises no event, so the arrival count says how many frames were collected,
-/// never how many were produced. `Running::frames_missed_before` is where the
+/// never how many were produced. `FrameGaps::missed_before` is where the
 /// frames nobody collected are accounted for, and it uses the source's
 /// timestamps for exactly this reason.
 #[derive(Debug, Default)]

@@ -183,6 +183,9 @@ name = "clipped-capture"
 version = "0.1.0"
 dependencies = [
  "clipped-logging",
+ "clipped-windows",
+ "tracing",
+ "windows",
 ]
 
 [[package]]

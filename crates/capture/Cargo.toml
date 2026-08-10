@@ -67,6 +67,14 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# `examples/wgc_probe.rs` places its test window on a non-primary monitor when
+# one exists, so the window is not sitting over whoever is at the keyboard. It
+# reuses `enumerate_monitors` rather than calling `EnumDisplayMonitors` a second
+# time in this crate. `clipped-windows` is layer 0 and `clipped-capture` is
+# layer 1, so an example-only, dev-only dependency on it does not bend the
+# layering `tests/integration/tests/workspace_layering.rs` enforces, and it
+# forces nothing on a consumer of the library.
+clipped-windows.workspace = true
 
 [lints]
 workspace = true
