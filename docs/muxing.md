@@ -103,7 +103,14 @@ from its predecessor.
 **The zero point.** The first packet written establishes the file's origin, and
 every timestamp is stored relative to it. That is what lets a caller pass raw
 performance-counter readings — nanoseconds since the machine booted — without
-the recording starting several years in.
+the recording starting several years in. A caller that has already rebased its
+timestamps onto the recording's own epoch — `clipped_capture::MediaTime`, which
+is what [av-sync.md](av-sync.md) says every source is converted to — passes those
+instead, and the writer's origin then coincides with the recording's.
+
+Which clock those nanoseconds count on, how each source is put on it, and what
+is done when two sources disagree, is [av-sync.md](av-sync.md). The muxer takes
+that as given: all it can do with two timestamps is subtract them.
 
 **Monotonicity is enforced on decode timestamps, per track.** A container
 requires that a track's decode timestamps increase; it does not require that its

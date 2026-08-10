@@ -558,6 +558,10 @@ enum Ready {
     Packet {
         start: usize,
         timestamp: AudioTimestamp,
+        /// Where the endpoint said the first frame handed over belongs, which
+        /// is what [`CapturedAudio::device_timestamp`] reports and what makes
+        /// the track's drift against the reference clock measurable.
+        device: AudioTimestamp,
     },
 }
 
@@ -585,6 +589,9 @@ pub(super) struct EndpointCapture {
     packet_offset: usize,
     /// Whether `packet` holds something to hand over.
     packet_pending: bool,
+    /// The position the endpoint reported for the first frame of `packet` that
+    /// survives `packet_offset`. Meaningful only while `packet_pending`.
+    packet_device: AudioTimestamp,
     /// Zeroes, long enough for one instalment of silence.
     silence: Vec<f32>,
     /// When to look for the endpoint again, when there is no stream.
@@ -680,6 +687,7 @@ impl EndpointCapture {
             packet: Vec::new(),
             packet_offset: 0,
             packet_pending: false,
+            packet_device: opened,
             silence: Vec::new(),
             retry_at: None,
             awaiting_change: false,
@@ -769,12 +777,19 @@ impl EndpointCapture {
                 timestamp,
                 SampleOrigin::SynthesisedSilence,
             )),
-            Ready::Packet { start, timestamp } => Capture::Samples(CapturedAudio::new(
-                &self.packet[start..],
-                self.format,
+            Ready::Packet {
+                start,
                 timestamp,
-                SampleOrigin::Endpoint,
-            )),
+                device,
+            } => Capture::Samples(
+                CapturedAudio::new(
+                    &self.packet[start..],
+                    self.format,
+                    timestamp,
+                    SampleOrigin::Endpoint,
+                )
+                .with_device_timestamp(device),
+            ),
         })
     }
 
@@ -824,7 +839,11 @@ impl EndpointCapture {
                 let start = self.packet_offset * channels;
                 let frames = ((self.packet.len() - start) / channels) as u64;
                 let timestamp = self.timeline.emit(frames);
-                return Ok(Ready::Packet { start, timestamp });
+                return Ok(Ready::Packet {
+                    start,
+                    timestamp,
+                    device: self.packet_device,
+                });
             }
 
             self.service_endpoint();
@@ -886,6 +905,7 @@ impl EndpointCapture {
             Continuity::Continue => {
                 self.packet_offset = 0;
                 self.packet_pending = true;
+                self.packet_device = arrived;
             }
             Continuity::SilenceFirst(silence) => {
                 tracing::debug!(
@@ -896,6 +916,7 @@ impl EndpointCapture {
                 self.timeline.owe_silence(silence);
                 self.packet_offset = 0;
                 self.packet_pending = true;
+                self.packet_device = arrived;
             }
             Continuity::Trim(overlap) => {
                 tracing::debug!(
@@ -904,6 +925,16 @@ impl EndpointCapture {
                 );
                 self.packet_offset = overlap as usize;
                 self.packet_pending = true;
+                // The endpoint's position is for the frame at the front of the
+                // packet, and that frame is being discarded, so the position
+                // reported to the caller has to advance by the frames dropped.
+                // Reporting the untrimmed one would show a fixed offset that is
+                // an artefact of this crate rather than a property of the clock.
+                self.packet_device = AudioTimestamp::from_nanos(
+                    arrived
+                        .as_nanos()
+                        .saturating_add(self.format.frames_to_nanos(overlap)),
+                );
             }
             Continuity::Drop => {
                 tracing::debug!(

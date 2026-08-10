@@ -62,7 +62,11 @@
 //! `now()`. A buffer's timestamp is the position WASAPI attached to it, on the
 //! Windows performance counter — the same clock a captured video frame is
 //! stamped on — so the two can be compared without a conversion nobody can
-//! check.
+//! check. Every buffer carries two accounts of the same moment:
+//! [`CapturedAudio::timestamp`] is where the track puts it, counting samples,
+//! and [`CapturedAudio::device_timestamp`] is where the endpoint said it
+//! belongs. The gap between them is the audio/video offset, and
+//! `docs/av-sync.md` is what measures it.
 //!
 //! **A recording outlives its audio device.** The default endpoint changing,
 //! being unplugged, or not existing at all does not end a capture; the track

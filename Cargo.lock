@@ -288,6 +288,7 @@ name = "clipped-video-pattern"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipped-audio",
  "clipped-capture",
  "clipped-windows",
  "windows",

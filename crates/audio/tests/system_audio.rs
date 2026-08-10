@@ -252,6 +252,117 @@ fn synthesised_silence_contains_no_samples_at_all() {
     );
 }
 
+#[test]
+fn every_endpoint_buffer_carries_the_position_the_device_gave_it() {
+    // The measurement A/V synchronisation is built on
+    // (`docs/av-sync.md`, issue #22). A buffer's `timestamp` counts samples and
+    // a buffer's `device_timestamp` is where the endpoint said those samples
+    // belong; the gap between the two is how far the audio track has slid
+    // against the performance counter, which is the clock video frames are
+    // stamped on. If the second one were missing, or were the same number as
+    // the first, that gap would be unobservable and drift could only be found
+    // by watching a finished recording.
+    let mut capture = match SystemAudioCapture::open() {
+        Ok(capture) => capture,
+        Err(error) => {
+            skipped(&format!(
+                "system audio capture could not be opened: {error}"
+            ));
+            return;
+        }
+    };
+
+    // The player renders zeroes until it is asked for a tone, which is enough
+    // to keep the audio engine running: loopback delivers nothing at all while
+    // the endpoint is idle, and this test needs endpoint buffers to look at.
+    let mut player = match TonePlayer::start(TONE, AMPLITUDE) {
+        Ok(player) => player,
+        Err(reason) => {
+            skipped(&reason);
+            return;
+        }
+    };
+
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut from_endpoint = 0usize;
+    let mut synthesised = 0usize;
+    let mut widest_offset = 0i64;
+
+    while Instant::now() < until {
+        match capture
+            .read(Duration::from_millis(200))
+            .expect("a healthy capture does not fail")
+        {
+            Capture::Samples(samples) => match samples.origin() {
+                SampleOrigin::Endpoint => {
+                    let device = samples.device_timestamp().expect(
+                        "a buffer the endpoint delivered carries the position the endpoint \
+                         reported for it",
+                    );
+                    let offset = samples.timestamp().as_nanos() as i64 - device.as_nanos() as i64;
+                    if offset.abs() > widest_offset.abs() {
+                        widest_offset = offset;
+                    }
+                    from_endpoint += 1;
+                }
+                SampleOrigin::SynthesisedSilence => {
+                    assert_eq!(
+                        samples.device_timestamp(),
+                        None,
+                        "silence this crate invented covers a period the device never \
+                         described, so it has no position of the device's to report"
+                    );
+                    synthesised += 1;
+                }
+            },
+            Capture::Idle => {}
+            Capture::FormatChanged(_) => {
+                skipped("the default output device changed during the test");
+                player.stop();
+                return;
+            }
+        }
+    }
+
+    player.stop();
+
+    assert!(
+        from_endpoint > 0,
+        "two seconds with a render stream open should produce endpoint buffers, and \
+         produced none"
+    );
+
+    // The two accounts have to be genuinely independent. A `device_timestamp`
+    // that was quietly the track's own timestamp would satisfy everything else
+    // here and would make drift permanently unobservable, so the test insists
+    // the two differ at least once: the track advances in whole frames while
+    // the endpoint's reported position wanders by tens of microseconds, and
+    // over hundreds of buffers they cannot agree exactly every time.
+    assert_ne!(
+        widest_offset, 0,
+        "the endpoint's position and the track's never differed by a single \
+         nanosecond over {from_endpoint} buffers, which means they are the same number \
+         and no drift could ever be seen"
+    );
+
+    // The timeline holds the track to within its 20 ms deadband of the
+    // device's own positions. Anything wider means the two accounts of the same
+    // moment have come apart, which is the failure this pair exists to detect.
+    assert!(
+        widest_offset.abs() < 20_000_000,
+        "the track drifted {:.3} ms from the endpoint's own positions in two seconds, \
+         which is outside the timeline's deadband",
+        widest_offset as f64 / 1e6
+    );
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "{from_endpoint} endpoint buffers ({synthesised} synthesised); the widest gap \
+         between the track and the device's own position was {:+.3} ms",
+        widest_offset as f64 / 1e6
+    );
+}
+
 /// Reads for `duration`, returning the interleaved samples.
 fn record(capture: &mut SystemAudioCapture, duration: Duration) -> Vec<f32> {
     let until = Instant::now() + duration;

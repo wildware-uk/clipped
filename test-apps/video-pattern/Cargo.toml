@@ -27,6 +27,16 @@ path = "src/main.rs"
 name = "wgc_video_pattern"
 path = "../../tests/capture/wgc_video_pattern.rs"
 
+# The audio/video synchronisation measurement, which captures this application
+# and the system audio endpoint at the same time and reports how far they drift
+# apart (issue #22, docs/av-sync.md). It belongs to this package for the same
+# reason the test above does — it starts this binary — and it is the only place
+# in the workspace where `clipped-capture` and `clipped-audio` are held at once,
+# which is what measuring the offset between them requires.
+[[test]]
+name = "av_sync"
+path = "../../tests/capture/av_sync.rs"
+
 [dependencies]
 # The command-line parser every executable in this workspace uses, so that
 # `--help` looks the same wherever a contributor meets it (see the root
@@ -66,11 +76,26 @@ windows = { workspace = true, features = [
 
 # tests/capture/wgc_video_pattern.rs captures this application through the real
 # Windows Graphics Capture backend and reads the pattern back out of the
-# captured textures. Both are test-only: the application itself never captures
-# anything, and nothing in the product depends on this package
+# captured textures, and tests/capture/av_sync.rs additionally records the
+# system audio endpoint alongside it to measure how far the two clocks drift
+# apart. All of it is test-only: the application itself never captures anything,
+# and nothing in the product depends on this package
 # (tests/integration/tests/workspace_layering.rs).
 [target.'cfg(windows)'.dev-dependencies]
 clipped-capture.workspace = true
+clipped-audio.workspace = true
+
+# `av_sync.rs` opens a WASAPI render stream of its own and hands the audio engine
+# buffers marked silent, so that the endpoint's clock keeps running for the
+# length of the run — loopback capture delivers nothing at all while the endpoint
+# is idle, and a period the device never described has no position to measure
+# against. That needs two namespaces the application itself does not:
+#
+# - Win32_Media_Audio   IAudioClient, IAudioRenderClient, the endpoint enumerator
+# - Win32_System_Com    CoCreateInstance and the multi-threaded apartment
+#
+# Dual MIT/Apache-2.0.
+windows = { workspace = true, features = ["Win32_Media_Audio", "Win32_System_Com"] }
 
 [lints]
 workspace = true

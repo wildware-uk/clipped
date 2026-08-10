@@ -114,8 +114,21 @@ reaches this process encodes this recorder's scheduling jitter rather than the
 endpoint's clock, and is worst exactly when the machine is busiest.
 
 It is the same clock a captured video frame is stamped on, so audio and video
-timestamps can be subtracted from one another directly. A/V synchronisation
-proper is [issue #22](https://github.com/wildware-uk/clipped/issues/22).
+timestamps can be subtracted from one another directly.
+
+Every buffer carries **two** accounts of the same moment, and the difference
+between them is the audio/video offset. `CapturedAudio::timestamp` is where the
+*track* puts it — the anchor plus every frame emitted since, so the track is
+contiguous and as long as the recording — and `CapturedAudio::device_timestamp`
+is where the *endpoint* said it belongs, adjusted for any frames trimmed off the
+front of the packet. The first advances at the endpoint's sample rate and the
+second at the performance counter's, so the gap between them is exactly how far
+the audio has slid against the picture. Synthesised silence has no
+`device_timestamp`, because it covers a period the device never described.
+
+[av-sync.md](av-sync.md) is the model that consumes this: which clock a
+recording is timed against, where the conversion to a media time happens, what
+happens on a gap or a step, and the drift measured on real hardware.
 
 There is exactly one place that reads the counter itself: measuring how long
 the endpoint has been saying nothing, which is a period the device will never
@@ -463,7 +476,14 @@ cargo test -p clipped-audio
   test failed here for that reason. It plays a
   quiet sound (about −28 dBFS) for under a second. The same file stalls a
   consumer through the public API and asserts that the silence invented to
-  cover the gap is actual zeroes.
+  cover the gap is actual zeroes, and asserts that every endpoint buffer carries
+  the position the device gave it — that synthesised silence carries none, and
+  that the device's position and the track's are genuinely two different numbers
+  rather than one copied twice, which is what makes drift observable at all.
+- **The drift itself**, in `tests/capture/av_sync.rs`, which records this crate
+  and a real video capture at the same time and measures how far apart they get.
+  It belongs there rather than here because it needs both
+  ([av-sync.md](av-sync.md)).
 
 Everything that touches an endpoint skips, loudly, on a machine without one —
 which is why these are not in the pull-request CI job, since a GitHub Windows

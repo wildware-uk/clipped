@@ -37,9 +37,17 @@ use core::time::Duration;
 /// nanoseconds on the Windows performance counter, both are produced only from
 /// a value their source supplied, and
 /// [`as_nanos`](Self::as_nanos) on either can be compared with the other
-/// directly. Merging them is work for A/V synchronisation
-/// ([issue #22](https://github.com/wildware-uk/clipped/issues/22)), which is
-/// the first code that holds both at once.
+/// directly.
+///
+/// The A/V synchronisation model
+/// ([issue #22](https://github.com/wildware-uk/clipped/issues/22)) is the first
+/// code that holds both at once. It considered merging them and did not: a new
+/// workspace crate for a single thirty-line type is a larger and more disruptive
+/// change than the duplication it removes. What it added instead is one named
+/// bridge — `clipped_capture::CaptureClock::media_time_on`, which takes
+/// nanoseconds together with the clock the caller claims they came from and puts
+/// them on the recording's timeline. `docs/av-sync.md` records the decision and
+/// what would reverse it: a third crate needing the same vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AudioTimestamp {
     nanos: u64,
