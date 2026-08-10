@@ -217,12 +217,25 @@ impl CodecSession {
         config: &EncoderConfig,
     ) -> Result<(), EncodeErrorKind> {
         let mut options: *mut ffi::AVDictionary = ptr::null_mut();
-        let mut set = |key: &CStr, value: &CStr| {
+        // The first option that could not be *offered*, as opposed to one the
+        // encoder declined. `av_dict_set` fails only by failing to allocate,
+        // and dropping that on the floor would open the session with
+        // `libopenh264`'s default for whatever never reached it — the same
+        // failure the `unrecognised` warning below exists to prevent, which
+        // catches only the options that did reach it (AGENTS.md section 15).
+        // The first is kept rather than the last because the later calls are
+        // meaningless once allocation is failing.
+        let mut rejected: Option<(&'static CStr, i32)> = None;
+        let mut set = |key: &'static CStr, value: &CStr| {
             // SAFETY: `options` is a live local holding either null — which
             // `av_dict_set` documents as "allocate a new dictionary" — or a
             // dictionary allocated by an earlier call, and both strings are
             // NUL-terminated literals which the call copies.
-            unsafe { ffi::av_dict_set(&raw mut options, key.as_ptr(), value.as_ptr(), 0) }
+            let code =
+                unsafe { ffi::av_dict_set(&raw mut options, key.as_ptr(), value.as_ptr(), 0) };
+            if code < 0 && rejected.is_none() {
+                rejected = Some((key, code));
+            }
         };
 
         let (rate_control, entropy_coder, profile) = match config.rate_control() {
@@ -239,6 +252,24 @@ impl CodecSession {
         // a missing frame is a visible stutter in a clip, and a bit rate
         // overshoot is a slightly larger file (SPEC.md section 9).
         set(c"allow_skip_frames", c"0");
+
+        if let Some((key, code)) = rejected {
+            // SAFETY: `options` is either null or a dictionary from the calls
+            // above, and is not used after this — the function returns here.
+            unsafe { ffi::av_dict_free(&raw mut options) };
+            // The key is in the log rather than in the error because
+            // `av_dict_set` fails by failing to allocate, and the error that
+            // reaches a user for that is `OutOfMemory`, which carries no
+            // operation. Which option was lost is a diagnostic, and diagnostics
+            // are where the deeper detail belongs (AGENTS.md section 15).
+            tracing::error!(
+                encoder = "software_h264",
+                option = key.to_string_lossy().as_ref(),
+                code,
+                "the software encoder's options could not be assembled"
+            );
+            return Err(failure("av_dict_set", code));
+        }
 
         // SAFETY: the context was allocated for this codec and has not been
         // opened; `options` is a live local, and libavcodec replaces it with

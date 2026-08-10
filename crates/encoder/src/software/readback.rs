@@ -319,6 +319,19 @@ impl Readback {
     }
 
     /// Fails unless the frame is the picture this staging texture can take.
+    ///
+    /// Everything `CopyResource` requires to match, not only the parts a reader
+    /// would think of: it copies whole resources, so the source has to be the
+    /// same *shape* as the staging texture — one mip level, one array slice and
+    /// one sample — as well as the same size and format. A multisampled or
+    /// array-sliced source of the identical size and format would otherwise
+    /// pass this check, be copied by a call that returns `void`, and leave the
+    /// encoder coding whatever the staging texture held last, which is the
+    /// failure [`ReadbackError::Mismatched`] exists to make impossible.
+    ///
+    /// Desktop Duplication and Windows Graphics Capture hand over neither
+    /// today, so this is a guard rather than a live case; the point of a guard
+    /// is that it covers what its documentation says it covers.
     fn check(&self, source: &ID3D11Texture2D) -> Result<(), ReadbackError> {
         let mut description = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: `source` is live and `description` is a live out-parameter.
@@ -342,6 +355,33 @@ impl Readback {
                     "the frame's texture is DXGI format {}, and this encoder copies \
                      DXGI_FORMAT_B8G8R8A8_UNORM ({}) frames",
                     description.Format.0, DXGI_FORMAT_B8G8R8A8_UNORM.0
+                ),
+            });
+        }
+        if description.SampleDesc.Count != 1 {
+            return Err(ReadbackError::Mismatched {
+                detail: format!(
+                    "the frame's texture is {}x multisampled, and a multisampled texture \
+                     has to be resolved before it can be copied, not read as a picture",
+                    description.SampleDesc.Count
+                ),
+            });
+        }
+        if description.MipLevels != 1 {
+            return Err(ReadbackError::Mismatched {
+                detail: format!(
+                    "the frame's texture is a chain of {} mip levels, and this encoder \
+                     copies a single-level texture",
+                    description.MipLevels
+                ),
+            });
+        }
+        if description.ArraySize != 1 {
+            return Err(ReadbackError::Mismatched {
+                detail: format!(
+                    "the frame's texture is an array of {} slices, and this encoder copies \
+                     a single-slice texture",
+                    description.ArraySize
                 ),
             });
         }

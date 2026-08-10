@@ -38,6 +38,23 @@ clipped-logging.workspace = true
 # Windows only, because the pin, the fetch script and the DLL handling are
 # (ADR 0004, "This is a Windows decision"). Everything else in this crate still
 # compiles and tests anywhere.
+#
+# WHAT THIS COSTS THE SHIPPED BINARY. `rusty_ffmpeg` links the FFmpeg import
+# libraries, so this line is not only a build-time fact about this crate: every
+# executable that depends on it now imports `avcodec-62.dll`, `avutil-60.dll`
+# and `swscale-9.dll`, which pull in `swresample-6.dll`. Windows resolves
+# imports before `main` runs, so `clipped-recorder` will not start at all
+# without those four beside it or on PATH — not `record`, but `--help`,
+# `capabilities` and `list-windows` too, each exiting with STATUS_DLL_NOT_FOUND
+# (0xC0000135) and no message of its own. Before this crate named the binding,
+# only `clipped-muxer`'s dependents were in that position.
+#
+# Distributing the libraries was already required (ADR 0004, and #123 for the
+# LGPL obligations); what is new is that they are required for every subcommand
+# rather than only for recording, and that a build tree needs them next to the
+# encoder's own test binaries. `crates/muxer/build.rs` is what puts them in the
+# target directory today, which is why building only this crate is not enough:
+# #158 moves that copy to the workspace and covers both halves.
 [target.'cfg(windows)'.dependencies]
 rusty_ffmpeg.workspace = true
 

@@ -7,14 +7,14 @@ and — since [issue #12](https://github.com/wildware-uk/clipped/issues/12) and
 [issue #13](https://github.com/wildware-uk/clipped/issues/13) — the Windows
 Graphics Capture and Desktop Duplication backends that implement all of it. A
 Windows build can produce GPU frames from a window or a display today, by either
-method, and `clipped-encoder` can say what this machine could encode with
-([encoder-capabilities.md](encoder-capabilities.md)) without being able to
-encode anything yet.
+method, and `clipped-encoder` can both say what this machine could encode with
+([encoder-capabilities.md](encoder-capabilities.md)) and encode a frame it is
+handed, on NVENC or on the CPU ([encoder-pipeline.md](encoder-pipeline.md)).
 
-What is still missing is everything downstream. `clipped-encoder`,
-`clipped-muxer` and `clipped-session` are still documentation-only crates, so
-nothing consumes a frame: `recorder record` still reports that the capture
-engine is not implemented, because a pipeline needs more than its first stage.
+What is still missing is what joins them up. `clipped-session` is still a
+documentation-only crate, so nothing takes a frame from a backend and gives it
+to an encoder: `recorder record` still reports that the capture engine is not
+implemented, because a pipeline needs more than its stages.
 
 So this document describes an interface, the rules a backend has to obey, and
 the two backends that obey them. Where it describes behaviour that does not

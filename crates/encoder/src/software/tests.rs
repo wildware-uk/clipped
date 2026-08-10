@@ -10,11 +10,27 @@
 //! that a user with no GPU will be recording with is the one covered on every
 //! CI run rather than only on a maintainer's machine.
 //!
-//! What it cannot fall back on is FFmpeg: `libopenh264` lives inside the pinned
-//! build, and `ffprobe` is how a stream is checked to be a stream. A missing
-//! FFmpeg is therefore a skip that says so, and `CLIPPED_REQUIRE_ENCODER=1`
-//! turns it into a failure, so "the encoder tests passed" cannot quietly mean
-//! "the encoder tests did nothing".
+//! What it cannot fall back on is FFmpeg, and "a missing FFmpeg" is three
+//! different things here, only one of which is a skip:
+//!
+//! - **The `ffmpeg` and `ffprobe` executables**, which is how a stream is
+//!   checked to be a stream, are looked for on `PATH` and beside the test
+//!   binary. Missing, they are a skip that says so on standard error, and
+//!   `CLIPPED_REQUIRE_ENCODER=1` turns that skip into a failure — so "the
+//!   encoder tests passed" cannot quietly mean "the encoder tests did nothing".
+//! - **The FFmpeg libraries** are linked, not loaded, so they are not a skip
+//!   and cannot be: without `avcodec-62.dll` and its companions beside the test
+//!   binary the process never starts, and Windows reports
+//!   `STATUS_DLL_NOT_FOUND` before a test is named. In a build tree
+//!   `crates/muxer/build.rs` puts them there
+//!   ([#158](https://github.com/wildware-uk/clipped/issues/158), and
+//!   `docs/encoder-pipeline.md`).
+//! - **`libopenh264` inside those libraries.** ADR 0004 pins a build that
+//!   carries it and `crates/muxer/tests/ffmpeg_linkage.rs` asserts it is still
+//!   there, so a build without it is a broken pin rather than a machine these
+//!   tests should tiptoe around: `open_encoder(...).expect(...)` fails the test
+//!   with the encoder's own error. Skipping there would hide the one thing the
+//!   ADR promises.
 //!
 //! # What "verified" means here
 //!
@@ -650,6 +666,65 @@ fn a_frame_of_the_wrong_size_is_refused_rather_than_encoded() {
 }
 
 #[test]
+fn a_frame_whose_texture_is_the_wrong_shape_is_refused_rather_than_encoded() {
+    // The size and the format are not the whole of what `CopyResource`
+    // requires: it copies a whole resource, so a texture of exactly the right
+    // size and format in a different shape — a mip chain, a texture array, a
+    // multisampled surface — cannot be copied into the staging texture either.
+    // The call returns `void`, so without this check the copy would do nothing
+    // and the encoder would code whatever the staging texture held last, which
+    // is the previous frame. That is the stale-picture failure the check exists
+    // to make impossible, and it was not covered for these three shapes.
+    let Some(gpu) = TestGpu::open() else {
+        return;
+    };
+
+    let mut encoder = gpu
+        .open_encoder(config_for(Codec::H264, TEST_SIZE))
+        .expect("the software encoder opens");
+
+    // A real frame first, so that the staging texture holds a picture: a check
+    // that only ever sees an empty staging texture proves nothing about the
+    // stale-frame case it is written for.
+    let good = gpu.pattern_texture(0);
+    encoder
+        .submit(&source_frame(&good, 0))
+        .expect("a frame of the session's shape is encoded");
+    drain(&mut encoder);
+
+    for (shape, mip_levels, array_size, samples, expected) in [
+        ("a mip chain", 4, 1, 1, "mip levels"),
+        ("a texture array", 1, 2, 1, "array of 2 slices"),
+        ("a multisampled texture", 1, 1, 4, "multisampled"),
+    ] {
+        let Some(texture) = gpu.oddly_shaped_texture(mip_levels, array_size, samples) else {
+            // Only the multisampled shape can fail here, and only on a device
+            // that supports no 4x multisampling at this size. Said out loud
+            // rather than passed over, because a shape that was never created
+            // is a guard that was never exercised.
+            skipped(&format!(
+                "this Direct3D device will not create {shape} of the test size"
+            ));
+            continue;
+        };
+
+        // SAFETY: the texture outlives the frame, which is dropped inside this
+        // loop body, and it was created on the device the encoder was opened
+        // against.
+        let surface = unsafe { SourceTexture::new(SurfaceKind::D3d11Texture2D, texture.as_raw()) };
+        let frame = SourceFrame::new(surface, SurfaceFormat::Bgra8Unorm, TEST_SIZE, frame_time(1));
+
+        let Err(error) = encoder.submit(&frame) else {
+            panic!("{shape} must not be accepted as a frame: the copy would do nothing");
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "the message for {shape} does not say what is wrong: {error}"
+        );
+    }
+}
+
+#[test]
 fn a_session_can_be_shut_down_twice_and_used_no_further() {
     let Some(gpu) = TestGpu::open() else {
         return;
@@ -1222,6 +1297,52 @@ impl TestGpu {
             // finished with the surface before this happens.
             context.Flush();
         }
+    }
+
+    /// A texture of the session's size and format but not its *shape*.
+    ///
+    /// `CopyResource` copies whole resources, so a mip chain, a texture array
+    /// or a multisampled surface cannot be copied into the staging texture even
+    /// when its first slice is the right picture. No initial data is supplied:
+    /// a multi-subresource texture needs one entry per subresource, and nothing
+    /// here reads the pixels — the copy is meant to be refused before it
+    /// happens.
+    ///
+    /// `None` when the device will not create that shape, which is only a
+    /// possibility for the multisampled one.
+    fn oddly_shaped_texture(
+        &self,
+        mip_levels: u32,
+        array_size: u32,
+        samples: u32,
+    ) -> Option<ID3D11Texture2D> {
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: TEST_SIZE.width,
+            Height: TEST_SIZE.height,
+            MipLevels: mip_levels,
+            ArraySize: array_size,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: samples,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            #[allow(clippy::cast_sign_loss)]
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+
+        let mut texture: Option<ID3D11Texture2D> = None;
+        // SAFETY: the description is a live local, no initial data is supplied
+        // — which `CreateTexture2D` allows for a default-usage texture — and
+        // `texture` is a live out-parameter receiving one reference.
+        unsafe {
+            self.device
+                .CreateTexture2D(&description, None, Some(&mut texture))
+        }
+        .ok()?;
+        texture
     }
 
     /// Uploads pixels into a texture the encoder can read.

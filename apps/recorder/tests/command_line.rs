@@ -190,7 +190,7 @@ fn capabilities_reports_encoders_and_codecs() {
     // detected and exits successfully. What it *finds* depends on the machine,
     // so what is asserted is the shape — every encoder family, the codecs, the
     // legend that separates a measurement from an inference, and the standing
-    // note that nothing can encode yet.
+    // note that nothing records yet.
     let output = recorder(&["capabilities"]);
     assert!(output.status.success(), "{}", stderr(&output));
 
@@ -206,13 +206,23 @@ fn capabilities_reports_encoders_and_codecs() {
         "HEVC",
         "AV1",
         "Automatic would choose",
-        "No encoder is implemented in this build",
+        "Encoding in this build:",
+        "Nothing records yet",
     ] {
         assert!(
             report.contains(expected),
             "the report should mention {expected}:\n{report}"
         );
     }
+    // Asserted through the binary because the binary is what a user runs: the
+    // software fallback (#18) and NVENC (#15) are implemented, and the shipped
+    // report went on saying the opposite of both until #167. A unit test on
+    // the string would not have caught that, because the string was the thing
+    // that was wrong.
+    assert!(
+        !report.contains("No encoder is implemented"),
+        "this build has encoder backends and must not deny it:\n{report}"
+    );
     assert!(
         report.contains("inferred from published limits"),
         "the report must explain which answers were not measured:\n{report}"

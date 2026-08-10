@@ -840,9 +840,23 @@ carry them.
 
 That is not a precaution. Removing it was measured: `ffmpeg` cannot decode the
 resulting elementary stream at all, and a clip cut from the middle of a
-recording would begin at a keyframe no decoder could start on. The copy costs
-one `memcpy` of a few hundred bytes per keyframe, which is once every couple of
-seconds.
+recording would begin at a keyframe no decoder could start on.
+
+It is not free, and it is not the "few hundred bytes" the parameter sets
+themselves are. Putting them in front means copying the *whole coded keyframe*
+into a buffer of the session's, because the packet's buffer belongs to
+libavcodec and is exactly the size of what it coded. Measured by printing the
+length of each keyframe buffer from `h264_output_is_a_decodable_stream`, which
+encodes the 1280x720 test pattern at 60 fps and 20 Mbit/s CBR: the parameter
+sets are 31 bytes, and the six keyframes in its 90 frames copied 50 340,
+71 251, 66 935, 71 481, 66 584 and 71 271 bytes. So the cost is tens of
+kilobytes per keyframe, once every second or two, and it scales with the
+keyframe rather than with the parameter sets: a 1440p keyframe is larger again.
+
+That is still cheap beside the 14 MB readback every frame makes, which is why it
+is done this way rather than with a scatter-gather packet. It is not, however,
+the rounding error "a few hundred bytes" would suggest, and a reader sizing a
+hot path from that number would be out by two to three orders of magnitude.
 
 ### Timestamps
 
@@ -895,10 +909,14 @@ and 53):
 - **Bad input is refused, not encoded.** An odd picture size, a codec this
   backend does not produce, a 10-bit surface, a null device, a timestamp that
   goes backwards, a frame whose declared size is wrong, a frame whose *texture*
-  is the wrong size, and use after shutdown each produce an error naming what
-  was wrong. The texture-size check matters more than it looks: `CopyResource`
-  returns `void`, so without it a mismatch is silently nothing at all and the
-  encoder codes whatever the staging texture held last.
+  is the wrong size, a frame whose texture is the wrong *shape* — a mip chain, a
+  texture array or a multisampled surface — and use after shutdown each produce
+  an error naming what was wrong. The texture checks matter more than they look:
+  `CopyResource` copies whole resources and returns `void`, so without them a
+  mismatch is silently nothing at all and the encoder codes whatever the staging
+  texture held last. The shape cases are tested after a real frame has been
+  encoded, so that the staging texture holds a picture and a silent copy would
+  genuinely produce a stale one.
 - **Nothing leaks.** Sixteen sessions are opened, used and dropped without
   `shut_down`, which is the path an unwind takes.
 
@@ -906,16 +924,44 @@ Unlike the NVENC tests, these need no encoding hardware: they create a Direct3D
 device on the graphics hardware and fall back to WARP, the software rasteriser
 that ships with Windows, so the encoder a user with no GPU will be recording
 with is covered on every CI run. What they cannot fall back on is FFmpeg — a
-missing `ffprobe` or `ffmpeg` is a skip that says so, and
-`CLIPPED_REQUIRE_ENCODER=1` turns it into a failure.
+missing `ffprobe` or `ffmpeg` *executable* is a skip that says so, and
+`CLIPPED_REQUIRE_ENCODER=1` turns it into a failure. A missing FFmpeg *library*
+is not a skip and cannot be: it is linked rather than loaded, so the test
+process never starts, which is the subject of the next section.
 
-### Building and running these tests
+### What linking FFmpeg here costs, and where it is paid
 
-`crates/muxer/build.rs` is what copies the FFmpeg runtime libraries beside the
-binaries in the target directory, and it runs when `clipped-muxer` is built.
-`clipped-encoder` now links FFmpeg too and is not a dependent of the muxer, so
-`cargo test -p clipped-encoder` on a checkout where the muxer has never been
-built fails at process start with `STATUS_DLL_NOT_FOUND`. `cargo test
+`crates/encoder` names `rusty_ffmpeg`, which links the FFmpeg import libraries.
+That is not only a fact about this crate's own tests: **every executable that
+depends on `clipped-encoder` now imports `avcodec-62.dll`, `avutil-60.dll` and
+`swscale-9.dll`**, which pull in `swresample-6.dll`. Windows resolves imports
+before `main` runs, so the process does not start without those four beside it
+or on `PATH`. Measured on this branch, with a copy of `clipped-recorder.exe`
+alone in an empty directory:
+
+```text
+clipped-recorder.exe: error while loading shared libraries: swscale-9.dll:
+cannot open shared object file: No such file or directory
+```
+
+That is `--help`, not `record`: `capabilities` and `list-windows` fail the same
+way, before any argument is parsed, with `STATUS_DLL_NOT_FOUND` (0xC0000135) and
+no message of the recorder's own. Adding the four libraries makes `--help` exit
+0 again. Before this crate named the binding, only `clipped-muxer`'s dependents
+were in that position, and `clipped-recorder` is not one of them.
+
+Shipping the FFmpeg libraries alongside Clipped was already required
+([ADR 0004](adr/0004-ffmpeg-dependency-strategy.md), and
+[#123](https://github.com/wildware-uk/clipped/issues/123) for the LGPL
+obligations). What is new is that they are needed for every subcommand rather
+than only for recording, so packaging cannot treat them as an encoder-only
+payload.
+
+In a build tree the same thing bites contributors. `crates/muxer/build.rs` is
+what copies those libraries beside the binaries in the target directory, and it
+runs when `clipped-muxer` is built; `clipped-encoder` is not a dependent of the
+muxer, so `cargo test -p clipped-encoder` on a checkout where the muxer has
+never been built fails at process start in exactly the way above. `cargo test
 --workspace` — what CI runs — is unaffected, and building the workspace once
 fixes it. [#158](https://github.com/wildware-uk/clipped/issues/158) is the
 proper fix: the copy belongs to the workspace rather than to one crate.
@@ -929,10 +975,10 @@ proper fix: the copy belongs to the workspace rather than to one crate.
 - Software HEVC or AV1. The pinned build carries `libsvtav1`, and
   [#157](https://github.com/wildware-uk/clipped/issues/157) is what it would
   take — a capability-report change with an encoder attached.
-- Anything that writes a packet to a container
-  ([#21](https://github.com/wildware-uk/clipped/issues/21)) or connects capture
-  to encoding ([#19](https://github.com/wildware-uk/clipped/issues/19),
-  [#20](https://github.com/wildware-uk/clipped/issues/20)).
+- Anything that connects capture to encoding to a container. `clipped-muxer`
+  writes Matroska since
+  [#21](https://github.com/wildware-uk/clipped/issues/21), and nothing yet
+  drives the three together, so `recorder record` still exits 3.
 - Reconfiguring a running session when the captured target changes size. Today
   a frame of a different size is refused, and the caller has to open a new
   encoder.

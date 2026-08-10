@@ -13,9 +13,16 @@
 //! [`claim_text`] is the only function that renders a claim, so there is one
 //! place for that rule to be right or wrong rather than a dozen.
 //!
-//! The second thing is that no encoder is implemented yet. A report full of
-//! green ticks, from a build that cannot record, would be worse than no report
-//! (AGENTS.md sections 27 and 54), so the footer says so and names the issues.
+//! The second thing is the distance between "your machine can do this" and
+//! "Clipped can do this". A report full of green ticks, from a build that
+//! cannot record, would be worse than no report (AGENTS.md sections 27 and 54),
+//! so the footer names the encoders this build has a backend for, the ones it
+//! only detects, and the fact that no session yet connects any of them to a
+//! capture and a file. Which encoders those are is asked of
+//! [`EncoderKind::is_implemented`] rather than written out here: the previous
+//! footer was a hand-written sentence, and it went on saying no encoder was
+//! implemented through two of them landing
+//! ([#167](https://github.com/wildware-uk/clipped/issues/167)).
 
 use std::error::Error;
 use std::fmt;
@@ -290,15 +297,7 @@ fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
          has no limits worth quoting. See\n    docs/encoder-capabilities.md.\n\n"
     ));
 
-    out.push_str(&format!(
-        "No encoder is implemented in this build, so nothing can be recorded yet: \
-         NVENC is\n    issue #{nvenc}, AMF #{amf}, Quick Sync #{quicksync} and the software \
-         fallback #{software},\n    at https://github.com/wildware-uk/clipped/issues.\n\n",
-        nvenc = EncoderKind::Nvenc.backend_issue(),
-        amf = EncoderKind::Amf.backend_issue(),
-        quicksync = EncoderKind::QuickSync.backend_issue(),
-        software = EncoderKind::Software.backend_issue(),
-    ));
+    out.push_str(&implementation_lines());
 
     let source = match (detection.source(), cache.path()) {
         (DetectionSource::Cached { .. }, Some(path)) => format!("read from {}", path.display()),
@@ -313,6 +312,62 @@ fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
         detection.elapsed().as_millis()
     ));
     out
+}
+
+/// What this build can encode with, what it only detects, and what it still
+/// cannot do at all.
+///
+/// Three separate facts, and a reader needs all three. The table above lists
+/// what the *machine* has; whether Clipped has a backend for it is a different
+/// question, answered by [`EncoderKind::is_implemented`] so that this copy
+/// cannot drift from the code again. And whichever encoder is named, no build
+/// records anything yet, because nothing connects a capture to an encoder and
+/// on to a file — a report that let a reader infer otherwise from a list of
+/// working encoders would be the same failure in a new place.
+fn implementation_lines() -> String {
+    let (implemented, detected_only): (Vec<EncoderKind>, Vec<EncoderKind>) = EncoderKind::ALL
+        .iter()
+        .partition(|kind| kind.is_implemented());
+
+    // Each list ends its own line rather than sitting mid-sentence, so that
+    // the wrapping does not depend on how many encoders are in it.
+    let mut out = String::new();
+    if !implemented.is_empty() {
+        out.push_str(&format!(
+            "Encoding in this build: {}.\n",
+            names(&implemented, false)
+        ));
+    }
+    if !detected_only.is_empty() {
+        out.push_str(&format!(
+            "Detection only, with no backend here: {}.\n    A machine whose best encoder is \
+             one of those would encode on the CPU\n    instead.\n",
+            names(&detected_only, true)
+        ));
+    }
+    out.push_str(
+        "Nothing records yet whichever encoder is chosen: no session connects a capture\n    \
+         to an encoder and on to a file, so `record` reports that the capture\n    \
+         engine is not implemented. Progress is at\n    \
+         https://github.com/wildware-uk/clipped/issues.\n\n",
+    );
+    out
+}
+
+/// Encoder names as a sentence-ready list, with the issue numbers a reader
+/// would want to follow and not the ones they would not.
+fn names(kinds: &[EncoderKind], with_issue: bool) -> String {
+    kinds
+        .iter()
+        .map(|kind| {
+            if with_issue {
+                format!("{kind} (#{})", kind.backend_issue())
+            } else {
+                kind.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Renders a claim, marking it when it was inferred.
@@ -495,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_says_no_encoder_is_implemented_and_names_the_issues() {
+    fn the_footer_names_the_backends_this_build_has_and_the_ones_it_lacks() {
         let detection = detect_cached(
             &{
                 #[derive(Debug)]
@@ -515,10 +570,62 @@ mod tests {
         .expect("a machine with no adapters detects successfully");
 
         let footer = footer(&detection, &CapabilityCache::disabled());
-        assert!(footer.contains("No encoder is implemented in this build"));
-        for issue in ["#15", "#16", "#17", "#18"] {
-            assert!(footer.contains(issue), "the footer should name {issue}");
+
+        // The two halves have to be told apart by name, whichever way round
+        // they are: a family with a backend must not be listed as one Clipped
+        // only detects, and vice versa. Checked against
+        // `EncoderKind::is_implemented` rather than against a list of names
+        // written here, because the failure this replaces was exactly a
+        // hand-maintained list that stopped being true.
+        let line = |lead: &str| {
+            footer
+                .lines()
+                .find(|line| line.starts_with(lead))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let encoding = line("Encoding in this build:");
+        let detected = line("Detection only, with no backend here:");
+
+        for kind in EncoderKind::ALL {
+            let name = kind.to_string();
+            if kind.is_implemented() {
+                assert!(
+                    encoding.contains(&name),
+                    "{kind} has a backend and the footer does not say so: {footer}"
+                );
+                assert!(
+                    !detected.contains(&name),
+                    "{kind} has a backend and must not be listed as detection only: {footer}"
+                );
+            } else {
+                assert!(
+                    detected.contains(&name)
+                        && detected.contains(&format!("#{}", kind.backend_issue())),
+                    "{kind} has no backend, and the footer should say so and name its \
+                     issue: {footer}"
+                );
+                assert!(
+                    !encoding.contains(&name),
+                    "{kind} has no backend and must not be listed as one: {footer}"
+                );
+            }
         }
+
+        // The claim this replaced. It was true when it was written, stayed in
+        // the shipped binary through NVENC and the software fallback landing,
+        // and is what #167 was raised for; a report that says it again is
+        // worse than one that says nothing.
+        assert!(
+            !footer.contains("No encoder is implemented"),
+            "two backends exist, so the footer must not deny it: {footer}"
+        );
+        // What is genuinely not possible yet still has to be said, or the
+        // corrected footer reads as "this build records".
+        assert!(
+            footer.contains("Nothing records yet"),
+            "the footer must still say that no recording completes: {footer}"
+        );
         assert!(
             footer.contains(INFERRED_MARKER),
             "the legend must explain the marker: {footer}"
