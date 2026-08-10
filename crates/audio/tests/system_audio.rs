@@ -5,21 +5,21 @@
 //! AGENTS.md section 26 asks for controlled generators rather than "start
 //! Spotify and listen", and AGENTS.md section 25 asks that tests not depend on
 //! installed applications or on a particular machine's devices. So the test
-//! synthesises a 440 Hz sine, renders it through WASAPI itself, captures it
-//! back through [`SystemAudioCapture`], and looks for 440 Hz in the samples
-//! with a Goertzel filter. Nothing about that needs a person, a speaker or an
-//! application, and — the point of the exercise — it fails if the capture path
-//! is wrong, which "the API returned S_OK" does not.
+//! synthesises a [`TONE`] Hz sine, renders it through WASAPI itself, captures
+//! it back through [`SystemAudioCapture`], and looks for that frequency in the
+//! samples with a Goertzel filter. Nothing about that needs a person, a speaker
+//! or an application, and — the point of the exercise — it fails if the capture
+//! path is wrong, which "the API returned S_OK" does not.
 //!
 //! # What it asserts, and why in that order
 //!
 //! Three measurements of the same frequency, taken in sequence from one
 //! capture: before the tone, during it, and after it. The tone has to appear
 //! and then disappear. Measuring only during it would pass on a machine that
-//! happened to have a 440 Hz component in whatever else was playing; measuring
+//! happened to have that frequency in whatever else was playing; measuring
 //! only the ratio would pass on a capture that latched its last buffer and
 //! repeated it for ever. The frequency is also *found* rather than assumed: the
-//! spectrum is swept from 200 Hz to 2 kHz and the peak has to land on 440.
+//! spectrum is swept from 200 Hz to 2 kHz and the peak has to land on the tone.
 //!
 //! # It plays a sound
 //!
@@ -54,9 +54,18 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::System::Com::{CoCreateInstance, CoIncrementMTAUsage, CLSCTX_ALL};
 
-/// The tone, in hertz. A musical A, and low enough that it is nowhere near any
-/// endpoint's Nyquist frequency.
-const TONE: f32 = 440.0;
+/// The tone, in hertz. Low enough to be nowhere near any endpoint's Nyquist
+/// frequency, and deliberately not a musical note.
+///
+/// It was 440 Hz, which is A above middle C exactly, and that is the problem:
+/// the machine this runs on is a desktop somebody is using, and music playing
+/// on it in standard tuning puts real energy at exactly 440 Hz. Measured here
+/// while something was playing, the background at 440 Hz was 0.013 against the
+/// tone's 0.037 — a ratio of under three, where the test asks for six — and the
+/// test failed. 997 Hz is the frequency digital audio has used for this for
+/// decades for the same reason: it sits between B5 and C6 and no instrument
+/// plays it, so background music contributes almost nothing to that bin.
+const TONE: f32 = 997.0;
 
 /// Peak amplitude of the rendered tone, as a fraction of full scale.
 ///
@@ -64,17 +73,21 @@ const TONE: f32 = 440.0;
 /// [`MINIMUM_RATIO`] on why it is not quieter still.
 const AMPLITUDE: f32 = 0.04;
 
-/// How much louder 440 Hz has to be while the tone plays than it was before it.
+/// How much louder the tone has to be while it plays than it was before it.
 ///
 /// Six, not sixty, because the machine a developer runs this on is not silent:
-/// whatever is already playing has a 440 Hz component of its own, and on a
-/// desktop playing music it measured about a fifteenth of the tone's at
-/// −34 dBFS. The tone is played a little louder than politeness alone would
-/// ask so that the margin is comfortable rather than marginal, and the
-/// assertions below are backed up by two that background audio cannot satisfy
-/// at all: the tone has to *stop* being there, and it has to be the strongest
-/// thing in the spectrum while it plays.
+/// whatever is already playing has some energy at the tone's frequency. At
+/// 997 Hz that is small — the five runs measured for the pull request put the
+/// background between 0.000002 and 0.0019 against a tone of about 0.040 — but
+/// it is not zero, and a threshold tight enough to depend on it being zero
+/// would fail on somebody else's desk. The assertions below are backed up by
+/// two that background audio cannot satisfy at all: the tone has to *stop*
+/// being there, and it has to be the strongest thing in the spectrum while it
+/// plays.
 const MINIMUM_RATIO: f64 = 6.0;
+
+/// How finely [`strongest_frequency`] looks at the spectrum, in hertz.
+const SWEEP_STEP: f32 = 1.0;
 
 /// The environment variable that turns "this machine has no sound card" from a
 /// skip into a failure. Not set in the pull-request CI job.
@@ -139,8 +152,8 @@ fn a_generated_tone_is_captured_at_the_frequency_it_was_played() {
 
     let _ = writeln!(
         std::io::stderr(),
-        "440 Hz magnitude: before {quiet_before:.6}, during {loud:.6}, after {quiet_after:.6} \
-         ({} frames captured, endpoint {})",
+        "{TONE} Hz magnitude: before {quiet_before:.6}, during {loud:.6}, after \
+         {quiet_after:.6} ({} frames captured, endpoint {})",
         capture.stats().frames,
         capture.endpoint_name().unwrap_or("<none>")
     );
@@ -149,7 +162,7 @@ fn a_generated_tone_is_captured_at_the_frequency_it_was_played() {
     // amount of background noise on a developer's machine would produce.
     assert!(
         loud > quiet_before * MINIMUM_RATIO + 1e-4,
-        "the captured audio should contain the 440 Hz tone that was played: it measured \
+        "the captured audio should contain the {TONE} Hz tone that was played: it measured \
          {loud:.6} while the tone sounded and {quiet_before:.6} before it"
     );
 
@@ -158,8 +171,8 @@ fn a_generated_tone_is_captured_at_the_frequency_it_was_played() {
     // would pass the assertion above and fail this one.
     assert!(
         quiet_after < loud / MINIMUM_RATIO,
-        "the 440 Hz tone should be gone once it stops playing: it measured {quiet_after:.6} \
-         after, against {loud:.6} while it sounded"
+        "the {TONE} Hz tone should be gone once it stops playing: it measured \
+         {quiet_after:.6} after, against {loud:.6} while it sounded"
     );
 
     // The frequency is found rather than assumed. If the capture path resampled,
@@ -168,7 +181,7 @@ fn a_generated_tone_is_captured_at_the_frequency_it_was_played() {
     let (peak, peak_magnitude) = strongest_frequency(&during, channels, rate, 200.0, 2_000.0);
     assert!(
         (peak - TONE).abs() <= 10.0,
-        "the strongest frequency in the recording should be the 440 Hz that was played, \
+        "the strongest frequency in the recording should be the {TONE} Hz that was played, \
          not {peak:.1} Hz (magnitude {peak_magnitude:.6})"
     );
 }
@@ -286,6 +299,14 @@ fn goertzel(samples: &[f32], channels: usize, rate: f32, frequency: f32) -> f64 
 }
 
 /// Sweeps the spectrum and returns the strongest frequency and its magnitude.
+///
+/// In steps of [`SWEEP_STEP`], which is 1 Hz rather than something coarser for
+/// a reason worth stating: a Goertzel bin over this window is about 1.4 Hz
+/// wide, so a sweep that steps further than that walks straight past peaks —
+/// including the tone's, if the tone does not happen to land on the grid. A
+/// 5 Hz step here found background at 490 Hz and reported it as the strongest
+/// frequency in a recording containing a 997 Hz tone twenty-five times its
+/// size, because it looked at 995 Hz and 1000 Hz and never at 997.
 fn strongest_frequency(
     samples: &[f32],
     channels: usize,
@@ -300,7 +321,7 @@ fn strongest_frequency(
         if magnitude > best.1 {
             best = (frequency, magnitude);
         }
-        frequency += 5.0;
+        frequency += SWEEP_STEP;
     }
     best
 }

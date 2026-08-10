@@ -293,10 +293,13 @@ cargo test -p clipped-audio
   as it opens being backed off rather than reopened in a loop — that one reads
   on a second thread, because the regression it guards against is a `read` that
   never returns and a hung test says nothing.
-- **The tone**, in `tests/system_audio.rs`: a 440 Hz sine this crate
+- **The tone**, in `tests/system_audio.rs`: a 997 Hz sine this crate
   synthesises, renders through WASAPI itself and captures back, asserted by
   Goertzel filter — it has to be present while it plays, absent afterwards, and
-  the strongest frequency between 200 Hz and 2 kHz has to be 440. It plays a
+  the strongest frequency between 200 Hz and 2 kHz has to be 997. It is 997 Hz
+  and not the more obvious 440 because 440 Hz is a musical A: music playing on
+  the machine while the suite runs puts energy in exactly that bin, and the
+  test failed here for that reason. It plays a
   quiet sound (about −28 dBFS) for under a second. The same file stalls a
   consumer through the public API and asserts that the silence invented to
   cover the gap is actual zeroes.
