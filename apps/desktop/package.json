@@ -1,0 +1,9 @@
+{
+  "name": "clipped-desktop-scratch",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "lint": "node -e \"console.log('scratch lint ran on Node ' + process.version)\"",
+    "build": "node -e \"console.log('scratch build ran on Node ' + process.version)\""
+  }
+}
