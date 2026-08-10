@@ -1,0 +1,33 @@
+# The Rust version is pinned exactly rather than tracking `stable` because the
+# workspace denies warnings in CI (`cargo clippy -- -D warnings`). New Clippy
+# lints and new `rustc` warnings ship with every six-week stable release, so
+# tracking `stable` would mean an unrelated toolchain update could turn a green
+# pull request red without a single line of Clipped changing. Pinning moves
+# that upgrade into its own deliberate commit, where the lint fallout can be
+# reviewed on its own.
+#
+# It also makes builds reproducible: a contributor, CI and a release build all
+# use the same compiler, so "it builds on my machine" is not a variable.
+#
+# `rust-version` in Cargo.toml is a different number and deliberately so: that
+# is the minimum supported Rust version the crates promise to compile on, while
+# this file is the toolchain development and CI actually use.
+#
+# Bumping this: raise `channel`, run the four verification commands from
+# docs/prerequisites.md, and fix any new lints in the same commit.
+[toolchain]
+channel = "1.97.1"
+
+# rustfmt and clippy are not optional parts of the workflow - `cargo fmt --all
+# --check` and `cargo clippy --workspace --all-targets -- -D warnings` both have
+# to pass before a change is done - so rustup installs them with the toolchain
+# instead of leaving a contributor to discover they are missing.
+components = ["rustfmt", "clippy"]
+
+# Clipped is a Windows application built against the Windows SDK and the MSVC
+# linker; the GNU toolchain is not a supported configuration.
+targets = ["x86_64-pc-windows-msvc"]
+
+# Everything the build needs is listed above, so there is no reason to pull down
+# the documentation and source components the default profile adds.
+profile = "minimal"
