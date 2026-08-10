@@ -12,9 +12,10 @@
 //! # Ownership
 //!
 //! Every native resource has one owner and one release point. [`Running`] holds
-//! the COM apartment, the Direct3D device, the capture item, the frame pool,
-//! the capture session, the two event registrations and the frame currently
-//! lent to the caller. [`GraphicsCaptureBackend`] holds an `Option<Running>`,
+//! the Direct3D device, the capture item, the frame pool, the capture session,
+//! the two event registrations and the frame currently lent to the caller. The
+//! COM apartment is the one exception, and `apartment.rs` says why: it belongs
+//! to the process rather than to a capture. [`GraphicsCaptureBackend`] holds an `Option<Running>`,
 //! and `shut_down` is `self.running = None`: dropping the option runs
 //! [`Running::drop`], which closes the session and the pool, unregisters both
 //! handlers and releases the device, in that order. `Drop` for the backend does
@@ -51,7 +52,7 @@ use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
-use crate::windows::apartment::Apartment;
+use crate::windows::apartment::ensure_multi_threaded_apartment;
 use crate::windows::device::CaptureDevice;
 use crate::{
     Acquisition, Availability, BackendCapabilities, BackendDeclaration, CaptureBackend,
@@ -212,11 +213,11 @@ struct GraphicsCaptureBackend {
 // the trait documents as running on the capture thread. So the only value that
 // actually crosses a thread boundary owns no COM interface.
 //
-// Second, if a caller nevertheless moves an initialised backend, the WinRT
-// types it holds are agile and the Direct3D 11 interfaces are free-threaded, so
-// using them from another thread is defined; the one operation that is genuinely
-// thread-bound is `RoUninitialize`, and `Apartment` checks the thread itself and
-// declines rather than unbalancing the wrong one.
+// Second, if a caller nevertheless moves an initialised backend, nothing it
+// holds is thread-bound: the WinRT types are agile, the Direct3D 11 interfaces
+// are free-threaded, and the multi-threaded apartment they were activated in
+// belongs to the process rather than to any thread — see `apartment.rs`, which
+// is also the reason this backend has no per-thread COM state to get wrong.
 //
 // What is *not* claimed is that two threads may use one backend at once. They
 // may not, and nothing here makes that possible: `CaptureBackend` is not `Sync`,
@@ -431,31 +432,13 @@ struct Running {
     lost: u64,
     /// The value of `lost` when the previous frame was delivered.
     lost_at_last_delivery: u64,
-    /// The apartment WinRT activation needs.
-    ///
-    /// **Declared last, and that is load-bearing.** Rust drops a struct's
-    /// fields in declaration order, so the last field is released last — after
-    /// every WinRT and Direct3D interface above it. Releasing a COM interface
-    /// on a thread that has already left the apartment is not defined, and if
-    /// this were the only thread in the multi-threaded apartment it would be a
-    /// release against an apartment that no longer exists. Moving this field up
-    /// would introduce that, silently, on a path that only runs at shut down.
-    ///
-    /// Held rather than entered and forgotten so that a recorder which starts
-    /// and stops capture repeatedly does not raise the apartment count once per
-    /// session.
-    #[expect(
-        dead_code,
-        reason = "held for its Drop, which leaves the COM apartment this capture entered"
-    )]
-    apartment: Apartment,
 }
 
 impl Running {
     /// Opens a capture of `target`.
     fn start(target: &CaptureTarget, config: &CaptureConfig) -> Result<Self, CaptureError> {
-        let apartment = Apartment::enter()
-            .map_err(|error| backend_error("entering the COM apartment", error))?;
+        ensure_multi_threaded_apartment()
+            .map_err(|error| backend_error("preparing the COM apartment", error))?;
 
         let (item, window) = capture_item_for(target)?;
         let pool_size = item
@@ -530,7 +513,6 @@ impl Running {
             discarded: 0,
             lost: 0,
             lost_at_last_delivery: 0,
-            apartment,
         })
     }
 
@@ -781,9 +763,10 @@ impl Drop for Running {
         }
 
         // Everything still holding a reference — the device, the item, the pool,
-        // the session — is released by its own `Drop` after this body returns,
-        // in field order, and the apartment is the last field precisely so that
-        // it is the last thing to go.
+        // the session — is released by its own `Drop` after this body returns.
+        // The COM apartment is not among them: it belongs to the process, not to
+        // this capture, and `apartment.rs` explains at length why taking it away
+        // when a recording stops is a crash rather than tidiness.
     }
 }
 

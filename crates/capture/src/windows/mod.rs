@@ -20,9 +20,11 @@
 //! COM apartment initialisation ([`apartment`]) and Direct3D device creation
 //! ([`device`]) live here rather than in `clipped-windows` because
 //! `clipped-windows` is still a documentation-only crate and this is the first
-//! code in the workspace that needs either. Both are written as small,
-//! self-contained RAII types precisely so that moving them down a layer, when a
-//! second subsystem needs them, is a move rather than a rewrite.
+//! code in the workspace that needs either. Both are small and self-contained
+//! precisely so that moving them down a layer, when a second subsystem needs
+//! them, is a move rather than a rewrite — and the apartment in particular is
+//! already process-wide rather than per-capture, which is the shape it would
+//! have in `clipped-windows` anyway.
 
 mod apartment;
 mod device;

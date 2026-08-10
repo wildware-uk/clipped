@@ -139,7 +139,7 @@ mod tests {
     use windows::core::IUnknown;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
 
-    use crate::windows::apartment::Apartment;
+    use crate::windows::apartment::ensure_multi_threaded_apartment;
 
     #[test]
     fn a_device_exposes_the_same_adapter_through_both_interfaces() {
@@ -148,7 +148,7 @@ mod tests {
         // WinRT — is the same one, and it is the part that can be got wrong.
         // A hardware device is what `create` asks for and what the measured
         // runs in the pull request used.
-        let _apartment = Apartment::enter().expect("the test thread can enter an apartment");
+        ensure_multi_threaded_apartment().expect("the process can have an MTA");
         let device = match CaptureDevice::create_with_driver_type(D3D_DRIVER_TYPE_WARP) {
             Ok(device) => device,
             Err(error) => {

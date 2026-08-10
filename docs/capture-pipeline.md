@@ -301,11 +301,25 @@ compose into; two leaves one spare and loses a frame whenever an encode overruns
 a single frame interval; three leaves two, which absorbs ordinary jitter. More
 would buy latency and video memory rather than frames.
 
-The capture thread enters a multi-threaded COM apartment
-(`windows/apartment.rs`) because WinRT activation needs one. The guard records
-the thread it entered on and refuses to `RoUninitialize` from any other, because
-that call is per thread and unbalancing the wrong thread's apartment is worse
-than leaking a reference on a thread that is going away.
+WinRT activation needs a COM apartment, and `windows/apartment.rs` makes sure
+the *process* has a multi-threaded one — `CoIncrementMTAUsage`, once, never
+released. A thread that has not initialised COM for itself is then treated as
+belonging to it, which is what lets a capture thread activate WinRT types
+without a message loop or a dispatcher queue.
+
+The absence of a matching release is the one place this subsystem does not have
+deterministic cleanup, and it is deliberate. The obvious design —
+`RoInitialize` on the capture thread and `RoUninitialize` from a guard's `Drop`
+— was written first and crashes: windows-rs caches activation factories in
+process-wide statics and keeps the raw pointers for the life of the program, so
+when the last thread in the apartment uninitialises, the apartment goes and
+every cached pointer is left dangling. It surfaced as an intermittent
+`STATUS_ACCESS_VIOLATION` in CI, in a run where one test thread's guard dropped
+while another was activating a WinRT type. A recorder that stopped a recording
+while its audio or encoder threads were mid-activation would be the same race
+with a user attached to it. So the apartment is treated as process
+infrastructure, like a loaded DLL: one reference for the life of the process, no
+matter how many recordings start and stop.
 
 ### Timestamps
 
@@ -366,19 +380,18 @@ build; it is probed the same way regardless.
 
 ### Ownership
 
-`Running` owns the apartment, the Direct3D device, the capture item, the frame
-pool, the session, both event registrations and the frame currently lent to the
-caller. The backend holds an `Option<Running>`, `shut_down` is
-`self.running = None`, and `Drop` calls `shut_down` — so an unwind on the capture
-thread releases exactly what a clean stop would. `Running::drop` releases the
-lent frame first (an outstanding frame is a buffer the compositor cannot
-reclaim), then closes the session, unsubscribes and closes the pool, and
-unsubscribes the item. The apartment is declared as the **last** field, and that
-is load-bearing rather than tidy: Rust drops fields in declaration order, so the
-last field is released last, after every WinRT and Direct3D interface. Releasing
-a COM interface on a thread that has already left the apartment is not defined,
-and moving that field up would introduce it silently on a path that only runs at
-shut down.
+`Running` owns the Direct3D device, the capture item, the frame pool, the
+session, both event registrations and the frame currently lent to the caller.
+The backend holds an `Option<Running>`, `shut_down` is `self.running = None`,
+and `Drop` calls `shut_down` — so an unwind on the capture thread releases
+exactly what a clean stop would. `Running::drop` releases the lent frame first
+(an outstanding frame is a buffer the compositor cannot reclaim), then closes
+the session, unsubscribes and closes the pool, and unsubscribes the item;
+everything still holding a reference is released by its own `Drop` immediately
+afterwards.
+
+The COM apartment is the one thing `Running` does *not* own, for the reason
+given under "Threading and the frame pool" above.
 
 ### How to run it
 
