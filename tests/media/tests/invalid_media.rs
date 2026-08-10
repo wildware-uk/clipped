@@ -16,7 +16,10 @@ use std::time::Duration;
 use clipped_media_validation::{require_media_tools, TemporaryDirectory};
 use clipped_media_validation::{AudioStream, Media, MediaError, Tone, VideoStream};
 
-use support::{second_cluster_rewound, truncated, write_recording, AudioSource, HEIGHT, WIDTH};
+use support::{
+    second_cluster_rewound, truncated, write_elementary_stream, write_recording, AudioSource,
+    HEIGHT, WIDTH,
+};
 
 const SECONDS: f64 = 2.0;
 const GAME: f64 = 440.0;
@@ -302,5 +305,97 @@ fn audio_that_starts_late_fails_the_synchronisation_bound() {
     assert!(
         text.contains("a:0 starts at 0.500s") && text.contains("v:0 starts at 0.000s"),
         "the report does not say which track is late: {text}"
+    );
+    assert!(
+        !text.contains("the tracks end"),
+        "this fixture moves both ends of the audio together, so only the start check should \
+         fire — the end of the recording is what the next test is for: {text}"
+    );
+}
+
+#[test]
+fn a_stream_with_no_start_time_is_reported_rather_than_assumed_to_start_at_zero() {
+    // A bare H.264 elementary stream: video with no container around it, so
+    // there is no timeline and `ffprobe` reports no `start_time` for it. The
+    // temptation is to read a missing field as 0.000s, which would make this
+    // file — which has no synchronisation to speak of — the best-synchronised
+    // media in the suite. Everywhere else in this harness a field the file does
+    // not report is a failure, and this is no different (AGENTS.md section 22).
+    //
+    // It is also not a hypothetical shape of file: it is what an encoder emits
+    // before anything muxes it, and what `crates/encoder`'s hardware tests
+    // probe today (issue #154).
+    let Some(tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("media-no-start-time");
+    let path = write_elementary_stream(&tools, &directory.file("video.h264"), SECONDS);
+
+    let media = Media::open(&path).expect("ffprobe reads an elementary stream");
+    let report = media
+        .validate()
+        .streams_start_at(0.0, 0.0)
+        .synchronised_within(Duration::from_millis(50))
+        .check()
+        .expect_err("a file with no timeline cannot be said to start anywhere");
+    eprintln!("{report}");
+
+    let text = report.to_string();
+    assert!(
+        text.contains("start time: v:0 reports no start time at all"),
+        "the report does not say which stream has no start time: {text}"
+    );
+    // And the second half: one stream is not something a synchronisation bound
+    // can be checked against, so it is reported rather than passed over.
+    assert!(
+        text.contains("A/V synchronisation: nothing to compare"),
+        "the report does not say why synchronisation could not be checked: {text}"
+    );
+}
+
+#[test]
+fn audio_that_stops_early_fails_the_end_of_recording_synchronisation_bound() {
+    // The other half of `synchronised_within`, and the one the test above
+    // cannot reach: `-itsoffset` slides a whole track, so both of its ends move
+    // and the start check catches it first. This fixture's audio begins with
+    // the video and then stops halfway, which is what a recording whose audio
+    // clock died mid-session looks like — in sync at the first packet, an
+    // entire second apart by the last (AGENTS.md section 21, "clock drift").
+    let Some(tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("media-drifted");
+    let path = write_recording(
+        &tools,
+        &directory.file("recording.mkv"),
+        SECONDS,
+        &[AudioSource::tone("Game", GAME).ending_at(SECONDS / 2.0)],
+    );
+
+    let media = Media::open(&path).expect("the recording opens");
+    // Nothing else is wrong with it: both tracks are there, both decode, and
+    // every timestamp increases.
+    media.validate().monotonic_timestamps().assert_valid();
+
+    let report = media
+        .validate()
+        .synchronised_within(Duration::from_millis(50))
+        .check()
+        .expect_err("a track that stops a second before the other is not in sync at the end");
+    eprintln!("{report}");
+
+    let text = report.to_string();
+    assert!(
+        text.contains("the tracks end") && text.contains("stated 0.050s bound"),
+        "the report does not say the tracks came apart at the end: {text}"
+    );
+    assert!(
+        text.contains("a:0 ends at") && text.contains("v:0 ends at"),
+        "the report does not say where each track ended: {text}"
+    );
+    assert!(
+        !text.contains("the tracks start"),
+        "the tracks begin together, so a start failure here would mean the fixture is not \
+         testing the end of the recording: {text}"
     );
 }

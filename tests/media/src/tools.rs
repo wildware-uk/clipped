@@ -113,7 +113,7 @@ pub fn require_media_tools() -> Option<MediaTools> {
         Ok(tools) => Some(tools),
         Err(unavailable) => {
             assert!(
-                !std::env::var_os(REQUIRE_MEDIA).is_some_and(|value| !value.is_empty()),
+                !skipping_is_forbidden(std::env::var_os(REQUIRE_MEDIA)),
                 "{REQUIRE_MEDIA} is set, so this must not be skipped: {unavailable}"
             );
             // Written through `std::io::stderr()` rather than with `eprintln!`
@@ -123,6 +123,15 @@ pub fn require_media_tools() -> Option<MediaTools> {
             None
         }
     }
+}
+
+/// Whether [`REQUIRE_MEDIA`] has been set to a value that demands the tools be
+/// there.
+///
+/// An empty value counts as unset, because that is how a workflow switches the
+/// demand off without deleting the line.
+fn skipping_is_forbidden(required: Option<std::ffi::OsString>) -> bool {
+    required.is_some_and(|value| !value.is_empty())
 }
 
 /// The pinned build's copy of `name`, or the first one on `PATH`.
@@ -147,4 +156,80 @@ fn tool(name: &str) -> Option<PathBuf> {
             .map(|directory| directory.join(&file))
             .find(|candidate| candidate.is_file())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The skip message is a deliverable of this crate — "skip cleanly with a
+    /// clear message when the required tooling is unavailable" is a scope
+    /// bullet of issue #24 — and it cannot be produced by running the harness
+    /// on a machine that has the pinned build, which is every machine that runs
+    /// these tests. So it is asserted directly instead of being read off a run
+    /// nobody can reproduce.
+    #[test]
+    fn the_skip_message_names_what_is_missing_and_what_to_do_about_it() {
+        let message = ToolsUnavailable {
+            missing: "ffprobe and ffmpeg".to_owned(),
+        }
+        .to_string();
+
+        assert!(
+            message.starts_with(
+                "ffprobe and ffmpeg could not be found, so nothing checked that \
+                                 the media is valid."
+            ),
+            "the message does not open by naming what is missing and what went unchecked: \
+             {message}"
+        );
+        assert!(
+            message.contains("scripts/fetch-ffmpeg.ps1"),
+            "the message does not say how to fix it: {message}"
+        );
+        assert!(
+            message.contains("PATH"),
+            "the message does not say where it looked: {message}"
+        );
+    }
+
+    /// Where it looked is part of the message, and on a checkout with the
+    /// pinned build that is a real directory rather than the "no FFMPEG_DIR"
+    /// fallback.
+    #[test]
+    fn the_skip_message_says_which_ffmpeg_it_looked_for() {
+        let message = ToolsUnavailable {
+            missing: "ffprobe".to_owned(),
+        }
+        .to_string();
+
+        let expected = PINNED_FFMPEG_DIR.map_or_else(
+            || "no FFMPEG_DIR".to_owned(),
+            |directory| format!("{directory}\\bin"),
+        );
+        assert!(
+            message.contains(&format!("Looked in {expected} and then on PATH")),
+            "the message does not name the directory it searched: {message}"
+        );
+    }
+
+    /// The lever that turns a skip into a failure, driven through the same
+    /// decision `require_media_tools` makes rather than read off the source.
+    /// This is the check that stops a machine which declared itself able to
+    /// validate media from quietly validating none.
+    #[test]
+    fn declaring_the_tools_required_forbids_a_skip() {
+        assert!(
+            !skipping_is_forbidden(None),
+            "an unset variable leaves a machine without FFmpeg free to skip"
+        );
+        assert!(
+            !skipping_is_forbidden(Some(std::ffi::OsString::from(""))),
+            "an empty value is how a workflow switches the demand off, and must not force a run"
+        );
+        assert!(
+            skipping_is_forbidden(Some(std::ffi::OsString::from("1"))),
+            "a set variable must turn a skip into a failure"
+        );
+    }
 }

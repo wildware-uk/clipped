@@ -185,23 +185,25 @@ impl<'a> Validation<'a> {
     /// catches a clock that drifted over the length of the recording rather
     /// than an offset that was there from the first packet (AGENTS.md section
     /// 21, "clock drift").
+    ///
+    /// A file with fewer than two streams fails this rather than passing it: a
+    /// caller asserting synchronisation on a recording that lost its audio
+    /// track wants to be told, not reassured.
     #[must_use]
     pub fn synchronised_within(mut self, bound: Duration) -> Self {
         let bound_seconds = bound.as_secs_f64();
         let streams = self.media.streams();
         if streams.len() < 2 {
+            let listing = describe_all(&streams);
+            self.failures.push(format!(
+                "A/V synchronisation: nothing to compare — a recording whose tracks are in sync \
+                 needs at least two of them, and this file has {} ({listing})",
+                streams.len()
+            ));
             return self;
         }
 
-        let starts: Vec<(String, f64)> = streams
-            .iter()
-            .map(|stream| {
-                (
-                    stream.label(),
-                    stream.number("start_time").unwrap_or_default(),
-                )
-            })
-            .collect();
+        let starts = self.stream_starts("A/V synchronisation");
         self.report_spread("start", &starts, bound_seconds);
 
         let labels = stream_labels(self.media);
@@ -227,6 +229,53 @@ impl<'a> Validation<'a> {
             self.report_spread("end", &ends, bound_seconds);
         }
         self
+    }
+
+    /// That every stream's own timeline begins at `expected` seconds, give or
+    /// take `tolerance`.
+    ///
+    /// Stronger than [`Self::synchronised_within`], and a different question:
+    /// that one bounds how far apart the tracks are from *each other*, so a
+    /// recording whose every track began three seconds in satisfies it. This
+    /// one says where the recording starts, which is what a writer that rebases
+    /// its timestamps onto the first packet is for (`crates/muxer/src/timeline.rs`).
+    #[must_use]
+    pub fn streams_start_at(mut self, expected: f64, tolerance: f64) -> Self {
+        let starts = self.stream_starts("start time");
+        for (label, start) in starts {
+            if (start - expected).abs() > tolerance {
+                self.failures.push(format!(
+                    "{label} start time: expected {expected:.3}s +/- {tolerance:.3}s, \
+                     found {start:.3}s"
+                ));
+            }
+        }
+        self
+    }
+
+    /// Each stream's declared start, and a recorded failure for any stream that
+    /// declares none.
+    ///
+    /// A missing `start_time` is not 0.000s. Everywhere else in this harness a
+    /// field the file does not report is a failure ("expected N, but the file
+    /// does not report it"); defaulting it here would turn absence of evidence
+    /// into evidence of synchronisation, which is the substitution AGENTS.md
+    /// section 22 exists to prevent — and the case is reachable, since a
+    /// declared but empty track has no start time to declare.
+    fn stream_starts(&mut self, what: &str) -> Vec<(String, f64)> {
+        let mut starts = Vec::new();
+        for stream in self.media.streams() {
+            match stream.number("start_time") {
+                Some(start) => starts.push((stream.label(), start)),
+                None => self.failures.push(format!(
+                    "{what}: {} reports no start time at all, so there is nothing to place it on \
+                     the recording's timeline ({})",
+                    stream.label(),
+                    stream.describe()
+                )),
+            }
+        }
+        starts
     }
 
     /// Records a failure when the tracks are further apart than `bound` at one

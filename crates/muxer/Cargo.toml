@@ -21,11 +21,12 @@ tracing.workspace = true
 # is layer 2, so this follows the dependency direction.
 clipped-logging.workspace = true
 
-# The muxer's own tests write real recordings and then take them apart again:
-# the synthetic-recording example encodes video with the pinned build's
-# software encoder, and `crates/muxer/tests/support` reads finished files back
-# with the demuxer to check what was written. Both need the FFI directly, and an
-# integration test can only reach a dependency the manifest lists for it.
+# The synthetic-recording example encodes real video with the pinned build's
+# software encoder before handing it to the muxer, so it needs the FFI directly.
+# It is the only test target here that does: reading finished files back is
+# `clipped-media-validation`'s job now, and `crates/muxer/tests/support` only
+# starts the example and collects its output. Cargo builds examples with the
+# dev-dependencies, which is why the FFI is listed twice.
 [dev-dependencies]
 rusty_ffmpeg.workspace = true
 # The synthetic-recording example takes command-line arguments, and every

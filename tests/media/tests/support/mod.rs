@@ -61,6 +61,18 @@ impl AudioSource {
         self
     }
 
+    /// A track that stops `seconds` into a longer recording, which is a
+    /// recording that started in sync and came apart while it ran.
+    ///
+    /// Trimming the generated audio rather than shortening the whole output:
+    /// what is wanted is a file whose tracks *begin* together and end far
+    /// apart, so that only the end-of-recording half of the synchronisation
+    /// check can catch it.
+    pub(crate) fn ending_at(mut self, seconds: f64) -> Self {
+        self.graph = format!("{},atrim=end={seconds}", self.graph);
+        self
+    }
+
     /// Two tones on one track: a source that leaked into another's track, which
     /// is the failure multi-track audio exists to prevent.
     pub(crate) fn mixed(title: &'static str, first: f64, second: f64) -> Self {
@@ -148,6 +160,46 @@ pub(crate) fn write_recording(
     command.arg(path);
 
     let output = command.output().expect("the pinned ffmpeg can be run");
+    assert!(
+        output.status.success(),
+        "the fixture could not be written: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    path.to_path_buf()
+}
+
+/// Writes a bare H.264 elementary stream: video with no container around it.
+///
+/// Not a recording, and that is the point. It is what an encoder emits before
+/// anything muxes it, it is what `crates/encoder`'s hardware tests are pointed
+/// at today (issue #154), and because there is no container there is no
+/// timeline: `ffprobe` reports the stream with no `start_time` and no duration.
+/// A harness that treats a field the file does not report as 0.000s would call
+/// this file synchronised.
+///
+/// # Panics
+///
+/// When FFmpeg refuses to write it.
+pub(crate) fn write_elementary_stream(tools: &MediaTools, path: &Path, seconds: f64) -> PathBuf {
+    let output = Command::new(tools.ffmpeg())
+        .args(["-hide_banner", "-v", "error", "-nostdin"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={WIDTH}x{HEIGHT}:rate={FRAME_RATE}"),
+        ])
+        .args([
+            "-c:v",
+            "libopenh264",
+            "-t",
+            &seconds.to_string(),
+            "-f",
+            "h264",
+        ])
+        .arg(path)
+        .output()
+        .expect("the pinned ffmpeg can be run");
     assert!(
         output.status.success(),
         "the fixture could not be written: {}",

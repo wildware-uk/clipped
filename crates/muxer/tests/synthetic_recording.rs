@@ -113,5 +113,12 @@ fn a_finished_recording_contains_what_it_was_given() {
         // a second into the video is out of sync however monotonic its
         // timestamps are.
         .synchronised_within(Duration::from_millis(40))
+        // Together *at zero*, which is the stronger statement and the one this
+        // test used to make directly. `synchronised_within` bounds the tracks
+        // against each other, so a recording in which every track started three
+        // seconds in would satisfy it; the writer rebases every timestamp onto
+        // the first packet of the recording (crates/muxer/src/timeline.rs), and
+        // this is what says so end to end. Exactly zero, not nearly.
+        .streams_start_at(0.0, 0.0)
         .assert_valid();
 }

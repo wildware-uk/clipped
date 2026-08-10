@@ -336,6 +336,7 @@ was actually broken.
 | The duration is plausible | `.duration_seconds(expected, tolerance)` | A recording that stopped early, or one whose timeline is wrong |
 | Timestamps increase, per stream | `.monotonic_timestamps()` | A clock that stepped backwards |
 | The tracks are in sync | `.synchronised_within(bound)` | Tracks that start apart, and tracks that *drift* apart over the recording |
+| The recording starts at zero | `.streams_start_at(0.0, tolerance)` | A writer that never rebased its timestamps: every track three seconds in, and in sync with itself |
 | A track carries its own tone and none of the others | `.audio_tone(index, Tone::at(440.0).isolated_from(880.0))` | Audio isolation, which no amount of `ffprobe` output can see |
 
 Nothing is asserted until `assert_valid()`, so one run reports every failed
@@ -400,8 +401,10 @@ never by the crates being validated, and then taken apart at the byte level:
 | An audio track that was never written | The report above |
 | A cluster timestamped before the one in front of it | `timestamps: a:0 goes backwards — packet 40 of the file is at 0.000000s, after packet 38 at 0.491000s` |
 | Audio half a second behind the video | `A/V synchronisation: the tracks start 0.500s apart, which is more than the stated 0.050s bound (a:0 starts at 0.500s, v:0 starts at 0.000s)` |
+| Audio that begins with the video and then stops halfway | `A/V synchronisation: the tracks end 1.001s apart, which is more than the stated 0.050s bound (a:0 ends at 0.999s, v:0 ends at 2.000s)` — the start check passes on this file, which is what makes it a test of the *end* |
 | A track another source bled into | `a:1 isolation: 440 Hz belongs to another source and must not be audible here, but it measures 0.1250 against this track's own 1320 Hz at 0.1250 — 1.0x apart` |
 | A track nothing was ever routed into | `the track is silent (peak amplitude 0.00e0 over 2.00s of audio)` |
+| A bare H.264 elementary stream, which has no timeline at all | `start time: v:0 reports no start time at all, so there is nothing to place it on the recording's timeline` — a missing field is a failure, never a silent 0.000s — and `A/V synchronisation: nothing to compare … this file has 1` |
 
 ### Why FFmpeg's programs rather than the linked libraries
 
@@ -428,6 +431,12 @@ neither the pinned build nor `PATH` has FFmpeg, so a checkout without it reports
 that it validated nothing instead of passing quietly. `CLIPPED_REQUIRE_MEDIA=1`
 turns that skip into a failure, which is the same lever `CLIPPED_REQUIRE_CAPTURE`
 and `CLIPPED_REQUIRE_ENCODER` give the other subsystems.
+
+CI sets it on the `Test` step. These tests link nothing — they run `ffprobe.exe`
+and `ffmpeg.exe` as subprocesses — so a fetch-script or cache regression that
+left the libraries but not the programs would still compile, and without the
+variable every test proving the harness *detects* anything would skip and leave
+the run green.
 
 ### What it cannot do yet
 

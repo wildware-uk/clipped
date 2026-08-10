@@ -281,9 +281,18 @@ jobs:
       # no-ops looks exactly like a run in which they passed: "green" and "ran"
       # stop being the same statement. If a future runner image loses the
       # compositor, this fails loudly and names the reason, which is the point.
+      #
+      # CLIPPED_REQUIRE_MEDIA does the same for the media validation harness
+      # (tests/media, docs/testing.md). Its tests link nothing: they run
+      # ffprobe.exe and ffmpeg.exe from the pinned build, so a fetch-script or
+      # cache regression that left the libraries but not the programs would
+      # still build and would silently skip every test that proves the harness
+      # detects a truncated file, a missing track or a rewound cluster. The
+      # build failing first is not a guarantee that covers them.
       - name: Test
         env:
           CLIPPED_REQUIRE_CAPTURE: '1'
+          CLIPPED_REQUIRE_MEDIA: '1'
         run: cargo test --workspace
 
   deny:
