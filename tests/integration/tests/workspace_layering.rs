@@ -20,7 +20,12 @@ use serde_json::Value;
 /// added without being placed here.
 const LAYERS: &[&[&str]] = &[
     // Platform primitives and shared vocabulary, which depend on nothing else.
-    &["clipped-windows", "clipped-events", "clipped-storage"],
+    &[
+        "clipped-windows",
+        "clipped-events",
+        "clipped-storage",
+        "clipped-logging",
+    ],
     // Subsystems built directly on a platform or persistence layer.
     &[
         "clipped-capture",

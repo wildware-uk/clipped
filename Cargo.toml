@@ -13,13 +13,21 @@ authors = ["The Clipped contributors"]
 # Internal crates are referenced through the workspace so that a version bump
 # happens in one place. Layering rules are documented in README.md; a crate must
 # only depend on crates listed below it there.
+#
+# Shared external dependencies are pinned here for the same reason: `tracing` is
+# the logging facade every crate is expected to call directly (docs/logging.md),
+# so a crate adopts it with `tracing.workspace = true` rather than picking its
+# own version and splitting the callsite registry across two copies of the crate.
 [workspace.dependencies]
+tracing = "0.1"
+
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }
 clipped-encoder = { path = "crates/encoder", version = "0.1.0" }
 clipped-events = { path = "crates/events", version = "0.1.0" }
 clipped-game-detection = { path = "crates/game-detection", version = "0.1.0" }
 clipped-library = { path = "crates/library", version = "0.1.0" }
+clipped-logging = { path = "crates/logging", version = "0.1.0" }
 clipped-muxer = { path = "crates/muxer", version = "0.1.0" }
 clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
 clipped-session = { path = "crates/session", version = "0.1.0" }
