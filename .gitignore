@@ -32,3 +32,7 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local agent worktrees. These are real git checkouts of this repository, so
+# committing them would embed a repository inside itself.
+/.claude/worktrees/

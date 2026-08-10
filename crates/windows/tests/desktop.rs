@@ -351,8 +351,16 @@ fn every_enumerated_window_is_distinct_and_internally_consistent() {
     handles.dedup();
     assert_eq!(handles.len(), total, "a window was enumerated twice");
 
+    // Deliberately not asserted here: that each enumerated window is still
+    // alive. `windows` is a snapshot, and a window that existed while it was
+    // taken may be gone by the time this loop reads it — which is the whole
+    // reason `WindowHandle` is documented as able to go stale at any moment.
+    // Asserting liveness would contradict the design being tested, and it
+    // failed in CI for exactly that reason (issue #134), because a runner has
+    // background processes opening and closing windows with nobody driving
+    // them. Everything below is a property of the snapshot itself, so it
+    // cannot race.
     for window in &windows {
-        assert!(is_window(window.handle()) || window.exclusion().is_some());
         assert_eq!(
             window.is_capturable(),
             window.exclusion().is_none(),
