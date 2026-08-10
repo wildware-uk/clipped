@@ -23,6 +23,13 @@
 //! the file to `ffprobe` to assert on what it reports, including that every
 //! submitted frame comes back out of a decoder.
 //!
+//! That extends to the encoder's own account of itself. `PictureKind` is read
+//! from an AMF property, so every keyframe assertion here is checked twice: once
+//! against what the encoder reported, and once against the NAL unit types in the
+//! bytes it produced ([`contains_idr`]). A backend that read the wrong property,
+//! or the wrong codec's enumeration, would otherwise report keyframes in exactly
+//! the right places while producing a stream that has none.
+//!
 //! # The harness
 //!
 //! Deliberately a second copy of the NVENC backend's, rather than a shared one:
@@ -233,6 +240,24 @@ fn hevc_output_is_a_decodable_stream() {
 
 #[test]
 fn a_forced_keyframe_arrives_where_it_was_asked_for() {
+    // Both codecs, and not for symmetry. HEVC's keyframe handling is a
+    // different set of AMF properties from H.264's, and running only H.264 is
+    // exactly how a real defect survived review once: `HevcGOPSPerIDR = 0`
+    // means AMF inserts no IDR at all, so with `KeyframeInterval::Never` the
+    // stream opened with a `CRA_NUT` that was reported as intra and the first
+    // packet of the recording was not a cut point (see `super::force_idr`).
+    for codec in [Codec::H264, Codec::Hevc] {
+        forced_keyframes_land_where_they_were_asked_for(codec);
+    }
+}
+
+/// The body of the test above, for one codec.
+fn forced_keyframes_land_where_they_were_asked_for(codec: Codec) {
+    /// Which frame asks to be a keyframe out of turn.
+    const FORCED: usize = 7;
+    /// How many frames the stream is.
+    const FRAMES: usize = 12;
+
     let Some(gpu) = TestGpu::open() else {
         return;
     };
@@ -241,20 +266,21 @@ fn a_forced_keyframe_arrives_where_it_was_asked_for() {
     // the first one and the one asked for. This is what the replay buffer
     // depends on: a clip has to be able to start where the user pressed the key,
     // not at the next scheduled keyframe (SPEC.md section 7).
-    let config = config_for(Codec::H264, TEST_SIZE).with_keyframe_interval(KeyframeInterval::Never);
+    let config = config_for(codec, TEST_SIZE).with_keyframe_interval(KeyframeInterval::Never);
     let mut encoder = match gpu.open_encoder(config) {
         Ok(encoder) => encoder,
         Err(error) => {
-            unsupported_or_panic(Codec::H264, &error);
+            unsupported_or_panic(codec, &error);
             return;
         }
     };
 
-    let mut keyframes = Vec::new();
-    for index in 0..12 {
+    let mut reported = Vec::new();
+    let mut in_the_bitstream = Vec::new();
+    for index in 0..FRAMES {
         let texture = gpu.pattern_texture(index);
         let frame = source_frame(&texture, index);
-        let frame = if index == 7 {
+        let frame = if index == FORCED {
             frame.forcing_keyframe()
         } else {
             frame
@@ -263,15 +289,49 @@ fn a_forced_keyframe_arrives_where_it_was_asked_for() {
         encoder.submit(&frame).expect("the frame is submitted");
         while let Some(packet) = encoder.next_packet().expect("a packet is produced") {
             if packet.is_keyframe() {
-                keyframes.push(packet.presentation_time());
+                reported.push(packet.presentation_time());
+            }
+            // The same question asked of the coded bytes rather than of the
+            // encoder. Everything else in this suite reads AMF's own
+            // `OutputDataType` property, which is the encoder marking its own
+            // homework; this reads the NAL unit types that a decoder, a muxer
+            // and the replay buffer will actually see.
+            if contains_idr(codec, packet.data()) {
+                in_the_bitstream.push(packet.presentation_time());
             }
         }
     }
 
-    let expected = [Duration::ZERO, amf_time(frame_time(7))];
+    let expected = [Duration::ZERO, amf_time(frame_time(FORCED))];
     assert_eq!(
-        keyframes, expected,
-        "keyframes should be the first frame and the one that asked to be one"
+        in_the_bitstream, expected,
+        "{codec}: the IDR pictures in the bitstream should be the first frame and the one that \
+         asked to be one"
+    );
+    assert_eq!(
+        reported, expected,
+        "{codec}: the packets flagged as keyframes should be exactly the IDR pictures in the \
+         bitstream"
+    );
+}
+
+#[test]
+fn the_first_picture_of_a_stream_is_always_coded_as_a_keyframe() {
+    // The rule `submit` applies, on its own and without hardware, so that CI
+    // sees it too. The second argument is how many pictures this session has
+    // already coded.
+    assert!(
+        super::force_idr(false, 0),
+        "the first picture has to be an IDR even when nothing asked, or the recording has no cut \
+         point at its own beginning"
+    );
+    assert!(
+        !super::force_idr(false, 1),
+        "a later picture that nothing asked about must be left to the configured interval"
+    );
+    assert!(
+        super::force_idr(true, 1),
+        "a frame that asked to be a keyframe has to be one wherever it falls"
     );
 }
 
@@ -661,6 +721,18 @@ fn encode_and_verify(codec: Codec) {
             }
             previous = Some(packet.presentation_time());
             timeline.push(packet.presentation_time());
+            // What the encoder says about the picture, checked against what it
+            // actually coded. `PictureKind` comes from AMF's own
+            // `OutputDataType` property, and a backend that read the wrong
+            // property or the wrong enumeration would report keyframes in
+            // exactly the right places while producing a stream with none.
+            assert_eq!(
+                packet.is_keyframe(),
+                contains_idr(codec, packet.data()),
+                "{codec}: the encoder reported {:?} at {:?}, which the bitstream disagrees with",
+                packet.picture(),
+                packet.presentation_time()
+            );
             if packet.is_keyframe() {
                 keyframes.push(packet.presentation_time());
             }
@@ -743,6 +815,24 @@ fn check_structure(codec: Codec, stream: &[u8]) {
         types.iter().any(|kind| keyframe.contains(kind)),
         "{codec} produced no keyframe"
     );
+}
+
+/// Whether a coded picture is an IDR, read out of the bitstream.
+///
+/// The independent half of every keyframe assertion here: the encoder's own
+/// answer is a property AMF fills in, and this is the NAL unit type a decoder
+/// reads.
+///
+/// H.264 numbers an IDR slice 5. HEVC has two, `IDR_W_RADL` (19) and
+/// `IDR_N_LP` (20), and deliberately does not count `CRA_NUT` (21): a clean
+/// random access picture may be followed by leading pictures that reference
+/// across it, so it is not the unconditional cut point a clip needs (see
+/// [`crate::packet::PictureKind`]).
+fn contains_idr(codec: Codec, packet: &[u8]) -> bool {
+    annex_b_units(packet).iter().any(|unit| match codec {
+        Codec::H264 => unit[0] & 0x1F == 5,
+        _ => matches!((unit[0] >> 1) & 0x3F, 19 | 20),
+    })
 }
 
 /// Splits an Annex B stream into its NAL units.

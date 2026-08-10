@@ -437,6 +437,32 @@ fn frame_duration(config: &EncoderConfig) -> i64 {
     AMF_SECOND * i64::from(rate.denominator()) / i64::from(rate.numerator())
 }
 
+/// Whether the picture about to be submitted has to be coded as an IDR.
+///
+/// Two reasons, and the second is the one that is not obvious.
+///
+/// The caller may ask, which is what saving a replay-buffer clip does.
+///
+/// And the *first* picture of a stream always has to be one, whatever the
+/// keyframe interval says, because a recording whose own beginning is not a cut
+/// point is one no clip can start at and no muxer can seek in (SPEC.md section
+/// 7). AMF does not guarantee that by itself: with HEVC and
+/// [`KeyframeInterval::Never`](crate::KeyframeInterval::Never) the backend sets
+/// `HevcGOPSPerIDR = 0`, which means AMF inserts no IDR *at all* — the stream
+/// opens with a clean random access picture (`CRA_NUT`, NAL type 21), reported
+/// through `HevcOutputDataType` as intra rather than as an IDR, so the first
+/// packet of the recording is not flagged as a keyframe. Forcing the first
+/// picture is what makes
+/// [`KeyframeInterval::Never`](crate::KeyframeInterval::Never)'s promise —
+/// "only the first frame is a keyframe" — true here.
+///
+/// H.264 does not need it: `IDRPeriod = 0` still emits an IDR for the first
+/// picture. Asking anyway costs nothing, because that picture is an IDR either
+/// way, and it keeps one rule rather than a per-codec exception.
+const fn force_idr(caller_asked: bool, pictures_coded: u64) -> bool {
+    caller_asked || pictures_coded == 0
+}
+
 /// A presentation time in the hundred-nanosecond units AMF measures time in.
 ///
 /// **This is where a timestamp loses precision**, and it is the one place in
@@ -466,7 +492,12 @@ fn presentation_units(time: Duration) -> i64 {
 /// The buffer is a reference this session owns, and the bytes stay readable
 /// until [`Session::release_coded`] gives that reference back — which is the
 /// next `next_packet`, or teardown.
-#[derive(Debug, Clone, Copy)]
+///
+/// Deliberately neither [`Clone`] nor [`Copy`]: it owns a reference to an
+/// `AMFBuffer`, and a second value carrying the same pointer is a second thing
+/// that looks releasable (AGENTS.md section 58). It is moved between the queues
+/// instead, so exactly one value owns the reference at any moment.
+#[derive(Debug)]
 struct Coded {
     buffer: *mut sys::AMFBuffer,
     /// Where AMF put the bytes. Valid while the reference above is held.
@@ -837,10 +868,11 @@ impl Session {
             ));
         }
 
+        let idr = force_idr(frame.forces_keyframe(), self.encoded_frames);
         let surface = self.wrap_texture(frame)?;
         // From here on the surface is derived from a texture this encoder does
         // not own, so every path has to release it before returning.
-        let coded = self.encode(surface, frame, duration);
+        let coded = self.encode(surface, frame, duration, idr);
         self.release_surface(surface);
 
         let coded = coded?;
@@ -884,11 +916,15 @@ impl Session {
     }
 
     /// Submits one wrapped frame and waits for its coded picture.
+    ///
+    /// `idr` is whether this picture has to be coded as an IDR — see
+    /// [`force_idr`], which is where the decision is made and explained.
     fn encode(
         &self,
         surface: *mut sys::AMFSurface,
         frame: &SourceFrame<'_>,
         duration: i64,
+        idr: bool,
     ) -> Result<Coded, EncodeError> {
         // SAFETY: `surface` is the live wrapper `wrap_texture` produced, held
         // for the whole of this call by its caller.
@@ -904,7 +940,7 @@ impl Session {
             unsafe { set_duration(surface, duration) };
         }
 
-        if frame.forces_keyframe() {
+        if idr {
             for property in settings::forced_keyframe(self.codec) {
                 // SAFETY: the surface is live and its vtable begins with
                 // `AMFPropertyStorage`'s entries, because `AMFSurface` derives
@@ -1125,9 +1161,17 @@ impl Session {
         let Some(coded) = self.ready.pop_front() else {
             return Ok(None);
         };
+
+        // Copied out before the picture is moved into `locked`, so that the
+        // owning value can be moved rather than duplicated. Raw pointers and
+        // lengths are not a reference to anything; the reference stays in the
+        // single `Coded` this session now holds.
+        let (data, length) = (coded.data, coded.length);
+        let presentation = coded.presentation;
+        let picture = coded.picture;
         self.locked = Some(coded);
 
-        let data = if coded.data.is_null() || coded.length == 0 {
+        let data = if data.is_null() || length == 0 {
             &[][..]
         } else {
             // SAFETY: AMF's buffer holds `length` readable bytes at `data` for
@@ -1135,17 +1179,17 @@ impl Session {
             // next call to this method or `Drop`. The returned slice borrows
             // `*self` for exactly that long, so the compiler will not let a
             // caller hold it across either.
-            unsafe { core::slice::from_raw_parts(coded.data, coded.length) }
+            unsafe { core::slice::from_raw_parts(data, length) }
         };
 
         Ok(Some(EncodedPacket::new(
             data,
-            coded.presentation,
+            presentation,
             // Equal to the presentation time by construction: the encoder is
             // configured without B-frames, so pictures come out in the order
             // they went in (see `settings`).
-            coded.presentation,
-            coded.picture,
+            presentation,
+            picture,
         )))
     }
 

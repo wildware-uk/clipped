@@ -131,7 +131,9 @@ pub(super) const fn picture_kind(codec: Codec, value: i64) -> PictureKind {
     }
 }
 
-/// The properties set on a frame that has asked to be a keyframe.
+/// The properties set on a frame that has to be coded as an IDR — one the
+/// caller asked to be a keyframe, or the first picture of the stream (see
+/// [`super::force_idr`]).
 ///
 /// Two things, not one: the picture type, and — for H.264 — the parameter sets
 /// in front of it. A keyframe a decoder cannot start at is not a cut point, and
@@ -329,6 +331,13 @@ fn hevc_properties(config: &EncoderConfig) -> Vec<Property> {
             // pictures keeps AMF's default length, so the stream still restarts
             // periodically with an intra picture — which is not a cut point, and
             // "never" is exactly a request for no more cut points.
+            //
+            // "No IDR will be inserted" is literal, and includes the first
+            // picture: measured, this opens the stream with a `CRA_NUT` (NAL
+            // type 21) that AMF reports as intra, where H.264's `IDRPeriod = 0`
+            // opens with a real IDR. The first picture is therefore forced by
+            // the session rather than left to this property — see
+            // `super::force_idr`.
             properties.push(Property::int64(wide!("HevcGOPSPerIDR"), 0));
         }
     }
@@ -470,8 +479,19 @@ fn hevc_rate_control(rate_control: RateControl, properties: &mut Vec<Property>) 
 
 /// The keyframe interval as the number H.264's `IDRPeriod` takes.
 ///
-/// Zero for [`KeyframeInterval::Never`], which is how AMF spells "no periodic
-/// IDR"; anything else is the interval in frames.
+/// Zero for [`KeyframeInterval::Never`]; anything else is the interval in
+/// frames.
+///
+/// What zero means is not documented. AMD's header describes
+/// `AMF_VIDEO_ENCODER_IDR_PERIOD` only as "IDR Period in frames; default =
+/// depends on USAGE" and says nothing about zero, unlike HEVC's
+/// `HevcGOPSPerIDR`, whose zero case AMD does spell out. It is set because it
+/// is the closest thing this property offers to the request, and nothing here
+/// depends on being right about it: the tests observe a twelve-frame stream,
+/// which is shorter than AMF's default group of pictures and so cannot tell the
+/// two apart, and the one thing that must be true either way — that the first
+/// picture is a cut point — is made true by [`super::force_idr`] rather than by
+/// trusting this.
 const fn gop_length(interval: KeyframeInterval) -> i64 {
     match interval {
         KeyframeInterval::Frames(frames) => frames.get() as i64,

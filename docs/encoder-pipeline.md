@@ -408,7 +408,7 @@ whole parameter set.
 | Profile | H.264 High; HEVC Main, main tier. 8-bit 4:2:0 is all this build produces. |
 | Preset | `Speed`, `Balanced`, `Quality` map to AMF's own three. The two codecs number them completely differently — balanced is 0 for H.264 and 5 for HEVC — which a unit test pins. |
 | Rate control | `RateControl::Bitrate` with no peak becomes CBR with a one-second VBV buffer; with a peak, peak-constrained VBR. `RateControl::Quality` becomes QVBR, whose quality level is the same 1–51 scale `QualityTarget` already uses. HEVC's rate-control enumeration is not H.264's with a prefix: CBR is 1 in one and 3 in the other. |
-| Keyframes | H.264 sets `IDRPeriod`; HEVC sets `HevcGOPSize` with one IDR per group of pictures. Setting only a GOP length produces intra frames that are not cut points, which looks fine in a player and breaks every clip the replay buffer tries to save. |
+| Keyframes | H.264 sets `IDRPeriod`; HEVC sets `HevcGOPSize` with one IDR per group of pictures. Setting only a GOP length produces intra frames that are not cut points, which looks fine in a player and breaks every clip the replay buffer tries to save. The *first* picture of a stream is forced to be an IDR whatever the interval says — see [The first picture is forced](#the-first-picture-is-forced). |
 | Parameter sets | Repeated at every keyframe — `HeaderInsertionSpacing` for H.264, IDR-aligned header insertion for HEVC — and inserted explicitly on a frame that asks to be a keyframe out of turn. |
 | Colour | Written as AMF's combined colour profile (matrix and range together) plus the ITU-T H.273 transfer and primaries code points, and for HEVC the nominal range as well. |
 | B-frames | Off, for the same reason as NVENC: reordered output means a decode timestamp that differs from the presentation timestamp. |
@@ -444,6 +444,26 @@ wait. The wait is therefore a guard rather than something that fires here, and i
 it ever does not clear, the encoder is flushed — which is what releases a queued
 input — and the failure is logged rather than the caller being told it may
 recycle a texture AMF is still reading.
+
+### The first picture is forced
+
+`Session::submit` asks for an IDR on the first picture of every stream, as well
+as on any frame the caller marked. That is not belt and braces: with HEVC and
+`KeyframeInterval::Never` the backend sets `HevcGOPSPerIDR = 0`, and AMD's "0
+means no IDR will be inserted" turns out to be literal. Dumping the NAL headers
+of such a stream gives `[35, 32, 33, 34, 21, …]` — access unit delimiter, VPS,
+SPS, PPS, then type 21, `CRA_NUT`, for frame 0. AMF reports that through
+`HevcOutputDataType` as intra rather than as an IDR, so the first packet of the
+recording was not flagged as a keyframe, and a replay buffer or a muxer looking
+for the first decodable point would not find one at the recording's own
+beginning (SPEC.md section 7). H.264 does not behave that way: `IDRPeriod = 0`
+still emits a real IDR (NAL type 5) for the first picture.
+
+Forcing it makes `KeyframeInterval::Never`'s documented promise — "only the first
+frame is a keyframe" — true for both codecs, and costs nothing on H.264, where
+the first picture is an IDR either way. The test that pins it reads the NAL unit
+types out of the bitstream rather than AMF's own report of them, so it fails on
+exactly this.
 
 ### Timestamps lose 100 nanoseconds
 
@@ -510,10 +530,16 @@ no session that connects capture to encoding
   frames.
 - **The timestamps are the ones that went in**, frame by frame, quantised to
   AMF's tick. Removing the conversion to hundred-nanosecond units makes it fail.
-- **Keyframes land where they were asked to.** A one-second interval at 60 fps
-  puts keyframes at frames 0 and 60 and nowhere else; a frame that asks to be a
-  keyframe becomes one even when the interval says otherwise. Asking for one IDR
-  every *two* groups of pictures makes it fail.
+- **Keyframes land where they were asked to, in the bytes rather than in the
+  report.** A one-second interval at 60 fps puts keyframes at frames 0 and 60 and
+  nowhere else; a frame that asks to be a keyframe becomes one even when the
+  interval says otherwise; and the first picture of a stream is one whatever the
+  interval says. Both codecs are run. Every keyframe assertion is made twice —
+  against `PictureKind`, which comes from an AMF property, and against the NAL
+  unit types in the coded bytes — so an encoder that mis-reports its own picture
+  types cannot pass. Asking for one IDR every *two* groups of pictures makes it
+  fail, and so does letting HEVC open a `KeyframeInterval::Never` stream with the
+  `CRA_NUT` AMF produces by default.
 - **Colour survives.** Red, green and blue frames are encoded, decoded with
   FFmpeg and compared with what went in. As with NVENC, this shows that the
   description in the stream agrees with the conversion performed rather than
