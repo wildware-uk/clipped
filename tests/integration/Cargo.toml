@@ -11,6 +11,8 @@ publish = false
 
 [dev-dependencies]
 serde_json = "1"
+# GPL-3.0-or-later, added only to prove the licence check rejects it.
+imagequant = "4.4.1"
 
 [lints]
 workspace = true

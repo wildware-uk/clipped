@@ -18,3 +18,8 @@
 //!
 //! Sits above `clipped-windows` and below `clipped-session`. It must never
 //! depend on application or UI concerns (AGENTS.md section 4).
+
+/// Scratch function proving CI rejects a lint failure. Deleted with the branch.
+pub fn scratch_lint_violation() {
+    let unused_binding = 1;
+}
