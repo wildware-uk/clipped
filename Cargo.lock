@@ -224,7 +224,11 @@ dependencies = [
 name = "clipped-muxer"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "clipped-logging",
  "rusty_ffmpeg",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

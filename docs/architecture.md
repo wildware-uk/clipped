@@ -290,19 +290,22 @@ contributor working in it needs.
 | --- | --- | --- |
 | [capture-pipeline.md](capture-pipeline.md) | Frame capture, backend selection and fallback, the capture clock, the path from frame to encoded packet | M1 |
 | [encoder-capabilities.md](encoder-capabilities.md) | Adapter and encoder detection, what is measured against what is inferred, the capability cache, what "Automatic" chooses | M1 |
+| [muxing.md](muxing.md) | Writing MKV, the track layout, timestamp handling and monotonicity, and what a recording killed mid-write costs | M1 |
 | [audio-routing.md](audio-routing.md) | Per-source capture, application-to-track routing, drift correction, the compatibility mix | M2 |
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 
-All but [capture-pipeline.md](capture-pipeline.md) and
-[encoder-capabilities.md](encoder-capabilities.md) are stubs today, stating what
-they will cover and which milestone writes them. `capture-pipeline.md` is
+All but [capture-pipeline.md](capture-pipeline.md),
+[encoder-capabilities.md](encoder-capabilities.md) and [muxing.md](muxing.md)
+are stubs today, stating what they will cover and which milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
 policy exist, so the interface, the ownership and threading rules, the timestamp
 model and the selection policy are documented there, and the sections that would
 describe an unwritten encoder path are listed at the end of it as still to be
 written. `encoder-capabilities.md` covers detection, which is written, and says
-plainly what detection cannot tell you until an encoder backend exists. The rest
+plainly what detection cannot tell you until an encoder backend exists.
+`muxing.md` covers the container writer, which is written, and ends with what
+has not been exercised because nothing yet produces the packets for it. The rest
 stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 

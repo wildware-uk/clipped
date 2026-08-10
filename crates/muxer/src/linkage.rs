@@ -22,9 +22,10 @@
 //! written here in `clipped-muxer` (ADR 0004), starting with this module. What
 //! it wraps is deliberately only what it needs — six entry points that read
 //! constants out of the loaded libraries and three that look a component up by
-//! name. The container writer that needs `AVFormatContext`, `AVStream` and
-//! `AVPacket` wrapped is [issue #21](https://github.com/wildware-uk/clipped/issues/21),
-//! and those wrappers are written when there is a muxer to hold them honest.
+//! name. The `AVFormatContext`, `AVStream` and `AVPacket` the container writer
+//! needs are wrapped in [`crate::writer`], which is where the ownership rules
+//! for them live; this module deliberately stayed free of them until there was
+//! a muxer to hold them honest.
 //!
 //! Everything below is free of ownership questions, which is why it is
 //! straightforward: FFmpeg's version, configuration and licence strings are
