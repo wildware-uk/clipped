@@ -24,6 +24,11 @@ path = "src/main.rs"
 [dependencies]
 clipped-logging.workspace = true
 clipped-session.workspace = true
+# Window and monitor enumeration for `list-windows`, and the target selection
+# the recorder resolves `--window`, `--process` and `--pid` through. Every
+# Windows API call this subcommand makes is behind this crate; none is made
+# here (AGENTS.md section 5).
+clipped-windows.workspace = true
 # Argument parsing, pinned in the root manifest so every Clipped executable
 # behaves the same way. Dual MIT/Apache-2.0.
 clap.workspace = true

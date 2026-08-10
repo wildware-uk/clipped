@@ -8,5 +8,34 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The Windows API. Pinned in the root manifest so that every crate reaching
+# Windows sees the same `HWND` (AGENTS.md section 10). Only the namespaces
+# listed here are generated and compiled, so the feature list is the honest
+# inventory of what this crate touches:
+#
+# - Win32_Foundation             HWND, HANDLE, RECT, CloseHandle
+# - Win32_UI_WindowsAndMessaging EnumWindows and the window queries around it
+# - Win32_UI_HiDpi               per-monitor DPI, and the process DPI mode
+# - Win32_Graphics_Gdi           monitors: EnumDisplayMonitors, GetMonitorInfoW
+# - Win32_Graphics_Dwm           DWMWA_CLOAKED, which is how a window can be
+#                                "visible" and yet show nothing
+# - Win32_System_Threading       OpenProcess and the executable name behind a PID
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Threading",
+] }
+
+# `tests/desktop.rs` creates real windows to enumerate, which needs the module
+# handle to register a window class with. Kept out of the shipped feature list
+# because nothing in the library creates a window: this crate observes the
+# desktop, it does not add to it.
+[dev-dependencies]
+windows = { workspace = true, features = ["Win32_System_LibraryLoader"] }
+
 [lints]
 workspace = true

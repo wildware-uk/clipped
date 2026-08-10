@@ -8,21 +8,20 @@
 //!
 //! # Adding a subcommand
 //!
-//! Add a variant to [`Command`] and a match arm to [`crate::run`]. The next two
-//! are already specified:
+//! Add a variant to [`Command`] and a match arm to [`crate::run`]. One more is
+//! already specified and deliberately absent:
 //!
-//! - `list-windows` — enumerate capturable windows
-//!   ([issue #10](https://github.com/wildware-uk/clipped/issues/10)).
 //! - `capabilities` — report detected encoders and codecs
 //!   ([issue #14](https://github.com/wildware-uk/clipped/issues/14)).
 //!
-//! Neither is declared here. A subcommand that parses arguments and then does
+//! It is not declared here. A subcommand that parses arguments and then does
 //! nothing is a control that silently does nothing, which AGENTS.md section 27
 //! rules out for a command line as much as for a window.
 
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use clipped_windows::{TargetSelector, WindowHandle};
 
 use crate::options::{AudioDeviceSelection, EncoderSelection, Framerate, Resolution, VideoCodec};
 
@@ -70,6 +69,133 @@ pub struct Cli {
 pub enum Command {
     /// Record a window or process to a file.
     Record(RecordArgs),
+
+    /// List the windows that can be captured.
+    ListWindows(ListWindowsArgs),
+}
+
+/// The mutually exclusive ways of naming one window to `list-windows`.
+///
+/// The same three `record` accepts, plus `--handle`, which is the answer to an
+/// ambiguous match: every candidate is reported with its handle, and a handle
+/// is the one selector that cannot be ambiguous.
+pub const SELECTOR_ARGUMENTS: [&str; 4] = ["window", "process", "pid", "handle"];
+
+/// Arguments to `clipped-recorder list-windows`.
+///
+/// With no selector it lists; with one it resolves, and reports the candidates
+/// if more than one window answers to it.
+///
+/// `record` does **not** go through this today: it validates its
+/// `--window`/`--process`/`--pid` and stops, because there is nothing to hand a
+/// resolved window handle to until the capture backend exists (issues #11 and
+/// #12). `list-windows` is therefore the only caller of
+/// [`clipped_windows::resolve`], and changing the selection rules changes what
+/// this subcommand reports and nothing else. Wiring `record` through the same
+/// call is the remainder of
+/// [issue #10](https://github.com/wildware-uk/clipped/issues/10).
+#[derive(Debug, Default, Args)]
+#[command(group(ArgGroup::new("selector").args(SELECTOR_ARGUMENTS)))]
+pub struct ListWindowsArgs {
+    /// Also list the windows that cannot be captured, and why. [default: off]
+    #[arg(long)]
+    pub all: bool,
+
+    /// Resolve the window whose title contains this text.
+    #[arg(long, value_name = "TITLE", value_parser = parse_selector_text)]
+    pub window: Option<String>,
+
+    /// Resolve the window belonging to this executable, such as `cs2.exe`.
+    #[arg(long, value_name = "NAME", value_parser = parse_selector_text)]
+    pub process: Option<String>,
+
+    /// Resolve the window belonging to this process identifier.
+    #[arg(long, value_name = "PID")]
+    pub pid: Option<u32>,
+
+    /// Resolve this exact window, as printed in the HANDLE column.
+    ///
+    /// Hexadecimal with `0x`, or decimal.
+    #[arg(long, value_name = "HANDLE", value_parser = parse_window_handle)]
+    pub handle: Option<WindowHandle>,
+}
+
+impl ListWindowsArgs {
+    /// The selector the arguments named, if any.
+    ///
+    /// [`None`] means "list everything" rather than "nothing was asked for":
+    /// the group is optional, and clap has already rejected any invocation
+    /// naming two selectors.
+    #[must_use]
+    pub fn selector(&self) -> Option<TargetSelector> {
+        if let Some(title) = &self.window {
+            return Some(TargetSelector::WindowTitle(title.clone()));
+        }
+        if let Some(name) = &self.process {
+            return Some(TargetSelector::ProcessName(name.clone()));
+        }
+        if let Some(process_id) = self.pid {
+            return Some(TargetSelector::ProcessId(process_id));
+        }
+        self.handle.map(TargetSelector::WindowHandle)
+    }
+}
+
+/// Rejects an empty window title or process name.
+///
+/// An empty substring is inside every title, so `--window=` asks for the whole
+/// desktop. [`clipped_windows::resolve`] reads it as matching nothing, which is
+/// the only reading available to a pure function that has no way to report a
+/// usage error — but that surfaces as ``no window matches the window title
+/// containing `` ``, which looks like a formatting bug rather than an answer.
+/// A command line *can* report a usage error, so it does, here, before
+/// matching ever runs.
+///
+/// Only wholly blank values are rejected. A title is matched as typed,
+/// including leading and trailing spaces, because a window really can be called
+/// `Untitled - Notepad ` and the user is the one who knows.
+fn parse_selector_text(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err(
+            "a window title or process name cannot be empty; run `clipped-recorder \
+             list-windows` to see what there is to choose from"
+                .to_owned(),
+        );
+    }
+
+    Ok(value.to_owned())
+}
+
+/// Parses a window handle as this program prints one, or as a person would
+/// type it.
+///
+/// `0x000104ac` is what the HANDLE column shows and what most people will
+/// paste; a bare decimal is what a script that has the number as an integer
+/// will produce. Both are accepted, and nothing else is: a handle typed without
+/// its `0x` is read as decimal, because silently treating an ambiguous string
+/// as hexadecimal would resolve to a different window than the user believed.
+fn parse_window_handle(value: &str) -> Result<WindowHandle, String> {
+    let trimmed = value.trim();
+    let handle = match trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        Some(hexadecimal) => isize::from_str_radix(hexadecimal, 16)
+            .map_err(|error| format!("`{value}` is not a hexadecimal window handle: {error}"))?,
+        None => trimmed
+            .parse::<isize>()
+            .map_err(|error| format!("`{value}` is not a window handle: {error}"))?,
+    };
+
+    if handle == 0 {
+        return Err(
+            "0 is not a window handle; run `clipped-recorder list-windows` to see the \
+             handles that exist"
+                .to_owned(),
+        );
+    }
+
+    Ok(WindowHandle::from_raw(handle))
 }
 
 /// Arguments to `clipped-recorder record`.
@@ -86,13 +212,15 @@ pub struct RecordArgs {
     /// Record the window whose title contains this text.
     ///
     /// Matching is by substring, so `--window "Counter-Strike"` finds
-    /// "Counter-Strike 2". If more than one window matches, the candidates are
-    /// reported rather than one being picked (issue #10).
-    #[arg(long, value_name = "TITLE")]
+    /// "Counter-Strike 2". `record` does not resolve the selector yet — it has
+    /// no capture engine to hand a window to — so run
+    /// `clipped-recorder list-windows --window <TITLE>` to see what it will
+    /// match, and which candidates an ambiguous title has (issue #10).
+    #[arg(long, value_name = "TITLE", value_parser = parse_selector_text)]
     pub window: Option<String>,
 
     /// Record the window belonging to this executable, such as `cs2.exe`.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", value_parser = parse_selector_text)]
     pub process: Option<String>,
 
     /// Record the window belonging to this process identifier.
@@ -171,7 +299,10 @@ mod tests {
     }
 
     fn record_args(arguments: &[&str]) -> RecordArgs {
-        let Command::Record(args) = parse(arguments).expect("the arguments are valid").command;
+        let Command::Record(args) = parse(arguments).expect("the arguments are valid").command
+        else {
+            panic!("expected the record subcommand");
+        };
         args
     }
 
@@ -299,8 +430,107 @@ mod tests {
 
     #[test]
     fn an_unknown_subcommand_is_a_usage_error_rather_than_a_panic() {
-        let error = parse(&["list-windows"]).unwrap_err();
+        let error = parse(&["capabilities"]).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    fn list_windows_args(arguments: &[&str]) -> ListWindowsArgs {
+        let Command::ListWindows(args) = parse(arguments).expect("the arguments are valid").command
+        else {
+            panic!("expected the list-windows subcommand");
+        };
+        args
+    }
+
+    #[test]
+    fn list_windows_needs_no_arguments_and_lists_only_capturable_windows_by_default() {
+        let args = list_windows_args(&["list-windows"]);
+        assert!(!args.all);
+        assert_eq!(args.selector(), None);
+    }
+
+    #[test]
+    fn each_list_windows_selector_becomes_the_matching_target_selector() {
+        assert_eq!(
+            list_windows_args(&["list-windows", "--window", "Counter-Strike"]).selector(),
+            Some(TargetSelector::WindowTitle("Counter-Strike".to_owned()))
+        );
+        assert_eq!(
+            list_windows_args(&["list-windows", "--process", "cs2.exe"]).selector(),
+            Some(TargetSelector::ProcessName("cs2.exe".to_owned()))
+        );
+        assert_eq!(
+            list_windows_args(&["list-windows", "--pid", "4242"]).selector(),
+            Some(TargetSelector::ProcessId(4242))
+        );
+        assert_eq!(
+            list_windows_args(&["list-windows", "--handle", "0x000104ac"]).selector(),
+            Some(TargetSelector::WindowHandle(WindowHandle::from_raw(
+                0x0001_04ac
+            )))
+        );
+    }
+
+    #[test]
+    fn an_empty_selector_is_a_usage_error_rather_than_a_match_against_everything() {
+        for command in ["list-windows", "record"] {
+            for argument in ["--window", "--process"] {
+                let error = parse(&[command, argument, ""]).unwrap_err().to_string();
+                assert!(
+                    error.contains("cannot be empty"),
+                    "`{command} {argument} \"\"` should be rejected with a reason: {error}"
+                );
+            }
+        }
+
+        // Whitespace only is the same request wearing a hat.
+        let error = parse(&["list-windows", "--window", "   "])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot be empty"), "{error}");
+    }
+
+    #[test]
+    fn a_selector_keeps_the_spaces_it_was_typed_with() {
+        // A window really can be titled with a trailing space, and a substring
+        // match is the user's to specify: only wholly blank values are refused.
+        assert_eq!(
+            parse_selector_text(" Counter-Strike "),
+            Ok(" Counter-Strike ".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_handle_is_accepted_in_the_form_it_is_printed_in_and_in_decimal() {
+        for (typed, expected) in [
+            ("0x000104ac", 0x0001_04ac),
+            ("0X104AC", 0x0001_04ac),
+            ("66732", 66_732),
+        ] {
+            assert_eq!(
+                parse_window_handle(typed),
+                Ok(WindowHandle::from_raw(expected)),
+                "`{typed}` should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn a_handle_that_is_not_one_is_rejected_with_the_reason() {
+        let error = parse_window_handle("chrome").expect_err("that is not a number");
+        assert!(error.contains("chrome"), "unexpected message: {error}");
+
+        let error = parse_window_handle("0").expect_err("0 is not a window");
+        assert!(
+            error.contains("list-windows"),
+            "the message should say how to find a real handle: {error}"
+        );
+    }
+
+    #[test]
+    fn two_list_windows_selectors_are_rejected_at_parse_time() {
+        let error = parse(&["list-windows", "--window", "cs2", "--pid", "12"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

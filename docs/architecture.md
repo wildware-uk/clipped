@@ -158,23 +158,28 @@ large:
 - The workspace, the eleven `clipped-*` crates, the recorder binary, the
   desktop and web placeholders, and the four test suites exist.
 - Most crates under `crates/` contain **module documentation only**: no types,
-  no functions and no capture code. Two are further on. `clipped-logging` has
+  no functions and no capture code. Three are further on. `clipped-logging` has
   the subscriber setup and the typed logging context. `clipped-capture` has the
   capture backend interface and the selection policy — the trait a backend
   implements, the frame and timestamp vocabulary, and the pure function that
   picks a backend and reports the choice — but no backend implements it, so
-  nothing in this repository can produce a frame yet. Each
+  nothing in this repository can produce a frame yet. `clipped-windows` has
+  window and monitor enumeration and the rules that resolve a user's selector to
+  one window, which is where a capture target comes from. Each
   `lib.rs` states that crate's responsibilities, what it is explicitly not
   responsible for, and where it sits in the stack; those doc comments are the
   authoritative statement of a crate's remit and this document defers to them.
 - `apps/recorder` has a command line: `record` parses and validates every
   argument and installs its Ctrl+C handler, then reports that this build has no
-  capture engine and exits 3. See [recorder-cli.md](recorder-cli.md).
+  capture engine and exits 3, and `list-windows` lists what could be captured.
+  See [recorder-cli.md](recorder-cli.md).
 - `apps/desktop` and `packages/` are README placeholders.
 - The tests assert the behaviour that exists: the workspace layering test,
-  `clipped-logging`'s unit and integration tests, and `clipped-capture`'s tests
-  for the selection policy and the frame and timestamp types. None of them
-  captures, encodes or writes anything, because nothing yet can.
+  `clipped-logging`'s unit and integration tests, `clipped-capture`'s tests for
+  the selection policy and the frame and timestamp types, and
+  `clipped-windows`' tests for target selection and for enumeration against
+  windows the test creates. None of them captures, encodes or writes anything,
+  because nothing yet can.
 
 Everything else in this document is a plan with an issue number attached.
 
@@ -185,11 +190,11 @@ cargo build --workspace
 cargo run -p clipped-recorder
 ```
 
-With no arguments that prints the help and exits 2. `record` is the only
-subcommand it has; it validates its arguments and then reports that this build
-cannot record, because the capture engine does not exist yet. The first useful
-invocation — capture a window, encode it, produce a playable MKV — is the M1
-milestone:
+With no arguments that prints the help and exits 2. It has two subcommands.
+`list-windows` lists the windows that could be captured, and works today.
+`record` validates its arguments and then reports that this build cannot record,
+because the capture engine does not exist yet. The first useful invocation —
+capture a window, encode it, produce a playable MKV — is the M1 milestone:
 
 ```text
 clipped-recorder record --window <window>
