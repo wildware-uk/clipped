@@ -551,6 +551,18 @@ notices that `MonitorFromWindow` now answers differently and rebuilds the
 duplication against the new output, which takes a few milliseconds and happens
 once per crossing.
 
+The copy is clamped to the destination texture as well as to the output, because
+the window and the frame can legitimately disagree about the size. The frame is
+whatever size the caller last acted on; the client rectangle is read fresh for
+every acquisition, and `AcquireNextFrame` blocks for up to 100 ms in between, so
+a window being drag-resized is routinely read at a different size from the
+texture it is about to be copied into. Direct3D defines a
+`CopySubresourceRegion` that writes outside the destination resource as
+*undefined behaviour*, so `place_window_in_output` takes the destination's size
+and guarantees the copy fits inside it; a window that has shrunk copies less than
+the whole frame and the remainder is cleared, exactly as for a straddling window.
+The caller is told about the new size by the next acquisition either way.
+
 ### A window that straddles two displays
 
 It is captured from the display showing most of it — Windows' own answer, via
@@ -632,6 +644,16 @@ Three refinements, each of which exists because the obvious version is wrong:
   recording is told `CaptureError::TargetLost`. Rebuilding is retried every 100 ms
   in the meantime, and the failure is logged the first time and then every five
   seconds rather than ten times a second.
+- **A window target's display is asked for again, not remembered.** Every rebuild
+  re-reads `MonitorFromWindow`, so a display being *removed* — switching a
+  DisplayPort monitor off is the everyday version — does not end a window
+  recording: Windows moves the window to a surviving display, the rebuild finds
+  it there, and the recording carries on. Only a monitor recording, whose target
+  really has gone, reaches the five-second grace and `TargetLost`. For a window
+  Windows can locate, the remembered display *name* is deliberately not used as a
+  fallback either: it names the display the window has just been moved off, and
+  matching it would record the wrong screen. A minimised window is on no display
+  at all, so it keeps the remembered one until it is restored.
 
 A display that is *attached* but cannot be duplicated is retried for as long as
 it stays that way, with no time limit. That is deliberate: the tempting
@@ -653,7 +675,7 @@ refused every time until it is rotated back
 | A minimised window | Waited out, like the other backend: acquisitions report `Acquisition::Timeout` until it comes back, rather than cropping the rectangle at (-32000, -32000) where Windows parks it. |
 | A protected window | Declined at `availability`, like the other backend. `WDA_MONITOR` renders the window black and `WDA_EXCLUDEFROMCAPTURE` leaves whatever is behind it in the frame; neither is the recording anybody asked for. |
 | A machine with no display output | Declined at `initialise` with `UnsupportedTarget`, naming the case: a remote session, a headless server or a virtual machine with no display. A basic display driver that has outputs but cannot duplicate them is declined the same way, naming that instead. |
-| Two captures of one display in one process | Not possible. DXGI gives a process **one duplication per output**; a second `DuplicateOutput` for a display this process is already duplicating fails with `E_INVALIDARG` (`0x80070057`). One target per session is already an assumption of this pipeline, but it is a hard limit here rather than a design choice, and it is why the tests that duplicate a display take a mutex. |
+| Two captures of one display in one process | Not possible. DXGI gives a process **one duplication per output**; a second `DuplicateOutput` for a display this process is already duplicating fails with `E_INVALIDARG` (`0x80070057`), which the backend classifies and reports as an `UnsupportedTarget` naming the limit rather than as an unexplained backend failure. One target per session is already an assumption of this pipeline, but it is a hard limit here rather than a design choice, and it is why the tests that duplicate a display take a mutex. |
 
 The crop also assumes the process is **per-monitor DPI aware** — window
 positions and the duplicated image have to be in the same units. A recorder calls
@@ -676,10 +698,12 @@ There are no callbacks and no second thread. `AcquireNextFrame` blocks with its
 own timeout, so unlike the Windows Graphics Capture backend there is no event
 handler and no condition variable. The wait is sliced at 100 ms so that a window
 target's "has it closed, been minimised, or moved to the other display?" checks
-happen about ten times a second however long the caller's timeout is. The one
-place this backend sleeps is between failed rebuild attempts, where there is no
-frame to wait for and the alternative is spinning on `DuplicateOutput` for the
-length of a display transition.
+happen about ten times a second however long the caller's timeout is. It sleeps
+on exactly two paths, both of which have no frame to wait for: between failed
+rebuild attempts, where the alternative is
+spinning on `DuplicateOutput` for the length of a display transition, and while a
+window target is minimised, where there is nothing on the display to crop. Both
+sleep 100 ms at a time and neither ever sleeps past the caller's deadline.
 
 ### How to test it
 

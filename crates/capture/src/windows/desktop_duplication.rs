@@ -63,7 +63,7 @@ use std::thread;
 use std::time::Instant;
 
 use windows::core::Interface;
-use windows::Win32::Foundation::{HMODULE, HWND, POINT, RECT};
+use windows::Win32::Foundation::{E_INVALIDARG, HMODULE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
@@ -682,19 +682,19 @@ impl Running {
                     session.release_frame();
                     return Ok(Taken::Nothing);
                 };
-                let Some(placement) = place_window_in_output(session.desktop_bounds(), client)
-                else {
-                    session.release_frame();
-                    return Ok(Taken::Nothing);
-                };
 
-                let copied = session.copy_out(&desktop, placement);
+                let copied = session.copy_out(&desktop, client);
                 // The desktop image is DXGI's to reuse the moment the copy is
                 // queued: Direct3D 11 keeps the source alive for as long as the
                 // command needs it, which is why the frame can be released here
                 // rather than being held for the length of the caller's encode.
                 session.release_frame();
-                copied?
+                match copied? {
+                    Some(texture) => texture,
+                    // The window is not on this output at all, which is what a
+                    // display change in progress looks like from here.
+                    None => return Ok(Taken::Nothing),
+                }
             }
         };
 
@@ -775,7 +775,42 @@ impl Running {
     /// Returns the new frame size if it differs from the one the caller was last
     /// told, which is what a mode change looks like from here.
     fn reinitialise(&mut self) -> Result<Option<FrameSize>, Recovery> {
-        let output = match find_output(Some(self.monitor), Some(&self.output_name)) {
+        // Where is the window *now*? A window target's display is asked for
+        // again rather than remembered, because the events this function exists
+        // to recover from are the events that move windows: removing a display
+        // — a DisplayPort monitor being switched off is the everyday version —
+        // invalidates every `HMONITOR` and makes Windows relocate the windows
+        // that were on it to a surviving display. Looking for the remembered
+        // display would spend the absence grace failing to find a monitor that
+        // has gone and then end a recording whose window is still on screen and
+        // still capturable (AGENTS.md section 16).
+        let mut name = Some(self.output_name.clone());
+        if let Region::Window(window) = self.region {
+            if !is_window(window) {
+                return Err(Recovery::TargetGone);
+            }
+            // `None` for a minimised window, which is on no display at all; the
+            // remembered display is the right guess until it is restored.
+            if let Some(monitor) = monitor_for_window(window) {
+                if monitor != self.monitor {
+                    tracing::info!(
+                        was = self.output_name.as_str(),
+                        "the captured window is no longer on the display being duplicated; \
+                         duplicating the one it is on now"
+                    );
+                    self.monitor = monitor;
+                }
+                // Deliberately no fallback to the remembered name either. That
+                // fallback is there for a handle invalidated by a display
+                // change, and a handle read a line ago cannot be one; what the
+                // name would match is the display the window may have just been
+                // moved off, which would rebuild the duplication there and
+                // record the wrong display.
+                name = None;
+            }
+        }
+
+        let output = match find_output(Some(self.monitor), name.as_deref()) {
             Ok(Some(output)) => output,
             // Every other display is there, but not this one. That is what an
             // unplugged monitor looks like — and also what one looks like for a
@@ -1064,25 +1099,43 @@ impl Session {
         }
     }
 
-    /// Copies the cropped region out of `desktop` and returns the texture the
-    /// caller will be handed.
+    /// Copies the part of `desktop` the window at `client` covers into this
+    /// session's destination texture, and returns the texture the caller will be
+    /// handed.
+    ///
+    /// [`None`] when the window is not on this output at all, which is a frame
+    /// there is nothing to make.
     fn copy_out(
         &mut self,
         desktop: &ID3D11Texture2D,
-        placement: Placement,
-    ) -> Result<ID3D11Texture2D, CaptureError> {
+        client: DesktopRect,
+    ) -> Result<Option<ID3D11Texture2D>, CaptureError> {
         let destination = self
             .destination
             .as_ref()
             .expect("a window capture always has a destination texture");
 
+        // Worked out here, against the destination texture's own size, rather
+        // than passed in: the invariant the copy below depends on is a fact
+        // about *this* texture, and it stops being one the moment the size it is
+        // checked against comes from somewhere else. The window's size and the
+        // destination's disagree for as long as it takes a caller to act on a
+        // reported size change, and a window being drag-resized changes size
+        // inside a single acquisition.
+        let Some(placement) =
+            place_window_in_output(self.desktop_bounds(), client, destination.size)
+        else {
+            return Ok(None);
+        };
+
         if placement.partial {
-            // Only part of the frame is covered, because the window is partly on
-            // another display. Whatever was copied there for a previous frame is
-            // still in the texture, and leaving it would record a stale strip of
-            // the window that scrolls as the window is dragged, so the
-            // uncovered part is painted black first. This costs a clear only
-            // while the window straddles two outputs.
+            // Only part of the frame is covered — because the window is partly
+            // on another display, or because it has shrunk since the frame was
+            // sized. Whatever was copied there for a previous frame is still in
+            // the texture, and leaving it would record a stale strip of the
+            // window that scrolls as the window is dragged, so the uncovered
+            // part is painted black first. This costs a clear only while the
+            // window does not fill its frame.
             //
             // SAFETY: `view` is a render target view of `destination.texture`,
             // both created by this session's device, and the context is that
@@ -1097,11 +1150,13 @@ impl Session {
         // SAFETY: both textures belong to this session's device — `desktop` is
         // the duplication's image, which is created on the device the
         // duplication was made with — and the box is inside the source, which
-        // `place_window_in_output` clamps to the output's own bounds. The
-        // destination offsets plus the box's extent are inside the destination,
-        // because the placement was computed from the same client size the
-        // destination was created for. The immediate context is used only from
-        // the capture thread.
+        // `place_window_in_output` clamps to the output's own bounds; the
+        // duplicated image is the output's size. The destination offsets plus
+        // the box's extent are inside the destination, because the placement was
+        // computed immediately above from `destination.size`, which is the size
+        // that texture was created at, and the clamp against it is what that
+        // function guarantees. The immediate context is used only from the
+        // capture thread.
         unsafe {
             self.device.context().CopySubresourceRegion(
                 &destination.texture,
@@ -1115,7 +1170,7 @@ impl Session {
             );
         }
 
-        Ok(destination.texture.clone())
+        Ok(Some(destination.texture.clone()))
     }
 
     /// Gives an outstanding frame back to DXGI.
@@ -1155,6 +1210,12 @@ struct Destination {
     /// A render target view of it, so that the parts of the frame no window
     /// covers can be painted black.
     view: ID3D11RenderTargetView,
+    /// The size the texture was created at.
+    ///
+    /// Kept here rather than read back from the texture or taken from the frame
+    /// format, because it is what every copy into this texture has to be clamped
+    /// to and the window it is a crop of can be a different size at any moment.
+    size: FrameSize,
 }
 
 impl Destination {
@@ -1222,7 +1283,11 @@ impl Destination {
             )
         })?;
 
-        Ok(Self { texture, view })
+        Ok(Self {
+            texture,
+            view,
+            size,
+        })
     }
 }
 
@@ -1341,18 +1406,20 @@ struct Placement {
     /// Where it lands in the frame: `(x, y)` in the destination texture.
     destination: (u32, u32),
     /// Whether the copy covers less than the whole frame, which happens when the
-    /// window straddles two displays.
+    /// window straddles two displays or is smaller than the frame it is being
+    /// copied into.
     partial: bool,
 }
 
 /// Works out what to copy where, for a window at `client` on an output at
-/// `output`.
+/// `output`, into a destination texture of size `frame`.
 ///
-/// The frame is always the window's client area, whatever else happens, so that
-/// a window being dragged does not resize the encoder every few pixels. What
-/// changes is how much of it this output can supply:
+/// The frame is the size the caller was last told, whatever the window is doing,
+/// so that a window being dragged does not resize the encoder every few pixels.
+/// What changes is how much of it this output can supply:
 ///
-/// - Entirely on this output: the whole frame is copied, `partial` is false.
+/// - Entirely on this output and the size of the frame: the whole frame is
+///   copied, `partial` is false.
 /// - Straddling two outputs: only the part on this one is copied, into the
 ///   matching corner of the frame, and `partial` is true so the caller knows to
 ///   clear the rest. Which output is "this" one is Windows' own answer — the
@@ -1365,7 +1432,30 @@ struct Placement {
 /// Returning [`None`] rather than an empty copy matters: an empty
 /// `D3D11_BOX` is undefined behaviour as far as Direct3D is concerned, and a
 /// frame of black would be a frame the recording claims to have captured.
-fn place_window_in_output(output: DesktopRect, client: DesktopRect) -> Option<Placement> {
+///
+/// # The frame and the window can disagree, and this is what makes that safe
+///
+/// `client` is read fresh for every acquisition; `frame` is the size the
+/// destination texture was created at, which only changes when the caller acts
+/// on an [`Acquisition::SizeChanged`]. Between those two things is a window
+/// being drag-resized: `check_target` reads its size, `AcquireNextFrame` then
+/// blocks for up to [`ACQUIRE_SLICE`], and the client rectangle is read again
+/// afterwards. So the copy is clamped to the frame as well as to the output, and
+/// the result is guaranteed to satisfy
+/// `destination.0 + width <= frame.width()` and
+/// `destination.1 + height <= frame.height()`.
+///
+/// That guarantee is not tidiness: Direct3D documents a
+/// `CopySubresourceRegion` that writes outside the destination resource as
+/// *undefined behaviour*, and a window that has grown since the frame was sized
+/// would ask for exactly that. A window that has *shrunk* copies less than the
+/// whole frame, which is `partial`, so the uncovered part is cleared rather than
+/// left holding the old edges of the window.
+fn place_window_in_output(
+    output: DesktopRect,
+    client: DesktopRect,
+    frame: FrameSize,
+) -> Option<Placement> {
     // In the output's own coordinates, which is what the duplicated image is
     // in, and in 64 bits because a window remembered from a display that has
     // since been unplugged can be an enormous distance from this one.
@@ -1374,8 +1464,14 @@ fn place_window_in_output(output: DesktopRect, client: DesktopRect) -> Option<Pl
 
     let visible_left = left.max(0);
     let visible_top = top.max(0);
-    let visible_right = (left + i64::from(client.width)).min(i64::from(output.width));
-    let visible_bottom = (top + i64::from(client.height)).min(i64::from(output.height));
+    // Three limits, and every one of them is real: the window's own extent, what
+    // the output has pixels for, and what the destination texture has room for.
+    let visible_right = (left + i64::from(client.width))
+        .min(i64::from(output.width))
+        .min(left + i64::from(frame.width()));
+    let visible_bottom = (top + i64::from(client.height))
+        .min(i64::from(output.height))
+        .min(top + i64::from(frame.height()));
 
     if visible_right <= visible_left || visible_bottom <= visible_top {
         return None;
@@ -1391,9 +1487,14 @@ fn place_window_in_output(output: DesktopRect, client: DesktopRect) -> Option<Pl
         bottom: visible_bottom as u32,
         back: 1,
     };
+    // Both are below the matching frame dimension: `visible_left` is less than
+    // `visible_right`, which is at most `left + frame.width()`, so their
+    // difference from `left` is less than `frame.width()`.
     let destination = ((visible_left - left) as u32, (visible_top - top) as u32);
+    // Measured against the frame rather than the window: what has to be cleared
+    // first is the part of the *destination* this copy will not reach.
     let partial =
-        source.right - source.left != client.width || source.bottom - source.top != client.height;
+        source.right - source.left != frame.width() || source.bottom - source.top != frame.height();
 
     Some(Placement {
         source,
@@ -1430,6 +1531,7 @@ fn find_output(
 
     let mut by_name = None;
     let mut any_output = false;
+    let mut undescribed = 0_u32;
 
     for adapter_index in 0.. {
         // SAFETY: the factory is live, and the index is checked by the call
@@ -1462,7 +1564,23 @@ fn find_output(
             // value, borrowing nothing.
             let description: DXGI_OUTPUT_DESC = match unsafe { output.GetDesc() } {
                 Ok(description) => description,
-                Err(_) => continue,
+                // An output that will not say where it is or what it is called
+                // cannot be matched against a monitor, cropped to, or
+                // duplicated. Skipping it is the only thing left to do, but it
+                // is not the same thing as there being no display attached, and
+                // saying nothing would leave the machine where this happens with
+                // an error that names the wrong cause (AGENTS.md section 15).
+                Err(error) => {
+                    undescribed += 1;
+                    tracing::warn!(
+                        adapter = adapter_name.as_str(),
+                        output_index,
+                        %error,
+                        "a display output would not report its description, so it cannot be \
+                         duplicated; ignoring it"
+                    );
+                    continue;
+                }
             };
             if !description.AttachedToDesktop.as_bool() {
                 continue;
@@ -1508,6 +1626,15 @@ fn find_output(
     if any_output {
         return Ok(None);
     }
+    if undescribed > 0 {
+        return Err(CaptureError::UnsupportedTarget {
+            method: METHOD,
+            target: TargetKind::Monitor,
+            reason: "this machine's display outputs would not report their descriptions, so \
+                     none of them can be duplicated; the warning logged for each one names \
+                     what DXGI said",
+        });
+    }
 
     Err(CaptureError::UnsupportedTarget {
         method: METHOD,
@@ -1542,10 +1669,10 @@ fn is_upright(rotation: DXGI_MODE_ROTATION) -> bool {
 
 /// Turns a `DuplicateOutput` failure into an error that says what it means.
 ///
-/// The three codes it has for "no" mean three quite different things to a user,
-/// and `DXGI_ERROR_UNSUPPORTED` in particular is the one worth naming: it is
-/// what a basic display adapter says, and "your display driver cannot do this"
-/// is a fact somebody can act on.
+/// The codes it has for "no" mean quite different things to a user, and
+/// `DXGI_ERROR_UNSUPPORTED` in particular is the one worth naming: it is what a
+/// basic display adapter says, and "your display driver cannot do this" is a
+/// fact somebody can act on.
 fn duplication_error(error: windows::core::Error) -> CaptureError {
     let reason = match error.code() {
         DXGI_ERROR_UNSUPPORTED => Some(
@@ -1559,6 +1686,17 @@ fn duplication_error(error: windows::core::Error) -> CaptureError {
         DXGI_ERROR_ACCESS_DENIED => Some(
             "Windows refused access to the display, which is what a secure desktop — a \
              sign-in screen or an elevation prompt — looks like from here",
+        ),
+        // Measured on Windows 11 build 26200: DXGI gives a *process* one
+        // duplication per output, and a second `DuplicateOutput` for a display
+        // this process is already duplicating answers `E_INVALIDARG`
+        // (0x80070057) rather than anything DXGI-shaped. It is the one hard
+        // limit this backend has found, so it is not left to reach a caller as
+        // an unclassified backend failure that reads like "this machine cannot
+        // duplicate a display".
+        E_INVALIDARG => Some(
+            "this process is already duplicating this display, and Windows allows a process \
+             only one duplication of each display at a time",
         ),
         _ => None,
     };
@@ -1699,8 +1837,8 @@ mod tests {
         D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_STAGING,
     };
     use windows::Win32::Graphics::Gdi::{
-        ChangeDisplaySettingsExW, CreateSolidBrush, DeleteObject, EnumDisplaySettingsW, FillRect,
-        GetDC, ReleaseDC, CDS_FULLSCREEN, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL,
+        ChangeDisplaySettingsExW, CreateSolidBrush, EnumDisplaySettingsW, FillRect, GetDC,
+        ReleaseDC, CDS_FULLSCREEN, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL,
         ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE, HBRUSH,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -1787,14 +1925,21 @@ mod tests {
         }
     }
 
+    fn frame(width: u32, height: u32) -> FrameSize {
+        FrameSize::new(width, height).expect("a test frame size is not zero")
+    }
+
     #[test]
     fn a_window_inside_the_output_is_copied_whole() {
         // The ordinary case: a 1280x720 window at (2660, 100) on a display whose
         // own origin is (2560, 0). All of it is on this output, so the copy is
         // the whole frame and nothing needs clearing first.
-        let placement =
-            place_window_in_output(rect(2560, 0, 2560, 1440), rect(2660, 100, 1280, 720))
-                .expect("a window on the output has something to copy");
+        let placement = place_window_in_output(
+            rect(2560, 0, 2560, 1440),
+            rect(2660, 100, 1280, 720),
+            frame(1280, 720),
+        )
+        .expect("a window on the output has something to copy");
 
         assert_eq!(placement.source.left, 100);
         assert_eq!(placement.source.top, 100);
@@ -1812,9 +1957,12 @@ mod tests {
     fn a_window_hanging_off_the_right_edge_keeps_the_part_that_is_there() {
         // 400 wide at 2360 into a 2560-wide output: 200 columns are on it and
         // 200 are past its right edge.
-        let placement =
-            place_window_in_output(rect(2560, 0, 2560, 1440), rect(4920, 100, 400, 300))
-                .expect("most of the window is on this output");
+        let placement = place_window_in_output(
+            rect(2560, 0, 2560, 1440),
+            rect(4920, 100, 400, 300),
+            frame(400, 300),
+        )
+        .expect("most of the window is on this output");
 
         assert_eq!(placement.source.left, 2360);
         assert_eq!(
@@ -1839,9 +1987,12 @@ mod tests {
         // The case the issue asks about, in miniature: the window starts 100
         // pixels before this output begins, so its first 100 columns are on the
         // display next door and the frame's first 100 columns stay black.
-        let placement =
-            place_window_in_output(rect(2560, 0, 2560, 1440), rect(2460, 200, 400, 300))
-                .expect("most of the window is on this output");
+        let placement = place_window_in_output(
+            rect(2560, 0, 2560, 1440),
+            rect(2460, 200, 400, 300),
+            frame(400, 300),
+        )
+        .expect("most of the window is on this output");
 
         assert_eq!(placement.source.left, 0);
         assert_eq!(placement.source.right, 300);
@@ -1858,7 +2009,11 @@ mod tests {
     #[test]
     fn a_window_on_another_display_entirely_has_nothing_to_copy() {
         assert_eq!(
-            place_window_in_output(rect(2560, 0, 2560, 1440), rect(100, 100, 800, 600)),
+            place_window_in_output(
+                rect(2560, 0, 2560, 1440),
+                rect(100, 100, 800, 600),
+                frame(800, 600)
+            ),
             None,
             "a window wholly on the other display must not produce an empty copy, which \
              Direct3D does not define, nor a black frame the recording would claim it \
@@ -1867,13 +2022,134 @@ mod tests {
         // Adjacent but not overlapping: the window ends exactly where the output
         // begins.
         assert_eq!(
-            place_window_in_output(rect(2560, 0, 2560, 1440), rect(2160, 0, 400, 300)),
+            place_window_in_output(
+                rect(2560, 0, 2560, 1440),
+                rect(2160, 0, 400, 300),
+                frame(400, 300)
+            ),
             None
         );
         // A window parked where Windows puts a minimised one.
         assert_eq!(
-            place_window_in_output(rect(0, 0, 2560, 1440), rect(-32000, -32000, 400, 300)),
+            place_window_in_output(
+                rect(0, 0, 2560, 1440),
+                rect(-32000, -32000, 400, 300),
+                frame(400, 300)
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn a_window_that_has_grown_since_the_frame_was_sized_is_clamped_to_the_frame() {
+        // The race `Session::copy_out`'s safety argument stands on.
+        // `check_target` reads the window's size and reports a change to the
+        // caller; `AcquireNextFrame` then blocks for up to ACQUIRE_SLICE, and
+        // the client rectangle is read again afterwards. A window being
+        // drag-resized in that gap is read *larger* than the destination texture
+        // it is about to be copied into, and Direct3D documents a
+        // `CopySubresourceRegion` that writes outside the destination resource
+        // as undefined behaviour.
+        let placement = place_window_in_output(
+            rect(0, 0, 2560, 1440),
+            rect(100, 100, 1600, 900),
+            frame(1280, 720),
+        )
+        .expect("the window is on the output");
+
+        assert_eq!(
+            (
+                placement.source.right - placement.source.left,
+                placement.source.bottom - placement.source.top
+            ),
+            (1280, 720),
+            "the copy has to be the size of the destination texture, not of the window: \
+             1600x900 of source into a 1280x720 destination is a write past the end of it"
+        );
+        assert_eq!(placement.destination, (0, 0));
+        assert!(
+            !placement.partial,
+            "the clamped copy still covers every pixel of the frame, so there is nothing to \
+             clear first"
+        );
+    }
+
+    #[test]
+    fn a_window_that_has_shrunk_since_the_frame_was_sized_leaves_nothing_stale_behind() {
+        // The same race in the other direction. The copy fits, but it no longer
+        // covers the whole frame, and the part it does not cover is still
+        // holding the edges of the larger window it used to be.
+        let placement = place_window_in_output(
+            rect(0, 0, 2560, 1440),
+            rect(100, 100, 640, 360),
+            frame(1280, 720),
+        )
+        .expect("the window is on the output");
+
+        assert_eq!(
+            (
+                placement.source.right - placement.source.left,
+                placement.source.bottom - placement.source.top
+            ),
+            (640, 360)
+        );
+        assert!(
+            placement.partial,
+            "the copy reaches a quarter of the frame, so the rest must be cleared rather \
+             than left showing the window at the size it used to be"
+        );
+    }
+
+    #[test]
+    fn no_placement_ever_reaches_past_the_frame_or_the_output() {
+        // The invariant `Session::copy_out`'s `// SAFETY:` comment asserts,
+        // checked over every combination of window position and size that can
+        // reach it — off each edge, across each corner, smaller than the frame
+        // and much larger — rather than at the three positions the cases above
+        // happen to name.
+        let output = rect(0, 0, 1920, 1080);
+        let destination = frame(640, 480);
+        let mut placed = 0_u32;
+
+        for left in (-900..2500).step_by(37) {
+            for top in (-700..1500).step_by(41) {
+                for (width, height) in [(640, 480), (320, 200), (1280, 960), (4000, 3000)] {
+                    let Some(placement) =
+                        place_window_in_output(output, rect(left, top, width, height), destination)
+                    else {
+                        continue;
+                    };
+                    placed += 1;
+
+                    let copied = (
+                        placement.source.right - placement.source.left,
+                        placement.source.bottom - placement.source.top,
+                    );
+                    assert!(
+                        placement.source.right <= output.width
+                            && placement.source.bottom <= output.height,
+                        "the source box left the duplicated image: {placement:?}"
+                    );
+                    assert!(
+                        placement.destination.0 + copied.0 <= destination.width()
+                            && placement.destination.1 + copied.1 <= destination.height(),
+                        "the copy would write outside the destination texture, which \
+                         Direct3D does not define: {placement:?} into {destination}"
+                    );
+                    assert_eq!(
+                        placement.partial,
+                        copied != (destination.width(), destination.height()),
+                        "a copy that does not cover the whole frame has to be preceded by a \
+                         clear: {placement:?}"
+                    );
+                }
+            }
+        }
+
+        assert!(
+            placed > 1000,
+            "the sweep has to actually produce placements to be checking anything; it \
+             produced {placed}"
         );
     }
 
@@ -1894,6 +2170,28 @@ mod tests {
             "a driver that cannot duplicate at all will not start doing so if we ask again"
         );
         assert!(!is_access_lost(windows::Win32::Foundation::E_FAIL));
+    }
+
+    #[test]
+    fn the_one_duplication_per_output_limit_is_named_rather_than_left_unexplained() {
+        // The hard limit this backend measured — a process gets one duplication
+        // of an output, and a second `DuplicateOutput` answers `E_INVALIDARG` —
+        // is the one whose HRESULT used to reach a caller unclassified. In the
+        // tests that read as "this machine would not duplicate a display", which
+        // is precisely the misdiagnosis the test mutex exists to prevent, and it
+        // would read the same way to a user with a second recorder running.
+        let error = duplication_error(windows::core::Error::new(
+            E_INVALIDARG,
+            "DuplicateOutput refused",
+        ));
+
+        let CaptureError::UnsupportedTarget { reason, .. } = &error else {
+            panic!("expected the limit to be named as an unsupported target, got: {error}");
+        };
+        assert!(
+            reason.contains("already duplicating this display"),
+            "the reason has to say what is actually wrong: {reason}"
+        );
     }
 
     #[test]
@@ -2041,6 +2339,36 @@ mod tests {
     const WINDOW_WIDTH: i32 = 400;
     const WINDOW_HEIGHT: i32 = 300;
 
+    /// The brush the marker window class is painted with.
+    ///
+    /// One for the process, not one per window, and never deleted. The window
+    /// class below is registered once and is never unregistered — Windows
+    /// unregisters it when the process ends — and a class holds its background
+    /// brush for as long as it exists, so a brush deleted with the window that
+    /// created it leaves every later window's class pointing at a freed GDI
+    /// handle that `DefWindowProcW` then hands to `WM_ERASEBKGND`. The ownership
+    /// that matches the class's own lifetime is one brush belonging to the
+    /// class, which is this (AGENTS.md section 58).
+    ///
+    /// Stored as a `usize` because [`HBRUSH`] is a raw pointer and therefore not
+    /// `Sync`; it is only ever a GDI handle, and it is only ever handed straight
+    /// back to GDI.
+    static MARKER_BRUSH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+    /// The process's one marker brush, created on first use.
+    fn marker_brush() -> HBRUSH {
+        let handle = *MARKER_BRUSH.get_or_init(|| {
+            // SAFETY: the colour is a plain value, and the returned brush is
+            // owned by the process from here on: it belongs to the window class
+            // registered with it, which lives as long as the process does.
+            let brush = unsafe {
+                CreateSolidBrush(COLORREF(MARKER_RED | MARKER_GREEN << 8 | MARKER_BLUE << 16))
+            };
+            brush.0 as usize
+        });
+        HBRUSH(handle as *mut core::ffi::c_void)
+    }
+
     /// A visible, topmost, unfocusable window painted [`MARKER_PIXEL`].
     ///
     /// Topmost because this is a duplicate of the screen: a window drawn over
@@ -2050,7 +2378,6 @@ mod tests {
     /// using the machine.
     struct MarkerWindow {
         window: HWND,
-        brush: HBRUSH,
     }
 
     impl MarkerWindow {
@@ -2066,17 +2393,12 @@ mod tests {
             // SAFETY: `GetModuleHandleW(None)` returns this executable's own
             // instance handle and takes nothing from this side.
             let instance = unsafe { GetModuleHandleW(None) }.ok()?;
-            // SAFETY: the colour is a plain value; the returned brush is owned
-            // here and deleted by `Drop`.
-            let brush = unsafe {
-                CreateSolidBrush(COLORREF(MARKER_RED | MARKER_GREEN << 8 | MARKER_BLUE << 16))
-            };
 
             let class_definition = WNDCLASSW {
                 lpfnWndProc: Some(marker_window_procedure),
                 hInstance: instance.into(),
                 lpszClassName: class,
-                hbrBackground: brush,
+                hbrBackground: marker_brush(),
                 ..Default::default()
             };
             // SAFETY: every pointer in the class definition is either null or a
@@ -2112,7 +2434,7 @@ mod tests {
             // is what keeps the keyboard where it was.
             let _ = unsafe { ShowWindow(window, SW_SHOWNOACTIVATE) };
 
-            let marker = Self { window, brush };
+            let marker = Self { window };
             marker.paint();
             Some(marker)
         }
@@ -2131,7 +2453,7 @@ mod tests {
             // and the context is released immediately afterwards.
             unsafe {
                 let context = GetDC(Some(self.window));
-                FillRect(context, &raw const client, self.brush);
+                FillRect(context, &raw const client, marker_brush());
                 ReleaseDC(Some(self.window), context);
             }
             pump_messages();
@@ -2167,12 +2489,15 @@ mod tests {
 
     impl Drop for MarkerWindow {
         fn drop(&mut self) {
-            // SAFETY: both handles were created by this struct and have not been
+            // The brush is deliberately not deleted here: it belongs to the
+            // window class, which outlives every window made from it. See
+            // [`MARKER_BRUSH`].
+            //
+            // SAFETY: the handle was created by this struct and has not been
             // released; the window was created on this thread, which is what
             // `DestroyWindow` requires.
             unsafe {
                 let _ = DestroyWindow(self.window);
-                let _ = DeleteObject(self.brush.into());
             }
             pump_messages();
         }
@@ -2463,15 +2788,18 @@ mod tests {
                     sample.0,
                     sample.1
                 );
-            } else if frames == 0 {
-                // Desktop Duplication produces a frame only when the display
-                // changes, and nothing in this test changes a display it did not
-                // put a window on.
-                note(&format!(
-                    "{} presented nothing during the test, so only its size could be checked",
-                    monitor.device_name()
-                ));
             } else {
+                // Asserted whatever this display presented, because the marker
+                // window is repainted at the top of every iteration of the loop
+                // above — for *this* display's capture as much as for the marked
+                // one's — and the marked display's own pass asserts that those
+                // repaints produce frames. So a duplication that was secretly
+                // reading the marked display could not reach this line with the
+                // marker unseen: it would have had frames, and the marker would
+                // have been in them. Zero frames here is the same evidence
+                // arriving the other way round — a duplication that saw none of
+                // the presents that were demonstrably happening on the marked
+                // display is not a duplication of the marked display.
                 assert!(
                     !marker_seen,
                     "{} showed the marker colour, which is only painted on {}: a capture is \
@@ -2830,6 +3158,106 @@ mod tests {
                 .session
                 .is_some(),
             "the rebuilt duplication should be live"
+        );
+    }
+
+    #[test]
+    fn a_window_target_is_found_again_when_the_display_it_was_on_has_gone() {
+        let _one_at_a_time = one_duplication_at_a_time();
+        // A display removed mid-recording — powering off a DisplayPort monitor
+        // is the everyday version, and issue #13's scope names monitor removal —
+        // invalidates every `HMONITOR`, takes that display's name off the DXGI
+        // enumeration, and makes Windows move the windows that were on it to a
+        // surviving display. The window is still on screen and still capturable,
+        // so a window recording has to carry on.
+        //
+        // A test cannot unplug a monitor, but it can leave the backend in
+        // exactly the state one leaves behind: a remembered monitor handle that
+        // matches no output, and a remembered display name that is not
+        // enumerated. Before this, `reinitialise` looked for the remembered
+        // display and nothing else, so it spent the five-second absence grace
+        // failing and then ended the recording with `TargetLost`.
+        let _ = clipped_windows::enable_per_monitor_dpi_awareness();
+
+        let Ok(monitors) = enumerate_monitors() else {
+            skipped("this machine would not enumerate its displays");
+            return;
+        };
+        let Some(display) = test_display(&monitors) else {
+            skipped("this machine reports no displays");
+            return;
+        };
+        let Some(window) = MarkerWindow::on(display) else {
+            skipped("this machine would not create a window");
+            return;
+        };
+
+        let size = window.client_size();
+        let mut backend = match capture_of(window.handle().0 as u64, TargetKind::Window, size) {
+            Ok(backend) => backend,
+            Err(error) => {
+                skipped(&format!(
+                    "this machine would not duplicate a window: {error}"
+                ));
+                return;
+            }
+        };
+
+        let running = backend.running.as_mut().expect("the capture is running");
+        running.discard_session();
+        // Nothing the enumeration can match, by either route.
+        running.monitor = HMONITOR(core::ptr::null_mut());
+        running.output_name = r"\\.\DISPLAY_THAT_HAS_BEEN_UNPLUGGED".to_owned();
+
+        match running.reinitialise() {
+            Ok(_) => {}
+            Err(Recovery::NotYet) => panic!(
+                "the window is on {}, which is attached and duplicable; a rebuild that only \
+                 ever asks for the display the window used to be on cannot find it",
+                display.device_name()
+            ),
+            Err(Recovery::TargetGone) => panic!(
+                "the recording was ended even though the window is still on screen on {}",
+                display.device_name()
+            ),
+        }
+
+        assert!(
+            running.session.is_some(),
+            "the duplication should have been rebuilt against the display the window is on"
+        );
+        assert_eq!(
+            running.output_name,
+            display.device_name(),
+            "the rebuilt duplication has to be of the display the window is on now, not of \
+             the one it was remembered on"
+        );
+
+        // And it is a working capture, not just a live handle.
+        let mut frames = 0_u32;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline && frames < 3 {
+            window.paint();
+            match backend.acquire(Duration::from_millis(250)) {
+                Ok(Acquisition::Frame(frame)) => {
+                    assert_eq!(frame.format().size(), size);
+                    frames += 1;
+                }
+                Ok(Acquisition::Timeout) => {}
+                Ok(Acquisition::SizeChanged(new_size)) => {
+                    backend
+                        .resize(new_size)
+                        .expect("the capture can be resized");
+                }
+                Err(error) => panic!("the recording ended after the display was lost: {error}"),
+            }
+        }
+        note(&format!(
+            "{frames} frames after the remembered display was forgotten"
+        ));
+        assert!(
+            frames >= 3,
+            "the recording has to carry on delivering frames of the window"
         );
     }
 
