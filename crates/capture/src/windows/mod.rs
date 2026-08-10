@@ -11,9 +11,9 @@
 //!
 //! - [`WindowsGraphicsCapture`], the `Windows.Graphics.Capture` backend
 //!   ([issue #12](https://github.com/wildware-uk/clipped/issues/12)).
-//!
-//! Desktop Duplication
-//! ([issue #13](https://github.com/wildware-uk/clipped/issues/13)) is not built.
+//! - [`DesktopDuplication`], the DXGI Desktop Duplication backend
+//!   ([issue #13](https://github.com/wildware-uk/clipped/issues/13)), which is
+//!   the fallback SPEC.md section 8 names below it.
 //!
 //! # Apartments and devices
 //!
@@ -27,7 +27,9 @@
 //! have in `clipped-windows` anyway.
 
 mod apartment;
+mod desktop_duplication;
 mod device;
 mod graphics_capture;
 
+pub use desktop_duplication::DesktopDuplication;
 pub use graphics_capture::WindowsGraphicsCapture;
