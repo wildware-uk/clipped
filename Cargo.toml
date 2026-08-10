@@ -21,6 +21,30 @@ authors = ["The Clipped contributors"]
 [workspace.dependencies]
 tracing = "0.1"
 
+# The FFmpeg binding is pinned here rather than in the crate that uses it
+# because its version and the prebuilt FFmpeg that scripts/fetch-ffmpeg.ps1
+# downloads have to move together: `5.0.0+ffmpeg-8.1` is the release built and
+# tested against the FFmpeg 8.1 headers the fetch script installs. Every crate
+# that later reaches for FFmpeg - the encoder, thumbnails, waveform extraction -
+# must use this one entry, so there is a single place to change when the pin
+# moves (docs/adr/0004-ffmpeg-dependency-strategy.md).
+#
+# Default features are off deliberately: they pull in avdevice, avfilter,
+# swscale and swresample, none of which anything links against yet. Each crate
+# opts into the components it actually uses.
+#
+# Licence note, as CONTRIBUTING.md asks for when one is unusual: this crate and
+# its `ffmpeg-sys-the-third` sys crate are WTFPL. That is permissive to the
+# point of imposing nothing at all - not even attribution - and it is
+# GPL-compatible and compatible with MPL-2.0, but it is not OSI-approved and it
+# carries no warranty disclaimer. It was accepted knowingly, over the MIT
+# `rsmpeg`, because `rsmpeg` has been dormant since August 2025 and caps FFmpeg
+# at 8.0. ADR 0004 sets out the trade-off and the exit.
+#
+# FFmpeg itself is LGPL v3 and is not vendored here; it is fetched by
+# scripts/fetch-ffmpeg.ps1 and linked dynamically.
+ffmpeg-the-third = { version = "5.0.0", default-features = false }
+
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }
 clipped-encoder = { path = "crates/encoder", version = "0.1.0" }

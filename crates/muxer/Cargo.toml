@@ -8,5 +8,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# `format` implies `codec`, so this is avformat plus avcodec and nothing else.
+# Both are needed to write a container: avformat does the muxing, avcodec owns
+# the codec parameters that describe each stream.
+ffmpeg-the-third = { workspace = true, features = ["format"] }
+
 [lints]
 workspace = true

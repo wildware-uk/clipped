@@ -31,6 +31,7 @@ cargo test --workspace
 | Visual Studio Build Tools | 2022, "Desktop development with C++" | check script |
 | Windows SDK | any Windows 10/11 SDK | check script |
 | Rust | exactly the channel in `rust-toolchain.toml` | rustup, check script |
+| LLVM (`libclang`) | any recent release | not yet enforced; see [LLVM](#llvm) |
 | Node | major version from `.nvmrc` | check script; see [Node](#node) |
 | GPU driver | vendor-current | reported, not enforced |
 | FFmpeg (`ffprobe`) | any recent build | check script, warning only |
@@ -151,6 +152,40 @@ rustup component add rustfmt clippy
 The first command reads `rust-toolchain.toml` and fetches exactly what it names.
 A toolchain installed before the pin existed may be missing the components,
 which is what the second command covers.
+
+## LLVM
+
+Clipped links against the FFmpeg libraries, and the Rust binding to them
+generates its bindings from FFmpeg's own C headers while the workspace builds.
+That is `bindgen`, which needs `libclang.dll` — so LLVM is a build requirement
+even though Clipped contains no C or C++ of its own. Without it,
+`cargo build --workspace` fails inside the `ffmpeg-sys-the-third` build script
+with `Unable to find libclang`.
+
+Check:
+
+```text
+clang --version
+```
+
+Any recent release will do; no version is pinned. LLVM's Windows installer puts
+`libclang.dll` beside `clang.exe`, which is where the binding looks first.
+
+Fix:
+
+```text
+winget install LLVM.LLVM
+```
+
+If `libclang.dll` lives somewhere the build cannot find — an LLVM distributed
+inside another toolchain, for instance — point `LIBCLANG_PATH` at the directory
+containing it rather than moving the file.
+
+The check script does not test for this yet, and neither does it test that the
+FFmpeg build has been fetched; both are
+[issue #122](https://github.com/wildware-uk/clipped/issues/122). Fetching FFmpeg
+itself is one command and is covered in [docs/ffmpeg.md](ffmpeg.md), which is
+the page to read before the first build.
 
 ## Node
 
