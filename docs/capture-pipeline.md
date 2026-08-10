@@ -373,8 +373,12 @@ caller. The backend holds an `Option<Running>`, `shut_down` is
 thread releases exactly what a clean stop would. `Running::drop` releases the
 lent frame first (an outstanding frame is a buffer the compositor cannot
 reclaim), then closes the session, unsubscribes and closes the pool, and
-unsubscribes the item; the apartment is declared as the first field so that Rust
-drops it last, after every WinRT interface is gone.
+unsubscribes the item. The apartment is declared as the **last** field, and that
+is load-bearing rather than tidy: Rust drops fields in declaration order, so the
+last field is released last, after every WinRT and Direct3D interface. Releasing
+a COM interface on a thread that has already left the apartment is not defined,
+and moving that field up would introduce it silently on a path that only runs at
+shut down.
 
 ### How to run it
 
