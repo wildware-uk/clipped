@@ -150,13 +150,6 @@ pub enum ConfigError {
     /// No default output directory could be worked out, and `--output` was not
     /// given.
     NoDefaultOutputDirectory,
-    /// The default output directory could not be created.
-    DefaultOutputDirectoryNotCreated {
-        /// The directory that could not be created.
-        directory: PathBuf,
-        /// Why creation failed.
-        source: io::Error,
-    },
     /// A relative `--output` could not be made absolute.
     WorkingDirectoryUnavailable {
         /// Why the current directory could not be read.
@@ -231,11 +224,6 @@ impl fmt::Display for ConfigError {
             Self::NoDefaultOutputDirectory => formatter.write_str(
                 "there is no home directory to put recordings in, so --output is required",
             ),
-            Self::DefaultOutputDirectoryNotCreated { directory, source } => write!(
-                formatter,
-                "the recordings directory {} could not be created: {source}",
-                directory.display()
-            ),
             Self::WorkingDirectoryUnavailable { source } => write!(
                 formatter,
                 "--output is relative and the current directory could not be read: {source}"
@@ -248,7 +236,6 @@ impl Error for ConfigError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::OutputDirectoryNotWritable { source, .. }
-            | Self::DefaultOutputDirectoryNotCreated { source, .. }
             | Self::WorkingDirectoryUnavailable { source } => Some(source),
             _ => None,
         }
@@ -258,11 +245,11 @@ impl Error for ConfigError {
 impl RecordingConfig {
     /// Validates parsed arguments into a configuration.
     ///
-    /// This touches the filesystem: it checks that the output directory exists
-    /// and can be written to, and creates the default recordings directory if
-    /// that is where the recording is going. It does not create, truncate or
-    /// open the output file itself — nothing here writes anything a later run
-    /// would have to clean up.
+    /// This reads the filesystem: it checks that the output directory exists
+    /// and can be written to, by creating and removing a probe file inside it.
+    /// It creates nothing that outlives the call — not the output file, and
+    /// not the default recordings directory, which is created with the first
+    /// recording rather than by validating a command that may never make one.
     pub fn resolve(args: &RecordArgs) -> Result<Self, ConfigError> {
         let target = resolve_target(args)?;
         let output = resolve_output(
@@ -347,17 +334,20 @@ fn resolve_output(requested: Option<&Path>, now: OffsetDateTime) -> Result<PathB
         None => {
             let directory =
                 default_output_directory().ok_or(ConfigError::NoDefaultOutputDirectory)?;
-            // The recordings directory is Clipped's own, so creating it is not
-            // a guess about what the user meant. A directory the user named
-            // themselves is left alone: a path that does not exist is far more
-            // often a typo than an instruction to build a tree.
-            fs::create_dir_all(&directory).map_err(|source| {
-                ConfigError::DefaultOutputDirectoryNotCreated {
-                    directory: directory.clone(),
-                    source,
-                }
-            })?;
-            check_directory_usable(&directory)?;
+            // The recordings directory is Clipped's own, so it is created
+            // rather than reported as missing — but not here. Validating a
+            // command must leave nothing behind, and a run that ends without
+            // recording anything (every run, until the capture pipeline
+            // exists) would otherwise leave an empty directory in the user's
+            // videos folder. Creation belongs with the first write, in the
+            // muxer session that opens the file.
+            //
+            // A directory the user named themselves is a different case and is
+            // never created: a path that is not there is far more often a typo
+            // than an instruction to build a tree.
+            if directory.exists() {
+                check_directory_usable(&directory)?;
+            }
             Ok(directory.join(default_output_file_name(now)))
         }
     }
@@ -375,16 +365,12 @@ fn absolute(path: &Path) -> Result<PathBuf, ConfigError> {
 
 /// Checks that the path names a file, with the container extension.
 fn check_output_file_name(path: &Path) -> Result<(), ConfigError> {
-    let file_name = path
-        .file_name()
+    // `file_name` is `None` for a path ending in `..` or naming only a root,
+    // and never `Some("")`, so this is the whole of the check.
+    path.file_name()
         .ok_or_else(|| ConfigError::OutputHasNoFileName {
             path: path.to_path_buf(),
         })?;
-    if file_name == OsStr::new("") {
-        return Err(ConfigError::OutputHasNoFileName {
-            path: path.to_path_buf(),
-        });
-    }
 
     let extension_matches = path
         .extension()
@@ -663,16 +649,31 @@ mod tests {
 
     #[test]
     fn a_relative_output_path_is_made_absolute() {
-        let resolved = resolve_output(
-            Some(Path::new("session.mkv")),
-            datetime!(2026-08-10 14:32:05 UTC),
-        )
-        .expect("the current directory exists and is writable");
+        // Against `absolute` rather than through `resolve_output`, because
+        // `resolve_output` would then probe the current directory for
+        // writability — which under `cargo test` is this crate's source
+        // directory, and a killed run would leave a probe file in it.
+        // `absolute` is where the whole of the rule lives.
+        let resolved =
+            absolute(Path::new("clips/session.mkv")).expect("the current directory can be read");
 
         assert!(resolved.is_absolute(), "{} is relative", resolved.display());
         assert_eq!(
-            resolved.file_name().and_then(OsStr::to_str),
-            Some("session.mkv")
+            resolved,
+            std::env::current_dir()
+                .expect("the current directory can be read")
+                .join("clips")
+                .join("session.mkv")
+        );
+    }
+
+    #[test]
+    fn an_absolute_output_path_is_left_alone() {
+        let already = TestDirectory::new("already-absolute");
+        let requested = already.path().join("session.mkv");
+        assert_eq!(
+            absolute(&requested).expect("an absolute path needs no current directory"),
+            requested
         );
     }
 

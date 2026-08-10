@@ -12,7 +12,15 @@ good rather than a reason to treat it as scaffolding.
 resolves them into a configuration, installs its Ctrl+C handler and then reports
 that there is no capture engine, because there is not one: `crates/capture`,
 `crates/encoder`, `crates/audio` and `crates/muxer` contain module documentation
-and no code. It writes no file and produces no output beyond the message.
+and no code.
+
+It produces no recording, and leaves nothing behind on the way to not producing
+one: no output file, and no recordings directory. It is not silent, though. The
+resolved configuration and the error both go to standard error, and to the log
+files under `%LOCALAPPDATA%\Clipped\logs` that every Clipped process writes
+([logging.md](logging.md)). The one thing validation puts on disk is a write
+probe, described under [defaults that touch the disk](#defaults-that-touch-the-disk),
+and it is removed again immediately.
 
 What works today is the argument surface and the shutdown path. The pipeline
 between them is milestone M1 — capture backend
@@ -71,13 +79,21 @@ words. Prefix with `name:` to select a device that is really called one of them:
 
 ### Defaults that touch the disk
 
-The default output directory — `Clipped` inside the user's videos folder — is
-created if it does not exist, because it is Clipped's own. A directory named
-with `--output` must already exist: a path that is not there is far more often a
-typo than an instruction to build a tree, and creating one silently is how
-recordings end up somewhere nobody looks.
+The default output directory — `Clipped` inside the user's videos folder — will
+be created if it does not exist, because it is Clipped's own. It is created by
+the recording that goes in it, not by validating the command: until there is
+something to write, a run leaves the videos folder exactly as it found it.
+
+A directory named with `--output` must already exist, and is never created: a
+path that is not there is far more often a typo than an instruction to build a
+tree, and creating one silently is how recordings end up somewhere nobody looks.
 
 An existing output file is never replaced without `--overwrite`.
+
+Validation does write one thing, briefly: a uniquely named zero-byte probe file
+in the output directory, created and immediately deleted, because Windows has no
+permission bit that can be read and believed. Failing here beats failing twenty
+minutes into a session.
 
 ## Exit codes
 
@@ -112,22 +128,25 @@ The output path is redacted to its file name and a digest of the whole path
 ## Stopping a recording
 
 Ctrl+C asks the recorder to stop; it does not kill it. The handler raises a
-shutdown signal, the recording loop notices at its next frame boundary, and a
-finalisation hook runs before the process exits — that is where the encoder is
-flushed and the container closed, so that the file left behind is complete.
+shutdown signal and a finalisation hook runs before the process exits. There is
+no recording loop between them yet: when the pipeline arrives, the loop will
+notice the signal at its next frame boundary, and the hook will flush the
+encoder and close the container so that the file left behind is complete.
 
-The seam is `clipped_recorder::shutdown::run_until_shutdown`, and the hook is
-guaranteed to run exactly once whether the recording ended by itself, was
+What exists today is both ends of that. The seam is
+`clipped_recorder::shutdown::run_until_shutdown`, and the hook it runs is
+guaranteed to run exactly once whether the body ended by itself, was
 interrupted, returned an error or panicked. The panic case is deliberate: a bug
 in the pipeline should still leave a file that plays.
 
 The signal path is tested against a real process receiving a real
 `CTRL_C_EVENT`, in `apps/recorder/tests/ctrl_c.rs`, using the fixture in
 `apps/recorder/examples/shutdown_fixture.rs`. What is *not* tested, because it
-cannot be until the pipeline exists, is that the resulting file plays — that is
+cannot be until the pipeline exists, is that the resulting file plays. That is
 the second half of acceptance criterion 3 on
-[issue #9](https://github.com/wildware-uk/clipped/issues/9) and it is not
-claimed anywhere.
+[issue #9](https://github.com/wildware-uk/clipped/issues/9); it is claimed
+nowhere, and verifying it with `ffprobe` against a real interrupted recording is
+[issue #126](https://github.com/wildware-uk/clipped/issues/126).
 
 ## Testing the command line
 
@@ -139,7 +158,14 @@ Unit tests cover parsing and validation, including the wording of the error
 messages: an error message is behaviour someone depends on, and changing one
 should be a decision rather than a side effect. `tests/command_line.rs` runs the
 built binary and asserts what it prints and what it exits with, including that a
-`record` invocation creates no file.
+`record` invocation creates neither an output file nor, when it is left to work
+out the default path, a recordings directory.
+
+Two of those tests read the command definition rather than a copy of it: they
+walk `record`'s arguments and require every one of them but the capture target
+to document a default, in `-h` as well as `--help`. Adding an option without a
+default fails them, which is the acceptance criterion rather than today's
+rendering of it.
 
 `cargo test --test ctrl_c` on its own is not enough: cargo builds examples for
 `cargo test` but not for a single named test target, so the Ctrl+C test would

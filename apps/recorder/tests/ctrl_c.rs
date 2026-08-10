@@ -123,11 +123,16 @@ fn unique_path(label: &str) -> PathBuf {
 /// no console to send to, and the fixture would inherit nothing to receive on,
 /// so the console has to exist before the child is spawned.
 fn ensure_console() {
-    // SAFETY: `AllocConsole` takes no arguments and either attaches a console
-    // to this process or fails because one is already attached. It does not
-    // touch the standard handles this process already has, so cargo's captured
-    // output is unaffected either way. The result is deliberately ignored:
-    // "already had one" is the expected outcome.
+    // SAFETY: `AllocConsole` takes no arguments and returns a BOOL. It either
+    // attaches a console to this process or fails because one is already
+    // attached; there is no pointer to get wrong and no state it can leave
+    // half-initialised, so the call is sound in both outcomes. The result is
+    // deliberately ignored: "already had one" is the expected outcome under
+    // `cargo test`, and it is the only outcome in which this process has
+    // handles to lose — Microsoft documents a successful `AllocConsole` as
+    // initialising the process's standard handles for the new console, which
+    // is precisely what is wanted in the case this call exists for, a test run
+    // that started with no console at all.
     unsafe {
         AllocConsole();
     }

@@ -11,6 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use clap::CommandFactory;
+use clipped_recorder::cli::{Cli, TARGET_ARGUMENTS};
+
 /// Exit code for arguments that were rejected. Mirrors
 /// `clipped_recorder::EXIT_USAGE`, restated so that the test fails if the value
 /// changes rather than following it.
@@ -63,6 +66,20 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// The `record` subcommand's arguments, as clap holds them.
+///
+/// Cloned out because `get_arguments` borrows the `Command` it came from, and
+/// the expectations below are built from the same definition the binary was
+/// built from rather than from a copy kept in this file.
+fn record_arguments() -> Vec<clap::Arg> {
+    Cli::command()
+        .find_subcommand("record")
+        .expect("record is a subcommand")
+        .get_arguments()
+        .cloned()
+        .collect()
+}
+
 #[test]
 fn help_lists_the_subcommands_that_exist() {
     let output = recorder(&["--help"]);
@@ -80,38 +97,83 @@ fn help_lists_the_subcommands_that_exist() {
 
 #[test]
 fn record_help_documents_a_default_for_every_option() {
-    let output = recorder(&["record", "--help"]);
-    assert!(output.status.success(), "{}", stderr(&output));
+    // How many options must show a default is read from the command
+    // definition, not from a list written here: a twelfth option that
+    // documents no default changes the count and fails this test. Which
+    // argument is missing one is `cli.rs`'s unit test, which can walk them
+    // individually; what only the built binary can show is that both help
+    // forms really print them, and that `-h` — what most people type — is not
+    // the poor relation.
+    let optional_arguments = record_arguments()
+        .iter()
+        .filter(|argument| {
+            let name = argument.get_id().as_str();
+            !TARGET_ARGUMENTS.contains(&name) && !matches!(name, "help" | "version")
+        })
+        .count();
+    assert!(optional_arguments > 0, "no optional arguments were found");
 
-    let help = stdout(&output);
-    for expected in [
-        "--window <TITLE>",
-        "--process <NAME>",
-        "--pid <PID>",
-        "-o, --output <PATH>",
-        "--overwrite",
-        "-r, --resolution <WIDTHxHEIGHT>",
-        "-f, --framerate <FPS>",
-        "--codec <CODEC>",
-        "--encoder <ENCODER>",
-        "--microphone <DEVICE>",
-        "--system-audio <DEVICE>",
-    ] {
-        assert!(help.contains(expected), "`{expected}` is missing:\n{help}");
-    }
-    for expected in [
-        "[default: source]",
-        "[default: 60]",
-        "[default: auto]",
-        "[default: default]",
-        "[default: off",
-        "[default: a timestamped file",
-    ] {
-        assert!(
-            help.contains(expected),
-            "`{expected}` is missing from the help:\n{help}"
+    for form in ["-h", "--help"] {
+        let output = recorder(&["record", form]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let help = stdout(&output);
+
+        for argument in record_arguments() {
+            let Some(long) = argument.get_long() else {
+                continue;
+            };
+            assert!(
+                help.contains(&format!("--{long}")),
+                "`record {form}` does not mention `--{long}`:\n{help}"
+            );
+        }
+
+        assert_eq!(
+            help.matches("[default:").count(),
+            optional_arguments,
+            "`record {form}` states a default for some but not all of the \
+             {optional_arguments} optional arguments:\n{help}"
         );
     }
+}
+
+#[test]
+fn record_without_an_output_creates_no_recordings_directory() {
+    // The default output path is under the user's videos folder, so this run
+    // is given a home directory of its own. A build that cannot record must
+    // not leave a `Videos\Clipped` behind for a recording that never happened.
+    let home = TestDirectory::new("default-output-home");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_clipped-recorder"))
+        .args(["record", "--window", "Counter-Strike 2"])
+        .env("USERPROFILE", home.path())
+        .env("HOME", home.path())
+        .output()
+        .expect("the recorder binary can be run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_NOT_IMPLEMENTED),
+        "stderr was: {}",
+        stderr(&output)
+    );
+
+    // The resolved path is logged with its directory redacted away, so the
+    // generated file name is the evidence that the default was the one used.
+    let message = stderr(&output);
+    assert!(
+        message.contains("output=clipped-") && message.contains(".mkv#"),
+        "the run should have resolved a generated default file name: {message}"
+    );
+
+    let left_behind: Vec<_> = fs::read_dir(home.path())
+        .expect("the home directory can be listed")
+        .map(|entry| entry.expect("the entry can be read").file_name())
+        .collect();
+    assert!(
+        left_behind.is_empty(),
+        "validating a run that cannot record created {left_behind:?} under the home directory"
+    );
 }
 
 #[test]
@@ -146,7 +208,7 @@ fn an_invalid_value_is_a_usage_error_and_not_a_panic() {
 }
 
 #[test]
-fn record_says_it_cannot_record_and_writes_nothing() {
+fn record_says_it_cannot_record_and_writes_no_recording() {
     let directory = TestDirectory::new("no-output-written");
     let output_path = directory.path().join("session.mkv");
 

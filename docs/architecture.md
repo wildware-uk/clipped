@@ -162,8 +162,9 @@ large:
   `lib.rs` states that crate's responsibilities, what it is explicitly not
   responsible for, and where it sits in the stack; those doc comments are the
   authoritative statement of a crate's remit and this document defers to them.
-- `apps/recorder` builds and runs, and prints that no capture commands are
-  implemented.
+- `apps/recorder` has a command line: `record` parses and validates every
+  argument and installs its Ctrl+C handler, then reports that this build has no
+  capture engine and exits 3. See [recorder-cli.md](recorder-cli.md).
 - `apps/desktop` and `packages/` are README placeholders.
 - The only test asserting real behaviour is the workspace layering test.
 
@@ -176,11 +177,11 @@ cargo build --workspace
 cargo run -p clipped-recorder
 ```
 
-Today that prints the recorder's name, version and the fact that no capture
-commands exist. The command line arrives with
-[issue #9](https://github.com/wildware-uk/clipped/issues/9), and the first
-useful invocation — capture a window, encode it, produce a playable MKV — is
-the M1 milestone:
+With no arguments that prints the help and exits 2. `record` is the only
+subcommand it has; it validates its arguments and then reports that this build
+cannot record, because the capture engine does not exist yet. The first useful
+invocation — capture a window, encode it, produce a playable MKV — is the M1
+milestone:
 
 ```text
 clipped-recorder record --window <window>

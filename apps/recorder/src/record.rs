@@ -47,7 +47,7 @@ impl fmt::Display for RecordError {
                 "the arguments are valid, but this build cannot record: the capture engine \
                  is not implemented yet. It is milestone {CAPTURE_MILESTONE} — capture \
                  backend issue #11, encoder issue #15, muxer issue #21, at \
-                 https://github.com/wildware-uk/clipped/issues. Nothing was written."
+                 https://github.com/wildware-uk/clipped/issues. No recording was written."
             ),
         }
     }
@@ -91,11 +91,13 @@ pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
     install_ctrl_c_handler(&signal)?;
     tracing::debug!("Ctrl+C will stop the recording at the next frame boundary");
 
-    // The seam. When the pipeline exists, the body below opens the capture,
-    // encoder, audio and muxer sessions and runs the frame loop until the
-    // signal is raised; the hook flushes the encoder and closes the container.
-    // Both halves are real today — what is missing is the pipeline between
-    // them, which is why the body returns immediately.
+    // The seam. When the pipeline exists, the body below creates the output
+    // file's directory — validation deliberately does not, so that a run which
+    // records nothing leaves nothing behind (`config::resolve_output`) — opens
+    // the capture, encoder, audio and muxer sessions, and runs the frame loop
+    // until the signal is raised; the hook flushes the encoder and closes the
+    // container. Both halves are real today — what is missing is the pipeline
+    // between them, which is why the body returns immediately.
     run_until_shutdown(
         &signal,
         |_signal| Err(RecordError::CaptureNotImplemented),
@@ -142,15 +144,21 @@ mod tests {
     }
 
     #[test]
-    fn the_not_implemented_message_names_the_milestone_and_says_nothing_was_written() {
+    fn the_not_implemented_message_names_the_milestone_and_says_no_recording_was_written() {
         let message = RecordError::CaptureNotImplemented.to_string();
         assert!(
             message.contains(CAPTURE_MILESTONE),
             "the message must name the milestone: {message}"
         );
         assert!(
-            message.contains("Nothing was written"),
+            message.contains("No recording was written"),
             "the message must say no file was produced: {message}"
+        );
+        // Not "nothing was written": the run wrote log files, and a claim the
+        // program cannot keep is worse than a narrower one it can.
+        assert!(
+            !message.to_lowercase().contains("nothing was written"),
+            "the message overclaims: {message}"
         );
     }
 }

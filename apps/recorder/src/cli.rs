@@ -37,6 +37,13 @@ Exit codes:
 Diagnostics are written to %LOCALAPPDATA%\\Clipped\\logs and to standard error.
 Set CLIPPED_LOG to change the level for one run, for example CLIPPED_LOG=debug.";
 
+/// The mutually exclusive ways of naming what to record.
+///
+/// Exactly one is required, and they are the only `record` arguments without a
+/// default — which is what makes "every other option documents a default" a
+/// property the tests can check rather than a list they have to be told.
+pub const TARGET_ARGUMENTS: [&str; 3] = ["window", "process", "pid"];
+
 /// The `clipped-recorder` command line.
 #[derive(Debug, Parser)]
 #[command(
@@ -73,7 +80,7 @@ pub enum Command {
 #[command(group(
     ArgGroup::new("target")
         .required(true)
-        .args(["window", "process", "pid"])
+        .args(TARGET_ARGUMENTS)
 ))]
 pub struct RecordArgs {
     /// Record the window whose title contains this text.
@@ -92,19 +99,25 @@ pub struct RecordArgs {
     #[arg(long, value_name = "PID")]
     pub pid: Option<u32>,
 
-    /// Where to write the recording. Must end in `.mkv`.
+    /// Where to write the recording, ending in `.mkv`. [default: a timestamped
+    /// file in the Clipped folder of your videos directory]
     ///
-    /// [default: a timestamped file in the Clipped folder of your videos
-    /// directory, such as
+    /// The generated name is, for example,
     /// `%USERPROFILE%\Videos\Clipped\clipped-20260810-143205.mkv`. That
-    /// directory is created if it does not exist; a directory you name
-    /// yourself must already exist]
+    /// directory is created when there is a recording to put in it; a
+    /// directory you name yourself must already exist.
+    //
+    // The default is stated in the summary rather than below it so that `-h`
+    // and `--help` agree about whether this option has one. clap only appends
+    // `[default: …]` for itself when a `default_value` is registered, and this
+    // default is a path built from the clock and the environment.
     #[arg(short, long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    /// Replace the output file if it already exists.
+    /// Replace the output file if it already exists. [default: off]
     ///
-    /// [default: off — an existing recording is never overwritten silently]
+    /// An existing recording is never overwritten silently, because it cannot
+    /// be recovered afterwards.
     #[arg(long)]
     pub overwrite: bool,
 
@@ -292,24 +305,60 @@ mod tests {
 
     #[test]
     fn record_help_states_a_default_for_every_optional_argument() {
-        let help = Cli::command()
-            .find_subcommand_mut("record")
-            .expect("record is a subcommand")
-            .render_long_help()
-            .to_string();
+        // The criterion is a property of every option, not of the eleven that
+        // happen to exist today, so this walks the arguments rather than
+        // listing the strings a snapshot of them renders to. A twelfth option
+        // with no default fails here.
+        //
+        // Whether the default reaches `-h` as well as `--help` is the point of
+        // the check: clap renders `[default: …]` into both when a default value
+        // is registered with it, and the two options whose default cannot be a
+        // `default_value` — `--output` and `--overwrite` — have to say so in
+        // the summary, which is the part `-h` prints.
+        let command = Cli::command();
+        let record = command
+            .find_subcommand("record")
+            .expect("record is a subcommand");
 
-        for expected in [
-            "[default: source]",
-            "[default: 60]",
-            "[default: auto]",
-            "[default: default]",
-            "[default: off",
-            "[default: a timestamped file",
-        ] {
+        let mut checked = 0;
+        for argument in record.get_arguments() {
+            let name = argument.get_id().as_str();
+            if TARGET_ARGUMENTS.contains(&name) || matches!(name, "help" | "version") {
+                continue;
+            }
+
+            let summary = argument
+                .get_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
             assert!(
-                help.contains(expected),
-                "`record --help` is missing `{expected}`:\n{help}"
+                !argument.get_default_values().is_empty() || summary.contains("[default:"),
+                "`--{name}` documents no default, so `record -h` cannot show one: {summary}"
             );
+            checked += 1;
         }
+        assert!(
+            checked > 0,
+            "no optional arguments were found to check; the walk is looking in the wrong place"
+        );
+    }
+
+    #[test]
+    fn the_capture_target_is_the_only_argument_without_a_default() {
+        // `TARGET_ARGUMENTS` is what the test above skips, so it has to stay
+        // the set of arguments that genuinely have no default: the capture
+        // target, exactly one of which is required.
+        let command = Cli::command();
+        let record = command
+            .find_subcommand("record")
+            .expect("record is a subcommand");
+        let group = record
+            .get_groups()
+            .find(|group| group.get_id() == "target")
+            .expect("the target group exists");
+
+        let members: Vec<_> = group.get_args().map(|id| id.as_str().to_owned()).collect();
+        assert_eq!(members, TARGET_ARGUMENTS, "the target group has changed");
+        assert!(group.is_required_set(), "a capture target is required");
     }
 }
