@@ -20,6 +20,7 @@ clipped-encoder = { path = "crates/encoder", version = "0.1.0" }
 clipped-events = { path = "crates/events", version = "0.1.0" }
 clipped-game-detection = { path = "crates/game-detection", version = "0.1.0" }
 clipped-library = { path = "crates/library", version = "0.1.0" }
+clipped-logging = { path = "crates/logging", version = "0.1.0" }
 clipped-muxer = { path = "crates/muxer", version = "0.1.0" }
 clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
 clipped-session = { path = "crates/session", version = "0.1.0" }
