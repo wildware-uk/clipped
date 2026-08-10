@@ -22,11 +22,19 @@
 //!
 //! [`PatternWindow`] owns every native resource here — the window, the Direct3D
 //! device and its immediate context, the swap chain and the staging texture —
-//! for its whole life, and [`Drop`] releases them in the order Windows requires:
+//! for its whole life, and they are released in the order Windows requires:
 //! exclusive fullscreen is left first (DXGI leaves the display in the mode the
 //! application chose if the swap chain is released while fullscreen), then the
-//! COM interfaces, then the window. Nothing here is shared with another thread
-//! (AGENTS.md sections 20 and 58).
+//! COM interfaces, then the window — DXGI's own guidance is that a swap chain
+//! goes before the window it presents to.
+//!
+//! That order is the struct's field order rather than a sequence of statements,
+//! because Rust drops a struct's fields in declaration order and `Drop::drop`
+//! runs before any of them. So [`PatternWindow::drop`] does only the one thing
+//! that has to happen before everything else — leaving fullscreen — and the
+//! window is last in the struct, behind the COM interfaces, held by
+//! [`OwnedWindow`], whose only job is to destroy it. Nothing here is shared with
+//! another thread (AGENTS.md sections 20 and 58).
 //!
 //! # Threading
 //!
@@ -36,7 +44,7 @@
 //! two stop flags in [`crate::app`], which are atomics.
 
 use windows::core::{w, Interface, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_WRITE,
@@ -62,8 +70,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{AppError, Presentation};
 use crate::pattern::{self, SurfaceMut};
 
-/// The window class name, registered once per process.
+/// The window class name, registered on the first window and reused after that.
 const CLASS_NAME: PCWSTR = w!("ClippedVideoPatternWindow");
+
+/// Frames presented before an exclusive fullscreen transition is asked for.
+///
+/// DXGI will not go fullscreen on a swap chain that has never presented,
+/// because it has no output to go fullscreen on until it has.
+const WARM_UP_FRAMES: u32 = 10;
 
 /// Where and how the window is put on screen.
 #[derive(Debug, Clone, Copy)]
@@ -80,18 +94,47 @@ pub(crate) struct Placement {
     pub(crate) presentation: Presentation,
 }
 
+/// A window handle that is destroyed when it is dropped.
+///
+/// It exists so that the window outlives the swap chain that presents to it:
+/// the fields of a struct are dropped in declaration order, so putting this
+/// last in [`PatternWindow`] is what puts `DestroyWindow` after the COM
+/// interfaces are released, without a `Drop` implementation having to move
+/// anything out of a `&mut self`.
+#[derive(Debug)]
+struct OwnedWindow(HWND);
+
+impl Drop for OwnedWindow {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` was created on this thread and, unless the user
+        // closed the window, has not been destroyed. Destroying an
+        // already-destroyed window fails rather than misbehaving, which is why
+        // the result is discarded rather than checked.
+        let _ = unsafe { DestroyWindow(self.0) };
+    }
+}
+
 /// A window presenting the test pattern.
+///
+/// The field order is the teardown order and is not arbitrary; see the module
+/// documentation.
 #[derive(Debug)]
 pub(crate) struct PatternWindow {
-    window: HWND,
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
     swap_chain: IDXGISwapChain1,
     /// The CPU-writable texture each frame is drawn into before being copied
     /// into the back buffer. Recreated when the swap chain changes size.
     staging: ID3D11Texture2D,
+    context: ID3D11DeviceContext,
+    device: ID3D11Device,
+    /// Destroyed after everything above it, which is what DXGI asks for.
+    window: OwnedWindow,
     width: u32,
     height: u32,
+    /// Frames presented so far, which is also the counter drawn into the next
+    /// one. Every present goes through [`PatternWindow::present_next`], so the
+    /// warm-up frames an exclusive transition needs are counted like any other
+    /// and no counter is ever drawn twice in a run.
+    presented: u32,
     /// Whether `SetFullscreenState(true)` was granted, so that [`Drop`] knows
     /// whether it has a display mode to give back.
     exclusive: bool,
@@ -129,14 +172,17 @@ impl PatternWindow {
             ..Default::default()
         };
         // SAFETY: `class` is a live, fully initialised `WNDCLASSW` whose string
-        // and module fields are static and outlive the call. `open` is called
-        // once per process, so the class is never registered twice.
+        // and module fields are static and outlive the call. Registering the
+        // same class twice is refused rather than harmful, and refusing it is
+        // the expected outcome of the second call: `open` is public API through
+        // `clipped_video_pattern::run`, so nothing stops a caller opening a
+        // second window in one process (AGENTS.md section 16).
         let atom = unsafe { RegisterClassW(&class) };
         if atom == 0 {
-            return Err(AppError::windows(
-                "RegisterClassW",
-                windows::core::Error::from_thread(),
-            ));
+            let error = windows::core::Error::from_thread();
+            if error.code() != ERROR_CLASS_ALREADY_EXISTS.to_hresult() {
+                return Err(AppError::windows("RegisterClassW", error));
+            }
         }
 
         let (style, extended_style) = match placement.presentation {
@@ -194,26 +240,20 @@ impl PatternWindow {
         }
         .map_err(|source| AppError::windows("CreateWindowExW", source))?;
 
-        // SAFETY: `window` is the window created immediately above.
-        let _ = unsafe { ShowWindow(window, SW_SHOWNOACTIVATE) };
+        // The handle is owned from here on: if anything below fails, dropping
+        // this is what destroys the window (AGENTS.md section 58).
+        let window = OwnedWindow(window);
 
-        match Self::assemble(window) {
-            Ok(opened) => Ok(opened),
-            Err(error) => {
-                // The window is this function's to release until the struct
-                // that owns it exists (AGENTS.md section 58).
-                // SAFETY: `window` was created on this thread and has not been
-                // destroyed.
-                let _ = unsafe { DestroyWindow(window) };
-                Err(error)
-            }
-        }
+        // SAFETY: `window.0` is the window created immediately above.
+        let _ = unsafe { ShowWindow(window.0, SW_SHOWNOACTIVATE) };
+
+        Self::assemble(window)
     }
 
     /// Builds the device, swap chain and staging texture for an existing
     /// window.
-    fn assemble(window: HWND) -> Result<Self, AppError> {
-        let (width, height) = client_size(window)?;
+    fn assemble(window: OwnedWindow) -> Result<Self, AppError> {
+        let (width, height) = client_size(window.0)?;
         if width < pattern::MIN_WIDTH || height < pattern::MIN_HEIGHT {
             return Err(AppError::PatternDoesNotFit { width, height });
         }
@@ -288,7 +328,10 @@ impl PatternWindow {
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: 2,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            Flags: DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH.0.unsigned_abs(),
+            // A plain `as` cast rather than `unsigned_abs`: this is a bit
+            // pattern in a signed newtype, not a number, and the absolute value
+            // of a flag whose sign bit is set is a different flag altogether.
+            Flags: DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH.0 as u32,
             ..Default::default()
         };
         let fullscreen = DXGI_SWAP_CHAIN_FULLSCREEN_DESC {
@@ -304,20 +347,21 @@ impl PatternWindow {
         // window owned by this thread, and both descriptions are live locals
         // read during the call.
         let swap_chain = unsafe {
-            factory.CreateSwapChainForHwnd(&device, window, &description, Some(&fullscreen), None)
+            factory.CreateSwapChainForHwnd(&device, window.0, &description, Some(&fullscreen), None)
         }
         .map_err(|source| AppError::windows("CreateSwapChainForHwnd", source))?;
 
         let staging = create_staging(&device, width, height)?;
 
         Ok(Self {
-            window,
-            device,
-            context,
             swap_chain,
             staging,
+            context,
+            device,
+            window,
             width,
             height,
+            presented: 0,
             exclusive: false,
             closed: false,
         })
@@ -325,7 +369,7 @@ impl PatternWindow {
 
     /// The window's handle, which is what a capture test points at.
     pub(crate) const fn handle(&self) -> HWND {
-        self.window
+        self.window.0
     }
 
     /// The client size the pattern is being drawn at.
@@ -338,6 +382,17 @@ impl PatternWindow {
         self.exclusive
     }
 
+    /// How many frames have been presented, which is one more than the last
+    /// counter drawn.
+    ///
+    /// This is the number the `stopped` line reports, and a capture test checks
+    /// the counters it decoded against it — so it has to count *every* present,
+    /// including the warm-up frames an exclusive transition needs
+    /// (`docs/testing.md`).
+    pub(crate) const fn presented(&self) -> u32 {
+        self.presented
+    }
+
     /// Asks DXGI for the display, and reports whether it was given.
     ///
     /// The sequence is the documented one, in order, because DXGI refuses the
@@ -345,6 +400,13 @@ impl PatternWindow {
     /// foreground, the swap chain has to have presented at least once so that
     /// its output is known, and the target has to be resized to a real mode
     /// before the transition is asked for.
+    ///
+    /// The frames presented to satisfy the second of those carry the counters
+    /// they would have carried anyway, and are counted: they are frames the
+    /// application really presented, a capture running early really can see
+    /// them, and drawing counter zero here and again in the run loop would make
+    /// the same counter arrive twice — which a capture test is entitled to read
+    /// as the capture backend duplicating a frame.
     ///
     /// A refusal is a legitimate outcome and is reported as `false` rather than
     /// as an error. Windows only grants the foreground to a process the user
@@ -358,13 +420,13 @@ impl PatternWindow {
     /// into a usable state afterwards — a resize the caller cannot recover
     /// from.
     pub(crate) fn take_display_exclusively(&mut self) -> Result<bool, AppError> {
-        // SAFETY: `self.window` is live and owned by this thread.
-        let foreground = unsafe { SetForegroundWindow(self.window) }.as_bool();
+        // SAFETY: `self.window.0` is live and owned by this thread.
+        let foreground = unsafe { SetForegroundWindow(self.window.0) }.as_bool();
 
         // Present a few frames first: DXGI needs the swap chain to have an
         // output before it can go exclusive on it.
-        for index in 0..10 {
-            self.present(index)?;
+        for _ in 0..WARM_UP_FRAMES {
+            self.present_next()?;
             self.pump_messages();
         }
 
@@ -440,7 +502,15 @@ impl PatternWindow {
         Ok(())
     }
 
-    /// Draws frame `index` and presents it.
+    /// Draws the next frame — the counter is [`PatternWindow::presented`] — and
+    /// presents it.
+    ///
+    /// The counter belongs to the window rather than to the caller so that
+    /// there is exactly one of it. Every frame this window ever presents is
+    /// numbered from the same sequence, which is what makes "the counter drawn
+    /// into the last frame plus one" and "the number of frames presented" the
+    /// same number, and what a capture test's cross-check rests on
+    /// (`docs/testing.md`).
     ///
     /// # Errors
     ///
@@ -449,7 +519,15 @@ impl PatternWindow {
     /// pattern. Either means the frames a test is about to capture would not be
     /// the frames it asked for, so presenting on regardless would be worse than
     /// stopping.
-    pub(crate) fn present(&mut self, index: u32) -> Result<(), AppError> {
+    pub(crate) fn present_next(&mut self) -> Result<(), AppError> {
+        let index = self.presented;
+        self.present(index)?;
+        self.presented = self.presented.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Draws frame `index` and presents it.
+    fn present(&mut self, index: u32) -> Result<(), AppError> {
         // SAFETY: `self.swap_chain` is live and buffer zero is its back buffer.
         // The returned texture is owned here and released at the end of this
         // function, which is what leaves `ResizeBuffers` a clean slate.
@@ -542,6 +620,11 @@ impl PatternWindow {
 }
 
 impl Drop for PatternWindow {
+    /// Leaves exclusive fullscreen, and nothing else.
+    ///
+    /// The rest of the teardown is the fields' own: this runs first, then the
+    /// swap chain, the staging texture, the context and the device are released
+    /// in that order, and [`OwnedWindow`] destroys the window last.
     fn drop(&mut self) {
         if self.exclusive {
             // Required before the swap chain is released: DXGI leaves the
@@ -552,11 +635,6 @@ impl Drop for PatternWindow {
                 eprintln!("[warn] could not leave exclusive fullscreen: {error}");
             }
         }
-        // SAFETY: `self.window` was created on this thread and, unless the user
-        // closed it, has not been destroyed. Destroying an already-destroyed
-        // window fails rather than misbehaving, which is why the result is
-        // discarded rather than checked.
-        let _ = unsafe { DestroyWindow(self.window) };
     }
 }
 
@@ -592,7 +670,9 @@ fn create_staging(
         },
         Usage: D3D11_USAGE_STAGING,
         BindFlags: 0,
-        CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0.unsigned_abs(),
+        // A bit pattern, so the sign bit is a flag rather than a sign; see the
+        // swap chain description above.
+        CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
         MiscFlags: 0,
     };
 

@@ -122,17 +122,31 @@ impl FrameReader {
         )?;
 
         let stride = mapped.RowPitch as usize;
-        let length = stride * description.Height as usize;
-        // SAFETY: `Map` returned a pointer to the whole of subresource zero,
-        // whose rows are `RowPitch` bytes apart and of which there are
-        // `Height`. The slice is read and copied out before `Unmap` below, and
-        // nothing else refers to it.
-        let pixels =
-            unsafe { core::slice::from_raw_parts(mapped.pData.cast::<u8>(), length) }.to_vec();
+        // Checked rather than assumed, as `render.rs::write_pattern` does with
+        // the same arithmetic: the product is the length of a slice built from
+        // a raw pointer, and a wrapped one would be a read past the end of the
+        // mapping rather than a wrong number.
+        let length = stride.checked_mul(description.Height as usize);
 
+        let pixels = length.map(|length| {
+            // SAFETY: `Map` returned a pointer to the whole of subresource
+            // zero, whose rows are `RowPitch` bytes apart and of which there
+            // are `Height`. The slice is read and copied out before `Unmap`
+            // below, and nothing else refers to it.
+            unsafe { core::slice::from_raw_parts(mapped.pData.cast::<u8>(), length) }.to_vec()
+        });
+
+        // Unmapped before the length is inspected: a staging texture left
+        // mapped cannot be copied into, so the next frame would fail for a
+        // reason that has nothing to do with why this one did.
         // SAFETY: `staging` is the texture mapped immediately above, and the
         // slice built from the mapping has been copied and dropped.
         unsafe { context.Unmap(staging, 0) };
+
+        let pixels = pixels.ok_or(ReadbackError::MappingTooLarge {
+            stride,
+            height: description.Height,
+        })?;
 
         Ok(Image {
             pixels,
@@ -190,7 +204,11 @@ impl FrameReader {
                 },
                 Usage: D3D11_USAGE_STAGING,
                 BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0.unsigned_abs(),
+                // A plain `as` cast rather than `unsigned_abs`: this is a bit
+                // pattern in a signed newtype, not a number, and the absolute
+                // value of a flag whose sign bit is set is a different flag
+                // altogether.
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 MiscFlags: 0,
             };
 
@@ -205,7 +223,19 @@ impl FrameReader {
                 },
             )?;
 
-            self.staging = Some((texture.ok_or(ReadbackError::NoDevice)?, width, height));
+            // Success without a texture is a broken runtime rather than a
+            // texture that would not name its device, and saying so is the
+            // difference between a puzzle and a bug report (AGENTS.md section
+            // 15).
+            let texture = texture.ok_or_else(|| ReadbackError::Direct3D {
+                operation: "ID3D11Device::CreateTexture2D",
+                source: windows::core::Error::new(
+                    windows::Win32::Foundation::E_FAIL,
+                    "reported success without returning a texture",
+                ),
+            })?;
+
+            self.staging = Some((texture, width, height));
         }
 
         self.staging
@@ -230,9 +260,16 @@ pub(crate) enum ReadbackError {
     },
     /// The backend handed over a null texture, which it promises not to do.
     NullTexture,
-    /// The texture would not name its device, or the device would not create a
-    /// resource.
+    /// The texture would not name the device that owns it, so there is nowhere
+    /// to create a staging texture.
     NoDevice,
+    /// The mapped texture describes more bytes than an address can hold.
+    MappingTooLarge {
+        /// Bytes between one row and the next, as Direct3D reported them.
+        stride: usize,
+        /// Rows in the mapped texture.
+        height: u32,
+    },
     /// A Direct3D call failed.
     Direct3D {
         /// Which call.
@@ -262,9 +299,27 @@ impl fmt::Display for ReadbackError {
             Self::NoDevice => {
                 formatter.write_str("the captured texture would not name the device that owns it")
             }
+            Self::MappingTooLarge { stride, height } => write!(
+                formatter,
+                "the mapped texture says its {height} rows are {stride} bytes apart, which is \
+                 more bytes than this process can address"
+            ),
             Self::Direct3D { operation, source } => {
                 write!(formatter, "{operation} failed: {source}")
             }
+        }
+    }
+}
+
+impl std::error::Error for ReadbackError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Direct3D { source, .. } => Some(source),
+            Self::UnsupportedTexture { .. }
+            | Self::UnsupportedFormat { .. }
+            | Self::NullTexture
+            | Self::NoDevice
+            | Self::MappingTooLarge { .. } => None,
         }
     }
 }

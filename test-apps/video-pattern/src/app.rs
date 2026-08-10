@@ -249,7 +249,6 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
     let interval = Duration::from_secs(1) / options.fps.max(1);
     let started = Instant::now();
     let mut next_present = Instant::now();
-    let mut frames: u32 = 0;
 
     let reason = loop {
         if window.pump_messages() {
@@ -268,8 +267,12 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
             break StopReason::Deadline;
         }
 
-        window.present(frames)?;
-        frames = frames.wrapping_add(1);
+        // The counter is the window's, not this loop's: a fullscreen run
+        // presents warm-up frames before the loop starts, and they are frames
+        // the application presented and a capture can see. Counting them here
+        // is what keeps `Summary::frames` the count of every frame presented
+        // and the last counter drawn plus one.
+        window.present_next()?;
 
         // Paced against a fixed schedule rather than by sleeping for an
         // interval after each frame, so that the time spent drawing does not
@@ -286,6 +289,7 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
     };
 
     let exclusive = window.is_exclusive();
+    let frames = window.presented();
     // Explicit, before the summary is printed: the `stopped` line means the
     // display has been given back and the window has gone, which is what lets a
     // test treat the line as permission to stop worrying about this process.

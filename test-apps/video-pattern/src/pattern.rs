@@ -43,14 +43,26 @@
 //!   defect this application exists to catch, and a pattern that only encoded a
 //!   counter in one corner could not see it.
 //!
-//! The last two cover each other, and it is worth knowing where each stops.
-//! The background changes every frame but repeats every eight, so on its own it
-//! would miss a tear between frames exactly eight apart. The marker is 64
+//! The last two cover each other, and it is worth knowing exactly where each
+//! stops. The background changes every frame but repeats every eight, so on its
+//! own it would miss a tear between frames exactly eight apart. The marker is 64
 //! pixels wide and moves 8 pixels a frame, so the pixel a decoder samples is
 //! still inside the marker when the frame is up to four frames out — but it is
-//! well outside it by eight. Between them, every displacement except zero is
-//! caught; a "tear" of zero frames is two copies of the same frame, which is
-//! not a tear.
+//! well outside it by eight, and it only returns to the same x after the
+//! marker's whole period, which is `(width - 64) / 8` frames rounded up: 152
+//! frames in a 1280-pixel pattern.
+//!
+//! **Between them, every displacement from one frame up to the marker's period
+//! is caught**, which is the guarantee the property test at the bottom of this
+//! file sweeps in full at every width the application is run at. It is not
+//! "every displacement": at the period itself the marker is back where it
+//! started, and where that period is also a multiple of eight — as it is at
+//! 1280 and 2560 pixels across — the background is back to the same colour too,
+//! so a frame torn between two source frames exactly 152 apart reads as a good
+//! one. That is five seconds of tear at 30 fps, which is not a compositor
+//! handing over a half-composed frame; a test pins the limit
+//! (`the_first_tear_the_pattern_cannot_see_is_a_whole_marker_period_away`) so
+//! that it stays a stated bound rather than a discovery.
 //!
 //! # Pixel format
 //!
@@ -416,17 +428,25 @@ const fn checksum(index: u32) -> u8 {
     bytes[0] ^ bytes[1] ^ bytes[2] ^ bytes[3] ^ 0x5A
 }
 
-/// The marker's left edge for `index` in a pattern `width` pixels across.
+/// How many frames the marker takes to return to where it started, in a pattern
+/// `width` pixels across.
 ///
-/// `width` is never smaller than [`MIN_WIDTH`] here: both callers check that
+/// This is the bound on what a torn frame can be caught at: two frames a whole
+/// period apart put the marker in the same place, so the marker check cannot
+/// separate them and only the background is left (see the module documentation).
+///
+/// `width` is never smaller than [`MIN_WIDTH`] here: every caller checks that
 /// first, because a pattern that does not fit is refused rather than drawn
 /// truncated.
-const fn marker_x(index: u32, width: u32) -> u32 {
-    let span = width - MARKER;
+const fn marker_period(width: u32) -> u32 {
     // `positions - 1` steps is the last start that still leaves room for the
     // marker, so the marker never runs off the right-hand edge.
-    let positions = span.div_ceil(MARKER_STEP);
-    (index % positions) * MARKER_STEP
+    (width - MARKER).div_ceil(MARKER_STEP)
+}
+
+/// The marker's left edge for `index` in a pattern `width` pixels across.
+const fn marker_x(index: u32, width: u32) -> u32 {
+    (index % marker_period(width)) * MARKER_STEP
 }
 
 /// The background colour for `index`.
@@ -1051,24 +1071,78 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_torn_between_any_two_source_frames_is_rejected() {
-        // The property the background and the marker exist for, over every
-        // displacement either of them could be blind to on its own: the
-        // background repeats every eight frames, and the marker's sample point
-        // is still inside the marker while the frame is up to four frames out.
-        // Between them nothing but a zero displacement gets through, and a zero
-        // displacement is not a tear.
-        for displacement in 1..=64u32 {
-            let frame = Frame::torn(500, 500 + displacement, 1280, 720);
-            let decoded = decode(&frame.surface(), Region::origin(1280, 720));
-            assert!(
-                decoded.is_err(),
-                "a frame whose header says 500 and whose body is frame {} decoded as \
-                 {decoded:?}; a torn frame read as a good one is a corrupted recording \
-                 nobody notices",
-                500 + displacement
-            );
+    fn a_frame_torn_between_two_source_frames_less_than_a_marker_period_apart_is_rejected() {
+        // The property the background and the marker exist for, swept in full
+        // rather than sampled: the background repeats every eight frames, and
+        // the marker's sample point is still inside the marker while the frame
+        // is up to four frames out, so neither is enough alone. Between them
+        // every displacement below the marker's period is caught — 151 of them
+        // at 1280 pixels across, 311 at 2560 — which is the guarantee the
+        // module documentation states.
+        for width in [MIN_WIDTH, 800, 1280, 1920, 2560] {
+            for displacement in 1..marker_period(width) {
+                let frame = Frame::torn(500, 500 + displacement, width, 720);
+                let decoded = decode(&frame.surface(), Region::origin(width, 720));
+                assert!(
+                    decoded.is_err(),
+                    "in a {width}-pixel pattern, a frame whose header says 500 and whose \
+                     body is frame {} decoded as {decoded:?}; a torn frame read as a good \
+                     one is a corrupted recording nobody notices",
+                    500 + displacement
+                );
+            }
         }
+    }
+
+    /// Whether a frame torn between two source frames `displacement` apart
+    /// still decodes as a good one, in a pattern `width` pixels across.
+    fn a_tear_gets_through(width: u32, displacement: u32) -> bool {
+        let frame = Frame::torn(500, 500 + displacement, width, 720);
+        decode(&frame.surface(), Region::origin(width, 720)).is_ok()
+    }
+
+    #[test]
+    fn the_first_tear_the_pattern_cannot_see_is_a_whole_marker_period_away() {
+        // The other side of that guarantee, pinned so that the documented bound
+        // is a measurement rather than a claim. A tear gets through only when
+        // the marker is back within half its own width of where it was *and*
+        // the background is back to the same colour, and the first displacement
+        // that does both is the marker's whole period — five seconds of tear at
+        // 30 fps, which is two different applications rather than one frame the
+        // compositor assembled from two.
+        for width in [MIN_WIDTH, 800, 1280, 1920, 2560] {
+            let period = marker_period(width);
+            if period % PALETTE.len() as u32 == 0 {
+                assert!(
+                    a_tear_gets_through(width, period),
+                    "a {width}-pixel pattern's marker repeats every {period} frames and \
+                     {period} is a multiple of the palette's eight, so both checks come back \
+                     at once and this displacement is the documented blind spot; if it is \
+                     now caught, the module documentation understates what the pattern can do"
+                );
+            } else {
+                assert!(
+                    !a_tear_gets_through(width, period),
+                    "a {width}-pixel pattern's marker repeats every {period} frames, which is \
+                     not a multiple of the palette's eight, so the background should still \
+                     catch a tear the marker cannot see"
+                );
+            }
+        }
+
+        // The two the module documentation quotes, found rather than asserted
+        // in the abstract: 152 at the width the capture tests run at, and four
+        // frames past the period at 800, where the period is not a multiple of
+        // the palette's.
+        assert_eq!(first_blind_displacement(1280), Some(152));
+        assert_eq!(first_blind_displacement(800), Some(96));
+        assert_eq!(marker_period(1280), 152);
+    }
+
+    /// The smallest tear that reads as a good frame, searched up to twice the
+    /// marker's period.
+    fn first_blind_displacement(width: u32) -> Option<u32> {
+        (1..marker_period(width) * 2).find(|displacement| a_tear_gets_through(width, *displacement))
     }
 
     #[test]

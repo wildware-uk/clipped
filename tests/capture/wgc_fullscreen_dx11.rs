@@ -73,6 +73,17 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 #[test]
 #[ignore = "takes over a display and needs a GPU; see the module docs"]
 fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
+    // Before any size is read, and for the same reason the test application
+    // does it (`test-apps/video-pattern/src/app.rs`): the subject is
+    // per-monitor DPI aware, so it reports and draws physical pixels, and a
+    // DPI-unaware test process is shown the smaller virtualised numbers on any
+    // display scaled above 100%. Without this the size assertion below compares
+    // 2560x1440 against 1707x960 and blames the application for the test's own
+    // DPI mode (AGENTS.md section 25).
+    let awareness = clipped_windows::enable_per_monitor_dpi_awareness()
+        .expect("the sizes this test compares are physical pixels, which needs this mode");
+    eprintln!("[info] per-monitor DPI awareness: {awareness:?}");
+
     let monitors = clipped_windows::enumerate_monitors().expect("this machine has displays");
     let expected = monitors
         .iter()
@@ -196,6 +207,22 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
         stopped.reason, "stop-requested",
         "the application should have stopped because the test asked it to"
     );
+
+    if let Some(last) = outcome.last {
+        // The two accounts of the same run, cross-checked: the counters that
+        // came out of the compositor against the count the application kept.
+        // This mode is the one where they could drift — the warm-up frames DXGI
+        // needs before a fullscreen transition are presented before the run
+        // loop, and if they were not counted the last counter captured could
+        // exceed the number of frames the application says it presented.
+        assert!(
+            last < stopped.frames,
+            "the last counter captured was {last} and the application says it presented \
+             only {} frames, so the counter it draws is not the count of frames it has \
+             presented",
+            stopped.frames
+        );
+    }
 
     // The display is back: the same enumeration that chose it reports the same
     // size it had before the run. A mode switch that was not undone would show

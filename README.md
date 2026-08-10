@@ -176,9 +176,8 @@ is not responsible for, and where it sits in this stack.
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 
-The four `docs/` entries are written under issues #3, #6, #8 and #5 and are
-listed here so those tickets do not each have to edit this table. The links
-resolve once milestone M0 is complete.
+The five `docs/` entries are written under issues #3, #6, #8, #5 and #23 and are
+listed here so those tickets do not each have to edit this table.
 
 ## Contributing
 

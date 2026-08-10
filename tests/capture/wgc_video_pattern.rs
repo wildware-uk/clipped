@@ -16,7 +16,10 @@
 //!   frame number, so a gap in the counters is exactly the frames the source
 //!   presented that never arrived — measured, not inferred from a clock.
 //! - **Duplicated frames.** The same counter twice is the same source frame
-//!   delivered twice.
+//!   delivered twice, and `Accounting::assert_healthy` fails a run that saw one.
+//!   The checker itself is proved by the tests at the bottom of this file, which
+//!   need no display and run everywhere: a counter that is asserted on only when
+//!   somebody has a GPU to hand is a counter nobody has watched fail.
 //! - **Torn frames.** The pattern's background and marker have to agree with
 //!   its counter, so a frame assembled from two source frames fails to decode
 //!   (`clipped_video_pattern::pattern`).
@@ -315,6 +318,20 @@ impl Accounting {
              which would put the recording's timeline out of step with the game's"
         );
 
+        // Zero, with no tolerance, unlike the dropped-frame check below. The
+        // margin there is for a machine too busy to hand every frame over in
+        // time; no amount of load makes a backend hand the *same* source frame
+        // over twice, so a duplicate is a defect in the pipeline rather than a
+        // symptom of the machine. Every measured run on issue #23 saw none.
+        assert_eq!(
+            self.duplicated, 0,
+            "{} captured frames carried a counter that had already arrived, so the same \
+             source frame was delivered more than once. An encoder would have written \
+             each of them into the recording, which is a stutter at playback and a \
+             timeline longer than the run",
+            self.duplicated
+        );
+
         let presented = self.presented();
         let dropped = self.dropped as f64 / presented.max(1) as f64;
         assert!(
@@ -463,4 +480,148 @@ fn capture_and_decode(app: &TestApp) -> Accounting {
 
     backend.shut_down();
     accounting
+}
+
+/// Tests of the checker itself, which need neither a GPU nor a display and are
+/// therefore not `#[ignore]`d.
+///
+/// The capture tests above can only be run by somebody with a desktop session,
+/// so everything they assert rests on an [`Accounting`] nobody watches fail. A
+/// counter that is printed but never asserted on, or asserted on in a way that
+/// cannot fail, would let a backend that delivered every source frame twice pass
+/// both of them silently — which is exactly the hollow test AGENTS.md section 54
+/// forbids. These feed the checker the runs it exists to reject and require it
+/// to reject them.
+mod accounting {
+    use std::panic::{self, AssertUnwindSafe};
+
+    use super::{Accounting, Region, SOURCE_FPS};
+
+    /// The counters a healthy six-second run at [`SOURCE_FPS`] decodes.
+    fn healthy_run() -> Vec<u32> {
+        (0..SOURCE_FPS * 6).collect()
+    }
+
+    /// An accounting of a run that decoded `counters`, in the order they
+    /// arrived, with the pattern found where a borderless window puts it.
+    fn accounting_of(counters: impl IntoIterator<Item = u32>) -> Accounting {
+        let mut accounting = Accounting {
+            region: Some(Region::origin(1280, 720)),
+            ..Accounting::default()
+        };
+        for index in counters {
+            accounting.delivered += 1;
+            accounting.record(index);
+        }
+        accounting
+    }
+
+    /// Runs `assert_healthy` and returns the message it failed with, or [`None`]
+    /// if it passed.
+    fn rejection(accounting: &Accounting) -> Option<String> {
+        let previous = panic::take_hook();
+        // The panics below are expected, and the default hook would print a
+        // backtrace note for each of them into the output of a passing test.
+        panic::set_hook(Box::new(|_| {}));
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| accounting.assert_healthy()));
+        panic::set_hook(previous);
+
+        outcome.err().map(|payload| {
+            payload.downcast_ref::<String>().map_or_else(
+                || "a panic that was not an assertion message".to_owned(),
+                Clone::clone,
+            )
+        })
+    }
+
+    #[test]
+    fn the_same_counter_twice_is_counted_as_one_duplicate() {
+        let accounting = accounting_of([5, 6, 6, 7]);
+        assert_eq!(accounting.duplicated, 1);
+        assert_eq!(accounting.dropped, 0);
+        assert_eq!(accounting.out_of_order, 0);
+        assert_eq!(accounting.decoded, 4);
+    }
+
+    #[test]
+    fn a_healthy_run_is_accepted() {
+        // The control. Without it the tests below would pass just as well
+        // against a checker that rejected everything.
+        let accounting = accounting_of(healthy_run());
+        assert_eq!(
+            rejection(&accounting),
+            None,
+            "a run that lost nothing and saw nothing twice has to pass, or the tests \
+             below prove nothing"
+        );
+    }
+
+    #[test]
+    fn a_run_in_which_every_source_frame_arrived_twice_is_rejected() {
+        // What a backend that handed each captured frame over twice would
+        // produce: every counter the source drew, delivered in pairs. Before
+        // `assert_healthy` checked for duplicates this run passed, printing
+        // `duplicated: 180` on its way through.
+        let doubled = healthy_run().into_iter().flat_map(|index| [index, index]);
+        let accounting = accounting_of(doubled);
+        assert_eq!(accounting.duplicated, u64::from(SOURCE_FPS) * 6);
+
+        let message = rejection(&accounting).expect(
+            "a run in which every frame arrived twice must fail, or a duplicate-delivery \
+             regression in the capture backend ships green",
+        );
+        assert!(
+            message.contains("delivered more than once"),
+            "the failure should name what happened; it said: {message}"
+        );
+    }
+
+    #[test]
+    fn a_single_duplicated_frame_is_rejected() {
+        // One duplicate in six seconds, which is the regression a tolerance
+        // would hide. Nothing about a busy machine produces one.
+        let mut counters = healthy_run();
+        counters.insert(100, 99);
+        let accounting = accounting_of(counters);
+        assert_eq!(accounting.duplicated, 1);
+        assert!(rejection(&accounting).is_some());
+    }
+
+    #[test]
+    fn a_run_that_lost_half_its_frames_is_rejected() {
+        // The other half of the acceptance criterion, and the run the
+        // deliberate break on issue #23 produced: the source counted in twos,
+        // so every other counter never arrived.
+        let accounting = accounting_of(healthy_run().into_iter().filter(|index| index % 2 == 0));
+        let message =
+            rejection(&accounting).expect("a run that lost half the source's frames must fail");
+        assert!(
+            message.contains("never arrived"),
+            "the failure should name what happened; it said: {message}"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_frames_arrived_backwards_is_rejected() {
+        let mut counters = healthy_run();
+        counters.swap(100, 101);
+        let accounting = accounting_of(counters);
+        assert_eq!(accounting.out_of_order, 1);
+        assert!(rejection(&accounting).is_some());
+    }
+
+    #[test]
+    fn a_run_that_never_found_the_pattern_is_rejected() {
+        let mut accounting = accounting_of(healthy_run());
+        accounting.region = None;
+        assert!(rejection(&accounting).is_some());
+    }
+
+    #[test]
+    fn a_run_with_too_few_frames_to_mean_anything_is_rejected() {
+        // Ten frames in six seconds is not a 30 fps source being captured; it
+        // is a run whose percentages would be arithmetic on noise.
+        let accounting = accounting_of(0..10);
+        assert!(rejection(&accounting).is_some());
+    }
 }

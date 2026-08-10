@@ -15,14 +15,23 @@ only sets `CARGO_BIN_EXE_…` for a test in the binary's own package — so they
 declared as `[[test]]` targets in `test-apps/*/Cargo.toml` with their sources
 here, beside the other system tests.
 
-These tests depend on GPU and display hardware, so they are not part of the
-pull-request CI job: they are `#[ignore]`d, and
+The capture tests themselves depend on GPU and display hardware, so they are not
+part of the pull-request CI job: they are `#[ignore]`d, and
 
 ```text
 cargo test -p clipped-video-pattern --test wgc_video_pattern -- --ignored --nocapture --test-threads=1
 cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --nocapture
 ```
 
-is how they are run. [docs/testing.md](../../docs/testing.md) explains what each
-test application draws, what it guarantees, how to run one by hand, and how a
-test drives it.
+is how they are run.
+
+`wgc_video_pattern.rs` also holds tests of its own frame accounting — that a
+counter arriving twice is counted as a duplicate and fails the run, that a run
+missing half the source's frames fails, that a healthy run passes. Those need
+neither a GPU nor a display and do run in the pull-request job, deliberately: the
+capture tests above rest entirely on that checker, and a checker only exercised
+on a machine with a display is a checker nobody has watched fail (AGENTS.md
+section 54).
+
+[docs/testing.md](../../docs/testing.md) explains what each test application
+draws, what it guarantees, how to run one by hand, and how a test drives it.

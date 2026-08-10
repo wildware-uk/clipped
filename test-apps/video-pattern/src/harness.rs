@@ -46,6 +46,15 @@ use std::time::Instant;
 /// How long [`Drop`] gives the application to stop cleanly before killing it.
 const DROP_GRACE: Duration = Duration::from_secs(3);
 
+/// How long the reader thread is given to finish once the application has
+/// exited.
+///
+/// It is reading a pipe whose only writer has gone, so this is the time for a
+/// thread to be scheduled and to see end of file — microseconds on an idle
+/// machine, and this much only because the machine running a capture test is
+/// allowed to be busy.
+const OUTPUT_DRAIN: Duration = Duration::from_secs(5);
+
 /// A running test application.
 #[derive(Debug)]
 pub struct TestApp {
@@ -199,7 +208,7 @@ impl TestApp {
         let deadline = Instant::now() + timeout;
         loop {
             match self.child.try_wait() {
-                Ok(Some(status)) if status.success() => return self.final_summary(),
+                Ok(Some(status)) if status.success() => return self.final_summary(OUTPUT_DRAIN),
                 Ok(Some(status)) => {
                     return Err(HarnessError::Stop {
                         detail: format!("the test application exited with {status}"),
@@ -233,16 +242,46 @@ impl TestApp {
 
     /// The `stopped` line the application prints last.
     ///
-    /// Called after the process has exited, so its reader thread has finished
-    /// and every line it ever wrote is already in the channel.
-    fn final_summary(&self) -> Result<Stopped, HarnessError> {
+    /// Called after the process has exited, which is not the same thing as the
+    /// reader thread having finished: the child exiting and the thread reading
+    /// the last bytes out of the pipe and sending them are separate events, in
+    /// separate processes, with nothing ordering them. So the drain waits for
+    /// the channel to *disconnect* — which happens when the reader thread drops
+    /// its sender, and it does that only after the pipe has reached end of file
+    /// — rather than taking what happens to have arrived. Draining with
+    /// `try_recv` instead loses the last line on a machine loaded enough to
+    /// have not scheduled the reader yet, and reports a clean run as an
+    /// application that may have kept the display.
+    ///
+    /// The wait is bounded so that a reader thread which somehow never finishes
+    /// fails the test rather than hanging it.
+    fn final_summary(&self, timeout: Duration) -> Result<Stopped, HarnessError> {
+        let deadline = Instant::now() + timeout;
         let mut last = None;
-        while let Ok(line) = self.lines.try_recv() {
-            let line = line.map_err(|source| HarnessError::Stop {
-                detail: format!("could not read the test application's output: {source}"),
-            })?;
-            if line.starts_with("stopped ") {
-                last = Some(line);
+        loop {
+            match self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) => {
+                    let line = line.map_err(|source| HarnessError::Stop {
+                        detail: format!("could not read the test application's output: {source}"),
+                    })?;
+                    if line.trim_end().starts_with("stopped ") {
+                        last = Some(line);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(HarnessError::Stop {
+                        detail: format!(
+                            "the test application exited but the thread reading its output \
+                             had not finished {:.1}s later, so its last line cannot be \
+                             accounted for",
+                            timeout.as_secs_f64()
+                        ),
+                    })
+                }
             }
         }
 

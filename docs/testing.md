@@ -94,10 +94,16 @@ agreement is asserted by unit tests that need no GPU and run in CI.
 - Frame *n* is drawn identically on every machine, every run.
 - Consecutive frames always differ, so the compositor always has new content and
   never skips composing the window.
-- A frame that decodes is whole: its header, background and marker agree.
+- A frame that decodes is whole: its header, background and marker agree — for
+  any tear between two source frames less than the marker's period apart, which
+  is 152 frames in a 1280-pixel-wide pattern. [What the pattern cannot
+  see](#what-the-pattern-cannot-see) has the rest of that.
 - The counter it draws is the count of frames it has presented, so the `stopped`
   line's frame count and the last counter captured are two independent accounts
-  of the same run.
+  of the same run. That holds for every frame the application ever presents,
+  including the warm-up frames DXGI needs before an exclusive fullscreen
+  transition: they come from the same counter and are counted in the same total,
+  so no counter is ever drawn twice and none goes unreported.
 
 ### Running it by hand
 
@@ -168,7 +174,7 @@ applications:
 
 | Test | What it decides |
 | --- | --- |
-| `wgc_video_pattern.rs` | That a borderless window and an ordinary bordered window are both captured frame for frame, with dropped, duplicated, out-of-order and torn frames all counted |
+| `wgc_video_pattern.rs` | That a borderless window and an ordinary bordered window are both captured frame for frame: dropped, duplicated, out-of-order and torn frames are counted *and* asserted on, and the checker that does it is itself tested without a GPU |
 | `wgc_fullscreen_dx11.rs` | That an application covering a whole display is captured, that every frame that arrives is the pattern, and that the display is the shape it was afterwards |
 | `readback.rs` | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it |
 
@@ -230,17 +236,24 @@ this project's development machine (RTX 4090, 2560x1440 at 144 Hz) reads:
 ```text
 === wgc_video_pattern (borderless) ===
 pattern found at    : 1280x720 at (0, 0)
-frames delivered    : 182
-frames decoded      : 182
+frames delivered    : 181
+frames decoded      : 181
 acquisition timeouts: 0
-source frames in run: 182 (counters 5 to 186)
+source frames in run: 181 (counters 4 to 184)
 dropped             : 0 (0.00%)
 duplicated          : 0
 out of order        : 0
 backend said missed : 0
-span on source clock: 6.03s
+span on source clock: 6.00s
 undecodable frames  : 0
 ```
+
+Every one of those numbers is asserted on and not merely printed: the run fails
+if the pattern was never found, if too few frames arrived to conclude anything,
+if any frame did not decode, if any counter arrived out of order or twice, or if
+more than 5% of the frames the source presented never arrived. The one tolerance
+is the last: a busy machine can lose a frame, and nothing a machine does makes a
+backend hand the same source frame over twice.
 
 They are `#[ignore]`d rather than skipping themselves at runtime, deliberately.
 A test that decides for itself that it could not run reads as a pass, and the
@@ -251,6 +264,14 @@ into a failure on a machine that is supposed to be able to capture.
 
 ## What the pattern cannot see
 
+- **A tear a whole marker period wide.** The background repeats every eight
+  frames and the marker returns to the same x after `(width - 64) / 8` frames —
+  152 in a 1280-pixel pattern, 312 in a 2560-pixel one — so a frame assembled
+  from two source frames exactly that far apart reads as a good one. Every
+  displacement below the period is caught, which is swept in full by a unit
+  test, and the first blind one is pinned by another so the bound stays a stated
+  number. At 30 fps it is a tear between frames five seconds apart, which is not
+  a compositor handing over a half-composed frame.
 - **HDR.** The pattern is drawn and decoded in BGRA8. On a display doing a
   colour conversion the decoder would fail rather than mislead, but it would
   have nothing useful to say. HDR capture is
