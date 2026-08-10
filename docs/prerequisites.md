@@ -42,11 +42,15 @@ warning and leave the exit code alone.
 ## Windows
 
 `SPEC.md` section 3 targets **Windows 11 / modern Windows 10**. Concretely that
-means **build 19044 (Windows 10 21H2) or later**. Two things set the floor:
-Windows Graphics Capture only gained the capture behaviour the capture backend
-relies on in build 19041, and 21H2 is the oldest Windows 10 release Microsoft
-still services. Windows 11 is the primary target; Windows 10 is supported but
-gets less testing.
+means **build 19044 (Windows 10 21H2) or later**, because 21H2 is the oldest
+Windows 10 release Microsoft still services. Windows 11 is the primary target;
+Windows 10 is supported but gets less testing.
+
+No API-level floor has been established yet. `crates/capture` is a
+documentation-only placeholder, so there is no capture backend to name a
+Windows Graphics Capture entry point against and no ADR recording one. If the
+backend built in M1 needs something newer than 19044, the number moves then and
+the specific API that forced it is recorded with the change.
 
 Check:
 
@@ -116,14 +120,26 @@ that is the minimum Rust the crates promise to compile on, while
 Check:
 
 ```text
-rustup --version
-rustc --version
+rustup show active-toolchain
 cargo fmt --version
 cargo clippy --version
 ```
 
-Run from the repository root so the pin applies. `rustc --version` must match the
-pinned channel.
+Run from the repository root. `rustup show active-toolchain` reports the
+toolchain a `cargo` command typed there would actually use, and names the reason
+in brackets — which for a healthy checkout is `rust-toolchain.toml`.
+
+Being installed and being in effect are separate things, and the check script
+tests both. Two things override `rust-toolchain.toml`, and neither is visible in
+the file:
+
+- a directory override left behind by `rustup override set`;
+- the `RUSTUP_TOOLCHAIN` environment variable.
+
+Either one puts you on a toolchain the repository never asked for, and the only
+symptom is lint or format output nobody else can reproduce. Clear them with
+`rustup override unset` in the repository root and by removing
+`RUSTUP_TOOLCHAIN` from the environment.
 
 Fix: install [rustup](https://rustup.rs), then from the repository root:
 
@@ -225,8 +241,7 @@ or unpack a build from [ffmpeg.org](https://ffmpeg.org/download.html) and put it
 ## The check script
 
 `scripts/check-prerequisites.ps1` takes every external thing it probes as a
-parameter, so its behaviour when a dependency is absent can be tested for real
-rather than simulated:
+parameter, so its outcome can be steered without touching the machine:
 
 ```text
 powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 `
@@ -235,8 +250,22 @@ powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 `
 ```
 
 `scripts/test-check-prerequisites.ps1` is the test for it. It runs the real
-script as a child process and asserts the exit code and the reported text for
-both a satisfied machine and several kinds of missing dependency:
+script as a child process and asserts the exit code and the reported text a
+contributor would read. Every case is driven by fixtures — stand-in commands, a
+registry key under `HKCU`, a JSON description of the display adapters — so no
+case can pass or fail because of what happens to be installed on the machine
+running it.
+
+Two shapes of wrongness are covered, because they are detected by different code
+and only one of them is easy:
+
+- **absent** — the probe points at a command, path or registry key that
+  genuinely does not exist;
+- **present but wrong** — the probe points at a stand-in that answers the way
+  the real tool answers in that state: `vswhere` printing `[]` for a Visual
+  Studio install with no C++ workload, `node` reporting a different major
+  version, `rustup` refusing a toolchain that is not installed, `rustup`
+  reporting a toolchain that overrides the pin.
 
 ```text
 powershell -ExecutionPolicy Bypass -File scripts/test-check-prerequisites.ps1
@@ -251,7 +280,5 @@ Not prerequisites, but worth having:
 
 - **Git** — required to clone the repository, and assumed by the contribution
   workflow.
-- **cmake** — some native dependencies build with it. Nothing in the workspace
-  needs it today.
 - **Windows Terminal** — the check script colours its output, which the legacy
   console renders less clearly.
