@@ -114,6 +114,15 @@ impl WindowsGraphicsCapture {
     /// false on Windows 10 before build 1903 and in some server SKUs where the
     /// compositor is absent. A failure to ask — the type not being registered —
     /// is treated as "no", because that is what it means.
+    ///
+    /// This is a WinRT activation, and
+    /// [`BackendDeclaration::availability`] promises to work on any thread, so
+    /// the obvious worry is a thread with no COM apartment. It is not one:
+    /// windows-rs's factory cache retries a `CO_E_NOTINITIALIZED` activation
+    /// after `CoIncrementMTAUsage`, which is exactly the apartment-agnostic
+    /// behaviour a declaration needs. [`Apartment`] still exists for the capture
+    /// thread, which does far more than one activation and should say so
+    /// explicitly rather than lean on a library's fallback.
     fn is_supported_here() -> bool {
         GraphicsCaptureSession::IsSupported().unwrap_or(false)
     }
@@ -382,18 +391,6 @@ struct HeldFrame {
 
 /// Everything a running capture owns.
 struct Running {
-    /// The apartment WinRT activation needs. Declared first so that it is
-    /// dropped last: Rust drops struct fields in declaration order, and
-    /// releasing a WinRT interface after leaving the apartment is not defined.
-    ///
-    /// Held rather than entered and forgotten so that a recorder which starts
-    /// and stops capture repeatedly does not raise the apartment count once per
-    /// session.
-    #[expect(
-        dead_code,
-        reason = "held for its Drop, which leaves the COM apartment this capture entered"
-    )]
-    apartment: Apartment,
     /// The Direct3D 11 device every texture belongs to.
     device: CaptureDevice,
     /// The window or display being captured.
@@ -434,6 +431,24 @@ struct Running {
     lost: u64,
     /// The value of `lost` when the previous frame was delivered.
     lost_at_last_delivery: u64,
+    /// The apartment WinRT activation needs.
+    ///
+    /// **Declared last, and that is load-bearing.** Rust drops a struct's
+    /// fields in declaration order, so the last field is released last — after
+    /// every WinRT and Direct3D interface above it. Releasing a COM interface
+    /// on a thread that has already left the apartment is not defined, and if
+    /// this were the only thread in the multi-threaded apartment it would be a
+    /// release against an apartment that no longer exists. Moving this field up
+    /// would introduce that, silently, on a path that only runs at shut down.
+    ///
+    /// Held rather than entered and forgotten so that a recorder which starts
+    /// and stops capture repeatedly does not raise the apartment count once per
+    /// session.
+    #[expect(
+        dead_code,
+        reason = "held for its Drop, which leaves the COM apartment this capture entered"
+    )]
+    apartment: Apartment,
 }
 
 impl Running {
@@ -499,7 +514,6 @@ impl Running {
             .map_err(|error| backend_error("starting the capture session", error))?;
 
         Ok(Self {
-            apartment,
             device,
             item,
             window,
@@ -516,6 +530,7 @@ impl Running {
             discarded: 0,
             lost: 0,
             lost_at_last_delivery: 0,
+            apartment,
         })
     }
 
@@ -765,10 +780,10 @@ impl Drop for Running {
             tracing::warn!(%error, "unsubscribing from the capture target closing failed");
         }
 
-        // `device` and `apartment` are released by their own `Drop`
-        // implementations, in field order, after this body returns: every WinRT
-        // interface above is gone by then, which is why the apartment is
-        // declared first.
+        // Everything still holding a reference — the device, the item, the pool,
+        // the session — is released by its own `Drop` after this body returns,
+        // in field order, and the apartment is the last field precisely so that
+        // it is the last thing to go.
     }
 }
 
