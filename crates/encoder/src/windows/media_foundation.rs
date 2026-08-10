@@ -307,11 +307,19 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_can_be_repeated_without_leaking_a_startup() {
-        // The guards are the whole of the resource handling here, and the way
-        // they fail is by not running: a second enumeration in the same
-        // process would then find Media Foundation still up from the first, or
-        // COM in the wrong state. Ten rounds is enough to catch either.
+    fn enumeration_can_be_repeated() {
+        // Enumeration takes and releases a COM apartment, a Media Foundation
+        // startup and one interface pointer per transform, ten times over. What
+        // this catches is a release that is wrong rather than merely absent: a
+        // second `CoTaskMemFree` of the activation array fails it with a heap
+        // corruption, which is how it was checked.
+        //
+        // What it does not catch is written down so that nobody trusts it
+        // further than it goes. `MFStartup` is reference counted, so a leaked
+        // `MFShutdown` leaves every later round working perfectly — verified by
+        // replacing the guard with `mem::forget` and watching this pass. A
+        // leaked interface pointer is invisible for the same reason. Those rest
+        // on the `SAFETY` comments and on review, not on this test.
         for _ in 0..10 {
             hardware_encoders().expect("Media Foundation can be asked repeatedly");
         }
