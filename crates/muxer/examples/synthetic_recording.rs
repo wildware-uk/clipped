@@ -110,10 +110,11 @@ struct Arguments {
 
     /// How many seconds apart the keyframes are.
     ///
-    /// Worth being able to change: a keyframe closes a Matroska cluster, so it
-    /// is one of the two things that decide how much an abrupt termination
-    /// costs. A recorder using a long keyframe interval is the case the muxer's
-    /// cluster time limit exists for.
+    /// Worth being able to change: a keyframe is one of the three things that
+    /// close a Matroska cluster — the others are a size limit and a time limit
+    /// — so with FFmpeg's defaults it is part of what decides how much an
+    /// abrupt termination costs. A recorder using a long keyframe interval is
+    /// the case the muxer's cluster time limit exists for.
     #[arg(long, default_value_t = 1.0)]
     keyframe_seconds: f64,
 }

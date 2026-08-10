@@ -14,9 +14,9 @@
 //!
 //! - Packets go to `av_interleaved_write_frame`, which orders them across
 //!   tracks and hands each one to the Matroska muxer as soon as it is safe to
-//!   write. The muxer accumulates a cluster and emits it when
-//!   [`CLUSTER_TIME_LIMIT_MS`] of media has gone into it, so at most that much
-//!   is in memory rather than on disk.
+//!   write. The muxer accumulates a cluster and emits it at the latest when
+//!   [`CLUSTER_TIME_LIMIT_MS`] of media has gone into it — sooner at a keyframe
+//!   or a size limit — so at most that much is in memory rather than on disk.
 //! - `AVFMT_FLAG_FLUSH_PACKETS` makes libavformat flush its own 32 KiB I/O
 //!   buffer to the operating system after every packet, so a cluster that has
 //!   been emitted is a cluster that has reached the file rather than one
@@ -25,11 +25,12 @@
 //!   file still describes itself.
 //!
 //! What is *not* written until [`MkvWriter::finish`] is the segment length, the
-//! duration and the cue index. A file missing those is one FFmpeg, VLC, mpv and
-//! MPC-HC all open anyway — the segment simply reads as unknown-length, exactly
-//! as a live stream does — and `crates/muxer/tests/abrupt_termination.rs` kills
-//! a writer mid-recording and proves it on real output rather than asserting it
-//! here.
+//! duration and the cue index. A file missing those still opens: the segment
+//! reads as unknown-length, which is the same construct a live stream is
+//! written with. That is verified with FFmpeg's own demuxer and no other —
+//! `crates/muxer/tests/abrupt_termination.rs` kills a writer mid-recording and
+//! decodes what is left with the pinned build's `ffprobe`. What other players
+//! do with such a file has not been tested here.
 //!
 //! # Ownership
 //!
@@ -58,33 +59,41 @@ use crate::track::{AudioCodec, AudioTrack, RecordingLayout, TrackId, VideoCodec,
 ///
 /// Named explicitly rather than left to be guessed from the file extension:
 /// what container a recording is written in is a decision (ADR 0001), not a
-/// consequence of what somebody typed after the dot.
-const MATROSKA_MUXER: &str = "matroska";
+/// consequence of what somebody typed after the dot. One spelling, used both to
+/// check the linked build has the muxer and to allocate the context, so the two
+/// cannot drift into asking about one container and writing another.
+const MATROSKA_MUXER: &core::ffi::CStr = c"matroska";
 
 /// How much media the Matroska muxer may accumulate in one cluster, in
 /// milliseconds.
 ///
 /// This is the size of the window an abrupt termination costs, and it is the
-/// most consequential number in this file. FFmpeg accumulates a cluster before
-/// it writes it, so whatever is in the open cluster when the process dies is
-/// lost. Left to itself the muxer closes a cluster when the video track reaches
-/// a keyframe, which ties how much a recording loses to a decision made in the
-/// encoder for unrelated reasons — and the long keyframe intervals a recorder
-/// wants for bitrate make that window large.
+/// most consequential number in this file. A cluster does not reach the disk
+/// until it is closed, so whatever is in the open one when the process dies is
+/// lost whole.
 ///
-/// Measured by killing the writer four seconds into a recording whose keyframes
-/// are five seconds apart, which is the experiment `docs/muxing.md` records the
-/// commands for:
+/// FFmpeg's Matroska muxer closes a cluster at the first of three things: a
+/// keyframe on the video track, `cluster_size_limit` bytes, or
+/// `cluster_time_limit` milliseconds of media. Both limits are `-1` in the
+/// option table and are replaced with 5 MB and 5000 ms while the header is
+/// written, so the default window is *not* the keyframe interval alone — it is
+/// bounded above at five seconds. Setting this to 1000 moves that ceiling to
+/// one second and takes the encoder's keyframe interval out of the answer
+/// entirely, which is what makes the loss a property of the recorder rather
+/// than of whatever the encoder was tuned for.
 ///
-/// | `cluster_time_limit` | What survived the kill |
-/// | --- | --- |
-/// | FFmpeg's default | 823 bytes; `ffprobe` reports `End of file` and finds no streams |
-/// | 1000 | 3.03 seconds of video and both audio tracks, decoding cleanly |
+/// Measured on the pinned build, counting Matroska cluster elements in a
+/// 30-second file at 30 fps with keyframes 10 seconds apart:
+///
+/// | `cluster_time_limit` | Clusters | Starting at (ms) |
+/// | --- | --- | --- |
+/// | FFmpeg's default | 6 | 0, 5033, 10000, 15033, 20000, 25033 |
+/// | 1000 | 30 | 0, 1033, 2067, 3100, … one a second |
 ///
 /// One second is the compromise. The cost is a cluster header — a few dozen
-/// bytes — every second rather than every keyframe, which against a recording
-/// running at tens of megabits does not register. The benefit is that what a
-/// kill costs is bounded by this constant instead of by an encoder setting.
+/// bytes — every second rather than every five, which against a recording
+/// running at tens of megabits does not register. `docs/muxing.md` records the
+/// commands, and what a killed recorder actually recovers with each setting.
 const CLUSTER_TIME_LIMIT_MS: i64 = 1000;
 
 /// A container context, and the file it is writing to.
@@ -107,7 +116,7 @@ impl FormatContext {
             ffi::avformat_alloc_output_context2(
                 &mut context,
                 ptr::null(),
-                c"matroska".as_ptr(),
+                MATROSKA_MUXER.as_ptr(),
                 ptr::null(),
             )
         };
@@ -349,8 +358,21 @@ impl MkvWriter {
     /// track the container cannot carry, and [`MuxError::Ffmpeg`] for anything
     /// FFmpeg or the filesystem refuses — a directory that does not exist, a
     /// disk with no room, a path with no permission.
+    ///
+    /// A failure leaves nothing behind: if the output was created before the
+    /// failure, it is removed again — and if it cannot be removed, that is
+    /// logged at `warn` — so that a caller retrying the same name is not told
+    /// it is about to overwrite a recording that is really an empty file from
+    /// its own last attempt.
     pub fn create(path: &Path, layout: &RecordingLayout) -> Result<Self, MuxError> {
-        if !linkage::muxer_available(MATROSKA_MUXER) {
+        // `to_str` cannot fail: the constant is an ASCII literal. Written as a
+        // fallback rather than an unwrap so that a recording never ends in a
+        // panic (AGENTS.md section 15); an unreadable muxer name is reported as
+        // the container being unavailable, which is what it would mean.
+        let Ok(matroska) = MATROSKA_MUXER.to_str() else {
+            return Err(MuxError::ContainerUnsupported);
+        };
+        if !linkage::muxer_available(matroska) {
             return Err(MuxError::ContainerUnsupported);
         }
 
@@ -393,6 +415,37 @@ impl MkvWriter {
         // as a URL rather than as a file.
         format.open_output(&format!("file:{path_text}"))?;
 
+        // The file exists from here on, so a failure has to take it away again.
+        // `create` refuses an output that already exists rather than truncating
+        // it, so an empty file left behind by a failed attempt would make that
+        // name permanently unusable — a session retrying after a transient
+        // failure would be told it was about to overwrite a recording.
+        Self::write_header_and_tracks(format, tracks, path, layout).inspect_err(|_| {
+            // The context, and with it the open file, was dropped by the call
+            // above; Windows would refuse to remove it otherwise.
+            if let Err(error) = std::fs::remove_file(path) {
+                warn!(
+                    path = %RedactedPath::new(path),
+                    %error,
+                    "a recording could not be started and the empty file left behind could \
+                     not be removed; that name cannot be recorded to until it is"
+                );
+            }
+        })
+    }
+
+    /// Everything between the output being opened and a usable writer.
+    ///
+    /// Separated from [`create`](Self::create) only so that every failure after
+    /// the file exists leaves through one place, which is where it is removed
+    /// again. `format` is taken by value so that a failure here drops it, and
+    /// so closes the file, before the caller tries to delete it.
+    fn write_header_and_tracks(
+        format: FormatContext,
+        tracks: Vec<(TrackId, c_int)>,
+        path: &Path,
+        layout: &RecordingLayout,
+    ) -> Result<Self, MuxError> {
         // SAFETY: `format` owns a live context and this is the only reference
         // to it. `flags` is a plain integer field, documented as settable by
         // the caller before `avformat_write_header`.
@@ -1023,8 +1076,8 @@ fn write_header(format: &FormatContext) -> Result<(), MuxError> {
     // SAFETY: `options` starts null, which `av_dict_set` treats as "allocate
     // one", and every string passed is NUL-terminated and outlives the call.
     // The dictionary is freed on every path below.
-    unsafe {
-        ffi::av_dict_set(
+    let set = unsafe {
+        let cluster = ffi::av_dict_set(
             &mut options,
             c"cluster_time_limit".as_ptr(),
             cluster_limit.as_ptr(),
@@ -1036,12 +1089,30 @@ fn write_header(format: &FormatContext) -> Result<(), MuxError> {
         // audio tracks to play. `infer_no_subs` marks what the caller marked,
         // and falls back to the first track of each kind when it marked
         // nothing.
-        ffi::av_dict_set(
+        let default_mode = ffi::av_dict_set(
             &mut options,
             c"default_mode".as_ptr(),
             c"infer_no_subs".as_ptr(),
             0,
         );
+        cluster.min(default_mode)
+    };
+
+    if set < 0 {
+        // Only an allocation failure can get here, but failing quietly would
+        // mean the option is simply absent from the dictionary: the muxer would
+        // then recognise everything it was handed, `av_dict_count` would be
+        // zero, and the warning below could not fire. The recording would lose
+        // five seconds to a kill instead of one with nothing to say so
+        // (AGENTS.md section 15).
+        //
+        // SAFETY: `options` is either null or a dictionary owned here; freeing
+        // nulls the pointer.
+        unsafe { ffi::av_dict_free(&mut options) };
+        return Err(MuxError::Ffmpeg {
+            operation: "setting the container options that bound what a crash costs",
+            source: AvError::new(set),
+        });
     }
 
     // SAFETY: the context is live with its output open and its streams

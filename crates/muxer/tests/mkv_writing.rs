@@ -340,6 +340,38 @@ fn a_recording_is_never_written_over_an_existing_file() {
 }
 
 #[test]
+fn a_recording_that_fails_to_start_leaves_no_file_behind() {
+    // The file is created before the container header is written, so a failure
+    // in between can leave an empty one. That matters here more than it usually
+    // would: `create` refuses a path that exists rather than truncating it, so
+    // a leftover would make that name permanently unrecordable, and a session
+    // retrying after a transient failure would be told it was about to
+    // overwrite a recording.
+    //
+    // The failure used is a codec header the muxer accepts as present and
+    // FFmpeg then rejects while writing the header: four bytes that are neither
+    // Annex B parameter sets nor an `avcC` record.
+    let directory = TemporaryDirectory::new("failed-start");
+    let path = directory.file("recording.mkv");
+
+    let layout = RecordingLayout::new(
+        VideoTrack::new(VideoCodec::H264, WIDTH, HEIGHT).with_codec_private([2, 3, 4, 5]),
+    );
+    let error = MkvWriter::create(&path, &layout)
+        .expect_err("FFmpeg cannot write a header for a track whose codec header is nonsense");
+
+    assert!(
+        matches!(error, MuxError::Ffmpeg { .. }),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !path.exists(),
+        "a failed start left {} behind, and that name can now never be recorded to",
+        path.display()
+    );
+}
+
+#[test]
 fn a_packet_for_a_track_the_recording_does_not_have_is_refused() {
     let directory = TemporaryDirectory::new("unknown-track");
     let path = directory.file("recording.mkv");

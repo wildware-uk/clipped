@@ -139,37 +139,73 @@ recorder process, lets it write three seconds in real time, ends it with
 survivor apart with `ffprobe`.
 
 **What survives.** The header, with every track's codec, name and language, and
-every Matroska cluster that was closed before the kill. Measured on the
-development machine: killed at 3.0 seconds with keyframes a second apart, the
-file holds 3.0 seconds of video and both audio tracks, and every surviving frame
-decodes.
+every Matroska cluster that was closed before the kill. A cluster does not reach
+the disk until it closes, so the survivor ends on a cluster boundary rather than
+in the middle of one. Measured on the development machine: the recorder reported
+writing 3.020 seconds and was killed, with keyframes five seconds apart, and the
+file left behind holds two closed clusters — 61 video packets reaching 2.000
+seconds and 201 audio packets reaching 2.020 — with every one of the 61 frames
+decoding.
 
 **What is lost.** Whatever was in the cluster still being accumulated, and the
 trailer. A file without a trailer has no segment length, no duration and no cue
-index; FFmpeg, VLC, mpv and MPC-HC all open it anyway — the segment reads as
-unknown-length, exactly as a live stream does — and `ffprobe` reports the
+index; it opens anyway, because the segment reads as unknown-length, which is
+the same construct a live stream is written with. `ffprobe` reports the
 truncation on standard error while reading everything in front of it. It is not
 seekable by index, and a library reading its duration has to scan it.
+
+That claim is tested against **FFmpeg's demuxer and no other**: the pinned
+build's `ffprobe` is the only tool any test here runs. VLC, mpv and MPC-HC all
+demux Matroska through their own readers and none of them has been tried, so
+this document does not say what they do with a trailer-less file. Anything that
+reads media through libavformat — which is most things, including `ffmpeg`
+itself and the editor Clipped will ship — reads it.
 
 **Two settings do that work**, and both are chosen for this rather than
 inherited:
 
-- `cluster_time_limit=1000` bounds how much media a cluster may accumulate. Left
-  to FFmpeg's default, a cluster is closed when the video track reaches a
-  keyframe — which ties how much a recording loses to a keyframe interval chosen
-  in the encoder for entirely unrelated reasons.
+- `cluster_time_limit=1000` bounds how much media a cluster may accumulate.
 - `AVFMT_FLAG_FLUSH_PACKETS` makes libavformat flush its own I/O buffer to the
   operating system after every packet, so a cluster that has been emitted is one
   that has reached the file rather than one sitting in a buffer the killed
   process takes with it.
 
-The measurement behind the first, with keyframes deliberately five seconds apart
-and the process killed four seconds in:
+### Why the cluster time limit, and what FFmpeg does without it
+
+FFmpeg's Matroska muxer closes a cluster at the first of three things: a
+keyframe on the video track, `cluster_size_limit` bytes, or `cluster_time_limit`
+milliseconds of media. Both limits read `-1` in the option table and are
+replaced with 5 MB and 5000 ms as the header is written. So the default window
+is **not** the keyframe interval alone, and a recording left to the defaults
+does not lose an unbounded amount — it loses at most five seconds.
+
+Measured on the pinned build by counting Cluster elements in a 30-second file at
+30 fps with keyframes deliberately 10 seconds apart:
+
+| `cluster_time_limit` | Clusters | Starting at (ms) |
+| --- | --- | --- |
+| FFmpeg's default | 6 | 0, 5033, 10000, 15033, 20000, 25033 |
+| `1000` | 30 | 0, 1033, 2067, 3100, … one a second |
+
+The default file closes a cluster every five seconds, and at the two keyframes
+(10 s and 20 s) as well. Raise the bitrate until five seconds no longer fits in
+5 MB and the size limit takes over instead: the same 30 seconds at 40 Mbit/s and
+720p is 9 clusters roughly four seconds apart, about 5 MB each.
+
+So the trade `cluster_time_limit=1000` actually buys is **five seconds of loss
+down to one**, and a loss that no longer moves when somebody changes the
+encoder's keyframe interval. The cost is a cluster header — a few dozen bytes —
+every second rather than every five, which against a recording running at tens
+of megabits does not register.
+
+Below five seconds the keyframe interval is what decides the default, which is
+why the difference is stark for a recorder killed early. With keyframes five
+seconds apart and the process killed 3.02 seconds in, the same run gives:
 
 | `cluster_time_limit` | What survived |
 | --- | --- |
-| FFmpeg's default | 823 bytes. `ffprobe` reports `End of file` and finds no streams at all. |
-| `1000` | 3.03 seconds of video and both audio tracks, every frame decoding. |
+| FFmpeg's default | 823 bytes. `ffprobe` reports `End of file` and finds no streams at all: no cluster of any kind had closed. |
+| `1000` | 61 video packets to 2.000 seconds and 201 audio packets to 2.020, every frame decoding. |
 
 Reproduce it with:
 
@@ -181,9 +217,40 @@ third-party\ffmpeg\current\bin\ffprobe.exe -v error -count_packets -count_frames
     -show_entries stream=index,codec_type,nb_read_packets,nb_read_frames -of csv kill.mkv
 ```
 
+and the cluster counts with the pinned `ffmpeg` directly, which needs none of
+this workspace:
+
+```powershell
+$ffmpeg = "third-party\ffmpeg\current\bin\ffmpeg.exe"
+& $ffmpeg -f lavfi -i testsrc2=size=320x240:rate=30 -t 30 -c:v libopenh264 -g 300 -y default.mkv
+& $ffmpeg -f lavfi -i testsrc2=size=320x240:rate=30 -t 30 -c:v libopenh264 -g 300 `
+    -cluster_time_limit 1000 -y limited.mkv
+
+# Matroska's Cluster element id is 1F 43 B6 75, and nothing in the FFmpeg tools
+# prints element structure, so count the ids:
+foreach ($file in "default.mkv", "limited.mkv") {
+    $bytes = [IO.File]::ReadAllBytes($file)
+    $count = 0
+    for ($i = 0; $i -lt $bytes.Length - 3; $i++) {
+        if ($bytes[$i] -eq 0x1F -and $bytes[$i + 1] -eq 0x43 -and
+            $bytes[$i + 2] -eq 0xB6 -and $bytes[$i + 3] -eq 0x75) { $count++ }
+    }
+    Write-Output "$file : $count clusters"
+}
+```
+
+That scan counts the identifier wherever it appears rather than parsing the
+segment, so it could in principle over-count by matching four bytes inside a
+block. It does not on these files: it gives 6, 30 and 9, the same numbers a
+proper walk of the segment's elements gives, which is also where the cluster
+start timestamps in the table came from.
+
 `crates/muxer/tests/abrupt_termination.rs` asserts the loss stays under 1.1
-seconds. That constant is the promise; loosening it is a change to what Clipped
-guarantees, not a way to quieten a test.
+seconds: a second of cluster, plus the packet past the limit that closes it,
+plus the one the recorder may have written but not yet printed. Sampling eight
+kill points spread across a cluster, the worst loss measured on the development
+machine was 1.02 seconds. That constant is the promise; loosening it is a change
+to what Clipped guarantees, not a way to quieten a test.
 
 **What is not covered.** Nothing here defends against the operating system
 losing writes it acknowledged — a power cut can still take the last cluster,

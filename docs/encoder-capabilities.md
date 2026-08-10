@@ -101,8 +101,9 @@ Two honest caveats, which the report repeats:
   guaranteed to be accepted.
 
 "HDR" here means 10-bit encoding, which is the necessary condition for it. The
-colour signalling that makes a 10-bit stream an HDR one belongs to the muxer
-(issue #21).
+colour signalling that makes a 10-bit stream an HDR one belongs to the muxer,
+which does not write it yet
+([issue #146](https://github.com/wildware-uk/clipped/issues/146)).
 
 ### The rule that keeps the table honest
 

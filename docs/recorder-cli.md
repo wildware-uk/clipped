@@ -27,8 +27,8 @@ What works today is the argument surface, `list-windows`, `capabilities`, and
 the shutdown path. The pipeline between them is milestone M1 — capture backend
 [#11](https://github.com/wildware-uk/clipped/issues/11), Windows Graphics
 Capture [#12](https://github.com/wildware-uk/clipped/issues/12), encoders
-[#15](https://github.com/wildware-uk/clipped/issues/15)–[#18](https://github.com/wildware-uk/clipped/issues/18),
-muxer [#21](https://github.com/wildware-uk/clipped/issues/21).
+[#15](https://github.com/wildware-uk/clipped/issues/15)–[#18](https://github.com/wildware-uk/clipped/issues/18).
+The muxer is written ([muxing.md](muxing.md)); nothing hands it packets yet.
 
 `record` does not yet resolve its target through `list-windows`' machinery. The
 enumeration and the selection rules are in `clipped-windows` and are what

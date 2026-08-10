@@ -11,6 +11,7 @@ use std::error::Error;
 use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
 
+use clipped_logging::RedactedPath;
 use rusty_ffmpeg::ffi;
 
 use crate::track::TrackId;
@@ -112,15 +113,23 @@ impl fmt::Display for MuxError {
                 "the loaded FFmpeg build cannot write Matroska, which is the recording \
                  container",
             ),
+            // Redacted rather than printed whole: an error message reaches the
+            // log files at least as reliably as a `Debug` string does, and a
+            // recording path contains the account name (docs/logging.md). The
+            // file name is what a person needs to recognise which recording is
+            // meant, and the digest is what correlates two lines about the same
+            // one; the directories above it identify the machine's owner and
+            // say nothing about the failure. `path` stays on the variant for a
+            // caller that has a legitimate need for the whole thing.
             Self::OutputExists { path } => write!(
                 formatter,
                 "{} already exists, and a recording is never written over one",
-                path.display()
+                RedactedPath::new(path)
             ),
             Self::PathNotRepresentable { path } => write!(
                 formatter,
                 "the output path {} is not valid Unicode, so it cannot be passed to FFmpeg",
-                path.display()
+                RedactedPath::new(path)
             ),
             Self::InvalidTrack { track, reason } => {
                 write!(formatter, "the {track} cannot be written: {reason}")
@@ -276,10 +285,39 @@ mod tests {
     }
 
     #[test]
-    fn refusing_to_overwrite_says_which_file() {
+    fn refusing_to_overwrite_says_which_file_without_saying_whose_it_is() {
         let error = MuxError::OutputExists {
-            path: PathBuf::from("C:/recordings/match.mkv"),
+            path: PathBuf::from(r"C:\Users\some-person\Videos\Clipped\match.mkv"),
         };
-        assert!(error.to_string().contains("match.mkv"), "{error}");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("match.mkv"),
+            "the file name is what identifies the recording: {message}"
+        );
+        // An error message reaches the log files, so the directories above the
+        // file — which carry the account name — must not (docs/logging.md).
+        assert!(
+            !message.contains("some-person"),
+            "the message carries the account name into the logs: {message}"
+        );
+        assert!(
+            !message.contains("Videos"),
+            "the message carries the directories into the logs: {message}"
+        );
+    }
+
+    #[test]
+    fn a_path_that_is_not_unicode_is_reported_without_the_directories_above_it() {
+        let error = MuxError::PathNotRepresentable {
+            path: PathBuf::from(r"C:\Users\some-person\Videos\Clipped\match.mkv"),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("match.mkv"), "{message}");
+        assert!(
+            !message.contains("some-person"),
+            "the message carries the account name into the logs: {message}"
+        );
     }
 }
