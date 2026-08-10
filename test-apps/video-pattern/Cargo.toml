@@ -1,0 +1,76 @@
+[package]
+name = "clipped-video-pattern"
+description = "A controlled test application that renders a deterministic, machine-verifiable video pattern"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Never published: this is a test subject, not a part of the product. It is a
+# workspace member so that `cargo build --workspace` and `cargo clippy
+# --workspace --all-targets` hold it to the same standard as everything else -
+# a test application that stops compiling is a capture test that stops running
+# (AGENTS.md section 26).
+publish = false
+
+[[bin]]
+name = "video-pattern"
+path = "src/main.rs"
+
+# The end-to-end capture test lives in tests/capture/ with the rest of the
+# system tests, but belongs to this package: Cargo only sets
+# CARGO_BIN_EXE_video-pattern for a test in the package that owns the binary,
+# and a test that has to guess at a path under target/ is a test that breaks
+# the first time somebody sets --target-dir.
+[[test]]
+name = "wgc_video_pattern"
+path = "../../tests/capture/wgc_video_pattern.rs"
+
+[dependencies]
+# The command-line parser every executable in this workspace uses, so that
+# `--help` looks the same wherever a contributor meets it (see the root
+# manifest). Dual MIT/Apache-2.0.
+clap.workspace = true
+
+# Displays, and the per-monitor DPI mode. Reused rather than reimplemented: this
+# application has to place its window on a non-primary display and has to see
+# physical pixels to draw a pattern that survives capture, and `clipped-windows`
+# already answers both (AGENTS.md section 55).
+[target.'cfg(windows)'.dependencies]
+clipped-windows.workspace = true
+
+# The window, the Direct3D 11 device and the swap chain the pattern is presented
+# through. The feature list is the honest inventory of what src/render.rs and
+# src/app.rs name:
+#
+# - Win32_Foundation               HWND, RECT, BOOL
+# - Win32_Graphics_Direct3D        the driver type and feature level
+# - Win32_Graphics_Direct3D11      the device, the staging texture, Map/Unmap
+# - Win32_Graphics_Dxgi(_Common)   the swap chain, the format, fullscreen
+# - Win32_System_Console           the Ctrl-C handler that gives a display back
+# - Win32_System_LibraryLoader     the module handle a window class needs
+# - Win32_UI_WindowsAndMessaging   the window, its class and its messages
+#
+# Dual MIT/Apache-2.0.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# tests/capture/wgc_video_pattern.rs captures this application through the real
+# Windows Graphics Capture backend and reads the pattern back out of the
+# captured textures. Both are test-only: the application itself never captures
+# anything, and nothing in the product depends on this package
+# (tests/integration/tests/workspace_layering.rs).
+[target.'cfg(windows)'.dev-dependencies]
+clipped-capture.workspace = true
+
+[lints]
+workspace = true
