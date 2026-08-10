@@ -58,10 +58,16 @@ serde_json = "1"
 # binary means two incompatible `HWND` types and two copies of the COM plumbing,
 # which produces type errors a contributor has no way to interpret. Each crate
 # still chooses its own `features`, because the crate is enormous and only the
-# namespaces a crate names are compiled. This entry deliberately enables none
-# by default, so a crate pays only for the headers it actually calls.
+# namespaces a crate names are compiled.
+#
+# This was `default-features = false`, so that a crate pays only for the
+# headers it actually calls, but `clipped-windows` needs the default `std`
+# feature for `windows_result::Error` to implement `std::error::Error` (its
+# `RunError`/`ListWindowsError` sources depend on that), and disabling
+# defaults there broke the build. Plain `"0.62"` it is, until that is worth
+# trading for opting individual crates back into `std`.
 # Dual MIT/Apache-2.0.
-windows = { version = "0.62", default-features = false }
+windows = "0.62"
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }
