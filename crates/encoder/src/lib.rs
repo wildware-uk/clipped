@@ -4,14 +4,24 @@
 //! and CPU time is the scarcest resource on the machine (AGENTS.md section 18).
 //! A software encoder exists only as a fallback for hardware that cannot encode.
 //!
-//! What exists today is **detection**: which adapters are in the machine, which
-//! encoders are on them, which codecs those encoders produce, and which one
-//! "Automatic" should choose (SPEC.md section 9). No encoder is implemented —
-//! NVENC is [issue #15](https://github.com/wildware-uk/clipped/issues/15), AMF
-//! [#16](https://github.com/wildware-uk/clipped/issues/16), Quick Sync
-//! [#17](https://github.com/wildware-uk/clipped/issues/17) and the software
-//! fallback [#18](https://github.com/wildware-uk/clipped/issues/18) — so this
-//! crate can tell you what your machine could do and cannot yet do it.
+//! This crate does two things.
+//!
+//! **Detection** answers what a machine could encode: which adapters are in it,
+//! which encoders are on them, which codecs those encoders produce, and which
+//! one "Automatic" should choose (SPEC.md section 9).
+//!
+//! **Encoding** turns captured GPU frames into coded packets. The interface is
+//! [`VideoEncoder`], and one backend implements it: NVENC
+//! ([#15](https://github.com/wildware-uk/clipped/issues/15)), through
+//! [`NvencEncoder`] on Windows. AMF
+//! ([#16](https://github.com/wildware-uk/clipped/issues/16)), Quick Sync
+//! ([#17](https://github.com/wildware-uk/clipped/issues/17)) and the software
+//! fallback ([#18](https://github.com/wildware-uk/clipped/issues/18)) are not
+//! implemented, so a machine with no NVIDIA GPU can still be told what it could
+//! do and cannot yet be recorded from.
+//!
+//! `docs/encoder-pipeline.md` describes the encoding half; the detection half
+//! is `docs/encoder-capabilities.md`.
 //!
 //! # Responsibilities
 //!
@@ -20,11 +30,14 @@
 //! - Saying which answers were measured and which were inferred: [`Claim`].
 //! - Ranking encoders for "Automatic": [`recommend`].
 //! - Remembering the answer between runs: [`CapabilityCache`].
+//! - Describing a stream to be produced: [`EncoderConfig`].
+//! - Producing it: [`VideoEncoder`], [`NvencEncoder`].
 //!
 //! # Not responsible for
 //!
 //! Frame acquisition (see `clipped-capture`) or container writing (see
-//! `clipped-muxer`). Encoding itself, yet.
+//! `clipped-muxer`). This crate takes a texture somebody else captured and
+//! produces packets somebody else writes.
 //!
 //! # Position in the architecture
 //!
@@ -72,10 +85,15 @@
 //! ```
 
 mod adapter;
+mod backend;
 mod cache;
 mod claim;
 mod codec;
+mod config;
 mod detection;
+mod error;
+mod frame;
+mod packet;
 mod probe;
 mod recommendation;
 mod reference;
@@ -84,16 +102,24 @@ mod reference;
 mod windows;
 
 pub use adapter::{Adapter, AdapterId, AdapterKind, DriverVersion};
+pub use backend::VideoEncoder;
 pub use cache::{
     CacheError, CacheState, CapabilityCache, HardwareSignature, StaleReason, CACHE_FILE_NAME,
     CACHE_FORMAT, DETECTION_REVISION,
 };
 pub use claim::{Claim, Evidence};
 pub use codec::{Codec, EncoderKind, Resolution, Vendor};
+pub use config::{
+    BitRate, ColourMatrix, ColourPrimaries, ColourRange, ColourSpace, EncodePreset, EncoderConfig,
+    FrameRate, KeyframeInterval, QualityTarget, RateControl, SurfaceFormat, TransferFunction,
+};
 pub use detection::{
     detect, detect_cached, Availability, CapabilityReport, CodecSupport, Detection,
     DetectionSource, EncoderReport, Signal, Unavailable,
 };
+pub use error::{EncodeContext, EncodeError, EncodeErrorKind};
+pub use frame::{DeviceKind, GraphicsDevice, SourceFrame, SourceTexture, SurfaceKind};
+pub use packet::{EncodedPacket, PictureKind};
 pub use probe::{
     probe, EncoderObservations, HardwareEncoder, ProbeError, RuntimeObservation, RuntimeOutcome,
     SystemFacts, SystemProbe,
@@ -101,4 +127,4 @@ pub use probe::{
 pub use recommendation::{measured_codecs, recommend, ChoiceReason, Recommendation};
 
 #[cfg(windows)]
-pub use windows::WindowsProbe;
+pub use windows::{NvencEncoder, WindowsProbe};

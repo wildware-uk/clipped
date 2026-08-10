@@ -24,7 +24,10 @@
 
 mod dxgi;
 mod media_foundation;
+mod nvenc;
 mod runtime;
+
+pub use nvenc::NvencEncoder;
 
 use crate::adapter::Adapter;
 use crate::probe::{EncoderObservations, ProbeError, SystemProbe};

@@ -105,11 +105,13 @@ impl EncoderKind {
 
     /// The issue that implements this encoder.
     ///
-    /// None of them are implemented: this ticket detects encoders and reports
-    /// them, and the backends follow. The report prints this so that "your GPU
-    /// can do AV1, and Clipped cannot yet" is one sentence with a link in it,
-    /// rather than a silence the reader has to interpret (AGENTS.md section
-    /// 27).
+    /// NVENC is implemented, in
+    /// [`NvencEncoder`](crate::NvencEncoder) (`docs/encoder-pipeline.md`); the
+    /// other three are not, and nothing yet connects any of them to a capture
+    /// or a container, so no build records anything. The report prints this so
+    /// that "your GPU can do AV1, and Clipped cannot yet" is one sentence with
+    /// a link in it, rather than a silence the reader has to interpret
+    /// (AGENTS.md section 27).
     #[must_use]
     pub const fn backend_issue(self) -> u32 {
         match self {
