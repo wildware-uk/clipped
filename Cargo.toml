@@ -20,6 +20,13 @@ authors = ["The Clipped contributors"]
 # own version and splitting the callsite registry across two copies of the crate.
 [workspace.dependencies]
 tracing = "0.1"
+# The command-line parser, pinned here for the same reason as `tracing`: the
+# recorder is not the only executable this workspace will grow — the desktop
+# application's sidecar tooling follows in M5 — and every one of them should
+# present the same argument syntax, the same `--help` layout and the same exit
+# code for a usage error. That only holds if they share one version of clap.
+# Dual MIT/Apache-2.0.
+clap = { version = "4.5", features = ["derive"] }
 
 clipped-audio = { path = "crates/audio", version = "0.1.0" }
 clipped-capture = { path = "crates/capture", version = "0.1.0" }
