@@ -14,15 +14,69 @@ product this is being built towards, and the
 [issue tracker](https://github.com/wildware-uk/clipped/issues) for what is
 actually being worked on.
 
+`cargo build --workspace` produces a `clipped-recorder` binary, but it has no
+capture commands yet; the recording engine is milestone M1.
+
+Installation instructions and screenshots are pending a shippable build.
+
+## Supported platforms
+
+Windows 11 and modern Windows 10, on x86_64. That is the only platform Clipped
+builds for today, because capture, process-specific audio and hardware encoding
+are all reached through Windows APIs.
+
+Linux is not supported and is not currently being worked on. Platform-specific
+code is kept in `clipped-windows` or in a `windows/` submodule of the crate that
+owns the behaviour (AGENTS.md section 5, and the module documentation in
+`crates/windows/src/lib.rs`), so that a second platform remains possible later
+without unpicking the whole engine. SPEC.md section 3 sets Windows as the
+initial target and asks that the architecture leave room for Linux.
+
 ## Building from source
 
-Requires the Rust toolchain pinned by `rust-toolchain.toml` and the Windows
-build prerequisites.
+You need:
+
+- Rust, stable channel, 1.85 or newer, installed through
+  [rustup](https://rustup.rs) with the `x86_64-pc-windows-msvc` target.
+- The MSVC build tools and Windows SDK that the `msvc` target links against —
+  in practice, Visual Studio Build Tools with the "Desktop development with
+  C++" workload.
+
+[docs/prerequisites.md](docs/prerequisites.md) has the full list, including the
+versions the project is tested against.
 
 ```text
+git clone https://github.com/wildware-uk/clipped.git
+cd clipped
 cargo build --workspace
 cargo test --workspace
 ```
+
+No environment variables, local configuration or generated files are required
+to build: a clean clone plus the toolchain above is enough.
+
+## Development setup
+
+Beyond the build, the checks a change is expected to pass locally are:
+
+```text
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace
+cargo test --workspace
+```
+
+Formatting is not a matter of taste here. `rustfmt.toml` pins the formatter
+settings, `.editorconfig` covers the non-Rust files, and `.gitattributes`
+normalises line endings to LF so that `cargo fmt --check` behaves the same on
+Windows as it does in CI.
+
+The workspace lints `missing_docs`, `missing_debug_implementations`,
+`unreachable_pub` and `clippy::undocumented_unsafe_blocks` are enabled in
+`Cargo.toml`, so anything public needs a doc comment.
+
+The desktop application is not buildable yet: `apps/desktop` and `packages/`
+are placeholders until milestone M5, and there is no npm workspace to install.
 
 ## Repository layout
 
@@ -36,7 +90,18 @@ tests/             Capture, audio, integration and performance suites
 docs/              Architecture, subsystem documentation and ADRs
 ```
 
-## Dependency direction
+## Architecture
+
+The recorder is a native Rust process that owns capture, encoding, muxing and
+session state. The desktop application is a client of that process over IPC, not
+a host for it, so closing or crashing the UI cannot interrupt a recording.
+[docs/architecture.md](docs/architecture.md) will describe the subsystems and
+how they fit together, and significant decisions are to be recorded as ADRs
+under `docs/adr/` (AGENTS.md section 48). Neither exists yet: both arrive with
+issue #6, and until then the crate-level documentation in each `lib.rs` is the
+authority.
+
+### Dependency direction
 
 The crates are layered. **A crate may depend only on crates in a lower layer.**
 This is not a convention to be remembered — it is asserted against the real
@@ -46,11 +111,22 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
-| 4 | `clipped-recorder` (binary) | layers 0–3 |
+| 4 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–3 |
+
+`clipped-logging` owns where diagnostics go and how much is recorded: it
+installs the process-wide `tracing` subscriber, resolves the log level from the
+environment and a configuration file without a rebuild, writes bounded rotating
+files under a documented per-user directory, and defines the standard context
+fields as types rather than loose strings. It deliberately does not own logging
+itself. The rule is that a crate wanting to emit events adds
+`tracing.workspace = true` and calls the `tracing` macros directly, so no
+diagnostic is routed through a Clipped-specific wrapper. `clipped-logging` is
+so far the only crate that has taken that dependency, because the others are
+still documentation-only stubs.
 
 Two rules matter most:
 
@@ -65,12 +141,46 @@ Two rules matter most:
 Each crate's `lib.rs` documents what it is responsible for, what it explicitly
 is not responsible for, and where it sits in this stack.
 
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| [SPEC.md](SPEC.md) | The product being built, and the milestone order |
+| [AGENTS.md](AGENTS.md) | Engineering standards every contribution is held to |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Workflow, branches, commits, definition of done |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Expected conduct and how to report a problem |
+| [docs/prerequisites.md](docs/prerequisites.md) | Toolchains, SDKs and driver expectations |
+| [docs/architecture.md](docs/architecture.md) | Subsystems, boundaries and ADRs |
+| [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
+| [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
+
+The four `docs/` entries are written under issues #3, #6, #8 and #5 and are
+listed here so those tickets do not each have to edit this table. The links
+resolve once milestone M0 is complete.
+
 ## Contributing
 
-Work is tracked as GitHub issues grouped into milestones. Engineering
-standards for this repository are in [AGENTS.md](AGENTS.md) and apply to human
-and automated contributors alike.
+Work is tracked as GitHub issues grouped into milestones `M0` to `M14`. An issue
+is the source of truth for its own scope and acceptance criteria; `SPEC.md` is a
+reference document, not a task list.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) explains the workflow, branch and commit
+naming, and what counts as done. Engineering standards are in
+[AGENTS.md](AGENTS.md) and apply to human and automated contributors alike.
+
+Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Licence
 
-Mozilla Public License 2.0. See [LICENSE](LICENSE).
+Mozilla Public License 2.0. The full text is in [LICENSE](LICENSE), and
+`Cargo.toml` declares `license = "MPL-2.0"` for every crate in the workspace.
+
+MPL-2.0 is file-level copyleft: changes to Clipped's own source files stay open,
+while the licence still permits linking against LGPL FFmpeg and against the
+permissive Rust ecosystem that a full GPL would have ruled out.
+
+The practical consequence for contributors is that dependencies must be
+MPL-2.0-compatible. MIT, Apache-2.0, BSD and ISC licensed crates are fine, as
+are MPL-2.0 ones; GPL-only dependencies are not, and a dependency with unclear
+licensing should not be added at all. See
+[CONTRIBUTING.md](CONTRIBUTING.md#licensing-and-dependencies).

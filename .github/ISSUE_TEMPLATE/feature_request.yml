@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest a capability Clipped does not have
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [SPEC.md](https://github.com/wildware-uk/clipped/blob/main/SPEC.md)
+        and the existing issues first — a lot of the product is already
+        specified and scheduled into a milestone, and the fastest route to a
+        feature is usually the ticket that already covers it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to do, and what makes it awkward or impossible
+        today? Describe the situation rather than the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like Clipped to do
+      description: The behaviour you are asking for, as concretely as you can put it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Other ways of solving it, including how other recorders handle it and
+        why that is or is not the right answer here.
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Impact on recording
+      description: >
+        Would this affect the capture path, run alongside a game, or add a
+        dependency or network access? Gameplay performance and local-first
+        operation take priority, so it helps to know early.
+    validations:
+      required: false
