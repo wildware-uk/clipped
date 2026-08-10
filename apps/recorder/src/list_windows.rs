@@ -18,8 +18,8 @@ use std::error::Error;
 use std::fmt;
 
 use clipped_windows::{
-    enumerate_monitors, enumerate_windows, monitor_info, resolve, scale_percentage, Exclusion,
-    MonitorHandle, ResolveError, TargetSelector, WindowInfo, WindowsError,
+    enumerate_monitors, enumerate_windows, monitor_info, resolve, scale_percentage, DpiAwareness,
+    Exclusion, MonitorHandle, ResolveError, TargetSelector, WindowInfo, WindowsError,
 };
 
 use crate::cli::ListWindowsArgs;
@@ -82,12 +82,24 @@ pub fn run(args: &ListWindowsArgs) -> Result<(), ListWindowsError> {
     // Before anything is measured, and only once per process: without it every
     // size below is the compatibility fiction Windows tells a DPI-unaware
     // process, and a 4K window on a 150% display is reported as 2560x1440.
-    if let Err(error) = clipped_windows::enable_per_monitor_dpi_awareness() {
-        tracing::debug!(
+    match clipped_windows::enable_per_monitor_dpi_awareness() {
+        Ok(DpiAwareness::Set) => {}
+        // Already aware is the same outcome by a different route, and there is
+        // nothing for a user to do about it.
+        Ok(DpiAwareness::AlreadySet) => {
+            tracing::debug!("this process was already per-monitor DPI aware");
+        }
+        // Not a debug line. If this fails, every CLIENT and DPI column printed
+        // below is wrong on any display scaled above 100% — silently, and in
+        // the direction that looks plausible — and a warning the user can see
+        // is the only thing standing between them and a recording made at the
+        // wrong resolution.
+        Err(error) => tracing::warn!(
             %error,
-            "per-monitor DPI awareness was not set, which is expected if it was already set; \
-             window sizes are reported as Windows gives them"
-        );
+            "this process could not be made per-monitor DPI aware; on a display scaled above \
+             100% the sizes below are the smaller ones Windows reports to a DPI-unaware \
+             process, not the real pixel sizes"
+        ),
     }
 
     let windows = enumerate_windows()?;

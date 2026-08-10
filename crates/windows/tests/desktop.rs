@@ -400,6 +400,34 @@ fn the_display_a_window_is_on_can_be_named_and_measured() {
     assert_eq!(geometry.monitor(), monitor.handle());
 }
 
+/// `MONITOR_DEFAULTTONEAREST` is a promise about windows that exist.
+///
+/// Microsoft documents no return value for `MonitorFromWindow` on a handle that
+/// is not a window, and it is tempting to assume the "default to nearest" flag
+/// makes the call infallible. It does not: the call returns a null `HMONITOR`,
+/// and `monitor_handle_for_window` reports that as absent rather than handing
+/// on a handle that `GetMonitorInfoW` will reject. This test exists to keep
+/// that statement true — and to catch it changing in a future Windows — because
+/// the alternative is a null [`clipped_windows::MonitorHandle`] travelling into
+/// a capture backend with nothing marking it as missing.
+#[test]
+fn a_handle_that_was_never_a_window_has_no_display() {
+    // Not a window on any desktop, and never destroyed by anything, so this
+    // does not race with the rest of the suite.
+    let handle = WindowHandle::from_raw(0x0bad_f00d);
+    assert!(
+        !is_window(handle),
+        "the fixture handle must not be a window"
+    );
+
+    let error = monitor_for_window(handle).expect_err("a non-window is on no display");
+    assert!(
+        matches!(error, WindowsError::WindowGone { handle: gone } if gone == handle),
+        "a null HMONITOR should be reported against the window, not as a monitor \
+         handle of zero: {error}"
+    );
+}
+
 /// The file name of the executable running this test.
 fn current_executable_name() -> Option<String> {
     std::env::current_exe()

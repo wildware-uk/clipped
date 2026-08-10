@@ -84,9 +84,16 @@ pub const SELECTOR_ARGUMENTS: [&str; 4] = ["window", "process", "pid", "handle"]
 /// Arguments to `clipped-recorder list-windows`.
 ///
 /// With no selector it lists; with one it resolves, and reports the candidates
-/// if more than one window answers to it. Both are the same code path the
-/// recorder uses to find a capture target, which is the point: this is how that
-/// path is inspected without starting a recording.
+/// if more than one window answers to it.
+///
+/// `record` does **not** go through this today: it validates its
+/// `--window`/`--process`/`--pid` and stops, because there is nothing to hand a
+/// resolved window handle to until the capture backend exists (issues #11 and
+/// #12). `list-windows` is therefore the only caller of
+/// [`clipped_windows::resolve`], and changing the selection rules changes what
+/// this subcommand reports and nothing else. Wiring `record` through the same
+/// call is the remainder of
+/// [issue #10](https://github.com/wildware-uk/clipped/issues/10).
 #[derive(Debug, Default, Args)]
 #[command(group(ArgGroup::new("selector").args(SELECTOR_ARGUMENTS)))]
 pub struct ListWindowsArgs {
@@ -95,11 +102,11 @@ pub struct ListWindowsArgs {
     pub all: bool,
 
     /// Resolve the window whose title contains this text.
-    #[arg(long, value_name = "TITLE")]
+    #[arg(long, value_name = "TITLE", value_parser = parse_selector_text)]
     pub window: Option<String>,
 
     /// Resolve the window belonging to this executable, such as `cs2.exe`.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", value_parser = parse_selector_text)]
     pub process: Option<String>,
 
     /// Resolve the window belonging to this process identifier.
@@ -132,6 +139,31 @@ impl ListWindowsArgs {
         }
         self.handle.map(TargetSelector::WindowHandle)
     }
+}
+
+/// Rejects an empty window title or process name.
+///
+/// An empty substring is inside every title, so `--window=` asks for the whole
+/// desktop. [`clipped_windows::resolve`] reads it as matching nothing, which is
+/// the only reading available to a pure function that has no way to report a
+/// usage error — but that surfaces as ``no window matches the window title
+/// containing `` ``, which looks like a formatting bug rather than an answer.
+/// A command line *can* report a usage error, so it does, here, before
+/// matching ever runs.
+///
+/// Only wholly blank values are rejected. A title is matched as typed,
+/// including leading and trailing spaces, because a window really can be called
+/// `Untitled - Notepad ` and the user is the one who knows.
+fn parse_selector_text(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err(
+            "a window title or process name cannot be empty; run `clipped-recorder \
+             list-windows` to see what there is to choose from"
+                .to_owned(),
+        );
+    }
+
+    Ok(value.to_owned())
 }
 
 /// Parses a window handle as this program prints one, or as a person would
@@ -180,13 +212,15 @@ pub struct RecordArgs {
     /// Record the window whose title contains this text.
     ///
     /// Matching is by substring, so `--window "Counter-Strike"` finds
-    /// "Counter-Strike 2". If more than one window matches, the candidates are
-    /// reported rather than one being picked (issue #10).
-    #[arg(long, value_name = "TITLE")]
+    /// "Counter-Strike 2". `record` does not resolve the selector yet — it has
+    /// no capture engine to hand a window to — so run
+    /// `clipped-recorder list-windows --window <TITLE>` to see what it will
+    /// match, and which candidates an ambiguous title has (issue #10).
+    #[arg(long, value_name = "TITLE", value_parser = parse_selector_text)]
     pub window: Option<String>,
 
     /// Record the window belonging to this executable, such as `cs2.exe`.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", value_parser = parse_selector_text)]
     pub process: Option<String>,
 
     /// Record the window belonging to this process identifier.
@@ -434,6 +468,35 @@ mod tests {
             Some(TargetSelector::WindowHandle(WindowHandle::from_raw(
                 0x0001_04ac
             )))
+        );
+    }
+
+    #[test]
+    fn an_empty_selector_is_a_usage_error_rather_than_a_match_against_everything() {
+        for command in ["list-windows", "record"] {
+            for argument in ["--window", "--process"] {
+                let error = parse(&[command, argument, ""]).unwrap_err().to_string();
+                assert!(
+                    error.contains("cannot be empty"),
+                    "`{command} {argument} \"\"` should be rejected with a reason: {error}"
+                );
+            }
+        }
+
+        // Whitespace only is the same request wearing a hat.
+        let error = parse(&["list-windows", "--window", "   "])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot be empty"), "{error}");
+    }
+
+    #[test]
+    fn a_selector_keeps_the_spaces_it_was_typed_with() {
+        // A window really can be titled with a trailing space, and a substring
+        // match is the user's to specify: only wholly blank values are refused.
+        assert_eq!(
+            parse_selector_text(" Counter-Strike "),
+            Ok(" Counter-Strike ".to_owned())
         );
     }
 

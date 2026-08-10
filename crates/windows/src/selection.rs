@@ -265,9 +265,12 @@ fn cloned(windows: &[&WindowInfo]) -> Vec<WindowInfo> {
 fn matches(window: &WindowInfo, selector: &TargetSelector) -> bool {
     match selector {
         // An empty substring is inside every title, so it would match the whole
-        // desktop. Nobody means that, and the command line rejects it before it
-        // reaches here; matching nothing is the safe reading of it in the one
-        // place that cannot report a usage error.
+        // desktop and report it as an ambiguity. Nobody means that. This is a
+        // public function over an arbitrary selector, and the choice available
+        // to it is between "everything" and "nothing"; nothing is the one a
+        // caller can recover from, so it is a `NoMatch`. Callers that can
+        // report a usage error should: `clipped-recorder` rejects an empty
+        // `--window`/`--process` at parse time, which is where it belongs.
         TargetSelector::WindowTitle(title) => {
             !title.is_empty() && contains_ignoring_case(window.title(), title)
         }

@@ -115,11 +115,12 @@ clipped-recorder list-windows
 
 The listings in this section come from a real run on a two-monitor desktop, with
 rows removed and window titles shortened so that they fit the page and do not
-publish anybody's open tabs. The shape, the columns and the wording are exactly
-what the command prints.
+publish anybody's open tabs. Where a count describes the rows that follow it, it
+has been reduced with them, so that no example contradicts itself. The shape,
+the columns and the wording are exactly what the command prints.
 
 ```text
-8 of 424 top-level windows can be captured.
+5 of 421 top-level windows can be captured.
 
 HANDLE      PID    PROCESS              CLIENT     DPI  MONITOR       TITLE
 0x00010698  24860  steamwebhelper.exe   2560x1392  96   \\.\DISPLAY2  Steam
@@ -139,8 +140,11 @@ HANDLE      PID    PROCESS              CLIENT     DPI  MONITOR       TITLE
 | `--pid <PID>` | — | Resolve by process identifier |
 | `--handle <HANDLE>` | — | Resolve one exact window, as printed in `HANDLE` |
 
-At most one selector may be given. With none, the command lists; with one, it
-resolves and prints everything known about the single window that answers to it:
+At most one selector may be given, and an empty `--window` or `--process` is
+rejected as a usage error rather than matched: an empty substring is inside every
+title, so it names the whole desktop, and nobody means that. With no selector the
+command lists; with one, it resolves and prints everything known about the single
+window that answers to it:
 
 ```text
 > clipped-recorder list-windows --window "File Explorer"
@@ -183,7 +187,7 @@ than being asked again.
 ```text
 > clipped-recorder list-windows --window "e"
 
-error: 7 windows match the window title containing `e`, and choosing between them would be a guess:
+error: 5 windows match the window title containing `e`, and choosing between them would be a guess:
   0x000201f2  WindowsTerminal.exe (pid 11428)  clipped
   0x00010698  steamwebhelper.exe (pid 24860)  Steam
   0x000403ae  chrome.exe (pid 10228)  Issues - Google Chrome
@@ -203,9 +207,9 @@ At most ten candidates are listed, with a count of the rest: `explorer.exe`
 alone owns sixty top-level windows, and an error nobody reads is not an error
 message.
 
-Long lists are unremarkable — the desktop above had 424 top-level windows and 8
-that could be captured — which is why the exclusion reasons exist rather than a
-filter that quietly drops them.
+Long lists are unremarkable — the desktop these examples came from had 424
+top-level windows and 8 that could be captured — which is why the exclusion
+reasons exist rather than a filter that quietly drops them.
 
 ## Exit codes
 

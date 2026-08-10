@@ -111,18 +111,46 @@ fn list_windows_prints_a_table_of_what_can_be_captured() {
     );
 
     let listing = stdout(&output);
-    assert!(
-        listing.contains("top-level windows can be captured."),
-        "the listing should say how much of the desktop it is showing: {listing}"
-    );
-    for column in [
-        "HANDLE", "PID", "PROCESS", "CLIENT", "DPI", "MONITOR", "TITLE",
-    ] {
+    let capturable = capturable_count(&listing);
+
+    // Which branch is right depends on the desktop the runner happens to have,
+    // so the test reads the count the command printed and holds it to what it
+    // said, rather than assuming a session with a window in it (AGENTS.md
+    // section 25). Both branches assert; neither is a way out.
+    if capturable == 0 {
         assert!(
-            listing.contains(column),
-            "the {column} column is missing: {listing}"
+            listing.contains("Nothing on this desktop can be captured. Pass --all to see why."),
+            "an empty desktop should say so and point at --all: {listing}"
         );
+    } else {
+        for column in [
+            "HANDLE", "PID", "PROCESS", "CLIENT", "DPI", "MONITOR", "TITLE",
+        ] {
+            assert!(
+                listing.contains(column),
+                "the {column} column is missing: {listing}"
+            );
+        }
     }
+}
+
+/// The `N` from `N of M top-level windows can be captured.`
+///
+/// Read from the output rather than assumed, because it is the number that
+/// decides whether a table follows.
+fn capturable_count(listing: &str) -> usize {
+    let headline = listing
+        .lines()
+        .find(|line| line.contains("top-level windows can be captured."))
+        .unwrap_or_else(|| {
+            panic!("the listing should say how much of the desktop it is showing: {listing}")
+        });
+
+    headline
+        .split_whitespace()
+        .next()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("the headline should start with a count: {headline}"))
 }
 
 #[test]

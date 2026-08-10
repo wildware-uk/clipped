@@ -198,25 +198,34 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>, WindowsError> {
 ///
 /// # Errors
 ///
-/// [`WindowsError::MonitorGone`] if the display has been detached between the
-/// two calls this makes, and [`WindowsError::Api`] if Windows refuses one of
-/// them.
+/// [`WindowsError::WindowGone`] if `window` no longer names a window, which is
+/// how a null `HMONITOR` reads; [`WindowsError::MonitorGone`] if the display
+/// has been detached between the two calls this makes.
 pub fn monitor_for_window(window: WindowHandle) -> Result<MonitorInfo, WindowsError> {
-    monitor_info(monitor_handle_for_window(window))
+    let handle =
+        monitor_handle_for_window(window).ok_or(WindowsError::WindowGone { handle: window })?;
+    monitor_info(handle)
 }
 
-/// The handle of the display showing most of `window`.
+/// The handle of the display showing most of `window`, or [`None`] if `window`
+/// no longer names one.
 ///
 /// `MONITOR_DEFAULTTONEAREST` means this answers even for a window positioned
 /// off every display, which happens: a window remembers a position from a
-/// monitor that has since been unplugged.
-pub(crate) fn monitor_handle_for_window(window: WindowHandle) -> MonitorHandle {
+/// monitor that has since been unplugged. It does not make the call infallible.
+/// Windows documents no return value for a handle that has stopped being a
+/// window, and what it actually returns is null — `MonitorFromWindow` on a
+/// handle that was never a window gives `HMONITOR(0)` on Windows 11, which
+/// `a_handle_that_was_never_a_window_has_no_display` in `tests/desktop.rs`
+/// pins down. A null handle is reported as absent here rather than passed on
+/// as a handle every later call would reject.
+pub(crate) fn monitor_handle_for_window(window: WindowHandle) -> Option<MonitorHandle> {
     // SAFETY: `MonitorFromWindow` takes a window handle by value and returns a
-    // handle. It has no failure mode with `MONITOR_DEFAULTTONEAREST` — an
-    // invalid or destroyed window yields the nearest monitor to the origin
-    // rather than a null handle — so there is nothing to check.
+    // handle. Like `IsWindow` it is defined for an arbitrary handle value, so
+    // there is no precondition to establish, and it reads no memory this code
+    // owns. Its result is checked below rather than assumed.
     let monitor = unsafe { MonitorFromWindow(window.to_hwnd(), MONITOR_DEFAULTTONEAREST) };
-    MonitorHandle::from_hmonitor(monitor)
+    (!monitor.is_invalid()).then(|| MonitorHandle::from_hmonitor(monitor))
 }
 
 /// Reads a display's name, geometry and DPI.

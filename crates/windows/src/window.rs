@@ -4,7 +4,7 @@ use core::ffi::c_void;
 use core::fmt;
 use core::mem;
 
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -391,9 +391,11 @@ pub fn is_window(handle: WindowHandle) -> bool {
 ///
 /// # Errors
 ///
-/// [`WindowsError::WindowGone`] if the window has been destroyed, which during
-/// a recording means the recording is over, and [`WindowsError::Api`] if
-/// `GetClientRect` fails for any other reason.
+/// [`WindowsError::WindowGone`] if the window has been destroyed — either
+/// because `GetClientRect` rejected the handle or because `MonitorFromWindow`
+/// answered with a null display — which during a recording means the recording
+/// is over, and [`WindowsError::Api`] if `GetClientRect` fails for any other
+/// reason.
 pub fn window_geometry(handle: WindowHandle) -> Result<WindowGeometry, WindowsError> {
     if !is_window(handle) {
         return Err(WindowsError::WindowGone { handle });
@@ -416,10 +418,17 @@ pub fn window_geometry(handle: WindowHandle) -> Result<WindowGeometry, WindowsEr
         }
     })?;
 
+    // A null `HMONITOR` here means the same thing as a failed `GetClientRect`:
+    // the window was destroyed during the measurement. It is reported rather
+    // than stored, so that a `WindowGeometry` always names a display that
+    // existed when it was built and a capture backend never receives a handle
+    // that nothing will accept.
+    let monitor = monitor_handle_for_window(handle).ok_or(WindowsError::WindowGone { handle })?;
+
     Ok(WindowGeometry::new(
         rect_to_pixels(rect).size(),
         window_dpi(handle),
-        monitor_handle_for_window(handle),
+        monitor,
     ))
 }
 
@@ -438,9 +447,12 @@ pub fn window_geometry(handle: WindowHandle) -> Result<WindowGeometry, WindowsEr
 ///
 /// # Errors
 ///
-/// [`WindowsError::Api`] if `EnumWindows` fails outright. Windows that are
-/// destroyed while the enumeration is running are dropped from the result
-/// rather than failing it, because that happens on any real desktop.
+/// [`WindowsError::Api`] if `EnumWindows` fails outright, or if measuring one
+/// of the windows it reported fails for a reason other than that window having
+/// closed. Windows that are destroyed while the enumeration is running are
+/// dropped from the result rather than failing it, because that happens on any
+/// real desktop; nothing else is dropped, because a window missing from the
+/// list with no reason given is the one thing this module exists to prevent.
 pub fn enumerate_windows() -> Result<Vec<WindowInfo>, WindowsError> {
     let handles = top_level_windows()?;
 
@@ -455,10 +467,10 @@ pub fn enumerate_windows() -> Result<Vec<WindowInfo>, WindowsError> {
     let desktop = unsafe { GetDesktopWindow() };
 
     let mut process_names = ProcessNames::default();
-    Ok(handles
+    handles
         .into_iter()
-        .filter_map(|handle| describe(handle, shell, desktop, &mut process_names))
-        .collect())
+        .filter_map(|handle| describe(handle, shell, desktop, &mut process_names).transpose())
+        .collect()
 }
 
 /// The handles `EnumWindows` reports, collected before anything is asked of
@@ -524,14 +536,25 @@ impl WindowFacts {
 }
 
 /// Reads everything known about one window, or [`None`] if it has gone.
+///
+/// The two outcomes are kept apart deliberately. A window destroyed between
+/// `EnumWindows` collecting its handle and this measuring it is [`None`] and
+/// disappears from the listing, which is the documented behaviour and the only
+/// silent drop this module allows. Any other failure is an error: dropping it
+/// too would quietly change the "N of M top-level windows" denominator and
+/// leave a user asking why their game is not in the list with no answer.
 fn describe(
     handle: HWND,
     shell: HWND,
     desktop: HWND,
     process_names: &mut ProcessNames,
-) -> Option<WindowInfo> {
+) -> Result<Option<WindowInfo>, WindowsError> {
     let window = WindowHandle::from_hwnd(handle);
-    let geometry = window_geometry(window).ok()?;
+    let geometry = match window_geometry(window) {
+        Ok(geometry) => geometry,
+        Err(WindowsError::WindowGone { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
 
     let title = window_title(window);
     let facts = WindowFacts::read(window, handle == shell || handle == desktop);
@@ -540,7 +563,7 @@ fn describe(
     let process_id = window_process_id(window);
     let process_name = process_names.name_of(process_id);
 
-    Some(WindowInfo::new(
+    Ok(Some(WindowInfo::new(
         window,
         title,
         process_id,
@@ -548,7 +571,7 @@ fn describe(
         geometry,
         facts.minimised,
         exclusion,
-    ))
+    )))
 }
 
 /// The first reason a window cannot be captured, in the order documented on
@@ -708,19 +731,48 @@ fn window_dpi(window: WindowHandle) -> u32 {
 ///
 /// # Errors
 ///
-/// [`WindowsError::Api`] if the mode could not be set. The common cause is that
-/// it was already set — by an application manifest, or by an earlier call — and
-/// Windows rejects a second attempt with `ERROR_ACCESS_DENIED`. That failure is
-/// harmless: the process is already DPI aware. It is still returned rather than
-/// swallowed, because this crate does not decide what a caller logs
-/// (AGENTS.md section 15).
-pub fn enable_per_monitor_dpi_awareness() -> Result<(), WindowsError> {
+/// [`WindowsError::Api`] if the mode could not be set, which is a real problem
+/// and not a formality: on a display scaled above 100% every size this crate
+/// then reports is the compatibility fiction described above. The one rejection
+/// that is *not* a problem — the mode was already set — is
+/// [`DpiAwareness::AlreadySet`] rather than an error, so that a caller does not
+/// have to tell the two apart by inspecting an `HRESULT` (AGENTS.md section
+/// 15).
+pub fn enable_per_monitor_dpi_awareness() -> Result<DpiAwareness, WindowsError> {
     // SAFETY: the argument is a documented constant handle to a DPI awareness
     // context; nothing is allocated, borrowed or shared. The call is
     // process-wide state, which is why the documentation above insists it
     // happens once, before anything reads a window size.
-    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
-        .map_err(|source| WindowsError::api("SetProcessDpiAwarenessContext", source))
+    match unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) } {
+        Ok(()) => Ok(DpiAwareness::Set),
+        // Windows rejects a second attempt to set the awareness mode with
+        // ERROR_ACCESS_DENIED, and that is the *only* meaning that code has
+        // here: the argument is a constant, so there is no invalid-parameter
+        // case to confuse it with. Anything else means the process is not
+        // per-monitor aware and the caller needs to know.
+        Err(source) if source.code() == ERROR_ACCESS_DENIED.to_hresult() => {
+            Ok(DpiAwareness::AlreadySet)
+        }
+        Err(source) => Err(WindowsError::api("SetProcessDpiAwarenessContext", source)),
+    }
+}
+
+/// What [`enable_per_monitor_dpi_awareness`] found the process to be.
+///
+/// The distinction exists so that a caller can log the two differently. "It was
+/// already per-monitor aware" is a detail nobody needs; "it could not be made
+/// per-monitor aware" means every measurement on a scaled display is wrong, and
+/// a caller that cannot tell them apart has to pick one level for both and will
+/// pick the quiet one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DpiAwareness {
+    /// This call set the mode, and it was not set before.
+    Set,
+
+    /// The mode was already set, by an application manifest or by an earlier
+    /// call. The process is per-monitor DPI aware either way, so there is
+    /// nothing here for a user to act on.
+    AlreadySet,
 }
 
 /// Collects each top-level window handle into the `Vec<HWND>` behind `state`.
