@@ -1,0 +1,11 @@
+# Normalise line endings to LF in the repository. rustfmt is configured with
+# newline_style = "Unix", so without this a Windows checkout produces CRLF
+# working files that `cargo fmt --check` would reject in CI.
+* text=auto eol=lf
+
+# Media fixtures used by the capture and audio test suites are binary.
+*.mkv binary
+*.mp4 binary
+*.wav binary
+*.png binary
+*.ico binary
