@@ -37,8 +37,38 @@ features = [
     # around it.
     "Win32_System_Com",
     # `LoadLibraryExW`, which is how a vendor encoder runtime is measured to be
-    # loadable rather than merely present on disk.
+    # loadable rather than merely present on disk, and how the NVENC backend
+    # reaches `nvEncodeAPI64.dll` — there is no import library for it, and
+    # `GetProcAddress` is the documented entry point
+    # (crates/encoder/src/windows/nvenc/api.rs).
     "Win32_System_LibraryLoader",
+]
+
+# Direct3D 11 is a *test* dependency, not a build one. The NVENC backend never
+# calls a Direct3D function: it is handed a device and a texture as opaque
+# handles and passes them to NVENC, which is what keeps the encoder free of
+# graphics-API knowledge it does not need (docs/encoder-pipeline.md). What needs
+# Direct3D is the test harness, which has to create a device on the NVIDIA
+# adapter and upload real pictures into real textures before there is anything
+# to encode.
+#
+# Declaring it here rather than widening the dependency above means the shipped
+# recorder does not compile a line of Direct3D on account of this crate.
+[target.'cfg(windows)'.dev-dependencies.windows]
+workspace = true
+features = [
+    # `D3D11CreateDevice`, `ID3D11Texture2D` and the texture description the
+    # harness fills in.
+    "Win32_Graphics_Direct3D11",
+    # `D3D_DRIVER_TYPE_UNKNOWN` and the feature level, which
+    # `D3D11CreateDevice` takes.
+    "Win32_Graphics_Direct3D",
+    # `CreateDXGIFactory1` and adapter enumeration, for finding the NVIDIA
+    # adapter to create the device on — on a machine with two GPUs, encoding on
+    # the wrong one is a cross-adapter copy per frame.
+    "Win32_Graphics_Dxgi",
+    # `DXGI_FORMAT_B8G8R8A8_UNORM`, the format captured frames arrive in.
+    "Win32_Graphics_Dxgi_Common",
 ]
 
 [lints]
