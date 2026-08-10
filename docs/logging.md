@@ -2,9 +2,22 @@
 
 Clipped is usually debugged without access to the machine it failed on, so logs
 are the primary diagnostic (SPEC.md section 36). `clipped-logging` owns where
-logs go and how much is recorded. It does not own logging itself: every crate
-depends on `tracing` and calls `tracing::info!` and friends directly, so there
-is no Clipped-specific wrapper to route diagnostics through.
+logs go and how much is recorded. It does not own logging itself: there is no
+Clipped-specific wrapper to route diagnostics through, and a crate that wants to
+emit events calls `tracing::info!` and friends directly.
+
+To do that, add the facade to the crate's manifest:
+
+```toml
+[dependencies]
+tracing.workspace = true
+```
+
+`tracing` is pinned once in the root manifest's `[workspace.dependencies]`, so
+every crate that adopts it gets the same version and the same callsite registry.
+At the time of writing `clipped-logging` is the only crate that has taken the
+dependency, because the others are still documentation-only stubs; a crate takes
+it in the change that gives it something to log.
 
 The crate sits at layer 0 and depends on no other `clipped-*` crate, so
 platform primitives and application logic alike can use it.
@@ -34,9 +47,17 @@ non-Windows machine — Clipped targets Windows, but the crate still builds and
 tests elsewhere — the directory follows `$XDG_STATE_HOME/clipped`, falling back
 to `$HOME/.local/state/clipped`.
 
-Log files are also written to standard error while a console is attached, with
-colour only when standard error is a terminal. Standard output is left alone so
-that anything the recorder prints there stays machine-readable.
+Keeping that true takes a little care in the tests: `Path::file_name` splits on
+the separators of the platform it was compiled for, so a test that asserts on a
+`C:\...` literal passes on Windows and fails on Linux, where the whole literal is
+one file name. Those assertions are gated to Windows and have an equivalent that
+runs everywhere, and `cargo test -p clipped-logging` is expected to pass on both.
+
+The same log records are also written to standard error whenever console output
+is enabled, which it is by default; `LogSettings::with_console(false)` turns that
+layer off. Whether standard error is a terminal decides one thing only: colour.
+Standard output is left alone so that anything the recorder prints there stays
+machine-readable.
 
 `LoggingGuard::directory()` returns the directory in use, which is what an
 "open log folder" action in the desktop application should call. It is not
@@ -160,8 +181,9 @@ private message contents and file contents.
   drive layout, not the folder names someone chose.
 
   ```rust
-  tracing::info!(path = %RedactedPath::new(&recording_path), "recording finished");
-  // path=match.mkv#3a7b0c9f21d4e885
+  let recording_path = r"C:\Users\alice\Videos\Clipped\match.mkv";
+  tracing::info!(path = %RedactedPath::new(recording_path), "recording finished");
+  // path=match.mkv#eb9715073a66288e
   ```
 
   Equal digests mean the same path, so a sequence of operations on one file can
@@ -203,11 +225,24 @@ clipped_logging::trace_frame!(
 );
 ```
 
-Turn it on for a debugging session:
+Turn it on for a debugging session. A feature belongs to the package that
+declares it, so the switch has to be spelled against a package that depends on
+`clipped-logging`. Today that is only `clipped-logging` itself:
+
+```text
+cargo test -p clipped-logging --features frame-tracing
+```
+
+When a binary takes the dependency — `clipped-recorder` has not yet, because it
+has no run loop to log from — the form for running it becomes:
 
 ```text
 cargo run -p clipped-recorder --features clipped-logging/frame-tracing
 ```
+
+That command fails today with *"the package 'clipped-recorder' does not contain
+this feature"*, and will keep failing until `clipped-recorder` lists
+`clipped-logging` in its dependencies.
 
 **Detail worth having occasionally in a normal build.** Use `FrameSampler`,
 which reduces a per-frame event to one every *n* frames with a plain counter —
@@ -268,11 +303,16 @@ Read honestly:
   ships unoptimised, and the ±0.2 ns spread between two identical loops there
   is code placement, not logging.
 
-The test asserts `trace_frame!` stays within the noise floor plus 0.5 ns, and
-that a disabled `debug!` stays under 5 ns per call. Both thresholds are set to
-catch a structural regression — a lost feature gate, an eagerly evaluated
-argument, a lock — rather than a single extra branch, which no threshold could
-tell apart from a busy machine.
+The test asserts that `trace_frame!` stays within the measured noise floor plus
+the larger of 0.5 ns and a quarter of the baseline loop's own cost, and that a
+disabled `debug!` stays under the larger of 5 ns and that same baseline. Both
+bounds scale with the machine on purpose: code placement noise is a proportion
+of what a loop costs, not a fixed number of nanoseconds, and a bound that a slow
+or contended runner trips is a failure nobody can tell apart from a real
+regression (AGENTS.md sections 25 and 51). Both are set to catch a structural
+regression — a lost feature gate, an eagerly evaluated argument, a lock — rather
+than a single extra branch, which no threshold could distinguish from a busy
+machine.
 
 Reproduce it with the numbers visible:
 

@@ -14,8 +14,9 @@ authors.workspace = true
 frame-tracing = []
 
 [dependencies]
-# The logging facade every other crate calls directly. MIT.
-tracing = "0.1"
+# The logging facade. Taken from the workspace because every other crate is
+# expected to depend on the same version of it. MIT.
+tracing.workspace = true
 # Subscriber implementation, plus `EnvFilter` for runtime level configuration. MIT.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Rolling file appender and the background writer that keeps disk I/O off the
@@ -26,7 +27,7 @@ tracing-appender = "0.2"
 # their own declarations of the two crates they exercise it through. Both are
 # already built for the library; no extra dependency enters the build.
 [dev-dependencies]
-tracing = "0.1"
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]

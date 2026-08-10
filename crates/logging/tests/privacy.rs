@@ -29,6 +29,18 @@ const FORBIDDEN: &[&str] = &[
     "-----BEGIN PRIVATE KEY-----",
 ];
 
+/// A recording path in the form the platform these tests are compiled for uses.
+///
+/// `Path::file_name` splits on that platform's separators only, so a
+/// backslash-separated literal is one long file name on Linux or macOS, and an
+/// assertion written against it would fail there for a reason that has nothing
+/// to do with redaction. Windows is what Clipped ships on and keeps the
+/// backslash form.
+#[cfg(windows)]
+const RECORDING_PATH: &str = r"C:\Users\alice\Videos\Clipped\match.mkv";
+#[cfg(not(windows))]
+const RECORDING_PATH: &str = "/home/alice/Videos/Clipped/match.mkv";
+
 /// Collects everything a subscriber writes, so a test can assert on it.
 #[derive(Clone, Default)]
 struct CapturedLog(Arc<Mutex<Vec<u8>>>);
@@ -119,19 +131,46 @@ fn a_full_session_context_renders_only_identifiers() {
     ] {
         assert!(output.contains(field), "missing {field} in:\n{output}");
     }
+
+    // "Only" is the half that matters for privacy: the span must carry the five
+    // documented fields and nothing else, so a field added to `SessionContext`
+    // without a type constraining it cannot slip into every log line unnoticed.
+    // Splitting on spaces is sound precisely because the values are identifiers
+    // and enumerations — a value with a space in it could not have got here.
+    let rendered_fields = output
+        .split_once('{')
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(fields, _)| fields)
+        .unwrap_or_else(|| panic!("the span should render its fields:\n{output}"));
+    let names: Vec<&str> = rendered_fields
+        .split_whitespace()
+        .filter_map(|field| field.split('=').next())
+        .collect();
+
+    assert_eq!(
+        names,
+        [
+            "session_id",
+            "game_id",
+            "capture_backend",
+            "encoder",
+            "audio_source"
+        ],
+        "the span rendered fields other than the documented five:\n{output}"
+    );
 }
 
 #[test]
 fn a_recording_path_is_logged_without_the_directories_it_lived_in() {
     let output = captured(|| {
         tracing::info!(
-            path = %RedactedPath::new(r"C:\Users\alice\Videos\Clipped\match.mkv"),
+            path = %RedactedPath::new(RECORDING_PATH),
             "recording finished"
         );
     });
 
     assert!(output.contains("path=match.mkv#"), "{output}");
-    for leaked in ["alice", "Users", "Videos", r"C:\"] {
+    for leaked in ["alice", "Videos", "Clipped"] {
         assert!(
             !output.contains(leaked),
             "the log leaked {leaked}:\n{output}"

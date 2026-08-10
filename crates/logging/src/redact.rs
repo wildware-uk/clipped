@@ -22,7 +22,11 @@ const FILE_NAME_LIMIT: usize = 64;
 /// ```
 /// use clipped_logging::RedactedPath;
 ///
-/// let redacted = RedactedPath::new(r"C:\Users\alice\Videos\Clipped\match.mkv");
+/// // Written with forward slashes, which Windows accepts as separators too, so
+/// // that this example also holds on a contributor's Linux or macOS machine —
+/// // `Path::file_name` only splits on the separators of the platform it was
+/// // compiled for, and a backslash means nothing to a Unix path.
+/// let redacted = RedactedPath::new("C:/Users/alice/Videos/Clipped/match.mkv");
 /// assert!(!redacted.to_string().contains("alice"));
 /// assert!(redacted.to_string().starts_with("match.mkv#"));
 /// ```
@@ -123,12 +127,50 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
 
+    /// A path in the form the platform these tests are compiled for uses.
+    ///
+    /// `Path::file_name` splits on that platform's separators only, so a
+    /// backslash-separated literal is one long file name on Linux or macOS and
+    /// an assertion written against it would fail there for a reason that has
+    /// nothing to do with redaction. Windows is the platform Clipped ships on
+    /// and keeps the backslash form; everywhere else the same directories are
+    /// spelled the local way.
+    #[cfg(windows)]
+    const RECORDING_PATH: &str = r"C:\Users\alice\Videos\Clipped\match.mkv";
+    #[cfg(not(windows))]
+    const RECORDING_PATH: &str = "/home/alice/Videos/Clipped/match.mkv";
+
     #[test]
     fn directory_components_do_not_survive() {
-        let redacted = RedactedPath::new(r"C:\Users\alice\Videos\Clipped\match.mkv").to_string();
+        let redacted = RedactedPath::new(RECORDING_PATH).to_string();
 
         assert!(redacted.starts_with("match.mkv#"), "{redacted}");
-        for leaked in ["alice", "Users", "Videos", "Clipped", "C:"] {
+        for leaked in ["alice", "Videos", "Clipped"] {
+            assert!(!redacted.contains(leaked), "{redacted} leaked {leaked}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_drive_and_account_name_do_not_survive() {
+        let redacted = RedactedPath::new(r"C:\Users\alice\Videos\Clipped\match.mkv").to_string();
+
+        // Pinned rather than merely inspected, because `docs/logging.md` prints
+        // this exact line as an example of what a redacted path looks like.
+        assert_eq!(redacted, "match.mkv#eb9715073a66288e");
+        for leaked in ["alice", "Users", "C:"] {
+            assert!(!redacted.contains(leaked), "{redacted} leaked {leaked}");
+        }
+    }
+
+    #[test]
+    fn a_windows_path_written_with_forward_slashes_is_redacted_anywhere() {
+        // Windows accepts both separators, so this form is a real Windows path
+        // and is also one every platform can parse.
+        let redacted = RedactedPath::new("C:/Users/alice/Videos/Clipped/match.mkv").to_string();
+
+        assert!(redacted.starts_with("match.mkv#"), "{redacted}");
+        for leaked in ["alice", "Users", "C:"] {
             assert!(!redacted.contains(leaked), "{redacted} leaked {leaked}");
         }
     }
@@ -141,8 +183,8 @@ mod tests {
 
     #[test]
     fn files_with_the_same_name_stay_distinguishable() {
-        let first = RedactedPath::new(r"D:\clips\2026\match.mkv");
-        let second = RedactedPath::new(r"D:\clips\2025\match.mkv");
+        let first = RedactedPath::new("D:/clips/2026/match.mkv");
+        let second = RedactedPath::new("D:/clips/2025/match.mkv");
 
         assert_eq!(first.file_name(), second.file_name());
         assert_ne!(first.digest(), second.digest());
@@ -150,9 +192,13 @@ mod tests {
 
     #[test]
     fn a_path_without_a_file_name_still_redacts() {
-        let redacted = RedactedPath::new(r"C:\").to_string();
+        // A bare root: `C:\` on Windows, `/` elsewhere. Both have no final
+        // component, which is the case being covered.
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        let redacted = RedactedPath::new(root).to_string();
+
         assert_eq!(redacted.chars().next(), Some('#'));
-        assert!(!redacted.contains("C:"), "{redacted}");
+        assert!(!redacted.contains(root), "{redacted}");
     }
 
     #[test]

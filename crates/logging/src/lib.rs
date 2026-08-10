@@ -3,10 +3,13 @@
 //! Clipped runs alongside games for hours at a time and is usually debugged
 //! without access to the machine it failed on, so logs are the primary
 //! diagnostic (SPEC.md section 36). This crate owns *where logs go and how much
-//! is recorded*. It deliberately does not own *logging itself*: every other
-//! crate depends on `tracing` and calls [`tracing::info!`] and friends
-//! directly, so nothing has to route diagnostics through a Clipped-specific
-//! wrapper.
+//! is recorded*. It deliberately does not own *logging itself*: a crate that
+//! wants to emit events takes `tracing.workspace = true` and calls
+//! [`tracing::info!`] and friends directly, so nothing has to route diagnostics
+//! through a Clipped-specific wrapper. The version is pinned once in the root
+//! manifest's `[workspace.dependencies]`; at the time of writing this crate is
+//! the only one that has taken the dependency, because the rest are still
+//! empty.
 //!
 //! # Responsibilities
 //!

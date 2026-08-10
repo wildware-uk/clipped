@@ -202,10 +202,14 @@ pub fn default_level_file() -> Option<PathBuf> {
 #[derive(Debug)]
 enum StartupWarning {
     /// A configured filter directive did not parse and was skipped.
-    UnparsableDirective {
-        source: FilterSource,
-        directive: String,
-    },
+    ///
+    /// Only the source is kept. The directive itself is an unvalidated external
+    /// string, and this crate's rule everywhere else — see
+    /// [`LoggingError::InvalidIdentifier`] — is that a rejected value is
+    /// described, never echoed. Naming the source is enough to find it: there
+    /// are four, and each of them is something the person reading the warning
+    /// set themselves.
+    UnparsableDirective { source: FilterSource },
     /// The level file exists but could not be read.
     UnreadableLevelFile { error: io::Error },
 }
@@ -213,9 +217,8 @@ enum StartupWarning {
 impl StartupWarning {
     fn emit(&self) {
         match self {
-            Self::UnparsableDirective { source, directive } => tracing::warn!(
+            Self::UnparsableDirective { source } => tracing::warn!(
                 filter_source = %source,
-                directive = %directive,
                 "ignoring a log filter directive that does not parse"
             ),
             Self::UnreadableLevelFile { error } => tracing::warn!(
@@ -248,6 +251,28 @@ fn read_level_file(level_file: &LevelFile, warnings: &mut Vec<StartupWarning>) -
     }
 }
 
+/// The environment variables that can set the level.
+///
+/// Passed into [`resolve_filter`] rather than read inside it, so that the
+/// precedence order and the skip-on-parse-failure path can be tested without
+/// mutating the environment of a process that is running other tests in
+/// parallel (AGENTS.md section 25).
+#[derive(Debug, Default)]
+struct EnvironmentLevels {
+    clipped_log: Option<String>,
+    rust_log: Option<String>,
+}
+
+impl EnvironmentLevels {
+    /// Reads both variables from the process environment.
+    fn from_process() -> Self {
+        Self {
+            clipped_log: std::env::var("CLIPPED_LOG").ok(),
+            rust_log: std::env::var("RUST_LOG").ok(),
+        }
+    }
+}
+
 /// Picks the first directive that `EnvFilter` accepts.
 ///
 /// A typo in `CLIPPED_LOG` therefore falls through to the next source instead
@@ -255,13 +280,14 @@ fn read_level_file(level_file: &LevelFile, warnings: &mut Vec<StartupWarning>) -
 /// last candidate and always parses.
 fn resolve_filter(
     settings: &LogSettings,
+    environment: &EnvironmentLevels,
     warnings: &mut Vec<StartupWarning>,
 ) -> (EnvFilter, FilterSource, String) {
     let level_file_directive = read_level_file(&settings.level_file, warnings);
 
     let candidates = candidate_directives(
-        std::env::var("CLIPPED_LOG").ok().as_deref(),
-        std::env::var("RUST_LOG").ok().as_deref(),
+        environment.clipped_log.as_deref(),
+        environment.rust_log.as_deref(),
         level_file_directive.as_deref(),
         settings.default_level.as_deref(),
     );
@@ -269,7 +295,7 @@ fn resolve_filter(
     for (source, directive) in candidates {
         match EnvFilter::try_new(&directive) {
             Ok(filter) => return (filter, source, directive),
-            Err(_) => warnings.push(StartupWarning::UnparsableDirective { source, directive }),
+            Err(_) => warnings.push(StartupWarning::UnparsableDirective { source }),
         }
     }
 
@@ -316,7 +342,8 @@ pub fn init(settings: &LogSettings) -> Result<LoggingGuard, LoggingError> {
     let (file_writer, worker) = tracing_appender::non_blocking(appender);
 
     let mut warnings = Vec::new();
-    let (filter, filter_source, directive) = resolve_filter(settings, &mut warnings);
+    let environment = EnvironmentLevels::from_process();
+    let (filter, filter_source, directive) = resolve_filter(settings, &environment, &mut warnings);
 
     let file_output = fmt_layer::layer()
         .with_writer(file_writer)
@@ -357,7 +384,73 @@ pub fn init(settings: &LogSettings) -> Result<LoggingGuard, LoggingError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
+
     use super::*;
+
+    /// A directive `EnvFilter` refuses, which is what a typo looks like.
+    const MALFORMED: &str = "nonsense==";
+
+    /// Settings that consult nothing outside this test.
+    fn test_settings() -> LogSettings {
+        LogSettings::default().without_level_file()
+    }
+
+    fn environment(clipped_log: Option<&str>, rust_log: Option<&str>) -> EnvironmentLevels {
+        EnvironmentLevels {
+            clipped_log: clipped_log.map(str::to_owned),
+            rust_log: rust_log.map(str::to_owned),
+        }
+    }
+
+    /// Collects what a subscriber writes, so a test can assert on it.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("the buffer is not poisoned").clone())
+                .expect("the subscriber writes UTF-8")
+        }
+    }
+
+    impl io::Write for CapturedLog {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the buffer is not poisoned")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CapturedLog {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `body` against a subscriber local to this thread and returns what it
+    /// wrote, so the assertion is on rendered output rather than on intent.
+    fn captured(body: impl FnOnce()) -> String {
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, body);
+        captured.contents()
+    }
 
     #[test]
     fn the_log_directory_sits_under_the_application_directory() {
@@ -394,5 +487,99 @@ mod tests {
         let mut warnings = Vec::new();
         assert_eq!(read_level_file(&LevelFile::Disabled, &mut warnings), None);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn a_directive_that_parses_is_the_one_that_is_used() {
+        let mut warnings = Vec::new();
+        let (_filter, source, directive) = resolve_filter(
+            &test_settings().with_default_level("warn"),
+            &environment(Some("info,clipped_capture=trace"), None),
+            &mut warnings,
+        );
+
+        assert_eq!(source, FilterSource::ClippedLogEnvironment);
+        assert_eq!(directive, "info,clipped_capture=trace");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_malformed_directive_is_skipped_for_the_next_source() {
+        // The claim being tested is the one in docs/logging.md: a typo in
+        // CLIPPED_LOG cannot leave a run with no logging. It is `EnvFilter`
+        // that decides what a typo is, so the test has to go through it.
+        let mut warnings = Vec::new();
+        let (_filter, source, directive) = resolve_filter(
+            &test_settings().with_default_level("warn"),
+            &environment(Some(MALFORMED), None),
+            &mut warnings,
+        );
+
+        assert_eq!(source, FilterSource::ApplicationDefault);
+        assert_eq!(directive, "warn");
+        assert!(
+            matches!(
+                warnings.as_slice(),
+                [StartupWarning::UnparsableDirective {
+                    source: FilterSource::ClippedLogEnvironment
+                }]
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn every_source_being_malformed_still_leaves_the_built_in_default() {
+        let mut warnings = Vec::new();
+        let (_filter, source, directive) = resolve_filter(
+            &test_settings().with_default_level(MALFORMED),
+            &environment(Some(MALFORMED), Some(MALFORMED)),
+            &mut warnings,
+        );
+
+        assert_eq!(source, FilterSource::BuiltInDefault);
+        assert_eq!(directive, crate::filter::BUILT_IN_DEFAULT);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+    }
+
+    #[test]
+    fn a_skipped_directive_is_reported_by_source_and_nothing_else() {
+        // The rejected directive is the one unvalidated external string this
+        // crate holds at start-up, and the rule elsewhere in the crate is that
+        // a rejected value is described rather than echoed. The warning does not
+        // carry the directive at all, and this asserts the rendered line carries
+        // no field beyond the source, so putting it back would fail here.
+        const MESSAGE: &str = "ignoring a log filter directive that does not parse";
+
+        let output = captured(|| {
+            StartupWarning::UnparsableDirective {
+                source: FilterSource::ClippedLogEnvironment,
+            }
+            .emit();
+        });
+
+        let fields = output
+            .split_once(MESSAGE)
+            .unwrap_or_else(|| panic!("the warning should report {MESSAGE}:\n{output}"))
+            .1;
+        assert_eq!(fields.trim(), "filter_source=CLIPPED_LOG", "{output}");
+    }
+
+    #[test]
+    fn an_unreadable_level_file_is_reported_without_its_path() {
+        // The path contains the account name, so the warning describes the
+        // failure and leaves the location to `LoggingGuard::directory`.
+        let output = captured(|| {
+            StartupWarning::UnreadableLevelFile {
+                error: io::Error::new(io::ErrorKind::PermissionDenied, "access is denied"),
+            }
+            .emit();
+        });
+
+        assert!(
+            output.contains("ignoring the log level file, which could not be read"),
+            "{output}"
+        );
+        assert!(output.contains("access is denied"), "{output}");
     }
 }

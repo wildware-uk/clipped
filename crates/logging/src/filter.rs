@@ -154,10 +154,21 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_directive_still_leaves_a_fallback_behind_it() {
+    fn the_built_in_default_is_always_the_last_candidate() {
+        // Half of the guarantee that a typo cannot leave a run with no logging:
+        // there is always something behind the directive that failed. The other
+        // half — that a directive `EnvFilter` rejects is actually skipped — is
+        // in `init::tests::a_malformed_directive_is_skipped_for_the_next_source`,
+        // because it is `EnvFilter` that decides, not this function.
         let candidates = candidate_directives(Some("nonsense=="), None, None, None);
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[1].0, FilterSource::BuiltInDefault);
+
+        let last = candidate_directives(Some("trace"), Some("debug"), Some("warn"), Some("error"));
+        assert_eq!(
+            last.last(),
+            Some(&(FilterSource::BuiltInDefault, BUILT_IN_DEFAULT.to_owned()))
+        );
     }
 
     #[test]

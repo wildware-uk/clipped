@@ -25,6 +25,18 @@ const RETAINED_FILES: usize = 4;
 /// How many stale log files exist before the run starts.
 const STALE_FILES: usize = 12;
 
+/// A recording path in the form the platform this test is compiled for uses.
+///
+/// `Path::file_name` splits on that platform's separators only, so a
+/// backslash-separated literal is one long file name on Linux or macOS, and the
+/// redaction assertions below would fail there for a reason that has nothing to
+/// do with redaction. Windows is what Clipped ships on and keeps the backslash
+/// form.
+#[cfg(windows)]
+const RECORDING_PATH: &str = r"C:\Users\alice\Videos\Clipped\match.mkv";
+#[cfg(not(windows))]
+const RECORDING_PATH: &str = "/home/alice/Videos/Clipped/match.mkv";
+
 /// A directory that deletes itself, so a failing test does not leave log files
 /// in the temporary directory of whoever ran it.
 struct TempDirectory {
@@ -121,7 +133,7 @@ fn the_installed_subscriber_writes_bounded_configurable_files() {
         tracing::debug!("only recorded because CLIPPED_LOG raised the level");
         tracing::trace!("must not be recorded at debug");
         tracing::info!(
-            path = %RedactedPath::new(r"C:\Users\alice\Videos\Clipped\match.mkv"),
+            path = %RedactedPath::new(RECORDING_PATH),
             "recording path chosen"
         );
     }
@@ -176,7 +188,7 @@ fn the_installed_subscriber_writes_bounded_configurable_files() {
         contents.contains("path=match.mkv#"),
         "the redacted path should identify the file:\n{contents}"
     );
-    for leaked in ["alice", "Videos", r"C:\Users"] {
+    for leaked in ["alice", "Videos", "Clipped"] {
         assert!(
             !contents.contains(leaked),
             "the log leaked {leaked}:\n{contents}"

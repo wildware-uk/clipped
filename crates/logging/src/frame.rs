@@ -43,11 +43,17 @@ pub const FRAME_TRACING: bool = cfg!(feature = "frame-tracing");
 /// );
 /// ```
 ///
-/// Enable it for a debugging session with:
+/// Enable it for a debugging session. The feature belongs to this package, so
+/// the switch is spelled against a package that depends on it — today only this
+/// one, because no binary has taken the dependency yet:
 ///
 /// ```text
-/// cargo run -p clipped-recorder --features clipped-logging/frame-tracing
+/// cargo test -p clipped-logging --features frame-tracing
 /// ```
+///
+/// Once a binary depends on `clipped-logging`, the form for running it is
+/// `cargo run -p clipped-recorder --features clipped-logging/frame-tracing`.
+/// See the "Logging from a capture thread" section of `docs/logging.md`.
 ///
 /// Note that the arguments are not evaluated in a normal build, so they must
 /// not be relied on for side effects.

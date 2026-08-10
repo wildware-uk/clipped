@@ -73,6 +73,22 @@ const DISABLED_DEBUG_TOLERANCE_NS: f64 = 5.0;
 /// notices if it stops being true in the generated code.
 const FRAME_TRACE_TOLERANCE_NS: f64 = 0.5;
 
+/// The same tolerance expressed as a fraction of the baseline loop's own cost,
+/// whichever is larger.
+///
+/// Code placement noise is a proportion of what the loop costs, not a fixed
+/// number of nanoseconds: in an unoptimised build the baseline is around 4
+/// ns/iteration and two identical loops differ by about 0.2 ns, so a flat 0.5 ns
+/// bound is only two and a half times the spread it has to sit above, and a slow
+/// or contended runner would fail this test for being slow rather than for
+/// logging costing anything. A failure nobody can distinguish from a real
+/// regression is worse than no assertion (AGENTS.md sections 25 and 51), so the
+/// bound scales the way the debug tolerance below already does. A quarter of the
+/// baseline is still far below the cost of the regression this exists to catch:
+/// a `trace_frame!` that lost its feature gate becomes a runtime-filtered event,
+/// which costs several nanoseconds in either profile.
+const FRAME_TRACE_TOLERANCE_FRACTION: f64 = 0.25;
+
 /// The arithmetic every loop performs, so that the loops differ only in whether
 /// they contain a log statement.
 #[inline(always)]
@@ -190,7 +206,7 @@ fn disabled_logging_costs_nothing_measurable_in_a_hot_loop() {
     );
 
     // On a machine slower than this test's author's, every figure here scales
-    // together, so the tolerance has a floor that scales with the baseline.
+    // together, so both tolerances have a floor that scales with the baseline.
     let disabled_debug_tolerance = DISABLED_DEBUG_TOLERANCE_NS.max(baseline);
 
     // With the feature on, `trace_frame!` is an ordinary `TRACE` event that
@@ -200,7 +216,7 @@ fn disabled_logging_costs_nothing_measurable_in_a_hot_loop() {
     let frame_trace_tolerance = if clipped_logging::FRAME_TRACING {
         disabled_debug_tolerance
     } else {
-        noise_floor + FRAME_TRACE_TOLERANCE_NS
+        noise_floor + FRAME_TRACE_TOLERANCE_NS.max(baseline * FRAME_TRACE_TOLERANCE_FRACTION)
     };
     assert!(
         frame_trace_overhead < frame_trace_tolerance,
