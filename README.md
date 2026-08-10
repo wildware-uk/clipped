@@ -129,6 +129,13 @@ without being placed in a layer.
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
 | 4 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–3 |
+| 5 | `clipped-video-pattern` (test application) | layers 0–4 |
+| 6 | `clipped-fullscreen-dx11` (test application) | layers 0–5 |
+
+Layers 5 and 6 are the controlled test applications in `test-apps/`, which
+capture tests point at instead of an installed game
+([docs/testing.md](docs/testing.md)). They are at the top of the stack because
+nothing in the product may depend on one.
 
 `clipped-logging` owns where diagnostics go and how much is recorded: it
 installs the process-wide `tracing` subscriber, resolves the log level from the
@@ -166,6 +173,7 @@ is not responsible for, and where it sits in this stack.
 | [docs/prerequisites.md](docs/prerequisites.md) | Toolchains, SDKs and driver expectations |
 | [docs/architecture.md](docs/architecture.md) | Subsystems, boundaries and ADRs |
 | [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
+| [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 
 The four `docs/` entries are written under issues #3, #6, #8 and #5 and are

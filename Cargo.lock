@@ -204,6 +204,17 @@ name = "clipped-events"
 version = "0.1.0"
 
 [[package]]
+name = "clipped-fullscreen-dx11"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clipped-capture",
+ "clipped-video-pattern",
+ "clipped-windows",
+ "windows",
+]
+
+[[package]]
 name = "clipped-game-detection"
 version = "0.1.0"
 
@@ -253,6 +264,16 @@ version = "0.1.0"
 [[package]]
 name = "clipped-storage"
 version = "0.1.0"
+
+[[package]]
+name = "clipped-video-pattern"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clipped-capture",
+ "clipped-windows",
+ "windows",
+]
 
 [[package]]
 name = "clipped-windows"

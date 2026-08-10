@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["apps/recorder", "crates/*", "tests/integration"]
+# `test-apps/*` are the controlled subjects capture tests point at instead of an
+# installed game (AGENTS.md section 26, docs/testing.md). They are workspace
+# members, and not a separate workspace, so that `cargo fmt`, `cargo clippy
+# --workspace --all-targets` and `cargo build --workspace` cover them: a test
+# application nobody compiles is a capture test that stops running, and finding
+# that out during a capture investigation is the worst possible moment.
+members = ["apps/recorder", "crates/*", "test-apps/*", "tests/integration"]
 
 [workspace.package]
 version = "0.1.0"
@@ -81,6 +87,15 @@ clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
 clipped-session = { path = "crates/session", version = "0.1.0" }
 clipped-storage = { path = "crates/storage", version = "0.1.0" }
 clipped-windows = { path = "crates/windows", version = "0.1.0" }
+
+# The controlled test applications (AGENTS.md section 26, docs/testing.md). They
+# are listed here for the same reason the crates above are — one place to change
+# a path or a version — and they are deliberately at the bottom: nothing in the
+# product may depend on one, which
+# `tests/integration/tests/workspace_layering.rs` asserts rather than hopes.
+# `clipped-fullscreen-dx11` is not listed because nothing depends on it; it is a
+# binary, and it is reached by running it.
+clipped-video-pattern = { path = "test-apps/video-pattern", version = "0.1.0" }
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

@@ -41,6 +41,17 @@ const LAYERS: &[&[&str]] = &[
     &["clipped-session"],
     // Executables and test-only packages.
     &["clipped-recorder", "clipped-workspace-tests"],
+    // The controlled test applications capture tests point at instead of an
+    // installed game (AGENTS.md section 26, docs/testing.md). They are above
+    // the executables rather than beside them for one reason: nothing in the
+    // product may depend on a test application, and putting them in their own
+    // layers is what makes that a rule the graph enforces rather than a
+    // convention.
+    &["clipped-video-pattern"],
+    // `fullscreen-dx11` is `video-pattern` pointed at a whole display, and
+    // shares its renderer and its pattern rather than owning a second copy, so
+    // it has to sit above it.
+    &["clipped-fullscreen-dx11"],
 ];
 
 fn workspace_root() -> PathBuf {

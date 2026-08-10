@@ -1,0 +1,45 @@
+[package]
+name = "clipped-fullscreen-dx11"
+description = "A controlled test application that takes a display fullscreen, for capture tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "fullscreen-dx11"
+path = "src/main.rs"
+
+# As in `clipped-video-pattern`: the test lives with the other system tests and
+# belongs to the package that owns the binary, because that is what makes
+# CARGO_BIN_EXE_fullscreen-dx11 exist.
+[[test]]
+name = "wgc_fullscreen_dx11"
+path = "../../tests/capture/wgc_fullscreen_dx11.rs"
+
+[dependencies]
+clap.workspace = true
+
+# The renderer, the pattern and the run loop. This binary is the same
+# application as `video-pattern` pointed at a whole display and asked to take it
+# exclusively; duplicating any of that here would mean two patterns to keep in
+# step with one decoder (AGENTS.md section 55).
+clipped-video-pattern.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# The test asserts that the window really did cover a whole display, and that
+# the display is the shape it was afterwards, which means knowing how big it is.
+clipped-windows.workspace = true
+clipped-capture.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[lints]
+workspace = true
