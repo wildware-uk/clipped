@@ -15,9 +15,10 @@ tracing.workspace = true
 
 `tracing` is pinned once in the root manifest's `[workspace.dependencies]`, so
 every crate that adopts it gets the same version and the same callsite registry.
-At the time of writing `clipped-logging` is the only crate that has taken the
-dependency, because the others are still documentation-only stubs; a crate takes
-it in the change that gives it something to log.
+At the time of writing `clipped-logging` and `clipped-recorder` are the only
+packages that have taken the dependency; the rest of `crates/` is still
+documentation-only stubs. A crate takes it in the change that gives it
+something to log.
 
 The crate sits at layer 0 and depends on no other `clipped-*` crate, so
 platform primitives and application logic alike can use it.
@@ -227,22 +228,23 @@ clipped_logging::trace_frame!(
 
 Turn it on for a debugging session. A feature belongs to the package that
 declares it, so the switch has to be spelled against a package that depends on
-`clipped-logging`. Today that is only `clipped-logging` itself:
+`clipped-logging`:
 
 ```text
 cargo test -p clipped-logging --features frame-tracing
 ```
 
-When a binary takes the dependency — `clipped-recorder` has not yet, because it
-has no run loop to log from — the form for running it becomes:
+From a binary that depends on it, the same feature is reached through the
+dependency:
 
 ```text
 cargo run -p clipped-recorder --features clipped-logging/frame-tracing
 ```
 
-That command fails today with *"the package 'clipped-recorder' does not contain
-this feature"*, and will keep failing until `clipped-recorder` lists
-`clipped-logging` in its dependencies.
+That works today, because `clipped-recorder` lists `clipped-logging` in its
+dependencies. Leaving off the `clipped-logging/` prefix does not: cargo reports
+*"the package 'clipped-recorder' does not contain this feature:
+frame-tracing"*, and names the package that does.
 
 **Detail worth having occasionally in a normal build.** Use `FrameSampler`,
 which reduces a per-frame event to one every *n* frames with a plain counter —

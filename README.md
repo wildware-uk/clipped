@@ -124,9 +124,9 @@ files under a documented per-user directory, and defines the standard context
 fields as types rather than loose strings. It deliberately does not own logging
 itself. The rule is that a crate wanting to emit events adds
 `tracing.workspace = true` and calls the `tracing` macros directly, so no
-diagnostic is routed through a Clipped-specific wrapper. `clipped-logging` is
-so far the only crate that has taken that dependency, because the others are
-still documentation-only stubs.
+diagnostic is routed through a Clipped-specific wrapper. `clipped-logging` and
+`clipped-recorder` are so far the only packages that have taken that
+dependency; the rest of `crates/` is still documentation-only stubs.
 
 Two rules matter most:
 

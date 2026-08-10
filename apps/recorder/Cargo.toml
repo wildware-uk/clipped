@@ -8,12 +8,52 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# The library target holds everything the binary does; `main.rs` is only an
+# entry point. It exists so that the command line can be tested through its own
+# types rather than only by spawning a process, and so that the Ctrl+C fixture
+# under `examples/` can install the same shutdown handler the recorder installs.
+# It is not a stable public API: see the note in `src/lib.rs`.
+[lib]
+name = "clipped_recorder"
+path = "src/lib.rs"
+
 [[bin]]
 name = "clipped-recorder"
 path = "src/main.rs"
 
 [dependencies]
+clipped-logging.workspace = true
 clipped-session.workspace = true
+# Argument parsing, pinned in the root manifest so every Clipped executable
+# behaves the same way. Dual MIT/Apache-2.0.
+clap.workspace = true
+# The logging facade. Diagnostics go through `tracing`; `clipped-logging` only
+# decides where they end up (docs/logging.md). MIT.
+tracing.workspace = true
+# Console control handling. Ctrl+C is a platform signal, and this crate is the
+# small, well-established wrapper over `SetConsoleCtrlHandler` on Windows and
+# `sigaction` elsewhere. Writing it by hand would put raw Win32 and an unsafe
+# block into an application crate for no gain (AGENTS.md sections 5 and 10).
+# Dual MIT/Apache-2.0.
+ctrlc = "3.4"
+# Local date and time, used to name the default output file after the moment
+# recording started. Calendar arithmetic and time-zone offsets are exactly the
+# kind of thing not to hand-roll. Dual MIT/Apache-2.0.
+time = { version = "0.3", default-features = false, features = [
+    "std",
+    "formatting",
+    "local-offset",
+    "macros",
+] }
+
+# Used by `examples/shutdown_fixture.rs` and `tests/ctrl_c.rs` to deliver a real
+# Ctrl+C to a real child process. Test-only, so no Win32 reaches the shipped
+# binary. Dual MIT/Apache-2.0.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
 
 [lints]
 workspace = true
