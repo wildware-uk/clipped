@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = ["apps/recorder", "crates/*", "tests/integration"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MPL-2.0"
+repository = "https://github.com/wildware-uk/clipped"
+authors = ["The Clipped contributors"]
+
+# Internal crates are referenced through the workspace so that a version bump
+# happens in one place. Layering rules are documented in README.md; a crate must
+# only depend on crates listed below it there.
+[workspace.dependencies]
+clipped-audio = { path = "crates/audio", version = "0.1.0" }
+clipped-capture = { path = "crates/capture", version = "0.1.0" }
+clipped-encoder = { path = "crates/encoder", version = "0.1.0" }
+clipped-events = { path = "crates/events", version = "0.1.0" }
+clipped-game-detection = { path = "crates/game-detection", version = "0.1.0" }
+clipped-library = { path = "crates/library", version = "0.1.0" }
+clipped-muxer = { path = "crates/muxer", version = "0.1.0" }
+clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
+clipped-session = { path = "crates/session", version = "0.1.0" }
+clipped-storage = { path = "crates/storage", version = "0.1.0" }
+clipped-windows = { path = "crates/windows", version = "0.1.0" }
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+# The recorder runs alongside games, so release builds trade compile time for
+# runtime cost. Debug symbols are kept because crash reports from users are the
+# only diagnostics available for a locally installed application.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

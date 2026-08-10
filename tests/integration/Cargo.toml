@@ -1,0 +1,16 @@
+[package]
+name = "clipped-workspace-tests"
+description = "Cross-crate tests that assert workspace-wide invariants"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / web UI
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Local development
+.env
+.env.local
+*.local
+
+# Recordings and other media produced while testing, which must never be
+# committed: they are large and can contain whatever was on screen.
+/recordings/
+*.mkv
+*.mp4
+*.wav
+
+# Editor and OS noise
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db

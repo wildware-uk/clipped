@@ -1,0 +1,7 @@
+# Only stable rustfmt options are configured here: unstable options would make
+# `cargo fmt --check` behave differently depending on the contributor's
+# toolchain channel, which defeats the point of enforcing formatting in CI.
+edition = "2021"
+max_width = 100
+newline_style = "Unix"
+use_field_init_shorthand = true
