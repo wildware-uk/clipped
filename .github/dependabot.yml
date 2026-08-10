@@ -1,0 +1,43 @@
+# Dependabot keeps the pins in this repository honest.
+#
+# Everything CI depends on is pinned to an exact version - the actions in
+# .github/workflows/ci.yml, cargo-deny, the crates in Cargo.lock - because a
+# floating version means a build can change without a commit explaining why.
+# The cost of that choice is that pins go stale silently, and a stale pin is
+# how a project ends up several years behind a security fix. Dependabot pays
+# that cost: each update arrives as its own pull request, runs through the same
+# CI as any other change, and is reviewed rather than absorbed.
+#
+# rust-toolchain.toml is deliberately absent from this file. Dependabot does not
+# manage it, and it should not: a compiler bump changes which lints fire across
+# the whole workspace, so it belongs in a deliberate commit with the lint
+# fallout fixed alongside it (see the comment in rust-toolchain.toml).
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    labels:
+      - "area:infra"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    labels:
+      - "area:infra"
+    # One pull request per patch bump of a transitive crate is noise nobody
+    # reads. Grouping the routine updates keeps the individual pull requests for
+    # the changes worth looking at - a major version, or a crate Clipped depends
+    # on directly.
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch

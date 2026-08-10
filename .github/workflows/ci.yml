@@ -1,0 +1,339 @@
+# Continuous integration for Clipped.
+#
+# Clipped is a Windows application, so everything here runs on Windows. A green
+# build on Linux would tell us nothing about whether the recorder compiles
+# against the Windows SDK, and AGENTS.md section 51 is explicit that code which
+# only works on the original developer's machine does not get merged.
+#
+# The four commands in the `rust` job are the same four CONTRIBUTING.md asks a
+# contributor to run before opening a pull request. They are deliberately not
+# paraphrased here: if CI and the contribution guide disagree about what "done"
+# means, the contribution guide loses, and nobody finds out until review.
+#
+# Every `uses:` below is pinned to a full commit SHA, with the human-readable
+# version in a trailing comment. A tag is not a pin: whoever controls the action
+# repository can move `v4` to point at a different commit, which is exactly how
+# the tj-actions/changed-files compromise reached consumers who thought they had
+# pinned. A SHA names one immutable tree. Dependabot understands SHA pins and
+# rewrites the trailing comment when it bumps one, so this costs nothing in
+# staleness - see .github/dependabot.yml.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Nothing here writes to the repository. Checks report through the check-run
+# API, which needs no token permissions beyond reading the code.
+permissions:
+  contents: read
+
+# A pull request that is pushed to twice in quick succession does not need the
+# first run finished. Pushes to `main` are never cancelled: `main` being green
+# is a fact about a commit, and cancelling that run would leave a gap in it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # A test that fails only in CI is the most expensive kind to diagnose, so the
+  # backtrace is captured the first time rather than after a re-run.
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  rust:
+    name: Rust (format, lint, build, test)
+    # `windows-latest` rather than a pinned image: the reproducibility that
+    # matters here is the compiler, and rust-toolchain.toml pins that exactly.
+    # Following the current image means a Windows SDK or MSVC change reaches us
+    # as a CI failure we can look at, rather than as a bug report from the first
+    # contributor to upgrade.
+    runs-on: windows-latest
+
+    steps:
+      # .gitattributes normalises the repository to LF and rustfmt.toml sets
+      # newline_style = "Unix". GitHub's Windows images ship git with
+      # core.autocrlf enabled, so without this the checkout is free to write
+      # CRLF and `cargo fmt --all --check` fails on every file for reasons that
+      # have nothing to do with the change under test. This has to run before
+      # the checkout, because the checkout is what would do the converting.
+      - name: Keep git from rewriting line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The step above states an intention; this one checks it held. A working
+      # tree with CRLF in it produces confusing formatting failures later, and
+      # "CI rewrote your line endings" is a much more useful thing to read than
+      # a thousand-line rustfmt diff.
+      - name: Verify the working tree uses LF line endings
+        run: |
+          $offenders = @(git ls-files --eol | Where-Object { $_ -match 'w/(crlf|mixed)' })
+          if ($offenders.Count -gt 0) {
+              Write-Host 'Files were checked out with non-LF line endings:' -ForegroundColor Red
+              $offenders | ForEach-Object { Write-Host "  $_" }
+              Write-Host ''
+              Write-Host 'The repository is LF-only (.gitattributes) and rustfmt.toml sets newline_style = "Unix".'
+              exit 1
+          }
+          Write-Host "All $((git ls-files).Count) tracked files are LF or binary."
+
+      # rust-toolchain.toml is the single source of truth for the compiler
+      # version, the components and the target. Installing a toolchain by name
+      # here - with dtolnay/rust-toolchain or otherwise - would mean CI could
+      # silently drift from what contributors build with, which is the exact
+      # thing the pin exists to prevent. `rustup toolchain install` with no
+      # arguments reads the file, and is the command docs/prerequisites.md tells
+      # a new contributor to run.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      # Issue #3 asks for the documented prerequisites to be verified on a
+      # machine that has never built the project. A GitHub-hosted runner is
+      # exactly that, every single run. Its output is copied into the run
+      # summary so that a drift in the documentation is visible without opening
+      # the log.
+      #
+      # Invoked the way docs/prerequisites.md says to invoke it, including the
+      # Windows PowerShell 5.1 host, so that what CI exercises is what a
+      # contributor pastes.
+      - name: Check documented prerequisites
+        shell: powershell
+        run: |
+          # GitHub prepends `$ErrorActionPreference = 'stop'` to a `powershell`
+          # step. Under Windows PowerShell 5.1, merging a native executable's
+          # stderr into the success stream with `2>&1` wraps each stderr line in
+          # a NativeCommandError ErrorRecord, which is terminating under Stop.
+          # So the first time the script below wrote anything to stderr, this
+          # step would throw before `$output` was ever assigned: no log, no run
+          # summary, no `exit $code`. That is precisely the unhappy path this
+          # step exists to report on, so stderr is captured with the preference
+          # relaxed and the exit code is decided by the script, not by the host.
+          $ErrorActionPreference = 'Continue'
+          $output = & powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          "## Prerequisite check on a clean runner`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit $code
+
+      # crates/muxer links against the FFmpeg C libraries (issue #7), and the
+      # Rust FFmpeg bindings generate their headers with bindgen, which loads
+      # libclang.dll at build time. Without LIBCLANG_PATH pointing at a
+      # directory containing that DLL, the build fails with "Unable to find
+      # libclang" - a message that names neither FFmpeg nor the step that should
+      # have set it up.
+      #
+      # The runner image is widely said to ship LLVM at C:\Program Files\LLVM.
+      # This step does not assume that: it reports every location it looked in
+      # and what it found, so the log answers the question rather than the
+      # comment doing it. It never fails the job - nothing in the workspace
+      # needs libclang until #7 lands, and once it does the honest failure is
+      # the build error naming the missing DLL, not a red step here.
+      - name: Locate libclang for bindgen
+        run: |
+          $candidates = @(
+              'C:\Program Files\LLVM\bin'
+              'C:\Program Files (x86)\LLVM\bin'
+          )
+          # LLVM also ships inside Visual Studio as an optional component. Ask
+          # vswhere where VS actually is rather than guessing at a year and an
+          # edition in a path, both of which change with the image.
+          $programFilesX86 = ${env:ProgramFiles(x86)}
+          $vswhere = if ($programFilesX86) {
+              Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          } else { $null }
+          if ($vswhere -and (Test-Path -LiteralPath $vswhere)) {
+              $vsRoot = & $vswhere -latest -products * -property installationPath
+              if ($vsRoot) { $candidates += (Join-Path $vsRoot 'VC\Tools\Llvm\x64\bin') }
+          }
+
+          Write-Host 'Looking for libclang.dll:'
+          $found = $null
+          foreach ($dir in $candidates) {
+              $dll = Join-Path $dir 'libclang.dll'
+              if (Test-Path -LiteralPath $dll) {
+                  $size = [math]::Round((Get-Item -LiteralPath $dll).Length / 1MB, 1)
+                  Write-Host "  [found]   $dll (${size} MB)"
+                  if (-not $found) { $found = $dir }
+              }
+              else {
+                  Write-Host "  [missing] $dll"
+              }
+          }
+
+          $clang = Get-Command clang -ErrorAction SilentlyContinue
+          if ($clang) {
+              Write-Host "clang on PATH: $($clang.Source)"
+              Write-Host "  $(& clang --version | Select-Object -First 1)"
+          }
+          else {
+              Write-Host 'clang is not on PATH.'
+          }
+
+          if ($found) {
+              "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Write-Host ''
+              Write-Host "LIBCLANG_PATH=$found for the rest of this job."
+              "> libclang: found at ``$found``, LIBCLANG_PATH set.`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          else {
+              $message = "libclang.dll was not found in any known location on this runner. LIBCLANG_PATH is left unset. Nothing in the workspace needs it yet; when crates/muxer starts linking FFmpeg (issue #7) this step will need to install LLVM rather than merely locate it."
+              Write-Host ''
+              Write-Host $message -ForegroundColor Yellow
+              "> $message`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+      # A sibling change (issue #7) adds scripts/fetch-ffmpeg.ps1 and an
+      # FFmpeg-linked crates/muxer. Until it lands there is nothing to fetch,
+      # and the guard says so out loud rather than quietly doing nothing:
+      # a step that silently succeeds without running is indistinguishable from
+      # one that ran, which is how a build ends up trusted for the wrong reason.
+      - name: Fetch FFmpeg
+        run: |
+          $script = 'scripts/fetch-ffmpeg.ps1'
+          if (Test-Path -LiteralPath $script) {
+              & powershell -ExecutionPolicy Bypass -File $script
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          else {
+              $message = "SKIPPED - FFmpeg fetch: $script does not exist yet, so there is nothing to fetch. The FFmpeg dependency strategy is issue #7; this step starts running by itself when that script appears."
+              Write-Host $message -ForegroundColor Yellow
+              "> $message`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+      # Restores the cargo registry, the git checkouts and target/, keyed on the
+      # lockfile and the toolchain, and prunes artefacts that no longer belong
+      # to any dependency so the cache does not grow without bound.
+      #
+      # Licence note: rust-cache is LGPL-3.0. That is a licence Clipped will not
+      # accept in a *dependency* (CONTRIBUTING.md), but this is not one - it is
+      # never linked into the recorder and is never distributed by us, it only
+      # runs on GitHub's infrastructure, and the LGPL places no conditions on
+      # running a program. Pinned to a commit SHA, like everything else here, so
+      # that neither a new release nor a moved tag can change a build without a
+      # commit in this repository saying so.
+      - name: Restore the cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # --all-targets so that tests, benches and examples are linted too; a
+      # warning in a test file is still a warning somebody has to read.
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      # Hardware-dependent capture and encoder tests are deliberately not run
+      # here: a hosted runner has no GPU and no game to record, so they would be
+      # testing the runner rather than Clipped. That path is manual and is
+      # tracked in M13.
+      - name: Test
+        run: cargo test --workspace
+
+  deny:
+    name: Dependencies (licences and advisories)
+    runs-on: windows-latest
+
+    steps:
+      - name: Keep git from rewriting line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      # Pinned to an exact cargo-deny version: the advisory database moves on
+      # its own, which is the point, but the tool interpreting deny.toml should
+      # not change underneath a pull request as well.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: cargo-deny@0.20.2
+
+      # Runs every check deny.toml configures: licences against the allow-list,
+      # RustSec advisories, banned and wildcard version requirements, and the
+      # registries dependencies come from. --all-features because an optional
+      # dependency's licence is not optional.
+      - name: Check dependency licences and advisories
+        run: cargo deny --all-features check
+
+  ui:
+    name: Desktop UI (lint and build)
+    runs-on: windows-latest
+
+    steps:
+      - name: Keep git from rewriting line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Tauri/React desktop application does not exist yet. Rather than
+      # leaving this job out and adding it later - by which time nobody
+      # remembers CI does not cover the UI - the job exists now and reports, in
+      # the log and in the run summary, that it has nothing to do and why.
+      - name: Look for the desktop workspace
+        id: workspace
+        run: |
+          $manifest = 'apps/desktop/package.json'
+          if (Test-Path -LiteralPath $manifest) {
+              "present=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              Write-Host "Found $manifest; linting and building the desktop application."
+          }
+          else {
+              "present=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              $message = "SKIPPED - desktop UI: $manifest does not exist yet, so there is no UI to lint or build. These steps start running by themselves when the Tauri/React application lands."
+              Write-Host $message -ForegroundColor Yellow
+              "> $message`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+      # .nvmrc is the pin, for the same reason rust-toolchain.toml is: the
+      # version is decided in the repository, not in this file.
+      - name: Install Node
+        if: steps.workspace.outputs.present == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      # `npm ci` rather than `npm install`, so the lockfile is honoured exactly
+      # and CI cannot quietly resolve a different dependency tree to the one a
+      # contributor tested against.
+      - name: Install dependencies
+        if: steps.workspace.outputs.present == 'true'
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Lint
+        if: steps.workspace.outputs.present == 'true'
+        working-directory: apps/desktop
+        run: npm run lint
+
+      - name: Build
+        if: steps.workspace.outputs.present == 'true'
+        working-directory: apps/desktop
+        run: npm run build
