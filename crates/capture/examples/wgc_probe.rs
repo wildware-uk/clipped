@@ -28,6 +28,7 @@
 //! cargo run --release -p clipped-capture --example wgc_probe -- --mode monitor --seconds 60
 //! cargo run --release -p clipped-capture --example wgc_probe -- --mode lifecycle --seconds 25
 //! cargo run --release -p clipped-capture --example wgc_probe -- --mode windowed --seconds 1800 --sample-seconds 60
+//! cargo run --release -p clipped-capture --example wgc_probe -- --mode windowed --seconds 10 --stall-ms 200
 //! ```
 //!
 //! # What it measures
@@ -38,12 +39,28 @@
 //!   percentile interval, and how many intervals were more than 1.5 target
 //!   intervals long, which is what "a stutter" means when a person says it.
 //! - **Dropped frames.** `CapturedFrame::frames_missed`, as the backend derives
-//!   it from the frame pool's depth.
+//!   it from the source's timestamps. `--stall-ms` holds each frame for a while
+//!   before releasing it, which is what a machine that cannot encode fast enough
+//!   does to the frame pool, and is how the count is shown to move rather than
+//!   assumed to.
 //! - **Leaks.** Process working set, private bytes, handle count and the
 //!   adapter's *local* video memory usage for this process, sampled on a fixed
 //!   interval. A capture that leaks a texture, a frame or a pool per frame shows
 //!   up in the last of those within a minute; a run whose samples are flat for
 //!   half an hour is the evidence the third acceptance criterion asks for.
+//!
+//! # Minimising the window invalidates a run
+//!
+//! Windows Graphics Capture stops delivering frames for a **minimised** window.
+//! It keeps delivering for an occluded one — that is the whole reason SPEC.md
+//! section 8 prefers this method — but minimise is different, and any pacing or
+//! dropped-frame figure covering a minimised stretch is measuring Alt-Tab rather
+//! than the backend.
+//!
+//! So the probe watches its own window's state throughout the run and says so:
+//! a run in which the window was minimised prints a `CONTAMINATED` banner and
+//! exits non-zero. A contaminated run is discarded and repeated, not reported.
+//! The exception is `--mode lifecycle`, which minimises on purpose and says so.
 
 use std::env;
 use std::fmt::Write as _;
@@ -81,10 +98,11 @@ use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetClientRect, GetSystemMetrics, PeekMessageW, PostQuitMessage, RegisterClassW,
-    SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, MSG,
-    PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_MINIMIZE,
-    SW_RESTORE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    GetClientRect, GetSystemMetrics, IsIconic, IsWindowVisible, PeekMessageW, PostQuitMessage,
+    RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
 
 /// How the test window is presented.
@@ -146,6 +164,7 @@ struct Options {
     sample_interval: Duration,
     width: u32,
     height: u32,
+    stall: Duration,
 }
 
 impl Default for Options {
@@ -157,6 +176,7 @@ impl Default for Options {
             sample_interval: Duration::from_secs(30),
             width: 1280,
             height: 720,
+            stall: Duration::ZERO,
         }
     }
 }
@@ -170,6 +190,9 @@ wgc_probe — measures the Windows Graphics Capture backend against a test windo
   --fps <n>                                         the rate the test window presents at (default: 60)
   --sample-seconds <n>                              resource sampling interval (default: 30)
   --size <width>x<height>                           test window client size (default: 1280x720)
+  --stall-ms <n>                                    hold each frame this long before releasing it,
+                                                    to starve the pool the way a slow encoder does
+                                                    (default: 0)
   --help                                            this message
 ";
 
@@ -201,6 +224,11 @@ fn parse_options() -> Result<Option<Options>, String> {
                     value()?
                         .parse()
                         .map_err(|_| "--sample-seconds needs a number")?,
+                );
+            }
+            "--stall-ms" => {
+                options.stall = Duration::from_millis(
+                    value()?.parse().map_err(|_| "--stall-ms needs a number")?,
                 );
             }
             "--size" => {
@@ -239,9 +267,17 @@ fn main() -> ExitCode {
     };
 
     match run(options) {
-        Ok(report) => {
-            print!("{report}");
-            ExitCode::SUCCESS
+        Ok(outcome) => {
+            print!("{}", outcome.report);
+            // A contaminated run must not be quietly readable as a result, so
+            // it fails: whoever launched it — a person or a script — is told
+            // that these numbers describe the window being minimised rather
+            // than the backend, and that the run has to be repeated.
+            if outcome.contaminated {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(message) => {
             eprintln!("wgc_probe failed: {message}");
@@ -287,6 +323,83 @@ fn tracing_subscriber_stub() {
     let _ = tracing::subscriber::set_global_default(Stderr);
 }
 
+/// Watches the test window's state so that a run spoiled by minimising it says
+/// so instead of reporting the numbers as though they meant something.
+///
+/// Windows Graphics Capture stops delivering frames for a minimised window, so
+/// a minimised stretch shows up as a pacing collapse that looks exactly like a
+/// backend problem and is not one. Occlusion is not the same thing and is not
+/// watched for: the compositor is asked for the item's own content, so a window
+/// drawn over the target changes nothing.
+///
+/// `IsWindowVisible` is checked alongside `IsIconic` because hiding a window
+/// stops composition for the same reason and would spoil a run the same way.
+#[derive(Debug)]
+struct WindowWatch {
+    window: HWND,
+    started: Instant,
+    /// When the current spoiled stretch began, if one is in progress.
+    since: Option<Instant>,
+    periods: u32,
+    total: Duration,
+}
+
+impl WindowWatch {
+    fn new(window: HWND, started: Instant) -> Self {
+        Self {
+            window,
+            started,
+            since: None,
+            periods: 0,
+            total: Duration::ZERO,
+        }
+    }
+
+    /// Samples the window, and returns a timeline entry when the state changed.
+    fn poll(&mut self) -> Option<(Duration, String)> {
+        // SAFETY: `self.window` is the test window, live for the whole capture;
+        // both calls only read the window table and take no pointers.
+        let hidden = unsafe { IsIconic(self.window) }.as_bool()
+            || !unsafe { IsWindowVisible(self.window) }.as_bool();
+
+        match (hidden, self.since) {
+            (true, None) => {
+                self.since = Some(Instant::now());
+                self.periods += 1;
+                Some((
+                    self.started.elapsed(),
+                    "the test window was minimised or hidden; Windows Graphics Capture \
+                     stops delivering frames for one, so this run no longer measures the \
+                     backend"
+                        .to_owned(),
+                ))
+            }
+            (false, Some(since)) => {
+                let spoiled = since.elapsed();
+                self.total += spoiled;
+                self.since = None;
+                Some((
+                    self.started.elapsed(),
+                    format!(
+                        "the test window came back after {:.1}s minimised or hidden",
+                        spoiled.as_secs_f64()
+                    ),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Closes any stretch still open, and reports how much of the run was
+    /// spoiled.
+    fn finish(mut self) -> (u32, Duration) {
+        if let Some(since) = self.since.take() {
+            self.total += since.elapsed();
+        }
+        (self.periods, self.total)
+    }
+}
+
 /// One resource sample, taken on a fixed interval so that a leak shows as a
 /// trend rather than as a single suspicious number.
 #[derive(Debug, Clone, Copy)]
@@ -318,6 +431,10 @@ struct Measurements {
     /// than a total.
     events: Vec<(Duration, String)>,
     target_lost: bool,
+    /// Stretches in which the test window was minimised or hidden, and how long
+    /// they lasted in total. See [`WindowWatch`].
+    spoiled_periods: u32,
+    spoiled_for: Duration,
 }
 
 impl Measurements {
@@ -364,7 +481,13 @@ impl Measurements {
     }
 }
 
-fn run(options: Options) -> Result<String, String> {
+/// What a run produced: the report, and whether it is fit to be read.
+struct Outcome {
+    report: String,
+    contaminated: bool,
+}
+
+fn run(options: Options) -> Result<Outcome, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let window_handle = Arc::new(AtomicIsize::new(0));
     let window_ready = Arc::new(AtomicBool::new(false));
@@ -417,7 +540,7 @@ fn run(options: Options) -> Result<String, String> {
 }
 
 /// Runs the capture loop and produces the report.
-fn capture(options: Options, window_handle: &AtomicIsize) -> Result<String, String> {
+fn capture(options: Options, window_handle: &AtomicIsize) -> Result<Outcome, String> {
     let raw = window_handle.load(Ordering::SeqCst);
     let window = HWND(raw as *mut core::ffi::c_void);
 
@@ -484,11 +607,15 @@ fn capture(options: Options, window_handle: &AtomicIsize) -> Result<String, Stri
             .saturating_add(1024),
     );
     let started = Instant::now();
+    let mut watch = WindowWatch::new(window, started);
     let mut next_sample = Duration::ZERO;
     let mut last_frame_at = Instant::now();
     let mut in_a_gap = false;
 
     while started.elapsed() < options.duration {
+        if let Some(event) = watch.poll() {
+            measurements.events.push(event);
+        }
         if started.elapsed() >= next_sample {
             measurements
                 .samples
@@ -505,6 +632,14 @@ fn capture(options: Options, window_handle: &AtomicIsize) -> Result<String, Stri
                 // the frame — which is what returns the buffer to the pool, and
                 // therefore what makes the leak measurement meaningful.
                 measurements.record_frame(frame.timestamp(), frame.frames_missed());
+                if !options.stall.is_zero() {
+                    // Deliberately inside the arm, so the frame — and the pool
+                    // buffer behind it — is still held while this sleeps. That
+                    // is what a slow encoder does to the frame pool, and it is
+                    // the only way to make the dropped-frame count move without
+                    // asking it to lie.
+                    thread::sleep(options.stall);
+                }
                 if in_a_gap {
                     let gap = last_frame_at.elapsed();
                     measurements.events.push((
@@ -557,6 +692,10 @@ fn capture(options: Options, window_handle: &AtomicIsize) -> Result<String, Stri
         }
     }
 
+    let (spoiled_periods, spoiled_for) = watch.finish();
+    measurements.spoiled_periods = spoiled_periods;
+    measurements.spoiled_for = spoiled_for;
+
     measurements
         .samples
         .push(sampler.sample(started.elapsed(), measurements.frames));
@@ -569,14 +708,23 @@ fn capture(options: Options, window_handle: &AtomicIsize) -> Result<String, Stri
 
     let after_shutdown = sampler.sample(started.elapsed(), measurements.frames);
 
-    Ok(report(
-        options,
-        &selection,
-        format,
-        &measurements,
-        target_interval,
-        after_shutdown,
-    ))
+    // A lifecycle run minimises on purpose and is about what the backend does
+    // when it happens; every other mode measures the backend against a window
+    // nobody touched, and a minimised stretch means it was not.
+    let contaminated = measurements.spoiled_periods > 0 && options.mode != Mode::Lifecycle;
+
+    Ok(Outcome {
+        report: report(
+            options,
+            &selection,
+            format,
+            &measurements,
+            target_interval,
+            after_shutdown,
+            contaminated,
+        ),
+        contaminated,
+    })
 }
 
 fn report(
@@ -586,9 +734,23 @@ fn report(
     measurements: &Measurements,
     target_interval: Duration,
     after_shutdown: ResourceSample,
+    contaminated: bool,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "\n=== wgc_probe ===");
+    if contaminated {
+        let _ = writeln!(
+            out,
+            "*** CONTAMINATED RUN - DISCARD IT ***\n\
+             The test window was minimised or hidden for {:.1}s of this run, in {} \
+             stretch(es).\n\
+             Windows Graphics Capture stops delivering frames for a minimised window, so \
+             every\npacing and dropped-frame figure below measures that rather than the \
+             backend. Repeat\nthe run without touching the probe window.",
+            measurements.spoiled_for.as_secs_f64(),
+            measurements.spoiled_periods
+        );
+    }
     let _ = writeln!(out, "mode                 : {}", options.mode.label());
     let _ = writeln!(out, "capture method       : {}", selection.setting());
     let _ = writeln!(out, "current method       : {}", selection.method());
@@ -608,6 +770,24 @@ fn report(
         measurements.frames_missed
     );
     let _ = writeln!(out, "non-monotonic stamps : {}", measurements.non_monotonic);
+    let _ = writeln!(
+        out,
+        "window minimised     : {}",
+        if measurements.spoiled_periods == 0 {
+            "never - it was on screen for the whole run".to_owned()
+        } else {
+            format!(
+                "{} stretch(es) totalling {:.1}s{}",
+                measurements.spoiled_periods,
+                measurements.spoiled_for.as_secs_f64(),
+                if contaminated {
+                    " <- CONTAMINATED"
+                } else {
+                    " (scripted by this mode)"
+                }
+            )
+        }
+    );
 
     match measurements.measured_fps() {
         Some(fps) => {

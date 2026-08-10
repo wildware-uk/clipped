@@ -289,8 +289,16 @@ impl CaptureBackend for GraphicsCaptureBackend {
         }
 
         let deadline = Instant::now() + timeout;
+        let mut look = Look::First;
         loop {
-            match running.take_next_frame()? {
+            // Read before looking in the pool, not after. `wait_for_frame`
+            // compares against this number, so anything that arrives while this
+            // thread is between the pool and the lock is already newer than the
+            // baseline and wakes the wait immediately instead of being slept
+            // through.
+            let arrivals_before = running.arrivals();
+
+            match running.take_next_frame(look)? {
                 Taken::Frame => return Ok(Acquisition::Frame(running.lend_held_frame())),
                 Taken::SizeChanged(size) => {
                     running.awaiting_resize = Some(size);
@@ -307,16 +315,23 @@ impl CaptureBackend for GraphicsCaptureBackend {
             if running.target_is_closed() {
                 return Err(CaptureError::TargetLost { method: METHOD });
             }
-            if !running.wait_for_frame(deadline) {
-                // Nothing arrived. Before reporting that as ordinary, ask
-                // whether there is still anything to wait for: see
-                // `Running::target_has_gone` for why the `Closed` event is not
-                // enough on its own.
+            if !running.wait_for_frame(arrivals_before, deadline) {
+                // Nothing arrived for the whole timeout, so the source is idle
+                // rather than this backend being behind. Break the timestamp
+                // chain: the gap the next frame ends is the source's silence,
+                // and counting it as frames this backend missed would report a
+                // paused game as a dropped-frame storm.
+                running.gaps.forget();
+
+                // Before reporting the timeout as ordinary, ask whether there
+                // is still anything to wait for: see `Running::target_has_gone`
+                // for why the `Closed` event is not enough on its own.
                 if running.target_has_gone() {
                     return Err(CaptureError::TargetLost { method: METHOD });
                 }
                 return Ok(Acquisition::Timeout);
             }
+            look = Look::AfterWaiting;
         }
     }
 
@@ -349,6 +364,106 @@ impl CaptureBackend for GraphicsCaptureBackend {
 impl Drop for GraphicsCaptureBackend {
     fn drop(&mut self) {
         self.shut_down();
+    }
+}
+
+/// Whether an attempt to take a frame is the first of an acquisition or a
+/// retry after waiting for one to arrive.
+///
+/// This is what separates "the source produced nothing" from "this backend was
+/// not there to take it", and it is the whole basis of the dropped-frame count:
+/// a frame already sitting in the pool the first time an acquisition looks was
+/// composed while the caller was elsewhere, whereas a frame that only appeared
+/// after a wait was one the source had not produced yet. Measured on Windows 11
+/// build 26200 against a 60 fps source: a caller that returned immediately took
+/// 601 of 603 frames after waiting, and a caller that stalled 200 ms per frame
+/// took all 50 of its frames on the first look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Look {
+    /// The first look of this acquisition.
+    First,
+    /// A look after [`CaptureSignal::wait_until`] reported something new.
+    AfterWaiting,
+}
+
+/// The dropped-frame count, derived from the source's own clock.
+///
+/// Windows Graphics Capture has no "frames missed" field, and it cannot be
+/// counted from `FrameArrived` either. The compositor does not compose into a
+/// pool with no free buffer, and it raises no event for the frames it therefore
+/// skips, so arrivals track deliveries however far behind the caller falls.
+/// Measured on Windows 11 build 26200 against a 60 fps source with a caller
+/// stalling 200 ms per frame: 52 arrivals, 50 deliveries and nothing else, over
+/// ten seconds in which the source presented about 600 frames.
+///
+/// What does survive is the timestamps. Consecutive delivered frames are
+/// differenced and the gap is divided by [`shortest`](Self::shortest), the
+/// smallest interval this capture has ever seen between two frames, which is
+/// the best evidence available of how often the source produces one. A gap of
+/// `n` whole intervals means `n - 1` source frames went by without one reaching
+/// the caller. The estimate is the shortest interval *seen*, so it is never
+/// shorter than the source's real interval and the division never over-counts:
+/// the figure is a lower bound, which is the right direction for a number a
+/// user reads as "your machine could not keep up".
+///
+/// # What is deliberately not counted
+///
+/// A gap counts only when the frame was already waiting in the pool the first
+/// time the acquisition looked ([`Look::First`]). That is the difference
+/// between a caller too slow to collect what the source produced and a source
+/// that produced nothing — a paused game, a static menu, an idle desktop —
+/// which the caller sat and waited through. [`forget`](Self::forget) breaks the
+/// chain for the same reason after a timeout, a discarded frame and a resize:
+/// the silence around those is nobody's dropped frame.
+///
+/// # What it cannot separate
+///
+/// A source that slows down at the same moment the caller does. Nothing in the
+/// API distinguishes them, and a capture whose caller never once kept up has no
+/// short interval to compare against and reports nothing at all. Both are
+/// stated in `docs/capture-pipeline.md` rather than papered over.
+#[derive(Debug, Default, Clone, Copy)]
+struct FrameGaps {
+    /// The source timestamp of the previously delivered frame, in `TimeSpan`
+    /// ticks. [`None`] before the first frame and after [`forget`](Self::forget).
+    previous: Option<u64>,
+    /// The shortest interval between two consecutive delivered frames seen so
+    /// far, in `TimeSpan` ticks.
+    shortest: Option<NonZeroU64>,
+}
+
+impl FrameGaps {
+    /// Records a frame timestamped `ticks` and returns how many source frames
+    /// went by since the previous one without reaching the caller.
+    fn missed_before(&mut self, ticks: u64, look: Look) -> u32 {
+        let Some(previous) = self.previous.replace(ticks) else {
+            return 0;
+        };
+        let Some(gap) = ticks.checked_sub(previous).and_then(NonZeroU64::new) else {
+            // Equal, or going backwards. Neither is a frame interval, and a
+            // capture backend is not the place to argue with the compositor's
+            // clock.
+            return 0;
+        };
+
+        let interval = match self.shortest {
+            Some(shortest) if shortest <= gap => shortest,
+            _ => {
+                self.shortest = Some(gap);
+                gap
+            }
+        };
+
+        if look != Look::First {
+            return 0;
+        }
+        u32::try_from((gap.get() / interval.get()).saturating_sub(1)).unwrap_or(u32::MAX)
+    }
+
+    /// Forgets the previous frame, so the next gap is not measured across
+    /// silence this backend did not cause.
+    fn forget(&mut self) {
+        self.previous = None;
     }
 }
 
@@ -386,7 +501,8 @@ struct HeldFrame {
     texture: ID3D11Texture2D,
     /// The timestamp the frame arrived with, converted once.
     timestamp: CaptureTimestamp,
-    /// Frames the pool is known to have discarded before this one.
+    /// Source frames that went by between the previous delivered frame and this
+    /// one without reaching the caller; see [`FrameGaps`].
     frames_missed: u32,
 }
 
@@ -421,17 +537,8 @@ struct Running {
     /// set the backend is idle and every acquisition repeats the report, which
     /// is what the trait documents.
     awaiting_resize: Option<FrameSize>,
-    /// Frames handed to the caller, for the dropped-frame accounting below.
-    delivered: u64,
-    /// Frames taken from the pool and thrown away by this backend, which
-    /// happens for the frame that reveals a size change and for a frame that
-    /// arrives with a zero dimension because the window was minimised.
-    discarded: u64,
-    /// The running lower bound on frames the pool dropped; see
-    /// [`Running::frames_missed_since_last_delivery`].
-    lost: u64,
-    /// The value of `lost` when the previous frame was delivered.
-    lost_at_last_delivery: u64,
+    /// The dropped-frame accounting; see [`FrameGaps`].
+    gaps: FrameGaps,
 }
 
 impl Running {
@@ -509,10 +616,7 @@ impl Running {
             format: FrameFormat::new(size, PixelFormat::Bgra8Unorm),
             held: None,
             awaiting_resize: None,
-            delivered: 0,
-            discarded: 0,
-            lost: 0,
-            lost_at_last_delivery: 0,
+            gaps: FrameGaps::default(),
         })
     }
 
@@ -553,7 +657,10 @@ impl Running {
     }
 
     /// Takes one frame out of the pool, if there is one.
-    fn take_next_frame(&mut self) -> Result<Taken, CaptureError> {
+    ///
+    /// `look` says whether this acquisition has waited yet, which is what the
+    /// dropped-frame count is derived from; see [`Look`].
+    fn take_next_frame(&mut self, look: Look) -> Result<Taken, CaptureError> {
         let Some(frame) = self.try_get_next_frame()? else {
             return Ok(Taken::Nothing);
         };
@@ -563,7 +670,10 @@ impl Running {
             .map_err(|error| backend_error("reading a frame's content size", error))?;
 
         if content_size != self.pool_size {
-            self.discarded += 1;
+            // A frame this backend threw away is not a frame the caller saw, so
+            // the chain of timestamps the dropped-frame count differences ends
+            // here rather than spanning the discard.
+            self.gaps.forget();
             drop(frame);
             return match frame_size(content_size) {
                 Some(size) => Ok(Taken::SizeChanged(size)),
@@ -597,18 +707,18 @@ impl Running {
         let texture: ID3D11Texture2D = unsafe { access.GetInterface() }
             .map_err(|error| backend_error("reading a frame's Direct3D 11 texture", error))?;
 
-        self.delivered += 1;
-        let frames_missed = self.frames_missed_since_last_delivery();
+        // `TimeSpan::Duration` is signed and counts from an arbitrary
+        // system-relative origin. It is never negative for a captured frame;
+        // clamping rather than casting keeps a driver that ever reported one
+        // from wrapping to an enormous timestamp.
+        let ticks = timestamp.Duration.max(0).unsigned_abs();
+        let frames_missed = self.gaps.missed_before(ticks, look);
 
         self.held = Some(HeldFrame {
             frame,
             texture,
             timestamp: CaptureTimestamp::from_performance_counter(
-                // `TimeSpan::Duration` is signed and counts from an arbitrary
-                // system-relative origin. It is never negative for a captured
-                // frame; clamping rather than casting keeps a driver that ever
-                // reported one from wrapping to an enormous timestamp.
-                timestamp.Duration.max(0).unsigned_abs(),
+                ticks,
                 NonZeroU64::new(TIMESPAN_TICKS_PER_SECOND)
                     .expect("a TimeSpan ticks 10 million times a second"),
             ),
@@ -635,33 +745,9 @@ impl Running {
         }
     }
 
-    /// How many frames the pool is known to have dropped since the previous
-    /// delivery.
-    ///
-    /// Windows Graphics Capture has no "frames missed" field, so this is
-    /// derived, and it is derived as a *lower bound* rather than a guess.
-    /// `FrameArrived` fires once per frame the compositor produced, so with `A`
-    /// arrivals, `D` frames delivered to the caller, `X` frames this backend
-    /// discarded and `L` frames lost, the pool currently holds `A - D - X - L`
-    /// frames, and it can hold no more than [`FRAME_POOL_BUFFERS`]. So at least
-    /// `A - D - X - FRAME_POOL_BUFFERS` frames have been lost. Losses only
-    /// accumulate, so the bound is kept monotonic and the reported figure is its
-    /// increment since the last frame.
-    ///
-    /// It under-reports rather than over-reports: a short burst that the pool
-    /// absorbed and gave back is not counted. That is the right direction for a
-    /// number a user reads as "your machine could not keep up".
-    fn frames_missed_since_last_delivery(&mut self) -> u32 {
-        let arrivals = self.signal.arrivals();
-        let accounted = self
-            .delivered
-            .saturating_add(self.discarded)
-            .saturating_add(u64::try_from(FRAME_POOL_BUFFERS).unwrap_or(0));
-        self.lost = self.lost.max(arrivals.saturating_sub(accounted));
-
-        let missed = self.lost.saturating_sub(self.lost_at_last_delivery);
-        self.lost_at_last_delivery = self.lost;
-        u32::try_from(missed).unwrap_or(u32::MAX)
+    /// Frames the compositor has handed to the pool since capture started.
+    fn arrivals(&self) -> u64 {
+        self.signal.arrivals()
     }
 
     /// Whether the capture item told us it had closed.
@@ -690,6 +776,21 @@ impl Running {
     /// a display being disconnected is left to the `Closed` event and to
     /// [issue #98](https://github.com/wildware-uk/clipped/issues/98), which owns
     /// display changes.
+    ///
+    /// # What this does not answer
+    ///
+    /// Microsoft's documentation for `IsWindow` advises against calling it on a
+    /// window the calling thread did not create, and every window this backend
+    /// captures belongs to another process. The reason is handle recycling: the
+    /// captured window can be destroyed and its `HWND` reissued to a different
+    /// window, at which point `IsWindow` reports true and closure is never
+    /// detected — the never-finalising recording this check exists to prevent,
+    /// reinstated. That is accepted rather than solved, because the alternative
+    /// is worse: `GraphicsCaptureItem::Closed` does not arrive here at all (see
+    /// above), so the choice is between a check that is wrong in a rare race and
+    /// no check at all. It is also bounded — the handle has to be recycled
+    /// during this one recording — and the failure is the pre-existing
+    /// behaviour rather than a new one.
     fn target_has_gone(&self) -> bool {
         let Some(window) = self.window else {
             return false;
@@ -702,9 +803,13 @@ impl Running {
 
     /// Blocks until a frame arrives, the target closes, or `deadline` passes.
     ///
+    /// `arrivals_before` must be the arrival count read *before* the pool was
+    /// last looked in, or a frame that arrived in between is slept through; see
+    /// [`CaptureSignal::wait_until`].
+    ///
     /// Returns whether it is worth looking in the pool again.
-    fn wait_for_frame(&self, deadline: Instant) -> bool {
-        self.signal.wait_until(deadline)
+    fn wait_for_frame(&self, arrivals_before: u64, deadline: Instant) -> bool {
+        self.signal.wait_until(arrivals_before, deadline)
     }
 
     /// Rebuilds the frame pool for a new target size.
@@ -732,6 +837,9 @@ impl Running {
         self.pool_size = pool_size;
         self.format = FrameFormat::new(size, PixelFormat::Bgra8Unorm);
         self.awaiting_resize = None;
+        // Whatever the source did while the caller was reconfiguring its
+        // encoder is not something this backend dropped.
+        self.gaps.forget();
 
         Ok(self.format)
     }
@@ -773,9 +881,18 @@ impl Drop for Running {
 /// What the two event handlers tell the capture thread, and how it waits.
 ///
 /// Deliberately the smallest thing that works. `FrameArrived` is raised on a
-/// thread-pool thread once per composed frame — up to 360 times a second on a
-/// high-refresh display — so the handler does no allocation, no logging and no
-/// COM call: it takes a lock held for two field updates and wakes the waiter.
+/// thread-pool thread once per frame the compositor puts into a *free* pool
+/// buffer — which, while the caller is keeping up, is once per frame the source
+/// presents, so up to the display's refresh rate — so the handler does no
+/// allocation, no logging and no COM call: it takes a lock held for two field
+/// updates and wakes the waiter.
+///
+/// It is not once per composed frame, and nothing here may be used as though it
+/// were. When the pool has no free buffer the compositor does not compose and
+/// raises no event, so the arrival count says how many frames were collected,
+/// never how many were produced. `Running::frames_missed_before` is where the
+/// frames nobody collected are accounted for, and it uses the source's
+/// timestamps for exactly this reason.
 #[derive(Debug, Default)]
 struct CaptureSignal {
     state: Mutex<SignalState>,
@@ -785,8 +902,9 @@ struct CaptureSignal {
 /// The two facts the handlers report.
 #[derive(Debug, Default, Clone, Copy)]
 struct SignalState {
-    /// Frames the compositor has composed since capture started. Monotonic, and
-    /// the basis of the dropped-frame accounting.
+    /// Frames the compositor has put into a free pool buffer since capture
+    /// started. Monotonic, and used only to decide whether it is worth looking
+    /// in the pool again — never as a count of what the source produced.
     arrivals: u64,
     /// Whether the window closed or the display was disconnected.
     closed: bool,
@@ -825,12 +943,17 @@ impl CaptureSignal {
     /// Waits for something to happen, or for `deadline`.
     ///
     /// Returns false only when the deadline passed with nothing new, which is
-    /// what [`Acquisition::Timeout`] reports. The comparison is against the
-    /// arrival count read before waiting, so a frame that arrives between the
-    /// caller's last look in the pool and this wait is not missed.
-    fn wait_until(&self, deadline: Instant) -> bool {
+    /// what [`Acquisition::Timeout`] reports.
+    ///
+    /// `arrivals_before` is the baseline to compare against, and the caller has
+    /// to have read it *before* it last looked in the pool. Sampling it here
+    /// instead would fold a frame that arrived between that look and this lock
+    /// into the baseline, and the waiter would then sleep through the very
+    /// frame it is waiting for: on a source that produces sporadically, the
+    /// caller is told nothing arrived for a whole acquisition timeout while a
+    /// frame sits in the pool.
+    fn wait_until(&self, arrivals_before: u64, deadline: Instant) -> bool {
         let mut state = self.lock();
-        let arrivals_before = state.arrivals;
 
         loop {
             if state.arrivals != arrivals_before || state.closed {
@@ -970,8 +1093,158 @@ fn backend_error(operation: &'static str, error: windows::core::Error) -> Captur
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
     use crate::{CaptureMethodSetting, TargetHandle};
+
+    /// The environment variable that turns "this machine could not run the
+    /// test" from a pass into a failure.
+    ///
+    /// Set it on any machine that is supposed to be able to capture. CI sets it
+    /// (`.github/workflows/ci.yml`), so a green Windows job means the capture
+    /// tests *ran*, not merely that they did not fail.
+    const REQUIRE_CAPTURE: &str = "CLIPPED_REQUIRE_CAPTURE";
+
+    /// Reports that a test could not run here, and returns whether the caller
+    /// should return early.
+    ///
+    /// Two things make this more than an `eprintln!`. It panics instead of
+    /// skipping when [`REQUIRE_CAPTURE`] is set, so a machine that is meant to
+    /// capture cannot quietly stop testing capture. And it writes through
+    /// `std::io::stderr()` rather than the `eprintln!` macro, because libtest
+    /// captures the macros: a skip printed with `eprintln!` is invisible in a
+    /// passing CI run, which is the failure mode — a regression that turns this
+    /// test into a no-op looks exactly like a test that passed.
+    fn skipped(reason: &str) -> bool {
+        if env_is_set(REQUIRE_CAPTURE) {
+            panic!("{REQUIRE_CAPTURE} is set, so this must not be skipped: {reason}");
+        }
+        let _ = writeln!(std::io::stderr(), "SKIPPED (capture): {reason}");
+        true
+    }
+
+    fn env_is_set(name: &str) -> bool {
+        std::env::var_os(name).is_some_and(|value| !value.is_empty())
+    }
+
+    /// 60 fps in `TimeSpan` ticks: 166,666 of them, near enough.
+    const SIXTY_FPS: u64 = TIMESPAN_TICKS_PER_SECOND / 60;
+
+    #[test]
+    fn a_caller_that_keeps_up_is_told_it_missed_nothing() {
+        // Ten seconds of a 60 fps source arriving on time, every frame taken on
+        // the first look — the case that has to report nothing even though the
+        // arithmetic is being asked to run, which is why this is not
+        // `Look::AfterWaiting`.
+        let mut gaps = FrameGaps::default();
+        let mut missed = 0;
+        for frame in 0..600u64 {
+            missed += gaps.missed_before(frame * SIXTY_FPS, Look::First);
+        }
+        assert_eq!(missed, 0);
+
+        // The same, with the jitter a real compositor has: intervals a few
+        // hundred microseconds either side of nominal must not round up into a
+        // dropped frame.
+        let mut gaps = FrameGaps::default();
+        let mut ticks = 0;
+        let mut missed = 0;
+        for frame in 0..600u64 {
+            ticks += SIXTY_FPS + (frame % 7) * 200;
+            missed += gaps.missed_before(ticks, Look::First);
+        }
+        assert_eq!(missed, 0);
+    }
+
+    #[test]
+    fn a_caller_that_falls_behind_is_told_how_many_frames_went_by() {
+        // The measured shape of a slow encoder: the source runs at 60 fps, the
+        // caller takes 200 ms per frame, and every frame it eventually collects
+        // is already sitting in the pool when it looks. Eleven of the twelve
+        // source frames in each 200 ms went nowhere.
+        let mut gaps = FrameGaps::default();
+
+        // One ordinary interval first, which is where the source's rate is
+        // learnt from — and which must itself count as nothing missed.
+        assert_eq!(gaps.missed_before(0, Look::AfterWaiting), 0);
+        assert_eq!(gaps.missed_before(SIXTY_FPS, Look::AfterWaiting), 0);
+
+        let stalled = TIMESPAN_TICKS_PER_SECOND / 5;
+        let mut missed = 0;
+        for frame in 1..=10u64 {
+            missed += gaps.missed_before(SIXTY_FPS + frame * stalled, Look::First);
+        }
+
+        assert_eq!(
+            missed, 110,
+            "ten 200 ms gaps at a 16.67 ms source interval are eleven missed frames each"
+        );
+    }
+
+    #[test]
+    fn a_source_that_stops_producing_is_not_a_dropped_frame() {
+        // A paused game. The caller waits out the silence and the frame that
+        // ends it arrives while it is waiting, so nothing was dropped: the
+        // source simply had nothing to give.
+        let mut gaps = FrameGaps::default();
+        gaps.missed_before(0, Look::AfterWaiting);
+        gaps.missed_before(SIXTY_FPS, Look::AfterWaiting);
+
+        let five_seconds = SIXTY_FPS + 5 * TIMESPAN_TICKS_PER_SECOND;
+        assert_eq!(
+            gaps.missed_before(five_seconds, Look::AfterWaiting),
+            0,
+            "a gap the caller waited through is the source being idle, not a drop"
+        );
+    }
+
+    #[test]
+    fn silence_the_backend_did_not_cause_is_not_measured_across() {
+        // `forget` is what `acquire` calls on a timeout, `take_next_frame` on a
+        // discarded frame and `resize` on a new pool. After it, the next frame
+        // starts a new chain rather than being blamed for the interval since
+        // the last one.
+        let mut gaps = FrameGaps::default();
+        gaps.missed_before(0, Look::AfterWaiting);
+        gaps.missed_before(SIXTY_FPS, Look::AfterWaiting);
+
+        gaps.forget();
+        assert_eq!(
+            gaps.missed_before(SIXTY_FPS + 5 * TIMESPAN_TICKS_PER_SECOND, Look::First),
+            0
+        );
+    }
+
+    #[test]
+    fn a_shorter_interval_than_any_seen_before_becomes_the_reference() {
+        // A capture that starts while the source is slow must not keep
+        // reporting drops once it finds out the source is faster than that.
+        let mut gaps = FrameGaps::default();
+        gaps.missed_before(0, Look::First);
+        // A first gap of 100 ms: nothing to compare it against, so nothing
+        // missed, and it becomes the reference.
+        assert_eq!(
+            gaps.missed_before(TIMESPAN_TICKS_PER_SECOND / 10, Look::First),
+            0
+        );
+        // Then the real rate shows up, and it too counts as nothing.
+        let faster = TIMESPAN_TICKS_PER_SECOND / 10 + SIXTY_FPS;
+        assert_eq!(gaps.missed_before(faster, Look::First), 0);
+        // From here on, 100 ms is five missed frames rather than none.
+        assert_eq!(
+            gaps.missed_before(faster + TIMESPAN_TICKS_PER_SECOND / 10, Look::First),
+            5
+        );
+    }
+
+    #[test]
+    fn a_timestamp_that_does_not_advance_is_not_an_interval() {
+        let mut gaps = FrameGaps::default();
+        gaps.missed_before(1_000_000, Look::First);
+        assert_eq!(gaps.missed_before(1_000_000, Look::First), 0);
+        assert_eq!(gaps.missed_before(999_999, Look::First), 0);
+    }
 
     #[test]
     fn the_backend_declares_what_the_selection_policy_prefers_it_for() {
@@ -1014,8 +1287,9 @@ mod tests {
         let size = FrameSize::new(2560, 1440).expect("2560x1440 is a valid size");
         let target = TargetProperties::new(TargetKind::Window, size);
 
-        if !WindowsGraphicsCapture::is_supported_here() {
-            eprintln!("skipped: Windows Graphics Capture is unsupported on this machine");
+        if !WindowsGraphicsCapture::is_supported_here()
+            && skipped("GraphicsCaptureSession::IsSupported reports false here")
+        {
             return;
         }
 
@@ -1110,6 +1384,116 @@ mod tests {
         .ok()
     }
 
+    /// A live capture of a real top-level window, or [`None`] on a machine that
+    /// cannot provide one — having said so through [`skipped`].
+    ///
+    /// The caller destroys the window. The backend is returned first so that
+    /// dropping it releases the capture before the window goes.
+    fn a_capture_of_a_real_window() -> Option<(Box<dyn CaptureBackend>, HWND)> {
+        if !WindowsGraphicsCapture::is_supported_here()
+            && skipped("GraphicsCaptureSession::IsSupported reports false here")
+        {
+            return None;
+        }
+        let Some(window) = a_real_window() else {
+            skipped("this machine would not create a window");
+            return None;
+        };
+
+        let size = FrameSize::new(320, 240).expect("320x240 is a valid size");
+        let target = CaptureTarget::new(
+            TargetHandle::from_raw(window.0 as u64),
+            TargetProperties::new(TargetKind::Window, size),
+        );
+
+        let mut backend = WindowsGraphicsCapture.create().expect("creation succeeds");
+        if let Err(error) = backend.initialise(&target, &CaptureConfig::default()) {
+            // SAFETY: `window` is the window created above and not yet
+            // destroyed.
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(window) };
+            skipped(&format!(
+                "this machine would not capture a plain window: {error}"
+            ));
+            return None;
+        }
+        Some((backend, window))
+    }
+
+    #[test]
+    fn a_minimised_window_is_waited_out_rather_than_reported_as_a_size_or_a_loss() {
+        // Minimise handling is part of issue #12's scope, so it is exercised
+        // deliberately here rather than left to whatever a measurement run
+        // happened to do. Windows reports a minimised window's client area as
+        // zero by zero and stops composing for it, and the two ways to get that
+        // wrong are both silent: passing the zero size on as a
+        // `SizeChanged` — which no encoder can be configured for — or reading
+        // the silence as the window having gone and finalising the recording
+        // while it is still on the taskbar.
+        let Some((mut backend, window)) = a_capture_of_a_real_window() else {
+            return;
+        };
+
+        for _ in 0..4 {
+            let _ = backend.acquire(Duration::from_millis(50));
+        }
+
+        // SAFETY: `window` is the live test window, created on this thread.
+        let _ = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+                window,
+                windows::Win32::UI::WindowsAndMessaging::SW_MINIMIZE,
+            )
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match backend.acquire(Duration::from_millis(100)) {
+                Ok(Acquisition::Frame(_) | Acquisition::Timeout) => {}
+                Ok(Acquisition::SizeChanged(size)) => {
+                    // The type makes a zero size unrepresentable; what this
+                    // asserts is that the backend does not report the
+                    // minimised shape as a size to reconfigure for.
+                    assert!(
+                        size.width() > 1 && size.height() > 1,
+                        "a minimised window must not be reported as a capture size: {size}"
+                    );
+                    backend.resize(size).expect("the pool can be recreated");
+                }
+                Err(error) => panic!(
+                    "a minimised window is still a window, and must not be reported as \
+                     anything else: {error}"
+                ),
+            }
+        }
+
+        // SAFETY: `window` is still the live test window.
+        let _ = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+                window,
+                windows::Win32::UI::WindowsAndMessaging::SW_RESTORE,
+            )
+        };
+
+        // Restoring has to leave a capture that still works. A `STATIC` window
+        // with nothing drawing into it may legitimately compose nothing, so
+        // what is asserted is that acquisition keeps answering rather than that
+        // a frame arrives.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match backend.acquire(Duration::from_millis(100)) {
+                Ok(Acquisition::SizeChanged(size)) => {
+                    backend.resize(size).expect("the pool can be recreated");
+                }
+                Ok(_) => {}
+                Err(error) => panic!("capture did not survive the window being restored: {error}"),
+            }
+        }
+
+        drop(backend);
+        // SAFETY: `window` is live and was created on this thread.
+        let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(window) };
+    }
+
     #[test]
     fn a_window_that_closes_mid_capture_is_reported_as_lost() {
         // A regression test for a real defect, found by the lifecycle run in
@@ -1121,30 +1505,9 @@ mod tests {
         // `CaptureError::TargetLost`, so a session would have waited for ever
         // on a window that no longer existed and never finalised its recording
         // (AGENTS.md sections 16 and 17).
-        if !WindowsGraphicsCapture::is_supported_here() {
-            eprintln!("skipped: Windows Graphics Capture is unsupported on this machine");
-            return;
-        }
-        let Some(window) = a_real_window() else {
-            eprintln!("skipped: this machine would not create a window");
+        let Some((mut backend, window)) = a_capture_of_a_real_window() else {
             return;
         };
-
-        let size = FrameSize::new(320, 240).expect("320x240 is a valid size");
-        let target = CaptureTarget::new(
-            TargetHandle::from_raw(window.0 as u64),
-            TargetProperties::new(TargetKind::Window, size),
-        );
-
-        let mut backend = WindowsGraphicsCapture.create().expect("creation succeeds");
-        let initialised = backend.initialise(&target, &CaptureConfig::default());
-        if let Err(error) = initialised {
-            // SAFETY: `window` is the window created above and not yet
-            // destroyed.
-            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(window) };
-            eprintln!("skipped: this machine would not capture a plain window: {error}");
-            return;
-        }
 
         // Let capture settle, then take the window away underneath it.
         for _ in 0..4 {

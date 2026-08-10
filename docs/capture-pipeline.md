@@ -293,7 +293,10 @@ on a thread-pool thread and the capture thread never needs a message loop — a
 capture thread that had to pump messages to receive frames would stall whenever
 something else posted to it (AGENTS.md section 20). The handler does no
 allocation, no logging and no COM call: it takes a lock held for one increment
-and wakes the capture thread, which then calls `TryGetNextFrame`.
+and wakes the capture thread, which then calls `TryGetNextFrame`. The count it
+keeps says how many frames were collected, never how many the source produced —
+see "Dropped frames" below, which is the one place that distinction matters and
+the one place it is easy to get wrong.
 
 The pool holds **three** buffers. The caller holds one frame while it submits the
 texture to the encoder, so a pool of one would leave the compositor nothing to
@@ -332,21 +335,51 @@ clock.
 ### Dropped frames
 
 Windows Graphics Capture has no "frames missed" field, so
-`CapturedFrame::frames_missed` is *derived*, and derived as a lower bound rather
-than guessed. `FrameArrived` fires once per composed frame, so with `A` arrivals,
-`D` frames delivered, `X` frames the backend discarded and `L` lost, the pool
-holds `A - D - X - L` frames and can hold no more than three. At least
-`A - D - X - 3` have therefore been lost. The bound is kept monotonic and the
-reported figure is its increment since the previous frame. It under-reports — a
-burst the pool absorbed and gave back is not counted — which is the right
-direction for a number a user reads as "your machine could not keep up".
+`CapturedFrame::frames_missed` is *derived* — and it cannot be derived from
+`FrameArrived`, which is the obvious idea and a wrong one.
+
+`FrameArrived` does not fire once per composed frame. It fires once per frame
+the compositor puts into a **free** pool buffer, and when the pool has no free
+buffer the compositor does not compose and raises no event for what it skipped.
+So arrivals track deliveries however far behind the caller falls, and any
+arithmetic of the form "arrivals minus deliveries minus the pool depth" is
+identically zero. Measured on Windows 11 build 26200, against the probe's 60 fps
+test window with the caller stalling 200 ms per frame: **52 arrivals, 50
+deliveries, over ten seconds in which the source presented about 600 frames.**
+The five hundred and fifty frames nobody saw produced no event of any kind.
+
+What does survive is the source's own clock. `Running` differences consecutive
+delivered frames' `SystemRelativeTime` and divides the gap by the shortest
+interval the capture has ever seen between two frames, which is its estimate of
+how often the source produces one: a gap of `n` whole intervals means `n - 1`
+source frames went by without one reaching the caller. Because the reference is
+the shortest interval *seen*, it is never shorter than the source's real
+interval, so the division cannot over-count — the figure is a lower bound, which
+is the right direction for a number a user reads as "your machine could not keep
+up". The same 200 ms run reports **474 frames missed against 50 delivered**.
+
+A gap only counts when the frame was already waiting in the pool the first time
+the acquisition looked. That is what separates a caller too slow to collect what
+the source produced from a source that produced nothing — a paused game, a
+static menu, an idle desktop — which the caller sat and waited through. The
+chain is broken for the same reason on a timeout, a discarded frame and a
+resize. Measured against the scripted lifecycle run, whose window is minimised
+for four seconds: the 4,044 ms interval that spans the minimise is reported as
+**0 frames missed**, because nothing was dropped — the window was not composing.
+
+Two things it does not do, stated rather than glossed:
+
+- It cannot separate a source that slows down at the same moment the caller
+  does. Nothing in the API distinguishes them.
+- A capture whose caller never once kept up has no short interval to compare
+  against, and reports nothing at all.
 
 ### Resize, minimise, occlusion and closure
 
 | What happens | What the backend does |
 | --- | --- |
 | The window is resized | A frame arrives whose `ContentSize` differs from the pool's. It is discarded, `Acquisition::SizeChanged` is reported, and the backend goes idle until `resize` calls `Direct3D11CaptureFramePool::Recreate` — which keeps the session, the item and both event registrations, so frames composed during the change are not all lost. |
-| The window is minimised | It stops composing, so acquisitions report `Acquisition::Timeout`. A frame that arrives with a zero dimension — which is what a minimised client area reports — is discarded rather than turned into a `FrameSize`, because `FrameSize` refuses to represent it and an encoder configured for it would fail on its first frame. |
+| The window is minimised | It stops composing, so acquisitions report `Acquisition::Timeout` — and go on reporting it until the window comes back, rather than deciding the window has gone. A frame that arrives with a zero dimension — which is what a minimised client area reports — is discarded rather than turned into a `FrameSize`, because `FrameSize` refuses to represent it and an encoder configured for it would fail on its first frame. The silence is not counted as dropped frames. `a_minimised_window_is_waited_out_rather_than_reported_as_a_size_or_a_loss` minimises a real window mid-capture and asserts all three. |
 | Something is drawn over the window | Nothing. The compositor is asked for the item's own content. |
 | The window closes | Reported as `CaptureError::TargetLost`. |
 
@@ -363,6 +396,15 @@ report a timeout, at most a handful of calls a second, never one per frame. A
 *display* target has no equivalent check; disconnection is left to the `Closed`
 event and to [issue #98](https://github.com/wildware-uk/clipped/issues/98),
 which owns display changes.
+
+`IsWindow` is not a perfect answer and is not presented as one. Microsoft's
+documentation advises against calling it on a window the calling thread did not
+create, because handles are recycled: if the captured window is destroyed and
+its `HWND` reissued to another window during the recording, `IsWindow` reports
+true and closure is never noticed. That is accepted rather than solved. With
+`Closed` not arriving at all, the choice is between a check that is wrong in a
+rare race and no check at all, and the race reinstates the old behaviour rather
+than inventing a new failure.
 
 ### The capture border, and which Windows build removes it
 
@@ -406,11 +448,25 @@ cargo run --release -p clipped-capture --example wgc_probe -- --mode borderless 
 cargo run --release -p clipped-capture --example wgc_probe -- --mode fullscreen --seconds 60
 cargo run --release -p clipped-capture --example wgc_probe -- --mode monitor --seconds 60
 cargo run --release -p clipped-capture --example wgc_probe -- --mode lifecycle --seconds 25
+cargo run --release -p clipped-capture --example wgc_probe -- --mode windowed --seconds 10 --stall-ms 200
 ```
 
 `--mode lifecycle` resizes, minimises, restores and finally closes the test
 window on a fixed schedule, so the four behaviours in the table above can be
-observed rather than assumed. It is an example rather than a test because it
+observed rather than assumed. `--stall-ms` holds each frame before releasing it,
+which is what a machine that cannot encode fast enough does to the frame pool,
+and is how the dropped-frame count is shown to move rather than assumed to.
+
+**Do not minimise the probe window during a run.** Windows Graphics Capture
+stops delivering frames for a minimised window — occlusion is fine, minimise is
+not — so any pacing or dropped-frame figure covering a minimised stretch is
+measuring Alt-Tab rather than the backend. The probe watches its own window and
+refuses to let that pass quietly: a run in which the window was minimised or
+hidden prints a `CONTAMINATED RUN - DISCARD IT` banner and exits non-zero. A
+contaminated run is repeated, not reported. `--mode lifecycle` minimises on
+purpose and is exempt.
+
+It is an example rather than a test because it
 needs a desktop, a GPU and minutes of wall-clock time, none of which the
 pull-request CI job has, and because its output is a measurement somebody reads.
 The automated version belongs in `tests/capture/` once the shared test

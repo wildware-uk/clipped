@@ -1,5 +1,7 @@
 //! The COM apartment WinRT activation needs, and why nothing here undoes it.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::HRESULT;
@@ -60,6 +62,9 @@ pub(super) fn ensure_multi_threaded_apartment() -> Result<(), windows::core::Err
 
     APARTMENT
         .get_or_init(|| {
+            #[cfg(test)]
+            REFERENCES_TAKEN.fetch_add(1, Ordering::Relaxed);
+
             // SAFETY: `CoIncrementMTAUsage` takes no arguments and no pointers.
             // Its only obligation is that a matching `CoDecrementMTAUsage` may
             // be called with the cookie it returns, which this crate never does
@@ -71,43 +76,69 @@ pub(super) fn ensure_multi_threaded_apartment() -> Result<(), windows::core::Err
         .map_err(windows::core::Error::from_hresult)
 }
 
+/// How many references this process has taken on the multi-threaded apartment.
+///
+/// The whole point of the design is that the answer is one, for ever, however
+/// many recordings start and stop — and "one, for ever" is not something the
+/// two calls returning `Ok` can demonstrate. It is only compiled into tests
+/// because there is nothing in a recorder that should ever read it.
+#[cfg(test)]
+static REFERENCES_TAKEN: AtomicUsize = AtomicUsize::new(0);
+
 #[cfg(test)]
 mod tests {
+    use windows::Win32::System::Com::{
+        CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPEQUALIFIER_IMPLICIT_MTA, APTTYPE_MTA,
+    };
+
     use super::*;
 
     #[test]
-    fn the_apartment_is_available_to_a_thread_that_never_asked_for_one() {
-        // The property the whole design rests on: a thread which has not
-        // initialised COM for itself can still activate a WinRT type once the
-        // process has a multi-threaded apartment. If that were untrue, every
-        // capture would need per-thread initialisation, and the release problem
-        // this function exists to avoid would come straight back.
+    fn a_thread_that_never_initialised_com_belongs_to_the_apartment() {
+        // The property the whole design rests on, asked of COM directly rather
+        // than inferred from an activation succeeding. Activating a WinRT type
+        // proves nothing here: windows-core's factory cache catches
+        // `CO_E_NOTINITIALIZED`, calls `CoIncrementMTAUsage` itself and retries
+        // (`imp/factory_cache.rs`), so that test passes whether or not this
+        // module does anything at all. `CoGetApartmentType` has no such
+        // fallback — on a thread with no apartment in a process with no MTA it
+        // returns `CO_E_NOTINITIALIZED` — so it reports the state of the
+        // process rather than the resourcefulness of a library.
         ensure_multi_threaded_apartment().expect("the process can have an MTA");
 
-        let activated = std::thread::spawn(|| {
-            windows::Foundation::Uri::CreateUri(&windows::core::HSTRING::from(
-                "https://github.com/wildware-uk/clipped",
-            ))
-            .is_ok()
+        let apartment = std::thread::spawn(|| {
+            let mut kind = APTTYPE::default();
+            let mut qualifier = APTTYPEQUALIFIER::default();
+            // SAFETY: both out parameters are live locals of the types the
+            // signature names, and the call reads nothing else.
+            unsafe { CoGetApartmentType(&mut kind, &mut qualifier) }.map(|()| (kind, qualifier))
         })
         .join()
-        .expect("the activation thread did not panic");
+        .expect("the apartment-reading thread did not panic")
+        .expect("a thread in a process with an MTA has an apartment type");
 
-        assert!(
-            activated,
-            "a thread with no apartment of its own should still be able to \
-             activate a WinRT type"
+        assert_eq!(
+            apartment,
+            (APTTYPE_MTA, APTTYPEQUALIFIER_IMPLICIT_MTA),
+            "a thread that never initialised COM should be an implicit member of \
+             the process's multi-threaded apartment"
         );
     }
 
     #[test]
-    fn asking_twice_is_the_same_answer_and_not_a_second_reference() {
-        // `get_or_init` runs the body once, so a second call cannot raise the
-        // process's apartment count again. Two calls returning the same `Ok` is
-        // the observable half of that; the half that matters is that a recorder
-        // starting and stopping capture all day holds one reference, not one
-        // per session.
+    fn the_apartment_is_referenced_once_however_many_times_it_is_asked_for() {
+        // The reference is never given back, so taking a second one would be a
+        // leak that grows with every recording a user starts. `get_or_init`
+        // runs its body once; this is the only way to observe that it did,
+        // which is why `REFERENCES_TAKEN` exists.
         assert!(ensure_multi_threaded_apartment().is_ok());
         assert!(ensure_multi_threaded_apartment().is_ok());
+
+        assert_eq!(
+            REFERENCES_TAKEN.load(Ordering::Relaxed),
+            1,
+            "the process's apartment reference is taken once for the life of the \
+             process, no matter how many captures ask for it"
+        );
     }
 }

@@ -273,7 +273,17 @@ jobs:
       # here: a hosted runner has no GPU and no game to record, so they would be
       # testing the runner rather than Clipped. That path is manual and is
       # tracked in M13.
+      #
+      # CLIPPED_REQUIRE_CAPTURE turns "this machine could not run the test" from
+      # a pass into a failure for the capture tests that need a real window and
+      # a real compositor. Without it those tests skip silently, and a
+      # regression that turns the closure and minimise regression tests into
+      # no-ops looks exactly like a run in which they passed: "green" and "ran"
+      # stop being the same statement. If a future runner image loses the
+      # compositor, this fails loudly and names the reason, which is the point.
       - name: Test
+        env:
+          CLIPPED_REQUIRE_CAPTURE: '1'
         run: cargo test --workspace
 
   deny:

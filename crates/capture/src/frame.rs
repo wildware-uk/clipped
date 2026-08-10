@@ -256,13 +256,20 @@ impl<'frame> CapturedFrame<'frame> {
         }
     }
 
-    /// Records how many frames the source composed since the last acquisition
+    /// Records how many frames the source produced since the last acquisition
     /// that this one did not deliver.
     ///
-    /// Both Windows capture APIs report this, and it is the difference between
-    /// "the game rendered 40 frames" and "we recorded 40 frames": without it a
-    /// dropped-frame count is guesswork. Leave it unset only when the source
-    /// genuinely does not say.
+    /// This is the difference between "the game rendered 40 frames" and "we
+    /// recorded 40 frames", and without it a dropped-frame count is guesswork.
+    ///
+    /// Not every API says. Desktop Duplication reports it outright, in
+    /// `DXGI_OUTDUPL_FRAME_INFO::AccumulatedFrames`; Windows Graphics Capture
+    /// has no such field and no event for the frames it skips, so its backend
+    /// derives the figure from the source's timestamps as a lower bound (see
+    /// `docs/capture-pipeline.md`, "Dropped frames"). Either is a legitimate
+    /// answer to this method. Leaving it unset says the backend does not know
+    /// rather than that nothing was dropped, which is why the accessor returns
+    /// an [`Option`] and not a zero.
     #[must_use]
     pub const fn with_frames_missed(mut self, frames_missed: u32) -> Self {
         self.frames_missed = Some(frames_missed);
