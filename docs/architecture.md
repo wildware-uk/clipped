@@ -157,15 +157,23 @@ large:
 
 - The workspace, the eleven `clipped-*` crates, the recorder binary, the
   desktop and web placeholders, and the four test suites exist.
-- Every crate under `crates/` currently contains **module documentation only**.
-  There are no types, no functions and no capture code in any of them. Each
+- Most crates under `crates/` contain **module documentation only**: no types,
+  no functions and no capture code. Two are further on. `clipped-logging` has
+  the subscriber setup and the typed logging context. `clipped-capture` has the
+  capture backend interface and the selection policy — the trait a backend
+  implements, the frame and timestamp vocabulary, and the pure function that
+  picks a backend and reports the choice — but no backend implements it, so
+  nothing in this repository can produce a frame yet. Each
   `lib.rs` states that crate's responsibilities, what it is explicitly not
   responsible for, and where it sits in the stack; those doc comments are the
   authoritative statement of a crate's remit and this document defers to them.
 - `apps/recorder` builds and runs, and prints that no capture commands are
   implemented.
 - `apps/desktop` and `packages/` are README placeholders.
-- The only test asserting real behaviour is the workspace layering test.
+- The tests assert the behaviour that exists: the workspace layering test,
+  `clipped-logging`'s unit and integration tests, and `clipped-capture`'s tests
+  for the selection policy and the frame and timestamp types. None of them
+  captures, encodes or writes anything, because nothing yet can.
 
 Everything else in this document is a plan with an issue number attached.
 
@@ -274,9 +282,15 @@ contributor working in it needs.
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 
-Each is a stub today, stating what it will cover and which milestone writes it.
-They are stubs on purpose: describing a capture pipeline that has not been
-written produces documentation that is wrong on the day it is committed.
+All but [capture-pipeline.md](capture-pipeline.md) are stubs today, stating what
+they will cover and which milestone writes them. `capture-pipeline.md` is
+written as far as the code goes: the capture backend interface and the selection
+policy exist, so the interface, the ownership and threading rules, the timestamp
+model and the selection policy are documented there, and the sections that would
+describe an unwritten encoder path are listed at the end of it as still to be
+written. The rest stay stubs on purpose: describing a capture pipeline that has
+not been written produces documentation that is wrong on the day it is
+committed.
 
 Supporting documents that are not subsystems:
 

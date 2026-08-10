@@ -8,5 +8,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# `CaptureMethod::log_value` must produce the same words as the `capture_backend`
+# field vocabulary in `clipped-logging`, and the only way to assert that is to
+# compare against the real enumeration. A dev-dependency does that without
+# putting a logging dependency into anything that links this crate, and
+# clipped-logging is a layer below clipped-capture, so it does not bend the
+# dependency direction either (tests/integration/tests/workspace_layering.rs).
+[dev-dependencies]
+clipped-logging.workspace = true
+
 [lints]
 workspace = true
