@@ -1,21 +1,30 @@
 # Capture pipeline
 
-**Status: the interface exists; no backend does.** `crates/capture` defines the
-capture backend trait, the frame and timestamp vocabulary, and the policy that
-picks a backend and reports which one it picked. Nothing in this repository can
-currently produce a frame: Windows Graphics Capture is
-[issue #12](https://github.com/wildware-uk/clipped/issues/12) and Desktop
-Duplication is [issue #13](https://github.com/wildware-uk/clipped/issues/13),
-both in M1, and neither has landed. The muxer is likewise still a
-documentation-only crate, and `clipped-encoder` can say what this machine could
-encode with ([encoder-capabilities.md](encoder-capabilities.md)) without being
-able to encode anything.
+**Status: the interface exists, and one backend does.** `crates/capture` defines
+the capture backend trait, the frame and timestamp vocabulary, the policy that
+picks a backend and reports which one it picked, and — since
+[issue #12](https://github.com/wildware-uk/clipped/issues/12) — the Windows
+Graphics Capture backend that implements all of it. A Windows build can produce
+GPU frames from a window or a display today, and `clipped-encoder` can say what
+this machine could encode with
+([encoder-capabilities.md](encoder-capabilities.md)) without being able to
+encode anything yet.
 
-So this document describes an *interface* and the rules a backend has to obey.
-Where it describes behaviour that does not exist yet it says so, because a
-document that quietly describes intentions as facts is worse than a short one
-(AGENTS.md section 7). It answers the questions AGENTS.md section 47 asks of a
-subsystem, and the sections still marked as unwritten are listed at the end.
+What is still missing is everything downstream and one backend beside it.
+Desktop Duplication is
+[issue #13](https://github.com/wildware-uk/clipped/issues/13) and is not built,
+so a Windows build has exactly one capture backend and there is nothing to fall
+back to. `clipped-encoder`, `clipped-muxer` and `clipped-session` are still
+documentation-only crates, so nothing consumes a frame: `recorder record` still
+reports that the capture engine is not implemented, because a pipeline needs
+more than its first stage.
+
+So this document describes an interface, the rules a backend has to obey, and
+the one backend that obeys them. Where it describes behaviour that does not
+exist yet it says so, because a document that quietly describes intentions as
+facts is worse than a short one (AGENTS.md section 7). It answers the questions
+AGENTS.md section 47 asks of a subsystem, and the sections still marked as
+unwritten are listed at the end.
 
 ## What it does
 
@@ -156,9 +165,12 @@ is not a frame-rate control.
 Selection runs before any of this and can happen on any thread, because reading
 a declaration touches nothing.
 
-None of the threading above is implemented. `clipped-session` owns the capture
-thread and it is still a documentation-only crate; what exists today is the
-`Send`/`Sync` bounds that will hold it to this shape.
+The *capture thread itself* does not exist yet: `clipped-session` owns it and is
+still a documentation-only crate. What exists is a backend that obeys the rules
+above — see "Windows Graphics Capture" below — and the `Send`/`Sync` bounds that
+will hold the session to them. `crates/capture/examples/wgc_probe.rs` runs the
+loop on its main thread, which is the shape a session's capture thread will
+take.
 
 ## Timestamps
 
@@ -221,8 +233,11 @@ with no display — preference order, a preferred backend declaring itself
 unavailable, a backend that cannot address the target kind, a forced method that
 is missing or unusable, and nothing being available at all. Those fakes are
 legitimate because the thing under test is the policy, not capture; the tests
-say so at the top of the module. Real capture is tested against real Windows
-APIs in issues #12 and #13.
+say so at the top of the module. The *registry* those declarations come from in
+a real recording is `registered_backends`, and it is checked separately: that no
+two backends claim one method, that every one of them is findable by its method,
+and that a Windows build has Windows Graphics Capture and does not have a
+candidate for a method nothing implements.
 
 ### Game Capture
 
@@ -246,6 +261,160 @@ exist. `CaptureMethod::GameCapture.log_value()` is still `game_capture`, because
 selection reports the method it was forced to and refused, and the word has to
 be the one a future backend would use. A build that ever implements Game Capture
 adds the logging variant in the same change.
+
+## Windows Graphics Capture
+
+The one implemented backend. It lives in `crates/capture/src/windows/`, behind
+`#[cfg(windows)]`, and is the only Windows code in the crate; `registered_backends`
+in `crates/capture/src/registry.rs` is the single place that says a build has it.
+On any other platform that list is empty and `select` reports "this build
+registered no capture backends at all" rather than pretending.
+
+### How it works
+
+`Windows.Graphics.Capture` asks the desktop compositor for a *capture item*: one
+window, or one display. The compositor already holds that content on the GPU, so
+frames arrive as Direct3D 11 textures on the device the backend created, and the
+backend never reads a pixel — a `Direct3D11CaptureFrame`'s surface is unwrapped
+to an `ID3D11Texture2D` through `IDirect3DDxgiInterfaceAccess` and that pointer
+is what `FrameTexture` carries. There is no `Map`, no staging texture and no
+system-memory copy in the backend at all.
+
+Because the compositor is asked for the *item's* content rather than for what is
+on screen where the item is, a window captured this way is unaffected by
+anything drawn over it. That is what
+`BackendCapabilities::is_occlusion_independent` declares, and it is why SPEC.md
+section 8 prefers this method to Desktop Duplication.
+
+### Threading and the frame pool
+
+The frame pool is created with `CreateFreeThreaded`, so `FrameArrived` is raised
+on a thread-pool thread and the capture thread never needs a message loop — a
+capture thread that had to pump messages to receive frames would stall whenever
+something else posted to it (AGENTS.md section 20). The handler does no
+allocation, no logging and no COM call: it takes a lock held for one increment
+and wakes the capture thread, which then calls `TryGetNextFrame`.
+
+The pool holds **three** buffers. The caller holds one frame while it submits the
+texture to the encoder, so a pool of one would leave the compositor nothing to
+compose into; two leaves one spare and loses a frame whenever an encode overruns
+a single frame interval; three leaves two, which absorbs ordinary jitter. More
+would buy latency and video memory rather than frames.
+
+The capture thread enters a multi-threaded COM apartment
+(`windows/apartment.rs`) because WinRT activation needs one. The guard records
+the thread it entered on and refuses to `RoUninitialize` from any other, because
+that call is per thread and unbalancing the wrong thread's apartment is worse
+than leaking a reference on a thread that is going away.
+
+### Timestamps
+
+`Direct3D11CaptureFrame::SystemRelativeTime` is a WinRT `TimeSpan`, which always
+counts 100-nanosecond units, so the conversion is
+`CaptureTimestamp::from_performance_counter(ticks, 10_000_000)` and the clock is
+declared as `SourceClock::PerformanceCounter`. Nothing in the backend reads a
+clock.
+
+### Dropped frames
+
+Windows Graphics Capture has no "frames missed" field, so
+`CapturedFrame::frames_missed` is *derived*, and derived as a lower bound rather
+than guessed. `FrameArrived` fires once per composed frame, so with `A` arrivals,
+`D` frames delivered, `X` frames the backend discarded and `L` lost, the pool
+holds `A - D - X - L` frames and can hold no more than three. At least
+`A - D - X - 3` have therefore been lost. The bound is kept monotonic and the
+reported figure is its increment since the previous frame. It under-reports — a
+burst the pool absorbed and gave back is not counted — which is the right
+direction for a number a user reads as "your machine could not keep up".
+
+### Resize, minimise, occlusion and closure
+
+| What happens | What the backend does |
+| --- | --- |
+| The window is resized | A frame arrives whose `ContentSize` differs from the pool's. It is discarded, `Acquisition::SizeChanged` is reported, and the backend goes idle until `resize` calls `Direct3D11CaptureFramePool::Recreate` — which keeps the session, the item and both event registrations, so frames composed during the change are not all lost. |
+| The window is minimised | It stops composing, so acquisitions report `Acquisition::Timeout`. A frame that arrives with a zero dimension — which is what a minimised client area reports — is discarded rather than turned into a `FrameSize`, because `FrameSize` refuses to represent it and an encoder configured for it would fail on its first frame. |
+| Something is drawn over the window | Nothing. The compositor is asked for the item's own content. |
+| The window closes | Reported as `CaptureError::TargetLost`. |
+
+That last row is worth its own paragraph, because the obvious implementation of
+it does not work. `GraphicsCaptureItem::Closed` is subscribed to, but it is
+delivered through the creating thread's dispatcher queue, and a capture thread
+deliberately has neither a dispatcher queue nor a message loop. Measured on
+Windows 11 build 26200, destroying the captured window produces no `Closed`
+callback at all: capture simply goes quiet, and a caller sits in
+`Acquisition::Timeout` for ever waiting for a window that no longer exists,
+never finalising its recording. So a *window* target is also checked with
+`IsWindow` on the one path where the answer matters — an acquisition about to
+report a timeout, at most a handful of calls a second, never one per frame. A
+*display* target has no equivalent check; disconnection is left to the `Closed`
+event and to [issue #98](https://github.com/wildware-uk/clipped/issues/98),
+which owns display changes.
+
+### The capture border, and which Windows build removes it
+
+Windows draws a yellow border around a captured window unless the application
+opts out through `GraphicsCaptureSession.IsBorderRequired`, which arrived in
+**Windows 11 build 22000**. `docs/prerequisites.md` supports Windows 10 21H2
+(build 19044) and later, so a supported machine can legitimately be without it.
+The backend probes for the property with `ApiInformation::IsPropertyPresent`
+rather than comparing build numbers, sets it where it exists, and where it does
+not, logs that the recording will have a border and carries on. Refusing to
+record over a cosmetic difference would be the wrong trade (AGENTS.md section
+16). `IsCursorCaptureEnabled`, which honours `CaptureConfig::capture_cursor`,
+arrived in Windows 10 build 19041 and is therefore present on every supported
+build; it is probed the same way regardless.
+
+### Ownership
+
+`Running` owns the apartment, the Direct3D device, the capture item, the frame
+pool, the session, both event registrations and the frame currently lent to the
+caller. The backend holds an `Option<Running>`, `shut_down` is
+`self.running = None`, and `Drop` calls `shut_down` — so an unwind on the capture
+thread releases exactly what a clean stop would. `Running::drop` releases the
+lent frame first (an outstanding frame is a buffer the compositor cannot
+reclaim), then closes the session, unsubscribes and closes the pool, and
+unsubscribes the item; the apartment is declared as the first field so that Rust
+drops it last, after every WinRT interface is gone.
+
+### How to run it
+
+`crates/capture/examples/wgc_probe.rs` renders its own Direct3D 11 test window at
+a fixed rate, captures it through this backend, and reports frame pacing, dropped
+frames and resource usage. It is the answer to "how do I see this working?" and
+to the acceptance criteria on issue #12, and it needs no game:
+
+```text
+cargo run --release -p clipped-capture --example wgc_probe -- --mode windowed --seconds 60
+cargo run --release -p clipped-capture --example wgc_probe -- --mode borderless --seconds 60
+cargo run --release -p clipped-capture --example wgc_probe -- --mode fullscreen --seconds 60
+cargo run --release -p clipped-capture --example wgc_probe -- --mode monitor --seconds 60
+cargo run --release -p clipped-capture --example wgc_probe -- --mode lifecycle --seconds 25
+```
+
+`--mode lifecycle` resizes, minimises, restores and finally closes the test
+window on a fixed schedule, so the four behaviours in the table above can be
+observed rather than assumed. It is an example rather than a test because it
+needs a desktop, a GPU and minutes of wall-clock time, none of which the
+pull-request CI job has, and because its output is a measurement somebody reads.
+The automated version belongs in `tests/capture/` once the shared test
+applications exist
+([issue #23](https://github.com/wildware-uk/clipped/issues/23)).
+
+### What is not covered
+
+- **Exclusive fullscreen has not been exercised.** The probe asks for it through
+  `IDXGISwapChain::SetFullscreenState`; on the development machine DXGI refuses
+  with `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` because Windows will not grant the
+  foreground to a process the user did not interact with, and DXGI will not go
+  exclusive for a background window. Borderless-fullscreen — a `WS_POPUP` window
+  covering the whole display, which is what most modern games actually use — is
+  exercised and works.
+- **HDR.** The pool is created as `B8G8R8A8UIntNormalized` and the backend always
+  reports `PixelFormat::Bgra8Unorm`.
+  [Issue #99](https://github.com/wildware-uk/clipped/issues/99) owns HDR;
+  `PixelFormat` already has the variants it will need.
+- **Multiple displays and display changes** belong to
+  [issue #98](https://github.com/wildware-uk/clipped/issues/98).
 
 ### Runtime fallback is not built
 
@@ -291,8 +460,8 @@ platform actually exists is a question for then.
 
 1. **Put it in a platform module.** Windows code goes in `crates/windows` or in
    a `windows/` submodule of `crates/capture`, never spread through the
-   platform-neutral modules (AGENTS.md section 5). No such module exists yet;
-   issue #12 creates the first one. The layering test in
+   platform-neutral modules (AGENTS.md section 5).
+   `crates/capture/src/windows/` is the worked example. The layering test in
    `tests/integration/tests/workspace_layering.rs` enforces the crate-level half
    of this.
 2. **Add a `CaptureMethod` variant** if it is a new technique. The crate will
@@ -311,16 +480,20 @@ platform actually exists is a question for then.
 4. **Implement `CaptureBackendFactory` and `CaptureBackend`.** Obey the six
    ownership rules above, take timestamps from the frame, and release in `Drop`
    as well as in `shut_down`.
-5. **Write the `SAFETY` comment.** `FrameTexture::new` is `unsafe` precisely so
+5. **Register it.** Add it to `REGISTERED` in `crates/capture/src/registry.rs`,
+   which is the one place that says what a build contains. Nothing else needs to
+   change: `select` sorts whatever it is handed.
+6. **Write the `SAFETY` comment.** `FrameTexture::new` is `unsafe` precisely so
    that a backend author has to state why the texture outlives the frame
    (AGENTS.md section 58).
-6. **Test it for real.** Selection logic is unit tested; a backend is not. It
-   needs a controlled test application
+7. **Test it for real.** Selection logic is unit tested; a backend cannot be.
+   `crates/capture/examples/wgc_probe.rs` is the pattern: a controlled test
+   window, a real capture of it, and measured pacing, dropped frames and
+   resource usage. The shared test applications
    ([issue #23](https://github.com/wildware-uk/clipped/issues/23)) and the media
    validation harness
-   ([issue #24](https://github.com/wildware-uk/clipped/issues/24)), and the
-   acceptance criteria on issues #12 and #13 ask for measured frame pacing and a
-   documented check that a long capture leaks no GPU resources.
+   ([issue #24](https://github.com/wildware-uk/clipped/issues/24)) will replace
+   the bespoke half of it.
 
 ## Assumptions
 
@@ -349,8 +522,11 @@ describe does not exist:
   ([issue #14](https://github.com/wildware-uk/clipped/issues/14)).
 - Back-pressure: what happens when the encoder cannot keep up, and which frames
   are dropped when some must be.
-- How to run a capture from the command line, and how to test one without a
-  game (issues #23 and #24).
+- How to run a capture from the command line. `recorder record` still reports
+  that the capture engine is not implemented, because a capture backend on its
+  own is not a recording; `crates/capture/examples/wgc_probe.rs` is how a
+  capture is exercised today. The shared test applications and the media
+  validation harness are issues #23 and #24.
 - HDR ([issue #99](https://github.com/wildware-uk/clipped/issues/99)) and
   multi-monitor and ultrawide behaviour
   ([issue #98](https://github.com/wildware-uk/clipped/issues/98)).

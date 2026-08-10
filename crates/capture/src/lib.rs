@@ -5,21 +5,22 @@
 //! characteristics and the user never has to know which API is involved
 //! (SPEC.md section 8).
 //!
-//! What exists today is the *interface* and the *selection policy*: the trait a
-//! backend implements, the vocabulary it reports in, and the pure function that
-//! picks one. No backend implements it yet — Windows Graphics Capture is
-//! [issue #12](https://github.com/wildware-uk/clipped/issues/12) and Desktop
-//! Duplication is [issue #13](https://github.com/wildware-uk/clipped/issues/13)
-//! — so nothing in this crate can currently produce a frame, and it is
-//! documented as an interface rather than as behaviour.
+//! One backend exists: Windows Graphics Capture, in the `windows` submodule,
+//! compiled only on Windows and reachable through [`registered_backends`].
+//! Desktop Duplication is
+//! [issue #13](https://github.com/wildware-uk/clipped/issues/13) and is not
+//! built, so a Windows build has exactly one capture backend and a build for
+//! any other platform has none.
 //!
 //! # Responsibilities
 //!
 //! - The backend interface: [`CaptureBackend`], [`CaptureBackendFactory`] and
 //!   [`BackendDeclaration`].
-//! - Choosing a backend and reporting the choice: [`select`], [`Selection`].
+//! - Choosing a backend and reporting the choice: [`select`], [`Selection`],
+//!   over the backends this build has: [`registered_backends`].
 //! - The vocabulary frames arrive in: [`CapturedFrame`], [`FrameFormat`],
 //!   [`CaptureTimestamp`].
+//! - Capturing, on Windows: [`windows::WindowsGraphicsCapture`].
 //!
 //! # Not responsible for
 //!
@@ -36,9 +37,11 @@
 //! # How platform-neutral this actually is
 //!
 //! No trait method, signature or data structure here is Windows-specific, and
-//! there is no Windows code in this crate: platform code lives in
-//! `clipped-windows` or in a `windows/` submodule of this crate, and neither
-//! exists yet (AGENTS.md section 5).
+//! every line of Windows code in this crate is inside the [`windows`] submodule,
+//! behind `#[cfg(windows)]` (AGENTS.md section 5). Everything else — the
+//! interface, the vocabulary, the selection policy — compiles and runs its unit
+//! tests on a machine that is not Windows, which is what makes that boundary
+//! checkable rather than a claim.
 //!
 //! The *vocabulary* is a different matter, and three enumerations name a
 //! platform outright: [`CaptureMethod::WindowsGraphicsCapture`] and
@@ -89,38 +92,48 @@
 //!
 //! # Example
 //!
-//! Choosing a backend and reporting it the way SPEC.md section 8 asks:
+//! Choosing a backend from the ones this build has, and reporting it the way
+//! SPEC.md section 8 asks:
 //!
 //! ```
-//! use clipped_capture::{CaptureMethodSetting, FrameSize, TargetKind, TargetProperties, select};
-//! # use clipped_capture::{Availability, BackendCapabilities, BackendDeclaration, CaptureMethod};
-//! # #[derive(Debug)]
-//! # struct Wgc;
-//! # impl BackendDeclaration for Wgc {
-//! #     fn method(&self) -> CaptureMethod { CaptureMethod::WindowsGraphicsCapture }
-//! #     fn capabilities(&self) -> BackendCapabilities {
-//! #         BackendCapabilities::new(true, true).with_occlusion_independent(true)
-//! #     }
-//! #     fn availability(&self, _: &TargetProperties) -> Availability { Availability::Available }
-//! # }
-//! # let registry: [&dyn BackendDeclaration; 1] = [&Wgc];
+//! use clipped_capture::{
+//!     CaptureMethodSetting, FrameSize, TargetKind, TargetProperties,
+//!     registered_backend, registered_backends, registered_declarations, select,
+//! };
+//!
 //! let size = FrameSize::new(2560, 1440).expect("a window has a size");
 //! let target = TargetProperties::new(TargetKind::Window, size);
 //!
-//! let selection = select(&registry, &target, CaptureMethodSetting::Automatic)?;
+//! match select(&registered_declarations(), &target, CaptureMethodSetting::Automatic) {
+//!     Ok(selection) => {
+//!         println!("Capture method: {}", selection.setting());
+//!         println!("Current method: {}", selection.method());
 //!
-//! println!("Capture method: {}", selection.setting());
-//! println!("Current method: {}", selection.method());
-//! # Ok::<(), clipped_capture::SelectionError>(())
+//!         // The backend the report named is the one that gets created.
+//!         let backend = registered_backend(selection.method())
+//!             .expect("selection only ever chooses a registered backend");
+//!         let _uninitialised = backend.create()?;
+//!     }
+//!     // A build for a platform with no capture backend, or a machine where
+//!     // Windows declines this target, ends here — and the error names every
+//!     // candidate that was asked and what each said, which is the point.
+//!     Err(error) => println!("{error}"),
+//! }
+//! # let _ = registered_backends();
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 mod backend;
 mod error;
 mod frame;
 mod method;
+mod registry;
 mod selection;
 mod target;
 mod time;
+
+#[cfg(windows)]
+pub mod windows;
 
 pub use backend::{
     Acquisition, Availability, BackendCapabilities, BackendDeclaration, CaptureBackend,
@@ -129,6 +142,7 @@ pub use backend::{
 pub use error::CaptureError;
 pub use frame::{CapturedFrame, FrameFormat, FrameSize, FrameTexture, PixelFormat, TextureKind};
 pub use method::{CaptureMethod, CaptureMethodSetting};
+pub use registry::{registered_backend, registered_backends, registered_declarations};
 pub use selection::{select, Considered, Outcome, Rejection, Selection, SelectionError};
 pub use target::{CaptureTarget, TargetHandle, TargetKind, TargetProperties};
 pub use time::{CaptureTimestamp, SourceClock};
