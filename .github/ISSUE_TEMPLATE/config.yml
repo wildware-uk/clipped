@@ -1,0 +1,14 @@
+# Blank issues stay enabled: maintainers file most planning and implementation
+# tickets by hand, and forcing those through a bug or feature form would get in
+# the way. The forms exist for reports from outside that context.
+blank_issues_enabled: true
+contact_links:
+  - name: How to contribute
+    url: https://github.com/wildware-uk/clipped/blob/main/CONTRIBUTING.md
+    about: Workflow, branch and commit naming, and what counts as done.
+  - name: Product specification
+    url: https://github.com/wildware-uk/clipped/blob/main/SPEC.md
+    about: What Clipped is being built towards, and the milestone order.
+  - name: Engineering standards
+    url: https://github.com/wildware-uk/clipped/blob/main/AGENTS.md
+    about: The standards every change is reviewed against, human or automated.

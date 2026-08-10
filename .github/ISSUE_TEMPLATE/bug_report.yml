@@ -1,0 +1,102 @@
+name: Bug report
+description: Something in Clipped behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Clipped is in early development and is not installable yet, so most
+        reports will come from a build from source.
+
+        Please do not attach recordings, logs or screenshots containing
+        anything you would not want published.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: What went wrong, and what you expected instead.
+      placeholder: |
+        Recording stopped after the game switched to fullscreen exclusive.
+        Expected the session to continue, or to fall back to another backend.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: >
+        The exact sequence, including the game or test application. If it only
+        happens sometimes, say how often.
+      placeholder: |
+        1. Start `clipped-recorder record --window ...`
+        2. Launch the game in borderless mode
+        3. Switch the game to fullscreen exclusive
+        4. Recording stops
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      description: >
+        Run `winver`, and give the edition and build — for example
+        "Windows 11 Pro 24H2, build 26100.2314".
+    validations:
+      required: true
+
+  - type: input
+    id: gpu-and-driver
+    attributes:
+      label: GPU and driver version
+      description: >
+        The GPU doing the encoding, and its driver version — for example
+        "NVIDIA RTX 4070, driver 566.36" or "AMD Radeon 7900 XT, Adrenalin
+        24.12.1". Include both GPUs on a laptop with switchable graphics.
+    validations:
+      required: true
+
+  - type: input
+    id: capture-backend-and-encoder
+    attributes:
+      label: Capture backend and encoder in use
+      description: >
+        For example "Windows Graphics Capture, NVENC AV1" or "Desktop
+        Duplication, software x264". The recorder logs both when a session
+        starts; if you are unsure, paste that line or write "unknown".
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Clipped version or commit
+      description: >
+        The commit you built from (`git rev-parse --short HEAD`), or the
+        release version once releases exist.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >
+        Log lines from around the failure. This is rendered as a code block, so
+        no backticks are needed.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: >
+        Other recording or capture software running at the same time, multiple
+        or ultrawide monitors, HDR, a resolution change, an audio device being
+        connected — anything that might be relevant.
+    validations:
+      required: false
