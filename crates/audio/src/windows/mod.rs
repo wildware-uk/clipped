@@ -8,7 +8,11 @@
 
 mod apartment;
 mod endpoint;
+mod endpoint_capture;
 mod loopback;
+mod microphone;
 mod notifications;
 
-pub use loopback::{CaptureStats, SystemAudioCapture};
+pub use endpoint_capture::CaptureStats;
+pub use loopback::SystemAudioCapture;
+pub use microphone::{microphones, Microphone, MicrophoneCapture, MicrophoneSelection};

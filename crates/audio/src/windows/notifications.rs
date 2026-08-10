@@ -8,7 +8,9 @@
 //! capturing the speakers, which now receive nothing. The stream stays healthy,
 //! no call fails, and the recording is silent from that moment on. Nothing in
 //! `IAudioClient` reports it, because from the client's point of view nothing
-//! happened.
+//! happened. The same is true on the input side: the default microphone moves
+//! to the headset that was just plugged in while the recording keeps listening
+//! to a desk microphone nobody is talking into.
 //!
 //! Device *removal* is the easier half: unplugging the endpoint that is being
 //! captured invalidates the client, and the next call returns
@@ -36,7 +38,7 @@ use std::sync::Mutex;
 use windows::core::{implement, PCWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
+    eConsole, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
     IMMNotificationClient_Impl, DEVICE_STATE, DEVICE_STATE_ACTIVE,
 };
 
@@ -50,7 +52,7 @@ use crate::windows::endpoint::{identifier_matches, platform_error};
 /// second is not information anybody acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EndpointChange {
-    /// Windows moved the default render endpoint somewhere else.
+    /// Windows moved the default endpoint this capture follows somewhere else.
     DefaultMoved,
     /// The endpoint being captured was disabled, unplugged or otherwise left
     /// the active state.
@@ -65,12 +67,16 @@ pub(super) enum EndpointChange {
 
 impl EndpointChange {
     /// The words this reason appears as in a log line.
+    ///
+    /// Which device is meant is the `source` and `device` fields of the line
+    /// this appears on, so the reason itself does not name one: the same four
+    /// things happen to a pair of speakers and to a microphone.
     pub(super) fn as_str(self) -> &'static str {
         match self {
-            Self::DefaultMoved => "the default output device changed",
-            Self::CaptureEndpointUnavailable => "the output device being recorded was disabled",
-            Self::CaptureEndpointRemoved => "the output device being recorded was unplugged",
-            Self::CaptureEndpointInvalidated => "the output device being recorded was invalidated",
+            Self::DefaultMoved => "the default device changed",
+            Self::CaptureEndpointUnavailable => "the device being recorded was disabled",
+            Self::CaptureEndpointRemoved => "the device being recorded was unplugged",
+            Self::CaptureEndpointInvalidated => "the device being recorded was invalidated",
         }
     }
 }
@@ -91,12 +97,42 @@ struct WatchState {
 
 /// The one fact the capture thread and the audio service's callback thread
 /// share.
-#[derive(Debug, Default)]
+///
+/// Which notifications matter is fixed when the capture opens - the flow its
+/// endpoints are on, and whether it follows the default at all - so those two
+/// are plain fields rather than shared state, and a callback reads them without
+/// taking the lock.
+#[derive(Debug)]
 pub(super) struct EndpointWatch {
+    /// The side of the audio stack this capture's endpoints are on. A default
+    /// microphone moving is not a reason to reopen system audio.
+    flow: EDataFlow,
+    /// Whether the default endpoint moving concerns this capture. It does not
+    /// when the user chose a particular device: a chosen microphone being
+    /// unplugged must not move the recording onto whatever Windows promoted.
+    follows_default: bool,
     state: Mutex<WatchState>,
 }
 
 impl EndpointWatch {
+    /// A watch for one capture's endpoints.
+    pub(super) fn new(flow: EDataFlow, follows_default: bool) -> Self {
+        Self {
+            flow,
+            follows_default,
+            state: Mutex::new(WatchState::default()),
+        }
+    }
+
+    /// Whether a default-device notification is about the endpoint this capture
+    /// follows.
+    fn concerns_default(&self, flow: EDataFlow, role: ERole) -> bool {
+        // Only the console role: that is the role this crate records
+        // (`endpoint.rs`), and reacting to the communications role changing
+        // would reopen the stream every time a chat application started.
+        self.follows_default && flow == self.flow && role == eConsole
+    }
+
     /// Locks the state, recovering from a poisoned mutex.
     ///
     /// A panic elsewhere while this lock was held would poison it, and the
@@ -196,10 +232,7 @@ impl IMMNotificationClient_Impl for NotificationClient_Impl {
         role: ERole,
         _default: &PCWSTR,
     ) -> windows::core::Result<()> {
-        // Only the console render role: that is the role this crate captures
-        // (`endpoint.rs`), and reacting to the communications role changing
-        // would reopen the stream every time a chat application starts.
-        if flow == eRender && role == eConsole {
+        if self.watch.concerns_default(flow, role) {
             self.watch.request_reopen(EndpointChange::DefaultMoved);
         }
         Ok(())
@@ -260,6 +293,7 @@ mod tests {
     use std::sync::Arc;
 
     use windows::core::ComObject;
+    use windows::Win32::Media::Audio::{eCapture, eRender};
 
     use super::*;
 
@@ -280,12 +314,18 @@ mod tests {
         })
     }
 
+    /// A watch for a capture that follows the default output device, which is
+    /// what system audio capture uses.
+    fn following_the_default_output() -> EndpointWatch {
+        EndpointWatch::new(eRender, true)
+    }
+
     #[test]
     fn the_first_reason_is_the_one_kept() {
         // Plugging in a headset raises a default change and then a state change
         // on the device that lost the role. Both mean "reopen"; the first is
         // the one that explains what happened.
-        let watch = EndpointWatch::default();
+        let watch = following_the_default_output();
         watch.request_reopen(EndpointChange::DefaultMoved);
         watch.request_reopen(EndpointChange::CaptureEndpointUnavailable);
 
@@ -301,7 +341,7 @@ mod tests {
     fn a_state_change_on_some_other_device_is_not_this_captures_business() {
         // A second sound card being disabled while this capture is on the
         // first must not tear down a healthy stream.
-        let watch = Arc::new(EndpointWatch::default());
+        let watch = Arc::new(following_the_default_output());
         watch.set_captured(Some("{0.0.0.00000000}.{captured}".to_owned()));
 
         let client = client(&watch);
@@ -323,10 +363,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_console_render_role_moving_matters() {
+    fn only_the_console_role_on_this_captures_own_side_moving_matters() {
         // The communications default moves whenever a headset is used for a
         // call. Recording follows the console role, so this must not reopen.
-        let watch = Arc::new(EndpointWatch::default());
+        // Nor must the default *microphone* moving reopen system audio: the
+        // two captures share this code and would otherwise each tear down for
+        // the other's device.
+        let watch = Arc::new(following_the_default_output());
         let client = client(&watch);
 
         let id = windows::core::HSTRING::from("{0.0.0.00000000}.{new-default}");
@@ -355,8 +398,58 @@ mod tests {
     }
 
     #[test]
+    fn the_default_microphone_moving_is_a_microphone_captures_business_only() {
+        // The other side of the same rule, from the microphone's point of view.
+        let watch = Arc::new(EndpointWatch::new(eCapture, true));
+        let client = client(&watch);
+
+        let id = windows::core::HSTRING::from("{0.0.1.00000000}.{new-default}");
+        client
+            .OnDefaultDeviceChanged(eRender, eConsole, &PCWSTR(id.as_ptr()))
+            .expect("the callback reports success to Windows whatever it decides");
+        assert_eq!(
+            watch.take_change(),
+            None,
+            "somebody plugging in speakers is not a reason to reopen the microphone"
+        );
+
+        client
+            .OnDefaultDeviceChanged(eCapture, eConsole, &PCWSTR(id.as_ptr()))
+            .expect("the callback reports success to Windows whatever it decides");
+        assert_eq!(watch.take_change(), Some(EndpointChange::DefaultMoved));
+    }
+
+    #[test]
+    fn a_capture_on_a_chosen_device_does_not_follow_the_default_anywhere() {
+        // The user picked a microphone. Windows promoting the webcam's
+        // microphone to default - which unplugging the chosen one does - must
+        // not move the recording onto it: a track that silently became a
+        // different microphone is worse than a silent one. The chosen device
+        // going away is still noticed, because that is what the capture waits
+        // for.
+        let watch = Arc::new(EndpointWatch::new(eCapture, false));
+        watch.set_captured(Some("{0.0.1.00000000}.{chosen}".to_owned()));
+        let client = client(&watch);
+
+        let id = windows::core::HSTRING::from("{0.0.1.00000000}.{promoted}");
+        client
+            .OnDefaultDeviceChanged(eCapture, eConsole, &PCWSTR(id.as_ptr()))
+            .expect("the callback reports success to Windows whatever it decides");
+        assert_eq!(watch.take_change(), None);
+
+        let chosen = windows::core::HSTRING::from("{0.0.1.00000000}.{chosen}");
+        client
+            .OnDeviceRemoved(&PCWSTR(chosen.as_ptr()))
+            .expect("the callback reports success to Windows whatever it decides");
+        assert_eq!(
+            watch.take_change(),
+            Some(EndpointChange::CaptureEndpointRemoved)
+        );
+    }
+
+    #[test]
     fn a_device_becoming_active_again_is_not_a_reason_to_reopen() {
-        let watch = Arc::new(EndpointWatch::default());
+        let watch = Arc::new(following_the_default_output());
         watch.set_captured(Some("{0.0.0.00000000}.{captured}".to_owned()));
         let client = client(&watch);
 

@@ -29,6 +29,26 @@ pub enum AudioError {
     /// more than the audio it is missing. A recording that has not started yet
     /// has nothing to protect, so the caller is told plainly instead.
     NoEndpoint,
+    /// The machine has no input device, so there is no microphone to record.
+    ///
+    /// Reported when a microphone capture is *opened*, for the same reason
+    /// [`NoEndpoint`](Self::NoEndpoint) is: there is no format to give a track
+    /// and no recording in progress to protect. A microphone disappearing
+    /// during a recording is survivable and is not this — the track becomes
+    /// silence until one comes back.
+    NoMicrophone,
+    /// The microphone the user chose is not connected.
+    ///
+    /// Distinct from [`NoMicrophone`](Self::NoMicrophone) because the answer is
+    /// different: the machine may well have other microphones, and the user can
+    /// plug this one in or pick another (AGENTS.md section 45). A capture on a
+    /// chosen device never silently moves to a different one.
+    MicrophoneUnavailable {
+        /// The name the device was last known by, which is what the user
+        /// recognises. It is remembered with the choice, because a device that
+        /// is not there cannot be asked its name.
+        name: String,
+    },
     /// The endpoint's mix format is one this crate cannot convert.
     ///
     /// Shared-mode WASAPI presents 16-, 24- or 32-bit integer or 32-bit float,
@@ -69,6 +89,15 @@ impl fmt::Display for AudioError {
                 "this machine has no default audio output device, so there is no system \
                  audio to record",
             ),
+            Self::NoMicrophone => f.write_str(
+                "no microphone is connected, so there is nothing to record on the \
+                 microphone track. Connect one, or turn the microphone track off",
+            ),
+            Self::MicrophoneUnavailable { name } => write!(
+                f,
+                "the microphone Clipped is set to record ({name}) is not connected. \
+                 Connect it, or choose a different microphone"
+            ),
             Self::UnsupportedFormat { described } => write!(
                 f,
                 "the audio output device presents samples in a format Clipped cannot \
@@ -86,7 +115,11 @@ impl Error for AudioError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Platform { source, .. } => Some(source.as_ref()),
-            Self::NoEndpoint | Self::UnsupportedFormat { .. } | Self::NotOpen => None,
+            Self::NoEndpoint
+            | Self::NoMicrophone
+            | Self::MicrophoneUnavailable { .. }
+            | Self::UnsupportedFormat { .. }
+            | Self::NotOpen => None,
         }
     }
 }

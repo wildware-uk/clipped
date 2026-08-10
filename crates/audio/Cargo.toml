@@ -28,6 +28,7 @@ windows = { workspace = true, features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
     "Win32_Security",
@@ -51,10 +52,11 @@ windows = { workspace = true, features = [
 # would not move when that one does.
 windows-core.workspace = true
 
-# `examples/loopback_probe.rs` installs Clipped's own logging so that the
-# endpoint-change lines appear exactly as they will in a recording session,
-# which is the point of running it (issue #19's second acceptance criterion
-# needs a hand on a cable, so it is verified by watching this). `clipped-logging`
+# `examples/loopback_probe.rs` and `examples/microphone_probe.rs` install
+# Clipped's own logging so that the endpoint-change lines appear exactly as they
+# will in a recording session, which is the point of running them (issue #19's
+# and issue #20's device-change criteria need a hand on a cable, so they are
+# verified by watching these). `clipped-logging`
 # is layer 0 and `clipped-audio` is layer 1, so an example-only dependency on it
 # does not bend the layering `tests/integration/tests/workspace_layering.rs`
 # enforces, and it forces nothing on a consumer of the library.

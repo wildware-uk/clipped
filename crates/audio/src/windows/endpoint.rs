@@ -1,13 +1,22 @@
-//! Finding the default render endpoint, and reading what shape its audio is.
+//! Finding the endpoint a capture records, and reading what shape its audio is.
+//!
+//! Clipped records two kinds of endpoint — the one Windows plays through, in
+//! loopback mode, and a microphone — and they differ in so little that one
+//! description of "which endpoint, and how" serves both: [`EndpointSource`].
+//! Everything that follows from it, from opening the stream to filling the gap
+//! left by a device that was unplugged, is the same code
+//! (`endpoint_capture.rs`).
 
 use core::num::{NonZeroU16, NonZeroU32};
 
-use windows::core::{GUID, HRESULT, PCWSTR};
+use windows::core::{GUID, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::ERROR_NOT_FOUND;
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM,
+    eCapture, eConsole, eRender, EDataFlow, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+    WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM,
 };
 use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
@@ -45,33 +54,259 @@ pub(super) fn create_enumerator() -> Result<IMMDeviceEnumerator, AudioError> {
         .map_err(|error| platform_error("creating the audio device enumerator", error))
 }
 
-/// The default render endpoint, or [`None`] if the machine has none.
+/// Which side of the audio stack a capture records, and what its audio is
+/// called.
 ///
-/// "None" is a state to report rather than an error to raise: a laptop with
-/// every output unplugged genuinely has no default render endpoint, and so does
-/// a machine part-way through installing a driver. The caller decides whether
-/// that ends an attempt to start recording or is something to keep waiting
-/// through.
-pub(super) fn default_render_endpoint(
+/// The two captures Clipped runs differ in three things and no more: whether
+/// the endpoints they open render or capture, whether the stream is a loopback
+/// of a render endpoint, and the words a log line describes them with. So they
+/// are one engine parameterised by this rather than two implementations of the
+/// same WASAPI stream, the same timeline and the same device-change handling
+/// (AGENTS.md section 55).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceKind {
+    /// The endpoint Windows plays through, recorded in loopback mode.
+    SystemAudio,
+    /// An input device, recorded directly.
+    Microphone,
+}
+
+impl SourceKind {
+    /// Which side of the audio stack this kind's endpoints are on.
+    pub(super) fn flow(self) -> EDataFlow {
+        match self {
+            Self::SystemAudio => eRender,
+            Self::Microphone => eCapture,
+        }
+    }
+
+    /// The flags `IAudioClient::Initialize` opens the stream with, beside the
+    /// event-driven flag the stream adds when the audio engine accepts it.
+    ///
+    /// A render endpoint can only be recorded in loopback mode; a capture
+    /// endpoint is recorded as it is, and asking for loopback on one fails.
+    pub(super) fn stream_flags(self) -> u32 {
+        match self {
+            Self::SystemAudio => AUDCLNT_STREAMFLAGS_LOOPBACK,
+            Self::Microphone => 0,
+        }
+    }
+
+    /// What the `source` field on this capture's log lines says, so that two
+    /// captures running in one recording can be told apart in a log
+    /// (AGENTS.md section 35).
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::SystemAudio => "system audio",
+            Self::Microphone => "microphone",
+        }
+    }
+}
+
+/// Which device of that kind a capture records.
+///
+/// The name is carried beside the identifier so that a message about a device
+/// that is not there can say which device the user chose, which is the
+/// difference between the message AGENTS.md section 45 asks for and an error
+/// code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DeviceSelection {
+    /// Whatever Windows currently makes the default, following it when it
+    /// moves.
+    Default,
+    /// One particular device, and only that one. A capture on a chosen device
+    /// waits for it to come back rather than quietly recording a different
+    /// one: a microphone track that silently became the webcam's microphone
+    /// would be worse than a silent one.
+    Device {
+        /// `IMMDevice::GetId`, which is stable across reboots and is therefore
+        /// what a stored choice holds.
+        id: String,
+        /// The name to use when talking about it, including while it is
+        /// missing and cannot be asked for one.
+        name: String,
+    },
+}
+
+/// Which endpoint a capture opens, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EndpointSource {
+    pub(super) kind: SourceKind,
+    pub(super) selection: DeviceSelection,
+}
+
+impl EndpointSource {
+    /// The endpoint Windows is playing through, recorded in loopback mode.
+    pub(super) fn system_audio() -> Self {
+        Self {
+            kind: SourceKind::SystemAudio,
+            selection: DeviceSelection::Default,
+        }
+    }
+
+    /// A microphone: the default input device, or a chosen one.
+    pub(super) fn microphone(selection: DeviceSelection) -> Self {
+        Self {
+            kind: SourceKind::Microphone,
+            selection,
+        }
+    }
+
+    /// Whether Windows moving the default endpoint concerns this capture.
+    ///
+    /// It does not when the user chose a device: the default moving to the
+    /// laptop's built-in microphone because a headset was unplugged must not
+    /// silently move a recording onto it.
+    pub(super) fn follows_default(&self) -> bool {
+        matches!(self.selection, DeviceSelection::Default)
+    }
+
+    /// The device this source refers to, or [`None`] if it is not there.
+    ///
+    /// "Not there" is a state to report rather than an error to raise: a laptop
+    /// with every output unplugged genuinely has no default render endpoint, a
+    /// machine part-way through installing a driver has no endpoint at all, and
+    /// a chosen microphone is unplugged every time its owner leaves the desk.
+    /// The caller decides whether that ends an attempt to start recording or is
+    /// something to keep waiting through.
+    pub(super) fn resolve(
+        &self,
+        enumerator: &IMMDeviceEnumerator,
+    ) -> Result<Option<IMMDevice>, AudioError> {
+        match &self.selection {
+            DeviceSelection::Default => default_endpoint(enumerator, self.kind.flow()),
+            DeviceSelection::Device { id, .. } => active_device(enumerator, id),
+        }
+    }
+
+    /// How the device is named in a log line, including while there is no
+    /// device to ask.
+    pub(super) fn device_description(&self) -> &str {
+        match (&self.selection, self.kind) {
+            (DeviceSelection::Device { name, .. }, _) => name,
+            (DeviceSelection::Default, SourceKind::SystemAudio) => "the default output device",
+            (DeviceSelection::Default, SourceKind::Microphone) => "the default microphone",
+        }
+    }
+}
+
+/// The default endpoint for a data flow, or [`None`] if the machine has none.
+///
+/// `eConsole` is the role Windows plays games and media through and records
+/// from by default, which is the audio a recording is about. `eCommunications`
+/// — which a headset may hold while speakers and a desk microphone hold the
+/// console role — is the role a chat application picks, and following it would
+/// mean a recording that changed device whenever a call started.
+pub(super) fn default_endpoint(
     enumerator: &IMMDeviceEnumerator,
+    flow: EDataFlow,
 ) -> Result<Option<IMMDevice>, AudioError> {
-    // `eConsole` is the role Windows plays games and media through, which is
-    // the audio a recording is about. `eCommunications` — which a headset may
-    // be default for while speakers stay default for everything else — belongs
-    // to microphone capture and voice chat
-    // (issue #20, https://github.com/wildware-uk/clipped/issues/20).
-    //
     // SAFETY: `enumerator` is a live `IMMDeviceEnumerator`, and both arguments
     // are values of the enumerations the signature names.
-    match unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) } {
+    match unsafe { enumerator.GetDefaultAudioEndpoint(flow, eConsole) } {
         Ok(device) => Ok(Some(device)),
         // The documented answer when there is no endpoint for the role, rather
         // than a failure of the call.
         Err(error) if error.code() == E_NOTFOUND => Ok(None),
         Err(error) => Err(platform_error(
-            "asking Windows for the default audio output device",
+            "asking Windows for the default audio device",
             error,
         )),
+    }
+}
+
+/// A device by identifier, or [`None`] if it is not present and usable.
+///
+/// Windows remembers a device long after it was last plugged in, and
+/// `GetDevice` answers happily for one that is unplugged or disabled — the
+/// stream then fails at `Activate`. So the state is what decides, and a device
+/// that is not active is reported the same way as one Windows has never heard
+/// of: not there, wait for it.
+fn active_device(
+    enumerator: &IMMDeviceEnumerator,
+    id: &str,
+) -> Result<Option<IMMDevice>, AudioError> {
+    // SAFETY: `enumerator` is a live `IMMDeviceEnumerator` and `id` is a
+    // null-terminated wide string that outlives the call.
+    let device = match unsafe { enumerator.GetDevice(&HSTRING::from(id)) } {
+        Ok(device) => device,
+        Err(error) if error.code() == E_NOTFOUND => return Ok(None),
+        Err(error) => {
+            return Err(platform_error(
+                "asking Windows for the audio device this recording is set to use",
+                error,
+            ))
+        }
+    };
+
+    // SAFETY: `device` is the live `IMMDevice` just returned.
+    let state = unsafe { device.GetState() }
+        .map_err(|error| platform_error("reading the audio device's state", error))?;
+    Ok((state == DEVICE_STATE_ACTIVE).then_some(device))
+}
+
+/// Every active endpoint on one side of the audio stack, in the order Windows
+/// lists them.
+///
+/// Only active endpoints: a device that is unplugged or disabled cannot be
+/// recorded, and offering it in a list of microphones to choose from would be
+/// offering a choice that fails.
+pub(super) fn active_endpoints(
+    enumerator: &IMMDeviceEnumerator,
+    flow: EDataFlow,
+) -> Result<Vec<EndpointIdentity>, AudioError> {
+    // SAFETY: `enumerator` is a live `IMMDeviceEnumerator` and both arguments
+    // are values of the types the signature names.
+    let devices = unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }
+        .map_err(|error| platform_error("listing the machine's audio devices", error))?;
+    // SAFETY: `devices` is the live `IMMDeviceCollection` just returned.
+    let count = unsafe { devices.GetCount() }
+        .map_err(|error| platform_error("counting the machine's audio devices", error))?;
+
+    let mut endpoints = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        // SAFETY: `index` is below the count the collection just reported.
+        let device = unsafe { devices.Item(index) }
+            .map_err(|error| platform_error("reading an audio device from the list", error))?;
+        endpoints.push(EndpointIdentity::of(&device)?);
+    }
+    Ok(endpoints)
+}
+
+/// The mute switch Windows keeps for an endpoint.
+///
+/// A muted microphone is the commonest reason a microphone track is silent, and
+/// it is invisible from the capture stream: WASAPI delivers packets of silence
+/// exactly as it would for a quiet room. Reading the switch is what lets Clipped
+/// say which of the two it is.
+///
+/// Best effort throughout. A device whose endpoint volume cannot be activated —
+/// which a virtual device may well refuse — records perfectly well, so a failure
+/// here answers "unknown" rather than ending anything.
+///
+/// The `IAudioEndpointVolume` is owned by this value and released when it drops
+/// (AGENTS.md section 58); windows-rs releases the reference in its own `Drop`.
+#[derive(Debug)]
+pub(super) struct EndpointMute(IAudioEndpointVolume);
+
+impl EndpointMute {
+    /// Activates the endpoint volume interface on a device, if Windows offers
+    /// one.
+    pub(super) fn of(device: &IMMDevice) -> Option<Self> {
+        // SAFETY: `device` is a live `IMMDevice`; windows-rs infers the
+        // interface identifier from the return type, so the activation cannot
+        // ask for one interface and be typed as another.
+        unsafe { device.Activate(CLSCTX_ALL, None) }.ok().map(Self)
+    }
+
+    /// Whether the device is muted at the operating-system level, or [`None`]
+    /// if Windows would not say.
+    pub(super) fn is_muted(&self) -> Option<bool> {
+        // SAFETY: `self.0` is a live `IAudioEndpointVolume` and `GetMute` takes
+        // no arguments.
+        unsafe { self.0.GetMute() }
+            .ok()
+            .map(|muted| muted.as_bool())
     }
 }
 
