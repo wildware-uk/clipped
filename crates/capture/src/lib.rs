@@ -33,11 +33,33 @@
 //! Sits above `clipped-windows` and below `clipped-session`. It must never
 //! depend on application or UI concerns (AGENTS.md section 4).
 //!
-//! The interface itself is platform-neutral: no type here names a Windows API,
-//! so a backend for another platform is a matter of implementing
-//! [`CaptureBackend`] and declaring a [`CaptureMethod`]. Platform code lives in
-//! `clipped-windows` or in a `windows/` submodule of this crate, and there is
-//! none of either here yet (AGENTS.md section 5).
+//! # How platform-neutral this actually is
+//!
+//! No trait method, signature or data structure here is Windows-specific, and
+//! there is no Windows code in this crate: platform code lives in
+//! `clipped-windows` or in a `windows/` submodule of this crate, and neither
+//! exists yet (AGENTS.md section 5).
+//!
+//! The *vocabulary* is a different matter, and three enumerations name a
+//! platform outright: [`CaptureMethod::WindowsGraphicsCapture`] and
+//! [`CaptureMethod::DesktopDuplication`] name Windows capture APIs,
+//! [`TextureKind::D3d11Texture2D`] names a Direct3D 11 interface, and
+//! [`SourceClock::PerformanceCounter`] names a Windows clock. That is a
+//! decision rather than an oversight. A capture interface cannot be honest and
+//! wordless about what a texture is or which clock stamped a frame — the
+//! encoder has to know what it has been handed — so the unavoidable platform
+//! words are concentrated in three small closed enumerations, where a reader
+//! can see all of them at once, instead of being spread through the traits as
+//! casts and conditional compilation.
+//!
+//! The cost is that a backend for another platform is not purely a matter of
+//! implementing [`CaptureBackend`]: it also needs variants in those
+//! enumerations, and they are closed to other crates, so it has to be built
+//! here or the enumerations have to be opened. [`SourceClock::Monotonic`]
+//! already exists for that day; [`TextureKind`] has one variant and would need
+//! a second. Whether that shape is still right when a second platform actually
+//! exists is a question for then; what a reader is owed now is the boundary as
+//! it is, not a claim that there is not one.
 //!
 //! # Ownership and threading, in one paragraph each
 //!

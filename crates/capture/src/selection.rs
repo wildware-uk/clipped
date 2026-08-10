@@ -155,6 +155,12 @@ pub enum SelectionError {
     /// Automatic selection ran out of candidates.
     NoBackendAvailable {
         /// Every candidate that was tried, and why each declined.
+        ///
+        /// Empty when there were none to try, which the message says in those
+        /// words: "no capture backend can capture this target" on its own is
+        /// the one report nobody can diagnose, because it does not distinguish
+        /// a build with no backends in it from backends that all declined
+        /// (AGENTS.md section 15).
         considered: Vec<Considered>,
     },
 }
@@ -172,6 +178,10 @@ impl fmt::Display for SelectionError {
             Self::ForcedMethodRejected { method, rejection } => {
                 write!(f, "{method} was requested, but it {rejection}")
             }
+            Self::NoBackendAvailable { considered } if considered.is_empty() => f.write_str(
+                "no capture backend can capture this target: this build registered \
+                 no capture backends at all",
+            ),
             Self::NoBackendAvailable { considered } => {
                 f.write_str("no capture backend can capture this target")?;
                 for candidate in considered {
@@ -189,16 +199,21 @@ impl Error for SelectionError {}
 ///
 /// # The policy
 ///
-/// With [`CaptureMethodSetting::Automatic`], candidates are tried in
-/// [`CaptureMethod::PREFERENCE_ORDER`] — Game Capture, then Windows Graphics
-/// Capture, then Desktop Duplication (SPEC.md section 8) — and the first one
-/// that passes both tests wins:
+/// With [`CaptureMethodSetting::Automatic`], the candidates are sorted by
+/// preference — Game Capture, then Windows Graphics Capture, then Desktop
+/// Duplication (SPEC.md section 8) — and the first one that passes both tests
+/// wins:
 ///
 /// 1. its [`BackendCapabilities`](crate::BackendCapabilities) say it can
 ///    address this kind of target at all, and
 /// 2. it answers [`Availability::Available`] when asked about this target.
 ///
-/// A method with no registered candidate is skipped. With
+/// A method with no registered candidate is skipped, because there is nothing
+/// to ask. Every candidate that *was* registered is examined: the order comes
+/// from sorting the candidates by
+/// `CaptureMethod::preference_rank`, whose `match` is
+/// exhaustive, rather than from walking a separate list of methods a new one
+/// could be missing from. With
 /// [`CaptureMethodSetting::Forced`], the named candidate faces the same two
 /// tests and there is no fall back: failing either is an error the user can
 /// read.
@@ -288,17 +303,20 @@ pub fn select(
             }
         }
         CaptureMethodSetting::Automatic => {
+            // Ordering the candidates, rather than walking a list of methods
+            // and looking each one up, is what makes it impossible for a
+            // registered candidate to be silently skipped: every candidate is
+            // in this vector, and `preference_rank` is an exhaustive match, so
+            // a method that exists has a place in the order or the crate does
+            // not compile.
+            let mut ordered: Vec<&dyn BackendDeclaration> = candidates.to_vec();
+            ordered.sort_by_key(|candidate| candidate.method().preference_rank());
+
             let mut considered = Vec::new();
 
-            for method in CaptureMethod::PREFERENCE_ORDER {
-                let Some(candidate) = candidates
-                    .iter()
-                    .find(|candidate| candidate.method() == method)
-                else {
-                    continue;
-                };
-
-                let outcome = consider(*candidate, target);
+            for candidate in ordered {
+                let method = candidate.method();
+                let outcome = consider(candidate, target);
                 considered.push(Considered { method, outcome });
 
                 if outcome == Outcome::Selected {
@@ -621,6 +639,44 @@ mod tests {
                 considered: Vec::new()
             }
         );
+        assert_eq!(
+            error.to_string(),
+            "no capture backend can capture this target: this build registered \
+             no capture backends at all",
+            "with nothing tried there are no reasons to list, so the message \
+             has to name the situation itself or the bug report says only \
+             'it failed'"
+        );
+    }
+
+    #[test]
+    fn automatic_selection_reaches_every_method_there_is() {
+        // The regression this catches: a method that `select` never asks
+        // about. An available candidate for it is registered on its own, so
+        // the only way it is not selected is that automatic selection cannot
+        // see it — which is what happened when selection walked a hand-written
+        // array and a method was missing from it. Forced selection, which
+        // looks the candidate up directly, agrees; the two paths disagreeing
+        // about which backends exist is the silent half of that fault.
+        for method in CaptureMethod::PREFERENCE_ORDER {
+            let candidate = FakeDeclaration::available(method);
+
+            let automatic = select(&[&candidate], &window(), CaptureMethodSetting::Automatic)
+                .unwrap_or_else(|error| panic!("{method} is available: {error}"));
+            assert_eq!(automatic.method(), method);
+
+            let forced = select(
+                &[&candidate],
+                &window(),
+                CaptureMethodSetting::Forced(method),
+            )
+            .unwrap_or_else(|error| panic!("{method} is available: {error}"));
+            assert_eq!(
+                forced.method(),
+                automatic.method(),
+                "the two selection paths must agree about which backends exist"
+            );
+        }
     }
 
     #[test]

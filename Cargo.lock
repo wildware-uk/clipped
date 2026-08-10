@@ -24,6 +24,9 @@ version = "0.1.0"
 [[package]]
 name = "clipped-capture"
 version = "0.1.0"
+dependencies = [
+ "clipped-logging",
+]
 
 [[package]]
 name = "clipped-encoder"

@@ -14,11 +14,12 @@ use core::fmt;
 /// The snake_case form used in logs is [`log_value`](Self::log_value), which is
 /// deliberately identical to the `capture_backend` field vocabulary in
 /// `clipped_logging::CaptureBackend`, so that a log line and the UI agree about
-/// which method is running. The two enumerations are not shared, because this
-/// crate must not force a logging dependency on every consumer of the interface
-/// and the logging vocabulary is closed on purpose; keeping them in step is a
-/// review obligation, and there is nothing to keep in step until a backend
-/// exists.
+/// which method is running. The two enumerations are not shared — a capture
+/// method is a technique this crate selects between, a `capture_backend` field
+/// value is a word the log format has committed to, and they answer to
+/// different documents — so `log_values_match_the_logging_field_vocabulary`
+/// asserts the correspondence against the real `clipped_logging` enumeration,
+/// which this crate takes as a dev-dependency for that test alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum CaptureMethod {
@@ -51,14 +52,67 @@ pub enum CaptureMethod {
 impl CaptureMethod {
     /// Every method, most preferred first (SPEC.md section 8).
     ///
-    /// [`select`](crate::select) walks this array, so the preference order lives
-    /// in exactly one place. Adding a variant means adding it here; the
-    /// `preference_order_contains_every_method` test fails otherwise.
+    /// This is the published order — what the settings screen lists and what
+    /// the documentation quotes. It is not what [`select`](crate::select)
+    /// walks: selection sorts the candidates it was given by `preference_rank`
+    /// (private, just below), so a method cannot be invisible to selection by
+    /// being absent from an array. `preference_rank` will not compile unless
+    /// every method holds its own slot here, so the array is complete and in
+    /// the order the ranks say.
     pub const PREFERENCE_ORDER: [Self; 3] = [
         Self::GameCapture,
         Self::WindowsGraphicsCapture,
         Self::DesktopDuplication,
     ];
+
+    /// Where this method comes in the preference order, `0` being the most
+    /// preferred.
+    ///
+    /// The `match` is exhaustive, so a new variant does not compile until its
+    /// author has decided where in the preference order it belongs, and each
+    /// rank is checked at compile time against the slot of
+    /// [`PREFERENCE_ORDER`](Self::PREFERENCE_ORDER) it names. Every method
+    /// therefore occupies its own position in that array, or the crate does not
+    /// build: the two ways of asking "which methods are there, and in what
+    /// order?" cannot drift apart.
+    ///
+    /// That is worth the machinery because they were previously able to
+    /// disagree in silence. Selection walked the array, so a registered,
+    /// [`Available`](crate::Availability::Available) candidate for a method
+    /// missing from it was never asked under
+    /// [`Automatic`](CaptureMethodSetting::Automatic) — the caller got "no
+    /// capture backend can capture this target" with an empty list of
+    /// candidates — while [`Forced`](CaptureMethodSetting::Forced) selected the
+    /// very same candidate happily.
+    pub(crate) const fn preference_rank(self) -> usize {
+        match self {
+            Self::GameCapture => const { Self::rank(Self::GameCapture, 0) },
+            Self::WindowsGraphicsCapture => const { Self::rank(Self::WindowsGraphicsCapture, 1) },
+            Self::DesktopDuplication => const { Self::rank(Self::DesktopDuplication, 2) },
+        }
+    }
+
+    /// `rank`, rejected unless
+    /// [`PREFERENCE_ORDER`](Self::PREFERENCE_ORDER)`[rank]` is `method`.
+    ///
+    /// Called only from inside `const` blocks in
+    /// [`preference_rank`](Self::preference_rank), which is what makes both
+    /// checks compile errors rather than panics. The comparison is on the
+    /// discriminants because `PartialEq` is not usable in a `const fn`; these
+    /// are fieldless variants, so the cast is the whole value.
+    const fn rank(method: Self, rank: usize) -> usize {
+        assert!(
+            rank < Self::PREFERENCE_ORDER.len(),
+            "a capture method's rank must be a position in PREFERENCE_ORDER: \
+             add the method to that array"
+        );
+        assert!(
+            Self::PREFERENCE_ORDER[rank] as usize == method as usize,
+            "a capture method's rank must be its own position in \
+             PREFERENCE_ORDER, not another method's"
+        );
+        rank
+    }
 
     /// How this method is written in a structured log field.
     ///
@@ -128,22 +182,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preference_order_contains_every_method() {
-        // Exhaustive match: adding a variant without adding it to
-        // PREFERENCE_ORDER stops compiling here, which is the point.
-        for method in [
-            CaptureMethod::GameCapture,
-            CaptureMethod::WindowsGraphicsCapture,
-            CaptureMethod::DesktopDuplication,
-        ] {
-            assert!(
-                CaptureMethod::PREFERENCE_ORDER.contains(&method),
-                "{method} is missing from the preference order"
-            );
-        }
-    }
-
-    #[test]
     fn preference_order_matches_the_specification() {
         // SPEC.md section 8: Game Capture, then Windows Graphics Capture, then
         // Desktop Duplication.
@@ -177,19 +215,40 @@ mod tests {
 
     #[test]
     fn log_values_match_the_logging_field_vocabulary() {
-        // These are the `capture_backend` values `clipped_logging::CaptureBackend`
-        // already emits, so a log search for one method must find frames from
-        // this crate's report of it too.
-        assert_eq!(
-            CaptureMethod::WindowsGraphicsCapture.log_value(),
-            "windows_graphics_capture"
-        );
-        assert_eq!(
-            CaptureMethod::DesktopDuplication.log_value(),
-            "desktop_duplication"
-        );
-        // Game Capture has no counterpart in the logging vocabulary, because
-        // nothing implements it and that enumeration is closed on purpose.
-        assert_eq!(CaptureMethod::GameCapture.log_value(), "game_capture");
+        // Compared against the real enumeration, not against string literals
+        // copied out of it: a log search for `capture_backend` has to find both
+        // this crate's report of the method and the session's log lines, and
+        // two hand-maintained lists of the same words drift.
+        for method in CaptureMethod::PREFERENCE_ORDER {
+            // Exhaustive on purpose: a new method has to state its counterpart
+            // here, or say why it has none.
+            let logged = match method {
+                // Game Capture has no counterpart, and that is the right
+                // answer rather than an omission. `clipped_logging`'s
+                // vocabulary names backends that can appear in a session log,
+                // nothing implements Game Capture, and AGENTS.md section 34
+                // rules out the usual way of doing so; a value no code can
+                // emit would be a word in the log format promising a backend
+                // that does not exist. A build that ever implements it adds
+                // the variant there in the same change.
+                CaptureMethod::GameCapture => {
+                    assert_eq!(method.log_value(), "game_capture");
+                    continue;
+                }
+                CaptureMethod::WindowsGraphicsCapture => {
+                    clipped_logging::CaptureBackend::WindowsGraphicsCapture
+                }
+                CaptureMethod::DesktopDuplication => {
+                    clipped_logging::CaptureBackend::DesktopDuplication
+                }
+            };
+
+            assert_eq!(
+                method.log_value(),
+                logged.to_string(),
+                "{method} is logged as one word by this crate and another by \
+                 clipped-logging, so no log search finds both"
+            );
+        }
     }
 }

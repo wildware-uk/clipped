@@ -183,19 +183,29 @@ all this is [issue #22](https://github.com/wildware-uk/clipped/issues/22).
 ## Choosing a backend
 
 `select(candidates, target, setting)` is a pure function. With
-`CaptureMethodSetting::Automatic` it walks `CaptureMethod::PREFERENCE_ORDER` —
-Game Capture, then Windows Graphics Capture, then Desktop Duplication (SPEC.md
-section 8) — and takes the first candidate that passes two tests:
+`CaptureMethodSetting::Automatic` it sorts the candidates it was handed by
+preference — Game Capture, then Windows Graphics Capture, then Desktop
+Duplication (SPEC.md section 8) — and takes the first that passes two tests:
 
 1. its declared `BackendCapabilities` can address this kind of target at all,
    and
 2. it answers `Availability::Available` when asked about this particular target.
 
-A method with no registered candidate is skipped. With
-`CaptureMethodSetting::Forced(method)` the named candidate faces the same two
-tests and there is no fall back: a setting the user typed is obeyed or reported,
-never quietly swapped for something else. Automatic is the setting for people
-who want fallback.
+A method with no registered candidate is skipped: it never appears, because
+there is nothing to ask. Sorting the candidates rather than walking a list of
+methods is deliberate. `CaptureMethod::preference_rank` is an exhaustive match,
+so a new method has to be given a place in the order before the crate compiles,
+and there is no second list of methods for it to be missing from — a registered
+candidate that automatic selection cannot see is not a thing this code can
+express. `CaptureMethod::PREFERENCE_ORDER` remains as the published order, for
+documentation and for a settings screen, and a method's rank has to name that
+method's own slot in it — checked while the crate compiles — so the published
+order is complete and in the order selection actually uses.
+
+With `CaptureMethodSetting::Forced(method)` the named candidate faces the same
+two tests and there is no fall back: a setting the user typed is obeyed or
+reported, never quietly swapped for something else. Automatic is the setting
+for people who want fallback.
 
 The result is a `Selection` carrying the setting, the chosen method, and the
 list of candidates that were examined with the reason each was passed over. The
@@ -226,6 +236,15 @@ therefore never reaches it, and the diagnostics report does not mention it,
 because "this build has no Game Capture backend" is a fact about the build
 rather than about the target the user is trying to record.
 
+It is also the one method with no `clipped_logging::CaptureBackend` counterpart,
+which is a decision rather than an omission. That enumeration is the closed
+vocabulary the `capture_backend` log field commits to (docs/logging.md); a value
+no code can emit would be the log format promising a backend that does not
+exist. `CaptureMethod::GameCapture.log_value()` is still `game_capture`, because
+selection reports the method it was forced to and refused, and the word has to
+be the one a future backend would use. A build that ever implements Game Capture
+adds the logging variant in the same change.
+
 ### Runtime fallback is not built
 
 Falling back *after* a backend fails mid-recording — black frames, no frames,
@@ -241,6 +260,31 @@ remembering the answer per game.
 same backend, `UnsupportedTarget` means try another — which is the
 classification that decision will read.
 
+## How platform-neutral this is
+
+The interface is platform-neutral in shape: no trait method, signature or data
+structure here is Windows-specific, and there is no Windows code in the crate at
+all — it goes in `crates/windows` or a `windows/` submodule, and issue #12
+creates the first one.
+
+The vocabulary is another matter, and it is worth being exact rather than
+reassuring. Three enumerations name a platform outright:
+`CaptureMethod::WindowsGraphicsCapture` and `CaptureMethod::DesktopDuplication`
+name Windows capture APIs, `TextureKind::D3d11Texture2D` names a Direct3D 11
+interface, and `SourceClock::PerformanceCounter` names a Windows clock. A
+capture interface cannot be wordless about what a texture is or which clock
+stamped a frame — the encoder has to know what it has been handed — so the
+unavoidable platform words are concentrated in three small closed enumerations
+where a reader can see all of them at once, rather than spread through the
+traits as casts and conditional compilation (AGENTS.md section 5).
+
+The cost is that a backend for another platform is not only an implementation of
+`CaptureBackend`. It needs variants in those enumerations, and they are closed to
+other crates, so it is written here or the enumerations are opened first.
+`SourceClock::Monotonic` already exists for that day; `TextureKind` has a single
+variant and would need a second. Whether this shape is still right when a second
+platform actually exists is a question for then.
+
 ## Adding a backend
 
 1. **Put it in a platform module.** Windows code goes in `crates/windows` or in
@@ -249,10 +293,15 @@ classification that decision will read.
    issue #12 creates the first one. The layering test in
    `tests/integration/tests/workspace_layering.rs` enforces the crate-level half
    of this.
-2. **Add a `CaptureMethod` variant** if it is a new technique, and place it in
-   `PREFERENCE_ORDER`. The `preference_order_contains_every_method` test fails
-   otherwise. Add the matching `log_value`, keeping it in step with the
-   `capture_backend` field vocabulary in `clipped-logging`.
+2. **Add a `CaptureMethod` variant** if it is a new technique. The crate will
+   not compile until the variant has a `preference_rank`, and the rank will not
+   compile unless it names that method's own slot in `PREFERENCE_ORDER`, so the
+   published order and the order selection uses cannot part company. Add the
+   matching `log_value` and a `clipped_logging::CaptureBackend` variant for it
+   in the same change: `log_values_match_the_logging_field_vocabulary` compares
+   the two enumerations, so the vocabularies cannot part company either. Game
+   Capture is the one method with no logging counterpart, deliberately — see
+   "Game Capture" above.
 3. **Implement `BackendDeclaration`.** Declare capabilities as constants.
    `availability` must be cheap and must not allocate GPU resources: every
    candidate ahead of the winner is asked while a user waits for a recording to

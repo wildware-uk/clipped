@@ -29,13 +29,35 @@ pub struct BackendCapabilities {
 impl BackendCapabilities {
     /// Declares a backend that can capture the given kinds of target.
     ///
-    /// At least one must be true; a backend that can capture nothing has no
-    /// reason to exist. The remaining capabilities default to the conservative
-    /// answer — no, it is not occlusion independent, and no, the cursor cannot
-    /// be turned off — so a backend author states the good news explicitly
-    /// rather than inheriting it.
+    /// The remaining capabilities default to the conservative answer — no, it
+    /// is not occlusion independent, and no, the cursor cannot be turned off —
+    /// so a backend author states the good news explicitly rather than
+    /// inheriting it.
+    ///
+    /// # Panics
+    ///
+    /// If both are false. A backend that can capture neither a window nor a
+    /// display has no reason to exist, and [`select`](crate::select) would pass
+    /// over it for every target without ever saying why.
+    ///
+    /// Unlike [`FrameSize::new`], which returns [`Option`] for the analogous
+    /// invariant, this is a panic, because the two invariants are broken by
+    /// different people. A frame size comes from the platform at run time and a
+    /// caller has to cope with a minimised window; capabilities are a constant
+    /// the backend's author writes, so this is a `const fn` and the assertion
+    /// fires while the crate is being compiled — the declaration in the
+    /// doctest below stops the build rather than a recording.
+    ///
+    /// ```compile_fail
+    /// # use clipped_capture::BackendCapabilities;
+    /// const NOTHING: BackendCapabilities = BackendCapabilities::new(false, false);
+    /// ```
     #[must_use]
     pub const fn new(captures_windows: bool, captures_monitors: bool) -> Self {
+        assert!(
+            captures_windows || captures_monitors,
+            "a capture backend must capture windows, displays or both"
+        );
         Self {
             captures_windows,
             captures_monitors,
@@ -401,4 +423,19 @@ pub trait CaptureBackend: fmt::Debug + Send {
     /// An implementation must do the same work from `Drop`, so that an unwind
     /// or an early return cannot leak native resources.
     fn shut_down(&mut self);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "a capture backend must capture windows, displays or both")]
+    fn a_backend_that_can_capture_nothing_is_refused() {
+        // The compile-time half of this is the `compile_fail` doctest on
+        // `new`; this is the same invariant reached through a value computed at
+        // run time, which is the only other way to get here.
+        let neither = [false, false];
+        let _ = BackendCapabilities::new(neither[0], neither[1]);
+    }
 }
