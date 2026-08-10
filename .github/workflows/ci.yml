@@ -9,6 +9,14 @@
 # contributor to run before opening a pull request. They are deliberately not
 # paraphrased here: if CI and the contribution guide disagree about what "done"
 # means, the contribution guide loses, and nobody finds out until review.
+#
+# Every `uses:` below is pinned to a full commit SHA, with the human-readable
+# version in a trailing comment. A tag is not a pin: whoever controls the action
+# repository can move `v4` to point at a different commit, which is exactly how
+# the tj-actions/changed-files compromise reached consumers who thought they had
+# pinned. A SHA names one immutable tree. Dependabot understands SHA pins and
+# rewrites the trailing comment when it bumps one, so this costs nothing in
+# staleness - see .github/dependabot.yml.
 name: CI
 
 on:
@@ -61,7 +69,7 @@ jobs:
           git config --global core.eol lf
 
       - name: Check out the repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The step above states an intention; this one checks it held. A working
       # tree with CRLF in it produces confusing formatting failures later, and
@@ -103,12 +111,89 @@ jobs:
       - name: Check documented prerequisites
         shell: powershell
         run: |
+          # GitHub prepends `$ErrorActionPreference = 'stop'` to a `powershell`
+          # step. Under Windows PowerShell 5.1, merging a native executable's
+          # stderr into the success stream with `2>&1` wraps each stderr line in
+          # a NativeCommandError ErrorRecord, which is terminating under Stop.
+          # So the first time the script below wrote anything to stderr, this
+          # step would throw before `$output` was ever assigned: no log, no run
+          # summary, no `exit $code`. That is precisely the unhappy path this
+          # step exists to report on, so stderr is captured with the preference
+          # relaxed and the exit code is decided by the script, not by the host.
+          $ErrorActionPreference = 'Continue'
           $output = & powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $output
           "## Prerequisite check on a clean runner`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           exit $code
+
+      # crates/muxer links against the FFmpeg C libraries (issue #7), and the
+      # Rust FFmpeg bindings generate their headers with bindgen, which loads
+      # libclang.dll at build time. Without LIBCLANG_PATH pointing at a
+      # directory containing that DLL, the build fails with "Unable to find
+      # libclang" - a message that names neither FFmpeg nor the step that should
+      # have set it up.
+      #
+      # The runner image is widely said to ship LLVM at C:\Program Files\LLVM.
+      # This step does not assume that: it reports every location it looked in
+      # and what it found, so the log answers the question rather than the
+      # comment doing it. It never fails the job - nothing in the workspace
+      # needs libclang until #7 lands, and once it does the honest failure is
+      # the build error naming the missing DLL, not a red step here.
+      - name: Locate libclang for bindgen
+        run: |
+          $candidates = @(
+              'C:\Program Files\LLVM\bin'
+              'C:\Program Files (x86)\LLVM\bin'
+          )
+          # LLVM also ships inside Visual Studio as an optional component. Ask
+          # vswhere where VS actually is rather than guessing at a year and an
+          # edition in a path, both of which change with the image.
+          $programFilesX86 = ${env:ProgramFiles(x86)}
+          $vswhere = if ($programFilesX86) {
+              Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          } else { $null }
+          if ($vswhere -and (Test-Path -LiteralPath $vswhere)) {
+              $vsRoot = & $vswhere -latest -products * -property installationPath
+              if ($vsRoot) { $candidates += (Join-Path $vsRoot 'VC\Tools\Llvm\x64\bin') }
+          }
+
+          Write-Host 'Looking for libclang.dll:'
+          $found = $null
+          foreach ($dir in $candidates) {
+              $dll = Join-Path $dir 'libclang.dll'
+              if (Test-Path -LiteralPath $dll) {
+                  $size = [math]::Round((Get-Item -LiteralPath $dll).Length / 1MB, 1)
+                  Write-Host "  [found]   $dll (${size} MB)"
+                  if (-not $found) { $found = $dir }
+              }
+              else {
+                  Write-Host "  [missing] $dll"
+              }
+          }
+
+          $clang = Get-Command clang -ErrorAction SilentlyContinue
+          if ($clang) {
+              Write-Host "clang on PATH: $($clang.Source)"
+              Write-Host "  $(& clang --version | Select-Object -First 1)"
+          }
+          else {
+              Write-Host 'clang is not on PATH.'
+          }
+
+          if ($found) {
+              "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Write-Host ''
+              Write-Host "LIBCLANG_PATH=$found for the rest of this job."
+              "> libclang: found at ``$found``, LIBCLANG_PATH set.`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          else {
+              $message = "libclang.dll was not found in any known location on this runner. LIBCLANG_PATH is left unset. Nothing in the workspace needs it yet; when crates/muxer starts linking FFmpeg (issue #7) this step will need to install LLVM rather than merely locate it."
+              Write-Host ''
+              Write-Host $message -ForegroundColor Yellow
+              "> $message`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
 
       # A sibling change (issue #7) adds scripts/fetch-ffmpeg.ps1 and an
       # FFmpeg-linked crates/muxer. Until it lands there is nothing to fetch,
@@ -136,11 +221,11 @@ jobs:
       # accept in a *dependency* (CONTRIBUTING.md), but this is not one - it is
       # never linked into the recorder and is never distributed by us, it only
       # runs on GitHub's infrastructure, and the LGPL places no conditions on
-      # running a program. Pinned to an exact version rather than a floating
-      # major so that a new release of it cannot change a build without a commit
-      # here saying so.
+      # running a program. Pinned to a commit SHA, like everything else here, so
+      # that neither a new release nor a moved tag can change a build without a
+      # commit in this repository saying so.
       - name: Restore the cargo cache
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -171,7 +256,7 @@ jobs:
           git config --global core.eol lf
 
       - name: Check out the repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the pinned Rust toolchain
         run: |
@@ -182,7 +267,7 @@ jobs:
       # its own, which is the point, but the tool interpreting deny.toml should
       # not change underneath a pull request as well.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.85.11
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-deny@0.20.2
 
@@ -204,7 +289,7 @@ jobs:
           git config --global core.eol lf
 
       - name: Check out the repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The Tauri/React desktop application does not exist yet. Rather than
       # leaving this job out and adding it later - by which time nobody
@@ -229,7 +314,7 @@ jobs:
       # version is decided in the repository, not in this file.
       - name: Install Node
         if: steps.workspace.outputs.present == 'true'
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm

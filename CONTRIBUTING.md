@@ -136,14 +136,23 @@ Every pull request, and every push to `main`, runs
 **Windows** runner. Clipped is a Windows application, so a green build anywhere
 else would not tell us much.
 
-Three jobs run in parallel, and all three have to pass before a pull request can
-be merged:
+Three jobs run in parallel:
 
 | Job | What it runs |
 | --- | --- |
 | **Rust (format, lint, build, test)** | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`, `cargo test --workspace` |
 | **Dependencies (licences and advisories)** | `cargo deny --all-features check` |
-| **Desktop UI (lint and build)** | `npm ci`, `npm run lint`, `npm run build` in `apps/desktop` |
+| **Desktop UI (lint and build)** | `npm ci`, `npm run lint`, `npm run build` in `apps/desktop` (once `apps/desktop` exists — see below) |
+
+`main` is **not** branch-protected at the moment, so nothing mechanically blocks
+a red pull request from being merged. A red build is still a blocker: it is
+enforced by review rather than by the platform, and "CI was failing but the
+failure looked unrelated" is a claim to make on the pull request and have
+agreed, not one to act on alone. Protection was considered and deliberately
+declined while the initial build-out is in flight — requiring branches to be up
+to date would force a rebase and a full CI re-run on every other open pull
+request after each merge. Issue #4 records the decision, the exact command that
+turns it on, and the condition for doing so.
 
 The Rust job runs exactly the four commands in [What "done"
 means](#what-done-means), so there is nothing CI checks that you cannot check

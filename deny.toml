@@ -33,8 +33,21 @@ all-features = true
 
 [advisories]
 # The RustSec advisory database is the source; the defaults point at it.
-# A yanked crate in Cargo.lock is a build that will stop reproducing as soon as
-# a cache expires, so it is an error rather than a warning.
+#
+# Yanking does not break an existing build: a yanked version stays downloadable
+# indefinitely and a Cargo.lock that already names it keeps resolving and
+# compiling. What yanking stops is *new* resolution ever selecting that version
+# again. The reason to fail on it is therefore not reproducibility but the
+# signal: an author yanks a release because it was broken, withdrawn or
+# published in error, and a crate in our lockfile that its own author has
+# retracted is something we want to hear about rather than keep building on.
+#
+# The cost of `deny` is worth stating plainly, because somebody will meet it on
+# a day they were doing something else: the moment any crate in Cargo.lock is
+# yanked upstream, every open pull request goes red until the lockfile is
+# updated. That is the intended behaviour - it is the notification - but it is
+# an interruption arriving from outside the repository, not a fault in the
+# branch it lands on.
 yanked = "deny"
 
 # Advisories that have been reviewed and consciously accepted go here, each with
