@@ -42,7 +42,12 @@ Four sections, all required:
   consequences are the most useful ones to write down; an ADR with only
   benefits has not been thought about.
 
-Keep it short. A page is usually enough.
+Length follows from the decision. Two or three pages is normal for a decision
+that closes real doors — the records already here run to about that, and nearly
+all of it is the alternatives and the consequences, which is where the value is.
+Be brief in Context and Decision; do not compress Alternatives or Consequences
+to hit a length. A short record is a good sign only when the decision was
+genuinely simple.
 
 ## Status and supersession
 

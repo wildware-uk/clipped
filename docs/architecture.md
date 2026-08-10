@@ -74,15 +74,16 @@ capture pipeline, and it is not required for recording to start, continue or
 finalise. The reasoning and the alternatives considered are in
 [ADR 0002](adr/0002-separate-recorder-process.md).
 
-Two consequences are already enforced in the repository:
+One consequence is enforced in the repository: `apps/desktop` and `packages/`
+are deliberately **not** Cargo packages, so the UI cannot be linked into the
+recorder even by mistake. The test `no_crate_depends_on_the_desktop_application`
+in `tests/integration/tests/workspace_layering.rs` fails if a `Cargo.toml`
+appears in any of them.
 
-- `apps/desktop` and `packages/` are deliberately **not** Cargo packages, so the
-  UI cannot be linked into the recorder even by mistake. The test
-  `no_crate_depends_on_the_desktop_application` in
-  `tests/integration/tests/workspace_layering.rs` fails if a `Cargo.toml`
-  appears in any of them.
-- No crate under `crates/` may refer to UI concerns at all. `clipped-session`,
-  the top library layer, documents this in its own crate docs.
+A second consequence is a convention held up by review, not by a check: no crate
+under `crates/` may refer to UI concerns at all. `clipped-session`, the top
+library layer, documents this in its own crate docs, but nothing fails if a
+crate ignores it — a reviewer has to notice.
 
 The IPC protocol between the two is designed in
 [issue #49](https://github.com/wildware-uk/clipped/issues/49) and supervision of
@@ -107,7 +108,7 @@ surrounding responsibility.
 | Encoder Manager | `clipped-encoder` | M1 |
 | Event/Highlight Engine | `clipped-events` (vocabulary), `clipped-session` (rules) | M8–M10 |
 | Media Library | `clipped-library` | M6 |
-| Storage Manager | `clipped-storage` (persistence), `clipped-library` (policy) | M6, M12 |
+| Storage Manager | `clipped-storage` (persistence); policy undecided | M6, M12 |
 | Export Engine | not yet created; `clipped-muxer` for remux | M11 |
 | Plugin Manager | `clipped-plugins` | M9 |
 | Game/Screen Capture | `clipped-capture` | M1 |
@@ -122,9 +123,13 @@ than an independent subsystem: it needs the same capture, encode and mux
 pipeline and differs only in what it keeps (SPEC.md section 16). The Export
 Engine has no crate yet because nothing exports; creating an empty crate for it
 now would be speculative structure, and the M11 issues that build it will place
-it. Storage appears twice because the mechanism (SQLite, on-disk layout) and the
-policy (quotas, retention, favourite protection) are different concerns with
-different rates of change.
+it. Storage policy — quotas, retention, favourite protection — is listed as
+undecided for the same reason: the mechanism (SQLite, on-disk layout) is clearly
+`clipped-storage`, but no crate's documented remit claims the policy, and
+`clipped-library` explicitly claims indexing, search, favourites and tags
+instead. Where it lives is an M12 decision that
+[issue #93](https://github.com/wildware-uk/clipped/issues/93) and
+[issue #111](https://github.com/wildware-uk/clipped/issues/111) will make.
 
 ### Dependency direction
 
@@ -200,11 +205,14 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-`cargo test --workspace` is the pull-request gate. It must stay fast,
-deterministic and runnable on a machine with no GPU, no game and no audio
-hardware, which is why the suites are split:
+There is no CI yet — [issue #4](https://github.com/wildware-uk/clipped/issues/4)
+sets up the Windows workflow — so today those four commands are run by hand
+before opening a pull request. `cargo test --workspace` is intended to be the
+pull-request gate once #4 lands. It must stay fast, deterministic and runnable
+on a machine with no GPU, no game and no audio hardware, which is why the suites
+are split:
 
-| Suite | Contains | Runs in CI |
+| Suite | Contains | Intended for CI (#4) |
 | --- | --- | --- |
 | Unit tests, in each crate | Isolated logic: replay ranges, cleanup rules, configuration resolution, game matching | yes |
 | `tests/integration` | Workspace-wide invariants and subsystem interaction: encoder + muxer, session + database | yes |
@@ -225,8 +233,11 @@ machine-checkable and repeatable (AGENTS.md section 26).
 These hold across the system. Where one stops holding, the architecture, and
 not just some code, needs revisiting.
 
-- **Windows first.** Windows 11 and modern Windows 10 (SPEC.md section 3).
-  Process-scoped audio capture raises the practical floor further; see
+- **Windows first.** Windows 11 and modern Windows 10 (SPEC.md section 3), with
+  a caveat: the process-scoped loopback API that separate audio tracks depend on
+  is documented from build 20348, which no consumer Windows 10 release reaches.
+  On current information separated audio is Windows 11 only and Windows 10 falls
+  back to a single mixed track; see
   [ADR 0003](adr/0003-process-specific-audio-capture.md). Linux is left room
   for by the layering, but no Linux implementation is planned.
 - **A GPU that can encode video.** Hardware encoding is the normal path;

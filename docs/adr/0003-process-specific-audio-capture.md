@@ -107,15 +107,31 @@ account above richer functionality, and this would risk it.
 
 ## Consequences
 
-- **The minimum Windows version rises.** Process-scoped loopback is a recent
-  API, documented as available from Windows 10 build 20348 onwards. SPEC.md
-  section 3 already targets Windows 11 and modern Windows 10, so this is mostly
-  a formalisation, but the real floor has to be confirmed on real machines and
-  then written into [prerequisites.md](../prerequisites.md) rather than assumed.
+- **The product's central feature is probably Windows 11 only.** Microsoft
+  documents process-scoped loopback as available from build 20348 onwards. No
+  shipping consumer Windows 10 release reaches that number: Windows 10 22H2 is
+  build 19045, and 20348 is Windows Server 2022, whose client-side equivalent is
+  Windows 11 (22000 and above). If 20348 is the true floor, then true
+  multi-track audio — which SPEC.md section 11 calls a core architectural
+  requirement and SPEC.md sections 44 and 46 make the reason to use this
+  application at all — is unavailable on **every** Windows 10 machine, and
+  Windows 10 users get the degraded single-track mode below. That materially
+  narrows the SPEC.md section 3 target of "Windows 11 / modern Windows 10"
+  rather than formalising it, and it is a cost this decision imposes on a
+  population of users, not a technicality. The floor is stated from
+  documentation and has not yet been confirmed on real hardware; confirming it
+  — including whether any Windows 10 servicing update backported the API — is
+  part of the M2 audio work, and the answer belongs in
+  [prerequisites.md](../prerequisites.md) with the version numbers spelled out.
+  If it is confirmed, the limitation has to be stated plainly wherever a Windows
+  10 user might otherwise expect separate tracks, rather than being discovered
+  after the fact by someone whose tracks all came out identical.
 - **Behaviour below that floor must degrade, not fail.** On a machine without
-  the API, the honest outcome is a single system-audio track and an explicit
-  statement that separation is unavailable — not silently mixing everything and
-  labelling it "Game" (AGENTS.md section 27).
+  the API — on current information, any Windows 10 machine — the honest outcome
+  is a single system-audio track and an explicit statement that separation is
+  unavailable, not silently mixing everything and labelling it "Game"
+  (AGENTS.md section 27). That fallback is therefore a supported mode with its
+  own tests, not an error path.
 - **A compatibility mix track is required, not optional.** Some players pick
   one arbitrary track from a multi-track file, so a recording whose first track
   is the isolated game audio would sound wrong to a user who simply
