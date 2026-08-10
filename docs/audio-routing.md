@@ -156,6 +156,16 @@ stops one is the caller.
 | There is no output device at all | logs a `warn`, produces silence, and looks again every two seconds until one appears |
 | The default moves to a device with a **different** sample rate or channel count | logs a `warn`, reports `Capture::FormatChanged` once, and produces silence until the caller restarts the capture or the user selects a usable device again |
 | Windows cannot open the new device | logs a `warn` and retries every two seconds |
+| The device opens and then fails at once, over and over | logs a `warn` and leaves it alone for two seconds before trying again, rather than reopening it immediately |
+
+That last row is not a nicety. A device that opens and then fails on the first
+call — a sound card on its way out — is the one failure that can be reopened
+faster than it fails, and reopening it with no delay is an `Activate`,
+`Initialize`, `Start`, fail, repeat loop with nothing to end it: a read that
+never returns, a core at 100%, and a log growing for as long as the recorder
+runs. A stream that has been running for longer than half a second still
+reopens with no delay, because that is the ordinary case and the delay would be
+silence in somebody's recording.
 
 The last row of the second kind — a different sample rate — is the one
 compromise. A track's format is fixed when the capture opens, because a muxer
@@ -205,7 +215,7 @@ section 58).
 | Resource | Owner | Released by |
 | --- | --- | --- |
 | `IAudioClient`, `IAudioCaptureClient` | `Stream` | `Stream::drop`, which stops the stream first |
-| The event handle WASAPI signals | `Stream` | `Stream::drop` |
+| The event handle WASAPI signals | `Stream`'s `WakeEvent` | its own `Drop`, which runs after the audio clients above have been released |
 | The `IMMNotificationClient` registration | `EndpointNotifications` | its `Drop`, which unregisters |
 | `IMMDeviceEnumerator` | `SystemAudioCapture` | its `Drop` |
 | The `WAVEFORMATEX` from `GetMixFormat` | `MixFormat` | its `Drop`, with `CoTaskMemFree` |
@@ -252,6 +262,16 @@ ordinary machine, because they need a hand on a cable:
 A run in which the frame count stands still is a recording whose audio track
 would be shorter than its video.
 
+**This procedure has not been carried out yet.** It is written here because it
+is what has to happen, not because it has happened: no output device has been
+physically unplugged on a machine running this code, so Windows actually
+dispatching to the registered `IMMNotificationClient` — as opposed to the
+callbacks doing the right thing when they are called, which is unit tested — is
+unverified. [Issue #141](https://github.com/wildware-uk/clipped/issues/141)
+tracks doing it and recording what was seen. The
+`AUDCLNT_E_DEVICE_INVALIDATED` route into the same reopen is the reason a
+recording survives an unplug even if the notification never arrives.
+
 ## How to test it
 
 ```text
@@ -269,12 +289,17 @@ cargo test -p clipped-audio
 - **The real endpoint**, in `src/windows/loopback.rs`: a contiguous timeline
   over two seconds of real capture; a 600 ms consumer stall producing bounded
   buffers and silence of the length the audio engine could not hold; an
-  endpoint change not ending the recording.
+  endpoint change not ending the recording; and an endpoint that fails as soon
+  as it opens being backed off rather than reopened in a loop — that one reads
+  on a second thread, because the regression it guards against is a `read` that
+  never returns and a hung test says nothing.
 - **The tone**, in `tests/system_audio.rs`: a 440 Hz sine this crate
   synthesises, renders through WASAPI itself and captures back, asserted by
   Goertzel filter — it has to be present while it plays, absent afterwards, and
   the strongest frequency between 200 Hz and 2 kHz has to be 440. It plays a
-  quiet sound (about −34 dBFS) for under a second.
+  quiet sound (about −28 dBFS) for under a second. The same file stalls a
+  consumer through the public API and asserts that the silence invented to
+  cover the gap is actual zeroes.
 
 Everything that touches an endpoint skips, loudly, on a machine without one —
 which is why these are not in the pull-request CI job, since a GitHub Windows

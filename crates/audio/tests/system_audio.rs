@@ -188,7 +188,18 @@ fn synthesised_silence_contains_no_samples_at_all() {
         }
     };
 
-    let until = Instant::now() + Duration::from_millis(1_500);
+    // The condition has to be forced rather than waited for. A developer's
+    // machine is rarely silent — something is usually playing — so a test that
+    // reads for a while and asserts only on the silence it happens to see is a
+    // test that asserts nothing on the machine it is run on. Stalling the
+    // consumer produces the same state a silent endpoint does: the audio engine
+    // holds 200 ms and discards the rest, and the discarded period is one the
+    // device delivered no samples for, so it comes back as synthesised silence.
+    let _ = capture.read(Duration::from_millis(200));
+    let stall = Duration::from_millis(600);
+    std::thread::sleep(stall);
+
+    let until = Instant::now() + Duration::from_millis(500);
     let mut synthesised = 0usize;
     while Instant::now() < until {
         match capture
@@ -203,14 +214,28 @@ fn synthesised_silence_contains_no_samples_at_all() {
                 synthesised += samples.frames();
             }
             Capture::Samples(_) | Capture::Idle => {}
-            Capture::FormatChanged(_) => return,
+            Capture::FormatChanged(_) => {
+                skipped("the default output device changed during the test");
+                return;
+            }
         }
     }
 
+    // At least the part of the stall the audio engine could not hold: it keeps
+    // 200 ms, so about 400 ms of a 600 ms stall is a period no samples exist
+    // for, and 350 ms leaves room for the scheduler. A lower bound rather than
+    // a range, because on a machine that was genuinely quiet the whole stall is
+    // a period the endpoint said nothing about.
+    let expected = capture.format().nanos_to_frames(350_000_000);
+    assert!(
+        synthesised as u64 >= expected,
+        "a {stall:?} stall should have produced at least {expected} frames of synthesised \
+         silence, and produced {synthesised}"
+    );
+
     let _ = writeln!(
         std::io::stderr(),
-        "{synthesised} frames of synthesised silence in 1.5 s of capture \
-         (0 means the endpoint was busy throughout, which is not a failure)"
+        "{synthesised} frames of synthesised silence after a {stall:?} stall"
     );
 }
 

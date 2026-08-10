@@ -80,9 +80,12 @@ impl EndpointChange {
 struct WatchState {
     /// The pending reason to reopen, if any.
     change: Option<EndpointChange>,
-    /// The identifier of the endpoint currently being captured. [`None`] when
-    /// no stream is open, in which case a state change to some other device is
-    /// nothing to do with this capture.
+    /// The identifier of the endpoint this capture is on, set from the moment
+    /// the endpoint is chosen rather than from the moment its stream is
+    /// running: opening one takes long enough to be unplugged during, and a
+    /// notification that arrives while this is [`None`] is discarded as being
+    /// about somebody else's device. [`None`] when the capture has no endpoint
+    /// at all, which is a state it waits through rather than fails on.
     captured: Option<String>,
 }
 
@@ -263,9 +266,14 @@ mod tests {
     /// Builds the object Windows would call, without registering it.
     ///
     /// The callbacks are what this module is, so they are tested by calling
-    /// them exactly as the audio service does. What is not tested here is
-    /// Windows choosing to call them, which needs a device to be unplugged;
-    /// `docs/audio-routing.md` records how that was verified by hand.
+    /// them exactly as the audio service does. What is *not* covered anywhere
+    /// in this crate is Windows choosing to call them: that needs a device to
+    /// be unplugged on a real machine, it has not been done, and until it has,
+    /// the registration itself — `RegisterEndpointNotificationCallback`
+    /// succeeding and Windows dispatching through the generated vtable — is
+    /// unverified. `docs/audio-routing.md` gives the procedure and
+    /// [issue #141](https://github.com/wildware-uk/clipped/issues/141) tracks
+    /// carrying it out.
     fn client(watch: &Arc<EndpointWatch>) -> ComObject<NotificationClient> {
         ComObject::new(NotificationClient {
             watch: Arc::clone(watch),

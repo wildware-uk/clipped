@@ -45,10 +45,11 @@ windows = { workspace = true, features = [
 # has been unplugged (`src/windows/notifications.rs`), and the `#[implement]`
 # macro that builds its vtable generates code rooted at `::windows_core`, which
 # only resolves if this crate depends on it by name. It is not a second copy of
-# anything: `windows 0.62` is built on this crate, and Cargo resolves both to the
-# same `0.62.x`, so the pin is written to match the `windows` pin in the root
-# `Cargo.toml` and moves with it. Dual MIT/Apache-2.0.
-windows-core = "0.62"
+# anything: `windows 0.62` is built on this crate, and both resolve to one
+# `0.62.x`. The version lives in `[workspace.dependencies]` beside the `windows`
+# pin, because keeping the two in step is the whole point and a literal here
+# would not move when that one does.
+windows-core.workspace = true
 
 # `examples/loopback_probe.rs` installs Clipped's own logging so that the
 # endpoint-change lines appear exactly as they will in a recording session,

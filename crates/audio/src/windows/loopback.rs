@@ -120,15 +120,57 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// a minute for hours.
 const ENDPOINT_RETRY: Duration = Duration::from_secs(2);
 
+/// How long a stream has to survive before a failed call on it is treated as
+/// the device having gone rather than as the device being broken.
+///
+/// A stream that opens and then fails at once is a broken endpoint, and
+/// reopening it immediately produces an open/fail loop that never returns to
+/// the caller. One that has been running longer than this and then fails is the
+/// ordinary case — a headset unplugged — and reopens with no delay, because
+/// that delay would be silence in somebody's recording.
+///
+/// Half a second: longer than the worst reopen observed here by an order of
+/// magnitude, and short enough that the delay only ever applies to a device
+/// that is genuinely failing.
+const SETTLED: Duration = Duration::from_millis(500);
+
 /// How the capture thread waits for the next packet.
 #[derive(Debug)]
 enum Wake {
     /// WASAPI signals this handle when a packet is ready. Owned by the
-    /// [`Stream`] and closed by its [`Drop`].
-    Event(HANDLE),
+    /// [`Stream`], and closed when the [`WakeEvent`] drops — after the audio
+    /// client that Windows signals it through has been released, which is the
+    /// order Microsoft's own event-driven capture sample uses.
+    Event(WakeEvent),
     /// The audio engine refused an event-driven loopback stream, so the packet
     /// queue is looked at on a timer instead.
     Poll,
+}
+
+/// The event handle WASAPI signals, closed when it is dropped.
+///
+/// A wrapper rather than a bare [`HANDLE`] closed in [`Stream::drop`] so that
+/// the close is ordered by the struct's field order: `wake` is declared after
+/// `client` and `capture`, so the audio client is released first and there is
+/// no instant at which Windows holds a handle this process has closed.
+struct WakeEvent(HANDLE);
+
+impl core::fmt::Debug for WakeEvent {
+    /// Forwards to the handle, so that the log line naming it reads as the
+    /// handle it is.
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Drop for WakeEvent {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from `CreateEventW` in `create_wake_event`,
+        // this value has owned it since, and nothing refers to it afterwards.
+        if let Err(error) = unsafe { CloseHandle(self.0) } {
+            tracing::warn!(%error, "closing the loopback stream's event handle failed");
+        }
+    }
 }
 
 /// One live loopback stream on one endpoint.
@@ -139,8 +181,14 @@ enum Wake {
 struct Stream {
     identity: EndpointIdentity,
     format: AudioFormat,
+    /// When this stream was started, which is how a device that fails the
+    /// moment it opens is told apart from one that has been working and has
+    /// now gone; see [`SETTLED`].
+    opened: Instant,
     client: IAudioClient,
     capture: IAudioCaptureClient,
+    /// Declared after `client` and `capture` so that the event handle is closed
+    /// after they are released.
     wake: Wake,
     /// Bytes one frame occupies in the endpoint's buffer, cached because it is
     /// multiplied by a frame count for every packet.
@@ -169,11 +217,22 @@ impl Stream {
     ///
     /// [`None`] when the machine has no default render endpoint. That is a
     /// state to wait through rather than an error, so it is not one.
-    fn open(enumerator: &IMMDeviceEnumerator) -> Result<Option<Self>, AudioError> {
+    ///
+    /// `watch` is told which endpoint this is as soon as the endpoint is known,
+    /// which is before the stream exists rather than after. `Activate`,
+    /// `Initialize` and `Start` take long enough for a device to be unplugged
+    /// during them, and a notification that arrives while the watch says no
+    /// endpoint is being captured is discarded as somebody else's business.
+    fn open(
+        enumerator: &IMMDeviceEnumerator,
+        watch: &EndpointWatch,
+    ) -> Result<Option<Self>, AudioError> {
         let Some(device) = default_render_endpoint(enumerator)? else {
+            watch.set_captured(None);
             return Ok(None);
         };
         let identity = EndpointIdentity::of(&device)?;
+        watch.set_captured(Some(identity.id.clone()));
 
         // SAFETY: `device` is a live `IMMDevice`; windows-rs infers the
         // interface identifier from the return type, so the activation cannot
@@ -251,6 +310,7 @@ impl Stream {
         Ok(Some(Self {
             identity,
             format,
+            opened: Instant::now(),
             client,
             capture,
             wake,
@@ -355,12 +415,12 @@ impl Stream {
 
     /// Waits for a packet, or for `limit`, whichever is sooner.
     fn wait(&self, limit: Duration) {
-        match self.wake {
-            Wake::Event(handle) => {
+        match &self.wake {
+            Wake::Event(event) => {
                 let milliseconds = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX);
-                // SAFETY: `handle` is the event this stream created and owns,
+                // SAFETY: `event.0` is the event this stream created and owns,
                 // and it is not closed until this stream is dropped.
-                let _ = unsafe { WaitForSingleObject(handle, milliseconds) };
+                let _ = unsafe { WaitForSingleObject(event.0, milliseconds) };
             }
             Wake::Poll => std::thread::sleep(limit.min(POLL_INTERVAL)),
         }
@@ -375,15 +435,8 @@ impl Drop for Stream {
         if let Err(error) = unsafe { self.client.Stop() } {
             tracing::warn!(%error, "stopping the loopback stream failed");
         }
-        if let Wake::Event(handle) = self.wake {
-            // SAFETY: `handle` came from `CreateEventW` in `create_wake_event`,
-            // this stream has owned it since, and nothing refers to it after
-            // the drop. The audio client above has been stopped, so Windows is
-            // no longer signalling it.
-            if let Err(error) = unsafe { CloseHandle(handle) } {
-                tracing::warn!(%error, "closing the loopback stream's event handle failed");
-            }
-        }
+        // The event handle is closed by `WakeEvent`'s own drop, which runs
+        // after the fields declared before it have been released.
     }
 }
 
@@ -399,7 +452,7 @@ fn create_wake_event(client: &IAudioClient) -> windows::core::Result<Wake> {
     // SAFETY: `handle` is the event just created, and `client` is an
     // initialised audio client that has not been started.
     match unsafe { client.SetEventHandle(handle) } {
-        Ok(()) => Ok(Wake::Event(handle)),
+        Ok(()) => Ok(Wake::Event(WakeEvent(handle))),
         Err(error) => {
             // SAFETY: `handle` is owned here and nothing else refers to it.
             let _ = unsafe { CloseHandle(handle) };
@@ -477,6 +530,11 @@ pub struct SystemAudioCapture {
     format_change: Option<AudioFormat>,
     closed: bool,
     stats: CaptureStats,
+    /// Makes every look at the endpoint report that the stream has been lost,
+    /// which is what a device that fails the moment it is opened does. Set only
+    /// by the test that checks such a device cannot spin.
+    #[cfg(test)]
+    endpoint_always_fails: bool,
 }
 
 // SAFETY: `SystemAudioCapture` is `Send` so that a session can open it and move
@@ -520,9 +578,8 @@ impl SystemAudioCapture {
         let watch = Arc::new(EndpointWatch::default());
         let notifications = EndpointNotifications::register(&enumerator, Arc::clone(&watch))?;
 
-        let stream = Stream::open(&enumerator)?.ok_or(AudioError::NoEndpoint)?;
+        let stream = Stream::open(&enumerator, &watch)?.ok_or(AudioError::NoEndpoint)?;
         let format = stream.format;
-        watch.set_captured(Some(stream.identity.id.clone()));
 
         let counter_frequency = performance_counter_frequency()?;
         let opened = read_performance_counter(counter_frequency)?;
@@ -555,10 +612,25 @@ impl SystemAudioCapture {
             format_change: None,
             closed: false,
             stats: CaptureStats::default(),
+            #[cfg(test)]
+            endpoint_always_fails: false,
         })
     }
 
     /// The shape of every buffer this capture produces.
+    ///
+    /// Fixed when the capture is opened, and it stays fixed across an endpoint
+    /// change: a capture only follows the default endpoint to a device whose
+    /// sample rate and channel count match, so every buffer really does have
+    /// this shape for the life of the capture.
+    ///
+    /// The two fields that describe the endpoint rather than the buffers —
+    /// [`endpoint_samples`](AudioFormat::endpoint_samples) and
+    /// [`channel_mask`](AudioFormat::channel_mask) — describe the endpoint the
+    /// capture *opened* on, and are not refreshed when it moves to another one.
+    /// They are diagnostics rather than a description of what is handed over:
+    /// the samples are `f32` whatever the endpoint delivers, because this crate
+    /// converts them.
     #[must_use]
     pub fn format(&self) -> AudioFormat {
         self.format
@@ -688,6 +760,19 @@ impl SystemAudioCapture {
                 } => self.accept_packet(arrived, frames, discontinuity),
                 Polled::Lost(change) => {
                     self.watch.request_reopen(change);
+                    // The same deadline the empty case observes, and for a
+                    // sharper reason: an endpoint that opens and then fails at
+                    // once produces `Lost` on every look, so a loop that only
+                    // left on an empty queue would never return to the caller
+                    // at all. `service_endpoint` decides how long to wait before
+                    // trying that endpoint again; this decides that the caller
+                    // hears about the silence meanwhile.
+                    if Instant::now() >= deadline {
+                        self.timeline.owe_silence_until(self.counter_now()?);
+                        if self.timeline.silence_owed() == 0 {
+                            return Ok(Ready::Idle);
+                        }
+                    }
                 }
                 Polled::Empty => {
                     let now = Instant::now();
@@ -751,6 +836,13 @@ impl SystemAudioCapture {
 
     /// Looks at the endpoint, if there is one.
     fn poll_stream(&mut self) -> Polled {
+        #[cfg(test)]
+        {
+            if self.endpoint_always_fails && self.stream.is_some() {
+                return Polled::Lost(EndpointChange::CaptureEndpointInvalidated);
+            }
+        }
+
         let Self { stream, packet, .. } = self;
         match stream.as_mut() {
             Some(stream) => stream.next_packet(packet),
@@ -765,6 +857,25 @@ impl SystemAudioCapture {
     /// themselves only set a flag (`notifications.rs`).
     fn service_endpoint(&mut self) {
         if let Some(change) = self.watch.take_change() {
+            // A stream that has only just been opened and has already failed on
+            // the endpoint itself is a broken device, and opening it again
+            // immediately is how a recorder ends up doing nothing else for the
+            // rest of the day: `Activate`, `Initialize`, `Start`, fail, repeat,
+            // with two log lines each time round and no read ever returning.
+            // Waiting is the only thing that helps.
+            //
+            // The reason is part of the test, not only the age. A notification
+            // is paced by a person with a plug in their hand and cannot loop; a
+            // failed call on the client is raised by this crate on every look,
+            // and can. So an unplug still reopens the moment it is noticed,
+            // however long the stream had been running, and only a device that
+            // breaks the instant it is opened is left alone for a while.
+            let failed_at_once = change == EndpointChange::CaptureEndpointInvalidated
+                && self
+                    .stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.opened.elapsed() < SETTLED);
+
             if self.stream.is_some() {
                 tracing::info!(
                     reason = change.as_str(),
@@ -777,8 +888,17 @@ impl SystemAudioCapture {
             self.stream = None;
             self.watch.set_captured(None);
             self.awaiting_change = false;
-            self.retry_at = None;
+            self.retry_at = failed_at_once.then(|| Instant::now() + ENDPOINT_RETRY);
             self.stats.endpoint_changes += 1;
+
+            if failed_at_once {
+                tracing::warn!(
+                    retry_in_seconds = ENDPOINT_RETRY.as_secs(),
+                    "the audio output device failed as soon as it was opened, so it is left \
+                     alone for a moment rather than reopened at once. The recording \
+                     continues, and system audio is silence until it works"
+                );
+            }
         }
 
         if self.stream.is_some() || self.awaiting_change {
@@ -788,14 +908,13 @@ impl SystemAudioCapture {
             return;
         }
 
-        match Stream::open(&self.enumerator) {
+        match Stream::open(&self.enumerator, &self.watch) {
             Ok(Some(stream)) if self.format.is_interchangeable_with(&stream.format) => {
                 tracing::info!(
                     endpoint = stream.identity.name,
                     endpoint_id = stream.identity.id,
                     "system audio capture resumed on the default output device"
                 );
-                self.watch.set_captured(Some(stream.identity.id.clone()));
                 self.stream = Some(stream);
                 self.retry_at = None;
             }
@@ -859,6 +978,21 @@ impl SystemAudioCapture {
     #[cfg(test)]
     fn simulate_endpoint_change(&self, change: EndpointChange) {
         self.watch.request_reopen(change);
+    }
+
+    /// Makes every look at the endpoint behave as though the device had been
+    /// invalidated.
+    ///
+    /// A device that opens and then fails on the first call is the one shape of
+    /// failure that cannot be reached from a healthy machine and cannot be left
+    /// untested: it is what a dying USB sound card does, and reopening it at
+    /// once is a loop with nothing to end it. The stream is opened for real and
+    /// the failure is injected where WASAPI would report it, so everything the
+    /// loop does in response — tearing down, backing off, filling the gap with
+    /// silence — is the code that would run.
+    #[cfg(test)]
+    fn fail_the_endpoint_from_now_on(&mut self) {
+        self.endpoint_always_fails = true;
     }
 }
 
@@ -945,6 +1079,46 @@ mod tests {
         }
     }
 
+    /// Asserts that every buffer starts exactly where all the buffers before it
+    /// ended.
+    ///
+    /// Measured from the first timestamp plus the running frame count, which is
+    /// how [`Timeline`] computes them. Adding each buffer's own duration to the
+    /// previous buffer's timestamp instead would floor the nanosecond
+    /// conversion twice, and two floors disagree with one by a nanosecond
+    /// whenever a buffer's length is not a whole number of nanoseconds — which
+    /// a silence instalment reconciled against the device's position often is
+    /// not. That is arithmetic in the test rather than drift in the capture,
+    /// and this way of asking is both exact and stricter: it fails on
+    /// cumulative drift as well as on a single bad buffer.
+    struct Contiguity {
+        format: AudioFormat,
+        anchor: Option<AudioTimestamp>,
+        frames: u64,
+    }
+
+    impl Contiguity {
+        fn new(format: AudioFormat) -> Self {
+            Self {
+                format,
+                anchor: None,
+                frames: 0,
+            }
+        }
+
+        fn accept(&mut self, samples: &CapturedAudio<'_>) {
+            let anchor = *self.anchor.get_or_insert(samples.timestamp());
+            assert_eq!(
+                samples.timestamp(),
+                AudioTimestamp::from_nanos(
+                    anchor.as_nanos() + self.format.frames_to_nanos(self.frames)
+                ),
+                "buffers must be exactly contiguous"
+            );
+            self.frames += samples.frames() as u64;
+        }
+    }
+
     #[test]
     fn a_capture_produces_a_contiguous_timeline_for_as_long_as_it_is_read() {
         // The property everything downstream depends on, asserted against the
@@ -955,28 +1129,14 @@ mod tests {
         let format = capture.format();
 
         let started = Instant::now();
-        let mut expected: Option<AudioTimestamp> = None;
-        let mut frames = 0u64;
+        let mut timeline = Contiguity::new(format);
 
         while started.elapsed() < Duration::from_secs(2) {
             match capture
                 .read(Duration::from_millis(200))
                 .expect("a healthy capture does not fail")
             {
-                Capture::Samples(samples) => {
-                    if let Some(expected) = expected {
-                        assert_eq!(
-                            samples.timestamp(),
-                            expected,
-                            "buffers must be exactly contiguous"
-                        );
-                    }
-                    frames += samples.frames() as u64;
-                    expected = Some(AudioTimestamp::from_nanos(
-                        samples.timestamp().as_nanos()
-                            + format.frames_to_nanos(samples.frames() as u64),
-                    ));
-                }
+                Capture::Samples(samples) => timeline.accept(&samples),
                 Capture::Idle => {}
                 Capture::FormatChanged(_) => {
                     skipped("the default output device changed during the test");
@@ -985,7 +1145,7 @@ mod tests {
             }
         }
 
-        let seconds = frames as f64 / f64::from(format.sample_rate().get());
+        let seconds = timeline.frames as f64 / f64::from(format.sample_rate().get());
         assert!(
             (1.8..=2.3).contains(&seconds),
             "two seconds of reading should produce about two seconds of audio, got {seconds:.3}"
@@ -1087,24 +1247,15 @@ mod tests {
             .expect("a capture opens with an endpoint")
             .to_owned();
 
-        let format = capture.format();
-        let mut expected: Option<AudioTimestamp> = None;
+        let mut timeline = Contiguity::new(capture.format());
         let mut read_once = |capture: &mut SystemAudioCapture| {
             if let Capture::Samples(samples) = capture
                 .read(Duration::from_millis(300))
                 .expect("a healthy capture does not fail")
             {
-                if let Some(expected) = expected {
-                    assert_eq!(
-                        samples.timestamp(),
-                        expected,
-                        "the timeline must stay contiguous across an endpoint change"
-                    );
-                }
-                expected = Some(AudioTimestamp::from_nanos(
-                    samples.timestamp().as_nanos()
-                        + format.frames_to_nanos(samples.frames() as u64),
-                ));
+                // The same contiguity the first test asserts, across the point
+                // the endpoint moved.
+                timeline.accept(&samples);
             }
         };
 
@@ -1128,6 +1279,78 @@ mod tests {
         assert!(
             capture.stats().frames > 0,
             "the recording must still be producing audio after the endpoint changed"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_that_fails_as_soon_as_it_opens_does_not_spin() {
+        // A device that opens and then fails on the first call — a sound card
+        // on its way out, or one being removed exactly as the capture reaches
+        // it — must not become an open/fail loop. Reopening it with neither a
+        // deadline nor a delay is a `read` that never returns, on a recorder
+        // AGENTS.md section 59 expects to run for days: a burnt core, a log
+        // that grows without limit, and no audio.
+        let Some(mut capture) = open() else { return };
+        let format = capture.format();
+        capture.fail_the_endpoint_from_now_on();
+
+        // Read on another thread, because the regression this guards against
+        // is an infinite loop inside `read`, and a test that hangs reports
+        // nothing at all. The channel gives it a bounded time to fail in.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut longest_read = Duration::ZERO;
+            let mut frames = 0u64;
+            let mut failure = None;
+            while started.elapsed() < Duration::from_millis(1_500) {
+                let attempted = Instant::now();
+                match capture.read(Duration::from_millis(200)) {
+                    Ok(Capture::Samples(samples)) => frames += samples.frames() as u64,
+                    Ok(Capture::Idle | Capture::FormatChanged(_)) => {}
+                    Err(error) => {
+                        failure = Some(error.to_string());
+                        break;
+                    }
+                }
+                longest_read = longest_read.max(attempted.elapsed());
+            }
+            let _ = sender.send((longest_read, frames, capture.stats(), failure));
+        });
+
+        let (longest_read, frames, stats, failure) = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a capture whose endpoint fails immediately must still return from read");
+
+        assert_eq!(
+            failure, None,
+            "an endpoint failing is handled, not an error"
+        );
+        assert!(
+            longest_read < Duration::from_secs(1),
+            "a read with a 200 ms timeout took {longest_read:?}"
+        );
+
+        // One teardown, then the endpoint is left alone for `ENDPOINT_RETRY`
+        // rather than reopened at once, so a second and a half of failing
+        // cannot be hundreds of `Activate`/`Initialize`/`Start` sequences.
+        assert!(
+            stats.endpoint_changes <= 2,
+            "1.5 s of a failing endpoint reopened it {} times; it is meant to back off",
+            stats.endpoint_changes
+        );
+
+        // And the recording carries on regardless, which is the whole point of
+        // surviving the failure: the track is silence, of the right length.
+        let seconds = frames as f64 / f64::from(format.sample_rate().get());
+        assert!(
+            (1.0..=2.0).contains(&seconds),
+            "1.5 s of reading a failing endpoint should still produce about 1.5 s of \
+             audio, got {seconds:.3}"
+        );
+        assert!(
+            stats.synthesised_silence_frames > 0,
+            "the gap a failing endpoint leaves has to be filled with silence"
         );
     }
 
