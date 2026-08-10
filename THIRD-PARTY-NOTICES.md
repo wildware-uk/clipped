@@ -130,3 +130,65 @@ WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
+
+## Intel oneVPL API headers (`mfxvideo.h` and what it includes)
+
+**Where:** `crates/encoder/src/windows/quicksync/sys.rs`
+
+**What:** Rust FFI bindings generated with
+[bindgen](https://github.com/rust-lang/rust-bindgen) 0.72.1 from Intel's oneVPL
+public API headers. The file is a derivative of those headers — Intel's type
+names, field names, enumerators and constant values — so their licence and
+notices travel with it.
+
+**Source:** [intel/libvpl](https://github.com/intel/libvpl), tag `v2.15.0`,
+`api/vpl/`. Five headers are reachable from `mfxvideo.h`, and all five
+contribute to the generated file:
+
+| File | SHA-256 |
+| --- | --- |
+| `mfxvideo.h` | `242cf5ebedd0101c7867ad004c562e9db6364d98a4c905e28f622e02b5b39519` |
+| `mfxsession.h` | `d9a3d568df1db1b6267e0992c71cbe2522566e7b16bb80f8e6c70a473a4598c7` |
+| `mfxstructures.h` | `d0d31b2006fa6053346338ae984708106d4b9df43a94f2e956d340e104e4dad5` |
+| `mfxcommon.h` | `c290e6ae15f35436097f0b605c02566fa67094cf449d090520d23c7e3fa194a8` |
+| `mfxdefs.h` | `1b3dd675af7927d74d716cef0a45e2079ffbc1e988290a6db558665bdc217bd6` |
+
+**Licence:** MIT, as reproduced below from that repository's `LICENSE`; each
+header also carries `SPDX-License-Identifier: MIT` at the top of itself. Only
+the API headers are used. No part of the libvpl dispatcher or runtime is
+redistributed here: Clipped loads the runtime the Intel graphics driver
+installed, which is why the licence question stops at the headers (see
+[docs/encoder-pipeline.md](docs/encoder-pipeline.md#the-quick-sync-backend)).
+
+**How it was generated, and what was changed:** the command is recorded in
+[docs/encoder-pipeline.md](docs/encoder-pipeline.md#the-bindings-and-their-licence-1)
+and repeated in the file's own header comment. Nothing in the generated output
+is edited by hand; the only modifications are the ones the command asks for
+(comments stripped, functions excluded) and the attribution comment added at the
+top of the file. The entry point signatures bindgen was told not to generate —
+there is no import library to link them against — are transcribed by hand into
+`api.rs`, each beside the declaration it came from.
+
+```text
+MIT License
+
+Copyright (c) 2020 Intel Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

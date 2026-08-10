@@ -26,10 +26,12 @@ mod amf;
 mod dxgi;
 mod media_foundation;
 mod nvenc;
+mod quicksync;
 mod runtime;
 
 pub use amf::AmfEncoder;
 pub use nvenc::NvencEncoder;
+pub use quicksync::QuickSyncEncoder;
 
 use crate::adapter::Adapter;
 use crate::probe::{EncoderObservations, ProbeError, SystemProbe};

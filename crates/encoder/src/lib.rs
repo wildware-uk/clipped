@@ -15,13 +15,14 @@
 //! ([#15](https://github.com/wildware-uk/clipped/issues/15)), through
 //! [`NvencEncoder`], for H.264, HEVC and AV1; AMF
 //! ([#16](https://github.com/wildware-uk/clipped/issues/16)), through
-//! [`AmfEncoder`], for H.264 and HEVC; and the software fallback
+//! [`AmfEncoder`], for H.264 and HEVC; Quick Sync
+//! ([#17](https://github.com/wildware-uk/clipped/issues/17)), through
+//! [`QuickSyncEncoder`] — which is written and, for want of an Intel GPU to run
+//! it on, unverified against hardware; `docs/encoder-pipeline.md` says exactly
+//! which of its paths have never executed; and the software fallback
 //! ([#18](https://github.com/wildware-uk/clipped/issues/18)), through
 //! [`SoftwareEncoder`], which encodes H.264 on the CPU for a machine with no
-//! usable encoding hardware. Quick Sync
-//! ([#17](https://github.com/wildware-uk/clipped/issues/17)) is not
-//! implemented, so a machine with only an Intel GPU can still be told what it
-//! could do and cannot yet be recorded from.
+//! usable encoding hardware.
 //!
 //! `docs/encoder-pipeline.md` describes the encoding half; the detection half
 //! is `docs/encoder-capabilities.md`.
@@ -35,7 +36,7 @@
 //! - Remembering the answer between runs: [`CapabilityCache`].
 //! - Describing a stream to be produced: [`EncoderConfig`].
 //! - Producing it: [`VideoEncoder`], [`NvencEncoder`], [`AmfEncoder`],
-//!   [`SoftwareEncoder`].
+//!   [`QuickSyncEncoder`], [`SoftwareEncoder`].
 //!
 //! # Not responsible for
 //!
@@ -136,4 +137,4 @@ pub use recommendation::{measured_codecs, recommend, ChoiceReason, Recommendatio
 #[cfg(windows)]
 pub use software::SoftwareEncoder;
 #[cfg(windows)]
-pub use windows::{AmfEncoder, NvencEncoder, WindowsProbe};
+pub use windows::{AmfEncoder, NvencEncoder, QuickSyncEncoder, WindowsProbe};
