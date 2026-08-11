@@ -156,9 +156,12 @@ responsible for:
   screen showing in it.
 - **State that is not only colour.** The current screen is marked three ways:
   the accent bar, the heavier weight, and `aria-current="page"`.
-- **Scalable text.** `zoomHotkeysEnabled` is on, so Ctrl+`+`, Ctrl+`-` and
-  Ctrl+`0` scale the whole interface. Windows display scaling applies to the
-  webview as it does to any window.
+- **Scalable text.** Windows display scaling applies to the webview as it does
+  to any window, and nothing here fixes a height that would clip text when it
+  grows. `zoomHotkeysEnabled` is set in `tauri.conf.json`, which is what lets
+  WebView2 handle Ctrl+`+`, Ctrl+`-` and Ctrl+`0` — but that is configured
+  rather than confirmed: it has not been exercised against a running window, so
+  do not treat it as verified until someone has.
 
 `eslint-plugin-jsx-a11y` catches the mechanical half of this at the point the
 code is written. The rest is asserted by the component tests, which drive the
