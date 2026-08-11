@@ -4,6 +4,27 @@
 - Date: 2026-08-10
 - Issue: [#7](https://github.com/wildware-uk/clipped/issues/7)
 
+## Amendments
+
+**2026-08-11 — who may name the binding
+([#155](https://github.com/wildware-uk/clipped/issues/155)).** The Decision
+below originally ended with "No other crate depends on `rusty_ffmpeg`
+directly." The software encoder fallback
+([#18](https://github.com/wildware-uk/clipped/issues/18)) made that false:
+`crates/encoder` links the binding to reach `libopenh264` inside the pinned
+build.
+
+This is a correction of wording, not a change of decision, so it is made in
+place rather than by a superseding record (see
+[the ADR README](README.md#status-and-supersession)). The decision — a pinned
+LGPL build, linked dynamically, through a raw sys binding — is unchanged, and
+this ADR's own Consequences already named `libopenh264` as the answer for #18,
+so a second consumer was foreseen when it was written. What was wrong was
+stating a *rule about who may name the FFI* as though it were a property of the
+decision. The rule that replaces it is in the Decision bullet below: a crate
+with no lower-layer route to what it needs may name the binding, and the safe
+wrappers over the container API still live in exactly one place.
+
 ## Context
 
 Clipped writes containers, remuxes without re-encoding, decodes for thumbnails
@@ -73,12 +94,19 @@ Concretely:
   `[workspace.dependencies]` so the crate version and the FFmpeg version move
   together. It links FFmpeg and generates the FFI with `bindgen`, and offers
   nothing above that.
-- **`crates/muxer` owns the link and owns the safe API over it.** Because the
-  binding is a `-sys` crate, every safe abstraction over FFmpeg in Clipped is
-  written here. Today that is `linkage`, which reports the loaded libraries and
-  probes the build; the wrappers around `AVFormatContext`, `AVStream` and
-  `AVPacket` are written with the muxer that needs them (#21). No other crate
-  depends on `rusty_ffmpeg` directly.
+- **`crates/muxer` owns the safe API over the container.** Because the binding
+  is a `-sys` crate, every safe abstraction over FFmpeg's *container* API in
+  Clipped is written here. Today that is `linkage`, which reports the loaded
+  libraries and probes the build, and the wrappers around `AVFormatContext`,
+  `AVStream` and `AVPacket`, written with the muxer that needs them (#21).
+
+  A crate that needs something inside the pinned build and has **no
+  lower-layer route to it** may name `rusty_ffmpeg` directly. `crates/encoder`
+  does, to reach `libopenh264` for the software fallback (#18): it sits at
+  layer 1 and `crates/muxer` at layer 2, so the muxer's wrappers are above it
+  and out of reach, and the dependency direction may not be inverted to share
+  them. What such a crate must not do is write a second safe API over the
+  *container*; that stays in one place. See the amendment above.
 - `crates/muxer/tests/ffmpeg_linkage.rs` asserts that what is loaded is the
   pinned artefact, that it is LGPL, and that it still contains the components
   later milestones depend on. Those assertions are how the licence position
