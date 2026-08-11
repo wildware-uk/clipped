@@ -97,14 +97,11 @@ pub const SELECTOR_ARGUMENTS: [&str; 4] = ["window", "process", "pid", "handle"]
 /// With no selector it lists; with one it resolves, and reports the candidates
 /// if more than one window answers to it.
 ///
-/// `record` does **not** go through this today: it validates its
-/// `--window`/`--process`/`--pid` and stops, because there is nothing to hand a
-/// resolved window handle to until the capture backend exists (issues #11 and
-/// #12). `list-windows` is therefore the only caller of
-/// [`clipped_windows::resolve`], and changing the selection rules changes what
-/// this subcommand reports and nothing else. Wiring `record` through the same
-/// call is the remainder of
-/// [issue #10](https://github.com/wildware-uk/clipped/issues/10).
+/// `record` goes through the same [`clipped_windows::resolve`] with the same
+/// three selectors, so what this subcommand reports for a selector is what
+/// `record` will point at — including the candidates of an ambiguous one. That
+/// is deliberate: "why did it record the wrong window?" should be answerable
+/// before the recording, not after it.
 #[derive(Debug, Default, Args)]
 #[command(group(ArgGroup::new("selector").args(SELECTOR_ARGUMENTS)))]
 pub struct ListWindowsArgs {
@@ -236,10 +233,9 @@ pub struct RecordArgs {
     /// Record the window whose title contains this text.
     ///
     /// Matching is by substring, so `--window "Counter-Strike"` finds
-    /// "Counter-Strike 2". `record` does not resolve the selector yet — it has
-    /// no capture engine to hand a window to — so run
-    /// `clipped-recorder list-windows --window <TITLE>` to see what it will
-    /// match, and which candidates an ambiguous title has (issue #10).
+    /// "Counter-Strike 2". A title matching more than one window is an error
+    /// rather than a guess; run `clipped-recorder list-windows --window
+    /// <TITLE>` to see the candidates.
     #[arg(long, value_name = "TITLE", value_parser = parse_selector_text)]
     pub window: Option<String>,
 

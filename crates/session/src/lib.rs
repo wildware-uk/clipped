@@ -20,3 +20,156 @@
 //! # Position in the architecture
 //!
 //! The top layer of the workspace, depended on by `apps/recorder`.
+//!
+//! # What exists today
+//!
+//! One recording: [`record`] captures a window, encodes its frames and writes
+//! them into a Matroska file, stopping when the [`StopSignal`] it was given is
+//! raised. It is the only caller in the workspace that holds `clipped-capture`,
+//! `clipped-encoder` and `clipped-muxer` at once, which is the reason the
+//! layering puts this crate above all three.
+//!
+//! **There is no audio track yet.** A recording written here has one video
+//! stream and nothing else; wiring `clipped-audio` in is
+//! [issue #180](https://github.com/wildware-uk/clipped/issues/180). A caller
+//! that asked for a microphone or system audio is told so once, at `warn`,
+//! rather than being left to discover it in the file (AGENTS.md section 54).
+//!
+//! Per-game settings, game detection and the replay buffer are later
+//! milestones; none of them is here.
+//!
+//! # Threading
+//!
+//! Two threads, and the split is forced by AGENTS.md section 20 — a capture
+//! thread may not wait on the filesystem:
+//!
+//! ```text
+//!  caller's thread                        muxing thread
+//!  ───────────────                        ─────────────
+//!  acquire a frame                          ┌──────────────┐
+//!  submit it to the encoder                 │              │
+//!  drain packets ──── bounded queue ──────▶ │ write_packet │──▶ recording.mkv
+//!  poll the stop signal                     │              │
+//!  repeat                                   └──────────────┘
+//! ```
+//!
+//! Capture and encoding share one thread because a captured texture may not
+//! outlive the acquisition that produced it (`docs/capture-pipeline.md`), so a
+//! frame has to be encoded before the loop moves on. Only *packets* — bytes —
+//! cross to the muxing thread, which owns the [`clipped_muxer::MkvWriter`] and
+//! is the only thread that touches the file.
+//!
+//! The queue between them is bounded, and what happens when it fills is stated
+//! rather than left to be discovered: the loop stops *submitting frames* while
+//! the muxer is behind, and counts every frame it skipped
+//! ([`RecordingReport::frames_dropped_writer_behind`]). Frames are dropped
+//! before they are encoded and never after — an encoded packet thrown away
+//! would corrupt every frame that referenced it — and the count is reported,
+//! because a recorder that silently records at half the rate it says is worse
+//! than one that admits it.
+//!
+//! # Timestamps
+//!
+//! `docs/av-sync.md`'s model, used exactly as written: the video source's clock
+//! is the reference, the first frame kept fixes the epoch
+//! ([`clipped_capture::CaptureClock`]), and every timestamp that reaches the
+//! container has been through one conversion in one place. Nothing here reads a
+//! clock to stamp a frame.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use std::path::PathBuf;
+//! use std::sync::atomic::{AtomicBool, Ordering};
+//!
+//! use clipped_session::{record, CaptureTargetSettings, RecordingSettings, StopSignal};
+//!
+//! /// The simplest possible stop signal: something else sets the flag.
+//! #[derive(Debug, Default)]
+//! struct Flag(AtomicBool);
+//!
+//! impl StopSignal for Flag {
+//!     fn is_requested(&self) -> bool {
+//!         self.0.load(Ordering::SeqCst)
+//!     }
+//! }
+//!
+//! let settings = RecordingSettings::new(
+//!     CaptureTargetSettings::window(0x0001_04ac, 2560, 1440),
+//!     PathBuf::from(r"D:\clips\session.mkv"),
+//! );
+//!
+//! let report = record(&settings, &Flag::default())?;
+//! println!("{report}");
+//! # Ok::<(), clipped_session::SessionError>(())
+//! ```
+
+mod error;
+mod pacing;
+mod report;
+mod settings;
+mod stop;
+
+#[cfg(windows)]
+mod encoding;
+#[cfg(windows)]
+mod muxing;
+#[cfg(windows)]
+mod recording;
+#[cfg(windows)]
+mod windows;
+
+pub use error::SessionError;
+pub use pacing::FrameGate;
+pub use report::{EndReason, RecordingReport};
+pub use settings::{
+    CaptureTargetSettings, CodecPreference, EncoderPreference, RecordingSettings,
+    ResolutionSetting, DEFAULT_FRAMERATE,
+};
+pub use stop::StopSignal;
+
+/// Records `settings.target` until `stop` is raised, and finalises the file.
+///
+/// Blocks for the length of the recording, on the thread that called it, which
+/// becomes the capture and encoding thread. A muxing thread is created for the
+/// life of the recording and joined before this returns.
+///
+/// The file at [`RecordingSettings::output`] is finalised on **every** path out
+/// of this function — a stop request, the target closing, an encoder failure, a
+/// full disk — so that whatever was captured before the end is playable
+/// (AGENTS.md section 17). Only a failure before the first packet leaves no
+/// file at all.
+///
+/// # Errors
+///
+/// [`SessionError`], which names which stage refused and what it was asked
+/// for. An error returned after recording started does not mean the recording
+/// was lost: the file has been finalised by then, and the message says so.
+/// What was written is in the log rather than in the error, because an error
+/// carrying a success is a shape callers get wrong.
+#[cfg(windows)]
+pub fn record(
+    settings: &RecordingSettings,
+    stop: &dyn StopSignal,
+) -> Result<RecordingReport, SessionError> {
+    recording::record(settings, stop)
+}
+
+/// Recording is a Windows feature; this build has no capture backend.
+///
+/// The workspace compiles and unit-tests on other platforms so that a
+/// contributor's other machine is not useless to them, and saying so plainly is
+/// better than a build that succeeds and a recorder that produces nothing
+/// (AGENTS.md section 54).
+///
+/// # Errors
+///
+/// Always [`SessionError::UnsupportedPlatform`].
+#[cfg(not(windows))]
+pub fn record(
+    settings: &RecordingSettings,
+    stop: &dyn StopSignal,
+) -> Result<RecordingReport, SessionError> {
+    let _ = (settings, stop);
+    Err(SessionError::UnsupportedPlatform)
+}

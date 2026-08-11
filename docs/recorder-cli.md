@@ -8,35 +8,38 @@ good rather than a reason to treat it as scaffolding.
 
 ## Status
 
-**The recorder cannot record yet.** `record` parses and validates its arguments,
-resolves them into a configuration, installs its Ctrl+C handler and then reports
-that there is no capture engine, because there is not one: `crates/capture`
-holds a backend interface with no backend behind it, `crates/encoder` detects
-encoders without being able to drive one, and `crates/audio` and `crates/muxer`
-contain module documentation and no code.
+**`record` records.** It resolves the target through the same rules
+`list-windows` prints, captures the window, encodes its frames on the graphics
+device they are already on, writes them into a Matroska file as they arrive, and
+finishes the file when it is asked to stop
+([#126](https://github.com/wildware-uk/clipped/issues/126)). The coordination
+lives in `clipped-session`; this command line is a front end over it, so the
+desktop application gets the same recording over IPC in M5 rather than a second
+implementation ([ADR 0002](adr/0002-separate-recorder-process.md)).
 
-It produces no recording, and leaves nothing behind on the way to not producing
-one: no output file, and no recordings directory. It is not silent, though. The
-resolved configuration and the error both go to standard error, and to the log
-files under `%LOCALAPPDATA%\Clipped\logs` that every Clipped process writes
-([logging.md](logging.md)). The one thing validation puts on disk is a write
-probe, described under [defaults that touch the disk](#defaults-that-touch-the-disk),
-and it is removed again immediately.
+Two things a recording does **not** have yet, stated here rather than left to be
+discovered in a file:
 
-What works today is the argument surface, `list-windows`, `capabilities`, and
-the shutdown path. The pipeline between them is milestone M1 — capture backend
-[#11](https://github.com/wildware-uk/clipped/issues/11), Windows Graphics
-Capture [#12](https://github.com/wildware-uk/clipped/issues/12), encoders
-[#15](https://github.com/wildware-uk/clipped/issues/15)–[#18](https://github.com/wildware-uk/clipped/issues/18).
-The muxer is written ([muxing.md](muxing.md)); nothing hands it packets yet.
+- **No audio track.** `clipped-audio` captures system audio and a microphone and
+  is tested doing it ([audio-routing.md](audio-routing.md)), but nothing routes
+  it into a session yet ([#180](https://github.com/wildware-uk/clipped/issues/180)),
+  so a recording has one video stream and nothing else. `--microphone` and
+  `--system-audio` are accepted, and a run that asks for either logs a warning
+  saying it cannot be recorded.
+- **No scaling.** `--resolution` may only name the size the capture is already
+  producing. Frames go from the capture to the encoder without being copied,
+  which is what keeps the cost off the game, and there is no scaler in that
+  path; a size that would need one is refused with exit code 3 rather than
+  silently recorded at the source size.
 
-`record` does not yet resolve its target through `list-windows`' machinery. The
-enumeration and the selection rules are in `clipped-windows` and are what
-`list-windows` runs on; wiring them into `record` belongs with the capture
-backend that will consume the resulting window handle
-([#11](https://github.com/wildware-uk/clipped/issues/11) and
-[#12](https://github.com/wildware-uk/clipped/issues/12)), because until then
-there is nothing to hand a resolved window to.
+A recording also ends if the window changes size, because Matroska fixes a
+track's dimensions in its header and the encoder is configured for one size. The
+file is finished at that point and says so; what a session should do instead is
+[#184](https://github.com/wildware-uk/clipped/issues/184).
+
+Everything else is here: the argument surface, `list-windows`, `capabilities`,
+and a shutdown path that is now exercised against a real recording rather than
+only a fixture.
 
 ## Commands
 
@@ -80,6 +83,52 @@ clipped-recorder record --window "Counter-Strike 2"
 Exactly one of `--window`, `--process` and `--pid` may be given. `--help` is the
 authority on all of this; the table above is here so the shape can be read
 without a build.
+
+The target is resolved through the same `clipped-windows` rules `list-windows`
+runs on, so `list-windows --window <TITLE>` shows exactly what
+`record --window <TITLE>` will point at — including the candidates of an
+ambiguous title, which is a usage error rather than a guess.
+
+`--framerate` is a **ceiling**, not a pace. The compositor produces a frame when
+the window's content changes, so a source slower than the requested rate records
+at the source's rate, with the real intervals between frames in the timestamps;
+a source faster than it has frames skipped before they are encoded, and the
+count is reported when the recording ends. Nothing is ever duplicated to pad a
+recording out to a nominal rate.
+
+Because it is a ceiling, **the file does not declare it**. The track carries no
+nominal frame rate at all, so a player or an editor reads the rate off the
+timestamps — which is where the recording's own account of when its frames
+happened lives. Declaring the ceiling instead would label a real 30 fps
+recording as 60 fps for having been made with the default `--framerate`.
+
+What the ceiling *is* still used for is configuring the encoder, and that has
+two consequences worth knowing when a source is much slower than the ceiling:
+the bitrate is budgeted for the ceiling's worth of frames, and the keyframe
+interval is two seconds converted into a number of frames at the ceiling — so a
+30 fps source recorded at `--framerate 60` gets keyframes four seconds apart.
+Deriving those from the rate the source is actually producing is
+[#191](https://github.com/wildware-uk/clipped/issues/191); until then, passing
+`--framerate` close to the source's rate is what a recording of a slow source
+wants.
+
+`--codec auto` and `--encoder auto` pick from what
+[`capabilities`](#capabilities) measured, most efficient first, and fall back to
+the next candidate when one refuses to open a session on the device the frames
+are captured on. An encoder named explicitly is never fallen back from: somebody
+who typed `--encoder nvenc` wants to know it was not used.
+
+### What a finished recording prints
+
+```text
+Recorded 233 frames of 1280x720 AV1 in 7.76s to D:\clips\session.mkv (NVIDIA NVENC, Windows Graphics Capture, 29.9 fps sustained; 0 frames dropped). Stopped by request.
+```
+
+On standard error, with the same figures in the log. "Frames dropped" is the one
+number that means something went wrong: it counts frames that were not encoded
+because the thread writing the file had not caught up. Frames skipped to hold
+`--framerate` are counted separately and are not in it, because they are the
+recorder doing what it was asked.
 
 `--microphone` and `--system-audio` treat `default` and `none` as reserved
 words. Prefix with `name:` to select a device that is really called one of them:
@@ -254,9 +303,8 @@ real backend too, `QuickSyncEncoder`, written to the same interface — but ther
 is no Intel GPU on the machine it was written on, so nothing has ever seen it
 encode a frame, and the footer does not count it until it has
 ([#160](https://github.com/wildware-uk/clipped/issues/160)). A machine whose
-best encoder is Quick Sync encodes on the CPU today. And nothing records yet
-whichever encoder is chosen, because no session connects a capture to an
-encoder and on to a file — `record` still exits 3.
+best encoder is Quick Sync encodes on the CPU today. Whichever is chosen, a
+recording made with it has a video track and no audio track.
 
 Which encoders count comes from `EncoderKind::is_implemented` rather than from
 a sentence in the report, because the sentence that used to be there went on
@@ -272,16 +320,19 @@ hardware, not merely compiling — and why Quick Sync fails it today.
 | 0 | The command succeeded |
 | 1 | The command failed while running |
 | 2 | The arguments were rejected — the same code clap uses for a usage error |
-| 3 | The command is not implemented in this build |
+| 3 | The recording asked for something this build cannot produce |
 
 3 is separate from 1 so that a script, and the test suite, can tell "this does
-not exist yet" from "this went wrong". Today `record` always exits 3 once its
-arguments are accepted.
+not exist yet" from "this went wrong". `record` exits 3 for a `--resolution`
+that would need a scaler, and for a capture in a high dynamic range pixel format
+no encoder here accepts ([#99](https://github.com/wildware-uk/clipped/issues/99)).
+A driver that failed mid-recording is a 1, and the file it leaves behind is
+still finished and playable.
 
-`list-windows` exits 2 when a selector matched no window, or more than one: the
-command line is what has to change, and the message already lists the windows
-that could have been meant. It exits 1 only when Windows refused to describe the
-desktop at all.
+Both `record` and `list-windows` exit 2 when a selector matched no window, or
+more than one: the command line is what has to change, and the message already
+lists the windows that could have been meant. They exit 1 when Windows refused
+to describe the desktop at all.
 
 `capabilities` exits 0 even on a machine with no hardware encoder — that is a
 report, not a failure — and 1 only when the adapters could not be enumerated at
@@ -308,26 +359,63 @@ The output path is redacted to its file name and a digest of the whole path
 
 ## Stopping a recording
 
-Ctrl+C asks the recorder to stop; it does not kill it. The handler raises a
-shutdown signal and a finalisation hook runs before the process exits. There is
-no recording loop between them yet: when the pipeline arrives, the loop will
-notice the signal at its next frame boundary, and the hook will flush the
-encoder and close the container so that the file left behind is complete.
+Ctrl+C asks the recorder to stop; it does not kill it. The recording loop polls
+the signal between frames, so it stops at a frame boundary and never mid-write.
+Then, in order:
 
-What exists today is both ends of that. The seam is
-`clipped_recorder::shutdown::run_until_shutdown`, and the hook it runs is
-guaranteed to run exactly once whether the body ended by itself, was
-interrupted, returned an error or panicked. The panic case is deliberate: a bug
-in the pipeline should still leave a file that plays.
+1. the encoder is told the stream has ended and drained of the pictures it was
+   holding back — that last fraction of a second is the part somebody who
+   pressed Ctrl+C was watching;
+2. the queue into the muxing thread is closed, everything in it is written, and
+   the container's trailer is written, which is where Matroska's segment length,
+   duration and cue index go;
+3. the recorder's finalisation hook runs, and says why the run ended.
 
-The signal path is tested against a real process receiving a real
-`CTRL_C_EVENT`, in `apps/recorder/tests/ctrl_c.rs`, using the fixture in
-`apps/recorder/examples/shutdown_fixture.rs`. What is *not* tested, because it
-cannot be until the pipeline exists, is that the resulting file plays. That is
-the second half of acceptance criterion 3 on
-[issue #9](https://github.com/wildware-uk/clipped/issues/9); it is claimed
-nowhere, and verifying it with `ffprobe` against a real interrupted recording is
-[issue #126](https://github.com/wildware-uk/clipped/issues/126).
+The seam is `clipped_recorder::shutdown::run_until_shutdown`, and the hook it
+runs is guaranteed to run exactly once whether the body ended by itself, was
+interrupted, returned an error or panicked. The panic case is deliberate, and it
+is real rather than nominal: the muxing thread finalises from its own destructor
+as well, so a bug in the pipeline still leaves a file that plays.
+
+A recorder started in a process group of its own — which is how a launcher
+isolates a long-running child — inherits Ctrl+C *disabled*, so the recorder asks
+for it back at startup (`shutdown::allow_ctrl_c`). Without that it could only be
+killed, which is the failure this whole path exists to prevent.
+
+### How that is verified
+
+Two tests, both against real processes and neither simulating the signal.
+
+`apps/recorder/tests/ctrl_c.rs` sends a genuine `CTRL_C_EVENT` to the fixture in
+`apps/recorder/examples/shutdown_fixture.rs` and asserts the hook ran with the
+right reason. It needs no GPU, so it runs in CI on every change.
+
+`apps/recorder/tests/record_end_to_end.rs` does it to a real recording:
+`test-apps/video-pattern` on screen, `clipped-recorder record` capturing it,
+a real `CTRL_C_EVENT` four seconds in, and the file it leaves read back with the
+pinned FFmpeg build through `clipped-media-validation`. It asserts the container
+opens, holds one video stream of the codec and size the recorder said it wrote,
+has a plausible duration and monotonic timestamps, declares the frame rate it
+sustained rather than the `--framerate` ceiling it was recorded under, and that
+**every frame the recorder reported encoding decodes out of the file**. It also
+asserts the three finalisation lines above appear in order — each one searched
+for in what is left after the one before it, so a trailer written before the
+flush fails exactly as a missing line does — which is how the hook is shown to
+have run rather than the file merely happening to be readable. That test needs a
+GPU, an encoder and a desktop session, so it is `#[ignore]`d:
+
+```text
+cargo test -p clipped-recorder --test record_end_to_end -- --ignored --nocapture --test-threads=1
+```
+
+What is **not** asserted is that the decoded pictures are the frames the source
+drew, in order. The video pattern carries a decodable counter for exactly that,
+but its decoder lives in `clipped-video-pattern`, which the workspace layering
+places above `clipped-recorder` so that nothing in the product can depend on a
+test application — dev-dependencies included. A test that reads those counters
+back out of a recording belongs beside `tests/capture/wgc_video_pattern.rs`,
+which already reads them out of captured frames, and is
+[#183](https://github.com/wildware-uk/clipped/issues/183).
 
 ## Testing the command line
 
@@ -339,8 +427,12 @@ Unit tests cover parsing and validation, including the wording of the error
 messages: an error message is behaviour someone depends on, and changing one
 should be a decision rather than a side effect. `tests/command_line.rs` runs the
 built binary and asserts what it prints and what it exits with, including that a
-`record` invocation creates neither an output file nor, when it is left to work
-out the default path, a recordings directory.
+`record` invocation which never gets as far as a frame creates neither an output
+file nor, when it is left to work out the default path, a recordings directory.
+
+The recording itself is `tests/record_end_to_end.rs`, described under
+[stopping a recording](#how-that-is-verified). Nothing in `tests/command_line.rs`
+starts a capture, which is why that file still runs on a machine with no GPU.
 
 Two of those tests read the command definition rather than a copy of it: they
 walk `record`'s arguments and require every one of them but the capture target

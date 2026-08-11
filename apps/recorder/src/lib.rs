@@ -14,11 +14,15 @@
 //!
 //! # What the recorder can do today
 //!
-//! Parse and validate a `record` invocation, stop cleanly when asked to, and
-//! report what this machine can encode. It cannot record: the capture, audio
-//! and muxer crates are documentation-only stubs and no encoder backend is
-//! implemented, so `record` reports that and exits. See [`record`] and
-//! [`shutdown`] for exactly where the pipeline plugs in.
+//! Record a window to a Matroska file, list what can be captured, and report
+//! what this machine can encode. `record` resolves its target, captures it,
+//! encodes the frames and writes them, and stops cleanly on Ctrl+C leaving a
+//! finished file
+//! ([issue #126](https://github.com/wildware-uk/clipped/issues/126)).
+//!
+//! The recording itself belongs to `clipped-session`; this package is the
+//! command line over it. There is no audio track yet — see [`record`] and
+//! `docs/recorder-cli.md`.
 //!
 //! # Modules
 //!
@@ -58,10 +62,14 @@ pub const EXIT_FAILURE: u8 = 1;
 /// mean "fix the command line".
 pub const EXIT_USAGE: u8 = 2;
 
-/// Exit code for a command that is not implemented in this build.
+/// Exit code for something this build cannot do yet.
 ///
 /// Distinct from [`EXIT_FAILURE`] so that a script, or the test suite, can tell
-/// "this does not exist yet" from "this went wrong".
+/// "this does not exist yet" from "this went wrong". `record` no longer exits
+/// with it for the absence of a capture engine — there is one — but it is still
+/// what a recording asks for that this build genuinely cannot produce ends
+/// with: a resolution that would need a scaler, or a high dynamic range capture
+/// no encoder here accepts.
 pub const EXIT_NOT_IMPLEMENTED: u8 = 3;
 
 /// Anything a subcommand can fail with.
@@ -81,8 +89,21 @@ impl RunError {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Record(record::RecordError::Configuration(_)) => EXIT_USAGE,
-            Self::Record(record::RecordError::CaptureNotImplemented) => EXIT_NOT_IMPLEMENTED,
-            Self::Record(record::RecordError::Shutdown(_)) => EXIT_FAILURE,
+            // A selector that named no window, or several, is the same class of
+            // mistake as a rejected argument: the command line is what has to
+            // change, and the message already lists the candidates.
+            Self::Record(record::RecordError::Resolution(_)) => EXIT_USAGE,
+            // What this build genuinely cannot produce, as opposed to what went
+            // wrong while producing it.
+            Self::Record(record::RecordError::Session(
+                clipped_session::SessionError::ScalingNotSupported { .. }
+                | clipped_session::SessionError::UnsupportedPixelFormat { .. },
+            )) => EXIT_NOT_IMPLEMENTED,
+            Self::Record(
+                record::RecordError::Shutdown(_)
+                | record::RecordError::Enumeration(_)
+                | record::RecordError::Session(_),
+            ) => EXIT_FAILURE,
             // A selector that named no window, or more than one, is a command
             // line to fix; a desktop that could not be enumerated is not.
             Self::ListWindows(list_windows::ListWindowsError::Resolution(_)) => EXIT_USAGE,
@@ -98,7 +119,7 @@ impl RunError {
     /// Whether the user should be pointed at `--help`.
     ///
     /// Only for the failures they can fix by reading it. Telling someone to
-    /// read the help when the capture engine does not exist would be worse than
+    /// read the help when a driver failed mid-recording would be worse than
     /// saying nothing, and so would telling them to read it when the message
     /// they were just given lists the windows they could have meant — the help
     /// has nothing further to add about a real desktop.
@@ -176,12 +197,40 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_capture_engine_has_an_exit_code_of_its_own() {
-        let error = RunError::from(RecordError::CaptureNotImplemented);
+    fn what_this_build_cannot_produce_has_an_exit_code_of_its_own() {
+        // Distinct from a failure, because a script — and the test suite — has
+        // to be able to tell "this does not exist yet" from "this went wrong".
+        let error = RunError::from(RecordError::Session(
+            clipped_session::SessionError::ScalingNotSupported {
+                requested: (1920, 1080),
+                captured: (2560, 1440),
+            },
+        ));
         assert_eq!(error.exit_code(), EXIT_NOT_IMPLEMENTED);
         assert!(
             !error.is_usage_error(),
-            "there is nothing the user can change to fix this"
+            "the help has nothing to add: no argument turns a scaler on"
         );
+    }
+
+    #[test]
+    fn a_recording_that_failed_part_way_through_is_a_failure_and_not_a_usage_error() {
+        let error = RunError::from(RecordError::Session(
+            clipped_session::SessionError::NoFrames,
+        ));
+        assert_eq!(error.exit_code(), EXIT_FAILURE);
+        assert!(!error.is_usage_error());
+    }
+
+    #[test]
+    fn a_selector_that_named_no_window_is_a_command_line_to_fix() {
+        // The same code `list-windows` uses for the same mistake, so a script
+        // cannot tell them apart and does not need to.
+        let error = RunError::from(RecordError::Resolution(
+            clipped_windows::ResolveError::NoMatch {
+                selector: clipped_windows::TargetSelector::ProcessId(4242),
+            },
+        ));
+        assert_eq!(error.exit_code(), EXIT_USAGE);
     }
 }

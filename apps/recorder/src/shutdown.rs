@@ -20,18 +20,15 @@
 //!   hook, guaranteeing the hook runs exactly once whatever happened: normal
 //!   end, error, Ctrl+C, or a panic on the way through.
 //!
-//! # What is here and what is not
+//! # What is here
 //!
-//! The signal, the hook and the guarantee are implemented and tested. There is
-//! no capture pipeline to put between them yet — `crates/capture` has no
-//! backend, `crates/muxer` is a documentation-only stub and no encoder backend
-//! is implemented — so today
-//! the recorder's own use of this module runs a body that reports capture is
-//! not implemented. Acceptance criterion 3 of
-//! [issue #9](https://github.com/wildware-uk/clipped/issues/9), "Ctrl+C during
-//! a recording produces a playable file", is therefore only half met: the
-//! shutdown half exists and is exercised, and the recording half arrives with
-//! the pipeline in M1.
+//! The signal, the hook, the guarantee, and — since
+//! [issue #126](https://github.com/wildware-uk/clipped/issues/126) — a real
+//! recording between them. [`ShutdownSignal`] is what `clipped-session`'s
+//! recording loop polls between frames, through
+//! [`clipped_session::StopSignal`], so Ctrl+C stops a recording at a frame
+//! boundary and the session flushes the encoder and closes the container before
+//! this module's hook runs.
 //!
 //! # Threading
 //!
@@ -100,6 +97,11 @@ impl ShutdownSignal {
     }
 
     /// Blocks until a stop is asked for, returning at once if one already was.
+    ///
+    /// Not what a recording uses — a capture loop polls
+    /// [`is_requested`](Self::is_requested) between frames — but what a process
+    /// with nothing else to do while it waits uses, such as
+    /// `examples/shutdown_fixture.rs`.
     pub fn wait(&self) {
         let Ok(mut requested) = self.state.requested_under_lock.lock() else {
             // The mutex is only ever held for a bool assignment, so poisoning
@@ -115,6 +117,48 @@ impl ShutdownSignal {
                 return;
             };
             requested = next;
+        }
+    }
+}
+
+impl clipped_session::StopSignal for ShutdownSignal {
+    /// One atomic load, which is what the recording loop is promised: it is
+    /// called once per acquisition on the thread that is also capturing and
+    /// encoding (AGENTS.md section 20).
+    fn is_requested(&self) -> bool {
+        Self::is_requested(self)
+    }
+}
+
+/// Re-enables Ctrl+C for this process.
+///
+/// A process created with `CREATE_NEW_PROCESS_GROUP` starts with Ctrl+C
+/// *disabled*, and that state is inherited by its own children. That flag is
+/// separate from the handler list, so installing a handler does not undo it:
+/// without this call, a recorder started that way ignores Ctrl+C entirely and
+/// the only way to stop it is to kill it — which is the one thing this module
+/// exists to prevent.
+///
+/// It matters outside a test because the recorder is designed to be started as
+/// a child process ([ADR 0002](../../../docs/adr/0002-separate-recorder-process.md)),
+/// and putting a long-running child in a process group of its own is the normal
+/// way to stop a console's Ctrl+C from tearing down a whole tree. A recorder
+/// launched like that would otherwise be uninterruptible.
+///
+/// Calling it when there is nothing to undo — the ordinary case, a recorder run
+/// from a console — fails harmlessly and changes nothing.
+pub fn allow_ctrl_c() {
+    #[cfg(windows)]
+    {
+        // SAFETY: `SetConsoleCtrlHandler` takes an optional handler pointer and
+        // a BOOL. Passing `None` with `FALSE` *removes* the inherited "ignore
+        // Ctrl+C" entry rather than registering anything, so no pointer is
+        // dereferenced and no callback is created that could outlive anything.
+        // The return value is deliberately ignored: a process that was not
+        // started in a new group has nothing to remove and the call fails
+        // without side effects.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
         }
     }
 }
@@ -156,8 +200,16 @@ impl fmt::Display for StopReason {
 /// `recording` is given the signal and is expected to poll
 /// [`ShutdownSignal::is_requested`] at a point where stopping is safe — between
 /// frames, not between the two halves of a write. When it returns, or unwinds,
-/// `finalise` runs exactly once with the reason, and is where the encoder is
-/// flushed and the container closed.
+/// `finalise` runs exactly once with the reason.
+///
+/// `finalise` is *not* where the encoder is flushed and the container closed.
+/// Both belong to whatever `recording` is — `clipped-session` owns the encoder
+/// and the writer and finalises them on every path out, including a panic — and
+/// reaching back into them from a hook here would be a second owner for the
+/// same file handle (`apps/recorder/src/record.rs`). What the hook is for is
+/// the work that has to happen *after* the file is finished and exactly once
+/// however the run ended: saying so, and in later milestones telling the
+/// library about the new recording.
 ///
 /// The hook runs during a panic unwind as well, which is the case that matters
 /// most: a bug in the pipeline should still leave a file that plays.
