@@ -550,7 +550,7 @@ impl Running {
         let (item, window) = capture_item_for(target)?;
         let pool_size = item
             .Size()
-            .map_err(|error| backend_error("reading the capture item's size", error))?;
+            .map_err(|error| starting_error(window, "reading the capture item's size", error))?;
         let size = frame_size(pool_size).ok_or(CaptureError::UnsupportedTarget {
             method: METHOD,
             target: target.properties().kind(),
@@ -575,7 +575,7 @@ impl Running {
 
         let session = pool
             .CreateCaptureSession(&item)
-            .map_err(|error| backend_error("creating the capture session", error))?;
+            .map_err(|error| starting_error(window, "creating the capture session", error))?;
 
         configure_session(&session, config);
 
@@ -587,7 +587,7 @@ impl Running {
                 signal.record_arrival();
                 Ok(())
             }))
-            .map_err(|error| backend_error("subscribing to captured frames", error))?
+            .map_err(|error| starting_error(window, "subscribing to captured frames", error))?
         };
 
         let item_closed = {
@@ -596,12 +596,14 @@ impl Running {
                 signal.record_closed();
                 Ok(())
             }))
-            .map_err(|error| backend_error("subscribing to the capture target closing", error))?
+            .map_err(|error| {
+                starting_error(window, "subscribing to the capture target closing", error)
+            })?
         };
 
         session
             .StartCapture()
-            .map_err(|error| backend_error("starting the capture session", error))?;
+            .map_err(|error| starting_error(window, "starting the capture session", error))?;
 
         Ok(Self {
             device,
@@ -1091,6 +1093,44 @@ fn backend_error(operation: &'static str, error: windows::core::Error) -> Captur
     }
 }
 
+/// The error for a failure that happened while a capture of `window` was being
+/// started.
+///
+/// `capture_item_for` checks that the window exists before it asks Windows for
+/// a capture item, but everything after that check is another few milliseconds
+/// in which the window can go — a game that exits exactly as a recording starts
+/// is the ordinary way to reach it (AGENTS.md section 16). Windows reports it
+/// from `CreateCaptureSession` as `ERROR_INVALID_STATE (0x8007139F)`, "the
+/// group or resource is not in the correct state to perform the requested
+/// operation", which names neither the window nor the reason; a caller handed
+/// that has no way to tell a vanished target from a broken backend, and would
+/// report a fault to the user instead of stopping quietly.
+///
+/// So the window is asked about again, and only when it has actually gone does
+/// this become [`CaptureError::TargetLost`]. When it is still there, the
+/// original failure is passed on unchanged, because then it really is a fault
+/// and hiding it behind "target lost" would be worse than the message Windows
+/// gave. A display target has nothing to ask — see
+/// [`Running::target_has_gone`], which has the same limitation and the same
+/// reasons.
+fn starting_error(
+    window: Option<HWND>,
+    operation: &'static str,
+    error: windows::core::Error,
+) -> CaptureError {
+    if let Some(window) = window {
+        // SAFETY: `IsWindow` only reads the window table, and reporting that a
+        // handle is no longer a window is exactly what it is for; passing a
+        // stale handle is sound and is the case being asked about. The caveat
+        // about handle recycling is the one recorded on
+        // `Running::target_has_gone`, and it applies here in the same way.
+        if !unsafe { IsWindow(Some(window)) }.as_bool() {
+            return CaptureError::TargetLost { method: METHOD };
+        }
+    }
+    backend_error(operation, error)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
@@ -1347,6 +1387,68 @@ mod tests {
         assert!(
             matches!(error, CaptureError::TargetLost { .. }),
             "expected the target to be reported as lost, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_window_that_goes_while_the_capture_is_starting_is_reported_as_lost() {
+        // Found while verifying exclusive fullscreen for issue #12: the test
+        // application went away a fraction of a second after announcing its
+        // window, and `initialise` reported `Backend { operation: "creating the
+        // capture session", source: HRESULT(0x8007139F) }` — "the group or
+        // resource is not in the correct state to perform the requested
+        // operation". Nothing in that says the window had gone, so a session
+        // would surface a fault to the user instead of stopping quietly, and
+        // the runtime fallback in issue #97 would try another backend against a
+        // target that no longer exists.
+        let Some(window) = a_real_window() else {
+            skipped("this machine would not create a window");
+            return;
+        };
+
+        // The HRESULT Windows actually returned, so this test fails if the
+        // classification stops covering it.
+        let refusal = windows::core::Error::new(
+            windows::core::HRESULT(0x8007_139Fu32 as i32),
+            "the group or resource is not in the correct state to perform the requested \
+             operation.",
+        );
+
+        // While the window is still there the failure is a real failure, and
+        // must not be dressed up as a target that went away.
+        let while_alive = starting_error(
+            Some(window),
+            "creating the capture session",
+            refusal.clone(),
+        );
+        assert!(
+            matches!(while_alive, CaptureError::Backend { .. }),
+            "a failure against a window that is still there is a backend failure, got: \
+             {while_alive}"
+        );
+
+        // SAFETY: `window` is the window created above, on this thread, and has
+        // not been destroyed yet — which is what `DestroyWindow` requires.
+        let destroyed =
+            unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(window) }.is_ok();
+        assert!(destroyed, "the test window should have been destroyable");
+
+        let once_gone = starting_error(
+            Some(window),
+            "creating the capture session",
+            refusal.clone(),
+        );
+        assert!(
+            matches!(once_gone, CaptureError::TargetLost { .. }),
+            "a window that has gone should be reported as lost, got: {once_gone}"
+        );
+
+        // A display target has no window to ask about, so it keeps the failure
+        // Windows gave rather than guessing.
+        let display = starting_error(None, "creating the capture session", refusal);
+        assert!(
+            matches!(display, CaptureError::Backend { .. }),
+            "a display has no window to have lost, got: {display}"
         );
     }
 

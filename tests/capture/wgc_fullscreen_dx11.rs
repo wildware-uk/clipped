@@ -9,25 +9,43 @@
 //! does. `test-apps/fullscreen-dx11` is that subject, and this is the test that
 //! points a capture at it.
 //!
-//! # What it can and cannot decide
+//! # The answer, and the thing that nearly hid it
 //!
-//! Windows decides whether the application gets the display exclusively:
-//! `SetFullscreenState` needs the foreground, and Windows does not give the
-//! foreground to a process the user has not interacted with. So this test reads
-//! what the application was granted and asserts accordingly:
+//! Windows Graphics Capture does capture a window holding a display
+//! exclusively. On Windows 11 build 26200 with an RTX 4090, one run of this
+//! test decoded **274 of a possible 300 frames in five seconds, with zero
+//! acquisition timeouts and zero undecodable frames**, from a subject that
+//! reported `exclusive=yes` and that said afterwards it had presented all 318
+//! of its frames with the display held exclusively.
 //!
-//! - **Granted (`exclusive=yes`).** Whether Windows Graphics Capture keeps
-//!   delivering frames for a window that owns its display is a fact about
-//!   Windows, not a property Clipped can assert into being — so a run that
-//!   delivers nothing is *reported*, loudly, rather than failed. What is
-//!   asserted is that capture does not error, that every frame that does arrive
-//!   is the pattern, and that the display is given back.
-//! - **Refused (`exclusive=no`).** The application is then a borderless window
+//! What made that hard to find is worth writing down, because it will waste
+//! somebody's afternoon otherwise. **A display that Windows has powered off
+//! makes every capture measurement meaningless.** With both displays asleep on
+//! the idle timeout, the compositor runs at about 4 Hz — measured, repeatedly,
+//! at 3.97 fps with a median interval of 251.6 ms — so Windows Graphics Capture
+//! delivers about one frame in fifteen for *any* target, and
+//! `SetFullscreenState` is refused with `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+//! (0x887A0022)`. Nothing about that is a capture defect and none of it
+//! reproduces once the display is awake. `tests/capture/README.md` says how to
+//! tell, and `docs/capture-pipeline.md` has the numbers.
+//!
+//! # What it decides, and what it only reports
+//!
+//! The subject asks DXGI for the display and prints whether it was given it, so
+//! this test reads the `exclusive` field rather than assuming (AGENTS.md
+//! section 16):
+//!
+//! - **Granted (`exclusive=yes`).** This is the case issue #12 exists to check,
+//!   and it is asserted: the subject has to survive the run, the frames have to
+//!   arrive, and every one of them has to decode as the pattern. A future
+//!   Windows that stops composing a window which owns its display would fail
+//!   here, which is the point.
+//! - **Refused (`exclusive=no`).** The subject is then a borderless window
 //!   covering the display, which is what a game in "fullscreen (windowed)" mode
-//!   is, and frames must arrive and must decode. That case is asserted in full.
-//!
-//! Being explicit about that split is the point. A test that quietly passed
-//! either way would be no evidence at all (AGENTS.md section 54).
+//!   is, and the same assertions apply — but the run is *not* evidence about
+//!   exclusive fullscreen and says so in as many words before it ends. A test
+//!   that quietly passed either way would be no evidence at all (AGENTS.md
+//!   section 54).
 //!
 //! # Why it is `#[ignore]`d
 //!
@@ -43,6 +61,7 @@
 mod readback;
 
 use core::time::Duration;
+use std::io::Write as _;
 use std::time::Instant;
 
 use clipped_capture::{
@@ -70,6 +89,25 @@ const READY_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long the application is given to stop, and give the display back.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The environment variable that turns "this machine could not run the test"
+/// from a pass into a failure, as everywhere else in `clipped-capture`.
+const REQUIRE_CAPTURE: &str = "CLIPPED_REQUIRE_CAPTURE";
+
+/// Reports that the test could not run here.
+///
+/// It panics rather than skipping when [`REQUIRE_CAPTURE`] is set, so a machine
+/// that is supposed to capture cannot quietly stop testing capture, and it
+/// writes through `std::io::stderr()` rather than `eprintln!` because libtest
+/// captures the macro — a skip nobody can see is the failure mode this exists to
+/// prevent.
+fn skipped(reason: &str) {
+    assert!(
+        std::env::var_os(REQUIRE_CAPTURE).is_none_or(|value| value.is_empty()),
+        "{REQUIRE_CAPTURE} is set, so this must not be skipped: {reason}"
+    );
+    let _ = writeln!(std::io::stderr(), "SKIPPED (capture): {reason}");
+}
+
 #[test]
 #[ignore = "takes over a display and needs a GPU; see the module docs"]
 fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
@@ -85,16 +123,36 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
     eprintln!("[info] per-monitor DPI awareness: {awareness:?}");
 
     let monitors = clipped_windows::enumerate_monitors().expect("this machine has displays");
-    let expected = monitors
+    let Some(expected) = monitors
         .iter()
         .find(|monitor| !monitor.is_primary())
         .or_else(|| monitors.first())
-        .expect("a machine running this test has at least one display");
+    else {
+        skipped("this machine reports no displays, so there is nothing to cover");
+        return;
+    };
     eprintln!(
         "[info] expecting the application to cover {} ({})",
         expected.device_name(),
         expected.bounds()
     );
+
+    // Asked before anything is put on screen: a machine with no capture backend
+    // should say so rather than take a display away and then find out.
+    let size = FrameSize::new(
+        expected.bounds().size().width(),
+        expected.bounds().size().height(),
+    )
+    .expect("a display has a real size");
+    let properties = TargetProperties::new(TargetKind::Window, size);
+    let Ok(selection) = select(
+        &registered_declarations(),
+        &properties,
+        CaptureMethodSetting::Automatic,
+    ) else {
+        skipped("this machine has no capture backend for a window");
+        return;
+    };
 
     let app = TestApp::start(
         env!("CARGO_BIN_EXE_fullscreen-dx11"),
@@ -137,7 +195,7 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
         if granted { "granted" } else { "refused" }
     );
 
-    let outcome = capture(&app);
+    let outcome = capture(&app, selection.method());
 
     eprintln!(
         "\n=== wgc_fullscreen_dx11 ===\n\
@@ -147,6 +205,7 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
          frames decoded      : {}\n\
          acquisition timeouts: {}\n\
          counters            : {} to {}\n\
+         subject survived    : {}\n\
          undecodable frames  : {}{}\n",
         if granted { "yes" } else { "no" },
         app.client_size().0,
@@ -154,8 +213,9 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
         outcome.delivered,
         outcome.decoded,
         outcome.timeouts,
-        outcome.first.map_or(0, |first| first),
-        outcome.last.map_or(0, |last| last),
+        outcome.first.unwrap_or(0),
+        outcome.last.unwrap_or(0),
+        if outcome.target_lost { "no" } else { "yes" },
         outcome.undecodable.len(),
         outcome
             .undecodable
@@ -171,28 +231,50 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
         outcome.undecodable.first().map_or("", String::as_str)
     );
 
-    if granted && outcome.decoded == 0 {
-        // A finding, not a pass and not a failure: Windows Graphics Capture is
-        // asked for a window's composed content, and a window that owns its
-        // display through DXGI may not be composed at all. Whoever runs this
-        // needs to see it said plainly.
+    assert!(
+        !outcome.target_lost,
+        "the subject's window went away {:.0}s into a run it was asked to keep going for 60s, \
+         so there was nothing left to capture. The known way to reach this is a display that \
+         has been powered off — Windows then revokes the exclusive mode a frame after granting \
+         it and the subject does not survive that, which is \
+         https://github.com/wildware-uk/clipped/issues/178. The subject's own message is on \
+         standard error above.",
+        CAPTURE_FOR.as_secs_f64()
+    );
+
+    // Half the source's frames, not all of them: this test reads every frame
+    // back into system memory and decodes it, which a recorder does not, and
+    // 2560x1440 of that at 60 fps is enough work to lose some. Half is far more
+    // than is needed to tell "captured" from "not captured" — the run this was
+    // written against decoded 274 of a possible 300 — and it is the number that
+    // moves if the backend stops delivering, which is the regression worth
+    // catching.
+    let floor = u64::from(SOURCE_FPS) * CAPTURE_FOR.as_secs() / 2;
+    assert!(
+        outcome.decoded >= floor,
+        "only {} of an expected {} frames decoded in {:.0}s of capturing a {SOURCE_FPS} fps \
+         application covering a display{}. Windows Graphics Capture composed {} frames and \
+         timed out {} times.",
+        outcome.decoded,
+        floor,
+        CAPTURE_FOR.as_secs_f64(),
+        if granted {
+            " that was holding it exclusively, which is the case issue #12 exists to check"
+        } else {
+            ""
+        },
+        outcome.delivered,
+        outcome.timeouts
+    );
+
+    if !granted {
+        // Said after the assertions rather than before, so that it is the last
+        // thing on the screen: a green run here is evidence about borderless
+        // fullscreen and nothing else.
         eprintln!(
-            "\n*** FINDING: the display was held exclusively, and in {:.0}s Windows Graphics \
-             Capture delivered {} frames, {} acquisition timeouts, and not one frame that \
-             held the test pattern. A recorder relying on this backend alone would record \
-             nothing while a game is in exclusive fullscreen. Record this on issue #23 and \
-             raise it against the capture backend. ***\n",
-            CAPTURE_FOR.as_secs_f64(),
-            outcome.delivered,
-            outcome.timeouts
-        );
-    } else {
-        assert!(
-            outcome.decoded >= u64::from(SOURCE_FPS) * CAPTURE_FOR.as_secs() / 4,
-            "only {} frames decoded in {:.0}s of capturing a {SOURCE_FPS} fps fullscreen \
-             application, which is too few to conclude anything from",
-            outcome.decoded,
-            CAPTURE_FOR.as_secs_f64()
+            "\n*** NOT EXERCISED: Windows refused the display exclusively, so this run \
+             covered borderless fullscreen only, and says nothing about the exclusive case. \
+             tests/capture/README.md has what makes the difference. ***\n"
         );
     }
 
@@ -248,39 +330,41 @@ struct Outcome {
     timeouts: u64,
     first: Option<u32>,
     last: Option<u32>,
+    /// Whether the subject's window went away before the run was over — either
+    /// before capture could start or during it.
+    target_lost: bool,
     undecodable: Vec<String>,
 }
 
 /// Captures the application's window for [`CAPTURE_FOR`].
-fn capture(app: &TestApp) -> Outcome {
+fn capture(app: &TestApp, method: clipped_capture::CaptureMethod) -> Outcome {
     let (width, height) = app.client_size();
     let size = FrameSize::new(width, height).expect("the application announced a real size");
     let properties = TargetProperties::new(TargetKind::Window, size);
 
-    let selection = select(
-        &registered_declarations(),
-        &properties,
-        CaptureMethodSetting::Automatic,
-    )
-    .expect("this machine should have a capture backend for a window");
-    let mut backend = registered_backend(selection.method())
+    let mut backend = registered_backend(method)
         .expect("selection only ever chooses a registered backend")
         .create()
         .expect("the backend should be creatable");
 
-    let target = CaptureTarget::new(TargetHandle::from_raw(app.window() as u64), properties);
-    let format = backend
-        .initialise(
-            &target,
-            &CaptureConfig::default().with_capture_cursor(false),
-        )
-        .expect("capturing a fullscreen application's window should start");
-    eprintln!(
-        "[info] capturing through {} at {format}",
-        selection.method()
-    );
-
     let mut outcome = Outcome::default();
+    let target = CaptureTarget::new(TargetHandle::from_raw(app.window() as u64), properties);
+    match backend.initialise(
+        &target,
+        &CaptureConfig::default().with_capture_cursor(false),
+    ) {
+        Ok(format) => eprintln!("[info] capturing through {method} at {format}"),
+        // The subject announced a window and then lost it. That is a finding
+        // about the subject, not a broken backend, and the caller decides what
+        // it means — so it is recorded rather than panicked on.
+        Err(CaptureError::TargetLost { .. }) => {
+            eprintln!("[info] the subject's window had already gone when capture tried to start");
+            outcome.target_lost = true;
+            return outcome;
+        }
+        Err(error) => panic!("capturing a fullscreen application's window should start: {error}"),
+    }
+
     let mut reader = FrameReader::default();
     let mut region = None;
     let deadline = Instant::now() + CAPTURE_FOR;
@@ -333,7 +417,12 @@ fn capture(app: &TestApp) -> Outcome {
                 region = None;
             }
             Err(CaptureError::TargetLost { .. }) => {
-                panic!("the fullscreen application's window went away mid-capture");
+                eprintln!(
+                    "[info] the subject's window went away after {} delivered frames",
+                    outcome.delivered
+                );
+                outcome.target_lost = true;
+                break;
             }
             Err(error) => panic!("capture failed after {} frames: {error}", outcome.delivered),
         }

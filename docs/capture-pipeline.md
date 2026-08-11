@@ -483,15 +483,75 @@ The automated version belongs in `tests/capture/` once the shared test
 applications exist
 ([issue #23](https://github.com/wildware-uk/clipped/issues/23)).
 
+### Exclusive fullscreen
+
+**It works.** A window that has taken a display through
+`IDXGISwapChain::SetFullscreenState` is captured by this backend like any other
+window, and `tests/capture/wgc_fullscreen_dx11.rs` is the automated proof:
+it starts `test-apps/fullscreen-dx11`, checks that Windows really granted the
+display, captures the window, and decodes the frame counter out of every frame
+that arrives. On Windows 11 build 26200 with an RTX 4090, capturing a 2560x1440
+subject presenting at 60 fps on the non-primary display:
+
+| Run | Granted | Delivered | Decoded of a possible 300 | Timeouts | Undecodable |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | yes | 274 | 274 | 0 | 0 |
+| 2 | yes | 266 | 266 | 0 | 0 |
+
+The subject reported `presented 318 frames with the display held exclusively`
+and `presented 325 frames …` respectively, stopped when the test asked it to,
+and the display was the same shape afterwards. The shortfall against 300 is the
+test reading every 14 MiB frame back into system memory and decoding it, which a
+recorder does not do.
+
+That closes the one presentation
+[issue #12](https://github.com/wildware-uk/clipped/issues/12) could not check
+when this backend landed. The earlier note that DXGI refused the transition with
+`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (0x887A0022)` was real but was not about the
+foreground, and is explained by the next section.
+
+### A powered-off display makes every capture measurement meaningless
+
+Worth knowing before trusting any number on this page, and the single biggest
+trap in reproducing them. When Windows has turned the displays off on the idle
+timeout, the desktop compositor drops to about 4 Hz, so Windows Graphics Capture
+delivers about one frame in fifteen for *any* target — it composes what the
+desktop composes, and a desktop nobody is looking at is barely composed at all.
+
+Measured on the development machine with both displays powered off after the
+15-minute idle timeout, `wgc_probe --mode windowed --seconds 10` at a target of
+60 fps:
+
+```text
+frames delivered     : 40
+acquisition timeouts : 80
+measured rate        : 3.97 fps (from frame timestamps)
+interval median      : 251.567 ms
+late frames          : 39 of 39 intervals longer than 25.00 ms (1.5x target)
+```
+
+The same command with the displays awake:
+
+```text
+frames delivered     : 597
+acquisition timeouts : 0
+measured rate        : 59.40 fps (from frame timestamps)
+interval median      : 16.667 ms
+late frames          : 2 of 596 intervals longer than 25.00 ms
+```
+
+In that state `SetFullscreenState` is also refused with
+`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (0x887A0022)`, and a subject that is granted
+the display loses it again one presented frame later
+([issue #178](https://github.com/wildware-uk/clipped/issues/178)). None of it
+reproduces on an awake display, and none of it is a capture defect.
+`SetThreadExecutionState(ES_DISPLAY_REQUIRED)` is not enough on its own: it
+resets the display idle timer but does not power a display back on.
+`tests/capture/README.md` records how to tell the two states apart before
+recording a number.
+
 ### What is not covered
 
-- **Exclusive fullscreen has not been exercised.** The probe asks for it through
-  `IDXGISwapChain::SetFullscreenState`; on the development machine DXGI refuses
-  with `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` because Windows will not grant the
-  foreground to a process the user did not interact with, and DXGI will not go
-  exclusive for a background window. Borderless-fullscreen — a `WS_POPUP` window
-  covering the whole display, which is what most modern games actually use — is
-  exercised and works.
 - **HDR.** The pool is created as `B8G8R8A8UIntNormalized` and the backend always
   reports `PixelFormat::Bgra8Unorm`.
   [Issue #99](https://github.com/wildware-uk/clipped/issues/99) owns HDR;
