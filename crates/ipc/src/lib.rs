@@ -17,6 +17,25 @@
 //! - The wire format: messages, framing, error vocabulary, versioning.
 //! - The transport: a per-user named pipe, and the rules for naming it.
 //! - The mechanics of serving connections and of being a client.
+//! - A machine-readable description of all of that, in [`schema`], which the
+//!   desktop application's TypeScript mirror of these messages is checked
+//!   against. The types here are the authority for both ends, and that module
+//!   is how the other end finds out when they change.
+//!
+//! [`schema`] is public, which for what is a build-time tool wants a reason
+//! (AGENTS.md section 44). The emitter that writes the description is a
+//! separate Cargo target — `src/bin/protocol-schema.rs` — and a binary reaches
+//! the library beside it only through that library's public API, so the
+//! alternative to exposing the module is not a smaller surface but a second
+//! copy of the protocol's description living in the binary. A `cargo` feature
+//! was weighed and not taken: off by default it would take
+//! `the_committed_schema_is_the_one_this_build_produces` out of `cargo test
+//! --workspace`, and with it the half of the conformance check that runs on
+//! this side; on by default it would be a flag nothing ever turns off
+//! (AGENTS.md section 38). What is exposed is inert — some `serde` data types,
+//! one function that fills them in, and the path the file is written to.
+//! Nothing in it takes part in holding a conversation, and nothing else in this
+//! crate depends on it.
 //!
 //! # Not responsible for
 //!
@@ -83,6 +102,7 @@ pub mod command;
 pub mod error;
 pub mod frame;
 pub mod message;
+pub mod schema;
 pub mod server;
 pub mod status;
 pub mod transport;
@@ -92,7 +112,7 @@ pub use command::{
     Command, Reply, StartRecording, StopRecording, UnbuiltCommand, UNBUILT_COMMANDS,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
-pub use frame::{FrameError, MAX_FRAME_BYTES};
+pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,

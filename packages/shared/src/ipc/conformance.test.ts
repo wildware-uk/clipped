@@ -1,0 +1,602 @@
+/**
+ * The check that fails when the TypeScript and the Rust disagree.
+ *
+ * `protocol.ts` is written by hand. That is only defensible if something fails
+ * the moment it stops describing the protocol `crates/ipc` implements, and this
+ * is that something. It reads `protocol-schema.json`, which
+ * `crates/ipc/src/schema.rs` derives from the Rust types — field names and
+ * optionality from `serde`, wire strings from serialising real values, and the
+ * verdict on every sample frame from running it through the real deserialiser —
+ * and holds the types in this directory against it.
+ *
+ * Three kinds of disagreement fail here:
+ *
+ * - **A value one side knows and the other does not.** Every enumeration is
+ *   compared both ways, and each list is tied to its type by construction, so a
+ *   list that satisfies this file is a type that does too.
+ * - **A field one side has and the other does not.** {@link FieldSpec} is a
+ *   mapped type over the interface itself: a field added to the TypeScript and
+ *   not to the descriptor does not compile, and a field added to the Rust and
+ *   not to the TypeScript fails here.
+ * - **A frame the two sides read differently.** Every sample is parsed and its
+ *   discriminant compared with the one the recorder's own deserialiser
+ *   produced, including the frames from a build newer than this one.
+ *
+ * The Rust half of the same check is
+ * `the_committed_schema_is_the_one_this_build_produces` in
+ * `crates/ipc/src/schema.rs`, which insists the committed schema is still what
+ * the Rust types say. Neither half is enough alone: this one would happily
+ * agree with a schema nobody had regenerated.
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import { LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES } from './frame';
+import { parseClientMessage, parseServerMessage } from './parse';
+import type {
+  ClientMessage,
+  CommandName,
+  ConnectionRole,
+  ErrorCode,
+  ErrorDetail,
+  ErrorOutcome,
+  EventStream,
+  Feature,
+  Hello,
+  IdleStatus,
+  KnownCommandName,
+  KnownErrorDetailName,
+  KnownEventName,
+  NotImplementedDetail,
+  OkOutcome,
+  PeerIdentity,
+  PongReply,
+  ProtocolError,
+  RecorderEvent,
+  RecorderRequest,
+  RecorderResponse,
+  RecorderState,
+  RecorderStatus,
+  RecordingFailedEvent,
+  RecordingStartedReply,
+  RecordingStatus,
+  RecordingStoppedReply,
+  RecordingSummary,
+  Reply,
+  ReplyName,
+  ServerMessage,
+  StartRecordingParams,
+  StatusChangedEvent,
+  StatusReply,
+  StopRecordingParams,
+  UnsupportedProtocolVersionDetail,
+  Welcome,
+} from './protocol';
+import {
+  CLIENT_MESSAGE_TYPES,
+  COMMANDS,
+  CONNECTION_ROLES,
+  DEFAULT_CONNECTION_ROLE,
+  END_REASONS,
+  ERROR_CODES,
+  ERROR_DETAILS,
+  EVENTS,
+  EVENT_STREAMS,
+  FEATURES,
+  MAX_CONCURRENT_CONNECTIONS,
+  OUTCOMES,
+  PROTOCOL_VERSION,
+  RECORDER_STATES,
+  REPLIES,
+  SERVER_MESSAGE_TYPES,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  isRecognisedErrorDetail,
+} from './protocol';
+import rawSchema from './protocol-schema.json';
+
+/** The schema document, as this build expects to find it. */
+interface SchemaDocument {
+  readonly schema_format: number;
+  readonly protocol_version: number;
+  readonly supported_protocol_versions: readonly number[];
+  readonly framing: {
+    readonly length_prefix_bytes: number;
+    readonly length_prefix_endianness: string;
+    readonly max_frame_bytes: number;
+  };
+  readonly max_concurrent_connections: number;
+  readonly envelopes: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  readonly enumerations: Readonly<
+    Record<string, { readonly values: readonly string[]; readonly tolerates_unrecognised: boolean }>
+  >;
+  readonly structures: Readonly<
+    Record<string, { readonly required: readonly string[]; readonly optional: readonly string[] }>
+  >;
+  readonly commands: readonly {
+    readonly name: string;
+    readonly params: string | null;
+    readonly reply: string | null;
+    readonly available_in_this_build: boolean;
+  }[];
+  readonly samples: readonly {
+    readonly name: string;
+    readonly direction: string;
+    readonly frame: unknown;
+    readonly parses: boolean;
+    readonly discriminant: string | null;
+  }[];
+}
+
+const schema = rawSchema as unknown as SchemaDocument;
+
+/** The schema shape this file knows how to read. */
+const SCHEMA_FORMAT = 1;
+
+/** Whether a type admits values outside the ones it lists. */
+type IsExtensible<T extends string> = string extends T ? true : false;
+
+/** Whether a tagged union has a member for a tag it does not recognise. */
+type ToleratesUnrecognised<Tag> = undefined extends Tag ? true : false;
+
+/** Two types are the same type. */
+type AssertEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/**
+ * The fields of an interface, and which of them may be left out.
+ *
+ * The values are not free: `undefined extends T[K]` decides them, so a
+ * descriptor calling a required field optional does not compile, and a field
+ * added to or removed from the interface breaks the descriptor until it is
+ * updated. That is what makes the comparison with the Rust below meaningful
+ * rather than a comparison of two hand-written lists.
+ */
+type FieldSpec<T> = {
+  readonly [K in keyof Required<T>]-?: undefined extends T[K] ? 'optional' : 'required';
+};
+
+interface Structure {
+  readonly required: readonly string[];
+  readonly optional: readonly string[];
+}
+
+/** The Rust-facing shape of one TypeScript interface. */
+function fields<T>(spec: FieldSpec<T>): Structure {
+  const required: string[] = [];
+  const optional: string[] = [];
+  for (const [name, kind] of Object.entries(spec as unknown as Record<string, string>)) {
+    (kind === 'optional' ? optional : required).push(name);
+  }
+  return { required: required.sort(), optional: optional.sort() };
+}
+
+interface EnumerationMirror {
+  readonly values: readonly string[];
+  readonly toleratesUnrecognised: boolean;
+}
+
+/** An open or closed set of wire strings, with its tolerance tied to its type. */
+function enumeration<T extends string>(
+  values: readonly string[],
+  toleratesUnrecognised: IsExtensible<T>,
+): EnumerationMirror {
+  return { values, toleratesUnrecognised };
+}
+
+/** The same, for a union that expresses its tolerance as a variant. */
+function taggedEnumeration<Tag>(
+  values: readonly string[],
+  toleratesUnrecognised: ToleratesUnrecognised<Tag>,
+): EnumerationMirror {
+  return { values, toleratesUnrecognised };
+}
+
+const TYPESCRIPT_ENUMERATIONS: Readonly<Record<string, EnumerationMirror>> = {
+  client_message_type: enumeration<ClientMessage['type']>(CLIENT_MESSAGE_TYPES, false),
+  server_message_type: enumeration<ServerMessage['type']>(SERVER_MESSAGE_TYPES, false),
+  connection_role: enumeration<ConnectionRole>(CONNECTION_ROLES, true),
+  event_stream: enumeration<EventStream>(EVENT_STREAMS, true),
+  feature: enumeration<Feature>(FEATURES, true),
+  command: enumeration<CommandName>(COMMANDS, true),
+  error_code: enumeration<ErrorCode>(ERROR_CODES, true),
+  error_detail: taggedEnumeration<ErrorDetail['detail']>(ERROR_DETAILS, true),
+  end_reason: enumeration<RecordingSummary['end_reason']>(END_REASONS, true),
+  event: taggedEnumeration<RecorderEvent['event']>(EVENTS, true),
+  outcome: enumeration<'ok' | 'error'>(OUTCOMES, false),
+  reply: enumeration<ReplyName>(REPLIES, false),
+  recorder_state: enumeration<RecorderState>(RECORDER_STATES, false),
+};
+
+const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
+  peer_identity: fields<PeerIdentity>({ name: 'required', version: 'required' }),
+  hello: fields<Hello>({
+    protocol_version: 'required',
+    client: 'required',
+    role: 'optional',
+    streams: 'optional',
+  }),
+  welcome: fields<Welcome>({
+    protocol_version: 'required',
+    recorder: 'required',
+    role: 'required',
+    features: 'required',
+    streams: 'optional',
+  }),
+  request: fields<RecorderRequest>({ id: 'required', command: 'required', params: 'optional' }),
+  response: fields<RecorderResponse>({ id: 'required', outcome: 'required' }),
+  protocol_error: fields<ProtocolError>({
+    code: 'required',
+    message: 'required',
+    detail: 'optional',
+  }),
+  start_recording: fields<StartRecordingParams>({
+    window: 'optional',
+    process: 'optional',
+    pid: 'optional',
+    output: 'optional',
+    overwrite: 'optional',
+    resolution: 'optional',
+    framerate: 'optional',
+    codec: 'optional',
+    encoder: 'optional',
+    microphone: 'optional',
+    system_audio: 'optional',
+  }),
+  stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
+  recording_summary: fields<RecordingSummary>({
+    output: 'required',
+    duration_ms: 'required',
+    end_reason: 'required',
+    frames_encoded: 'required',
+    frames_skipped_for_rate: 'required',
+    frames_dropped_writer_behind: 'required',
+    sustained_framerate: 'optional',
+    encoder: 'required',
+    codec: 'required',
+    width: 'required',
+    height: 'required',
+  }),
+  'outcome.ok': fields<OkOutcome>({ ok: 'required' }),
+  'outcome.error': fields<ErrorOutcome>({ error: 'required' }),
+  'reply.pong': fields<PongReply>({ reply: 'required' }),
+  'reply.status': fields<StatusReply>({ reply: 'required', status: 'required' }),
+  'reply.recording_started': fields<RecordingStartedReply>({
+    reply: 'required',
+    recording_id: 'required',
+    output: 'required',
+  }),
+  'reply.recording_stopped': fields<RecordingStoppedReply>({
+    reply: 'required',
+    summary: 'required',
+  }),
+  'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
+  'recorder_status.recording': fields<RecordingStatus>({
+    state: 'required',
+    recording_id: 'required',
+    output: 'required',
+    target: 'required',
+    elapsed_ms: 'required',
+  }),
+  'event.status_changed': fields<StatusChangedEvent>({ event: 'required', status: 'required' }),
+  'event.recording_failed': fields<RecordingFailedEvent>({
+    event: 'required',
+    recording_id: 'required',
+    error: 'required',
+  }),
+  'error_detail.unsupported_protocol_version': fields<UnsupportedProtocolVersionDetail>({
+    detail: 'required',
+    requested: 'required',
+    supported: 'required',
+    recorder_version: 'required',
+  }),
+  'error_detail.not_implemented': fields<NotImplementedDetail>({
+    detail: 'required',
+    subsystem: 'required',
+    milestone: 'required',
+    tracking_issue: 'required',
+  }),
+};
+
+/**
+ * What each command takes and gives back, in the names of the structures above.
+ *
+ * `params` and `reply` are keys of {@link TYPESCRIPT_STRUCTURES}, so a command
+ * cannot claim a shape this file does not describe, and the structures those
+ * names point at are themselves held against the Rust. `available_in_this_build`
+ * is the recorder's own answer to whether a command is performed or refused with
+ * `not_implemented`: a build that gains one changes the schema and this list has
+ * to follow, which is the point at which somebody asks whether the interface
+ * should now be offering it.
+ */
+const TYPESCRIPT_COMMANDS: readonly {
+  readonly name: KnownCommandName;
+  readonly params: keyof typeof TYPESCRIPT_STRUCTURES | null;
+  readonly reply: keyof typeof TYPESCRIPT_STRUCTURES | null;
+  readonly available_in_this_build: boolean;
+}[] = [
+  { name: 'ping', params: null, reply: 'reply.pong', available_in_this_build: true },
+  { name: 'get_status', params: null, reply: 'reply.status', available_in_this_build: true },
+  {
+    name: 'start_recording',
+    params: 'start_recording',
+    reply: 'reply.recording_started',
+    available_in_this_build: true,
+  },
+  {
+    name: 'stop_recording',
+    params: 'stop_recording',
+    reply: 'reply.recording_stopped',
+    available_in_this_build: true,
+  },
+  { name: 'save_replay', params: null, reply: null, available_in_this_build: false },
+  { name: 'add_bookmark', params: null, reply: null, available_in_this_build: false },
+  { name: 'take_screenshot', params: null, reply: null, available_in_this_build: false },
+  { name: 'apply_settings', params: null, reply: null, available_in_this_build: false },
+];
+
+/** Which structure each envelope's payload takes, as the types here compose it. */
+const TYPESCRIPT_ENVELOPES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  client: { hello: 'hello', request: 'request' },
+  server: { welcome: 'welcome', refused: 'protocol_error', response: 'response', event: 'event' },
+};
+
+function errorDiscriminant(error: ProtocolError): string {
+  const detail = error.detail;
+  if (detail === undefined) {
+    return error.code;
+  }
+  return `${error.code}.${detail.detail ?? 'unrecognised'}`;
+}
+
+function replyDiscriminant(reply: Reply): string {
+  switch (reply.reply) {
+    case 'pong':
+      return 'pong';
+    case 'status':
+      return `status.${reply.status.state}`;
+    case 'recording_started':
+      return 'recording_started';
+    case 'recording_stopped':
+      return `recording_stopped.${reply.summary.end_reason}`;
+  }
+}
+
+function eventDiscriminant(event: RecorderEvent): string {
+  switch (event.event) {
+    case 'status_changed':
+      return `status_changed.${event.status.state}`;
+    case 'recording_failed':
+      return 'recording_failed';
+    case undefined:
+      return 'unrecognised';
+  }
+}
+
+function clientDiscriminant(message: ClientMessage): string {
+  switch (message.type) {
+    case 'hello': {
+      const role = message.role ?? DEFAULT_CONNECTION_ROLE;
+      const streams = message.streams ?? [];
+      // The streams are in the path so that a mirror which dropped a stream
+      // name it did not recognise reaches a different answer from one that kept
+      // it, which is the only thing the "an event stream invented later" sample
+      // can prove.
+      return streams.length === 0 ? `hello.${role}` : `hello.${role}.${streams.join('+')}`;
+    }
+    case 'request':
+      return `request.${message.command}`;
+  }
+}
+
+function serverDiscriminant(message: ServerMessage): string {
+  switch (message.type) {
+    case 'welcome':
+      return `welcome.${message.role}`;
+    case 'refused':
+      return `refused.${errorDiscriminant(message)}`;
+    case 'response':
+      return 'ok' in message.outcome
+        ? `response.ok.${replyDiscriminant(message.outcome.ok)}`
+        : `response.error.${errorDiscriminant(message.outcome.error)}`;
+    case 'event':
+      return `event.${eventDiscriminant(message)}`;
+  }
+}
+
+function sampleNamed(name: string) {
+  const sample = schema.samples.find((candidate) => candidate.name === name);
+  if (sample === undefined) {
+    throw new Error(`the schema has no \`${name}\` sample`);
+  }
+  return sample;
+}
+
+describe('the schema this check reads', () => {
+  it('is a document this build understands', () => {
+    expect(schema.schema_format).toBe(SCHEMA_FORMAT);
+  });
+});
+
+describe('the constants', () => {
+  it('agree about the protocol version', () => {
+    expect(PROTOCOL_VERSION).toBe(schema.protocol_version);
+    expect([...SUPPORTED_PROTOCOL_VERSIONS]).toEqual([...schema.supported_protocol_versions]);
+  });
+
+  it('agree about the framing', () => {
+    expect(LENGTH_PREFIX_BYTES).toBe(schema.framing.length_prefix_bytes);
+    expect(MAX_FRAME_BYTES).toBe(schema.framing.max_frame_bytes);
+    expect(schema.framing.length_prefix_endianness).toBe('little');
+  });
+
+  it('agree about how many connections a recorder serves', () => {
+    expect(MAX_CONCURRENT_CONNECTIONS).toBe(schema.max_concurrent_connections);
+  });
+
+  it('agree about the commands, including the ones no build performs yet', () => {
+    expect([...COMMANDS]).toEqual(schema.commands.map((command) => command.name));
+    expect(TYPESCRIPT_COMMANDS).toEqual(schema.commands);
+  });
+});
+
+describe('the unions are derived from the lists this check compares', () => {
+  it('ties each list to the type built from it', () => {
+    // Without these, the comparisons below would be checking constants that
+    // nothing forces the types to agree with.
+    const replies: AssertEqual<Reply['reply'], ReplyName> = true;
+    const states: AssertEqual<RecorderStatus['state'], RecorderState> = true;
+    const events: AssertEqual<Exclude<RecorderEvent['event'], undefined>, KnownEventName> = true;
+    const details: AssertEqual<
+      Exclude<ErrorDetail['detail'], undefined>,
+      KnownErrorDetailName
+    > = true;
+    const client: AssertEqual<ClientMessage['type'], (typeof CLIENT_MESSAGE_TYPES)[number]> = true;
+    const server: AssertEqual<ServerMessage['type'], (typeof SERVER_MESSAGE_TYPES)[number]> = true;
+
+    expect([replies, states, events, details, client, server]).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+    ]);
+  });
+});
+
+describe('the enumerations', () => {
+  it('describe the same set of enumerations', () => {
+    expect(Object.keys(TYPESCRIPT_ENUMERATIONS).sort()).toEqual(
+      Object.keys(schema.enumerations).sort(),
+    );
+  });
+
+  for (const [name, rust] of Object.entries(schema.enumerations)) {
+    it(`knows every ${name}`, () => {
+      const mirror = TYPESCRIPT_ENUMERATIONS[name];
+      expect(mirror, `${name} is on the wire and not in protocol.ts`).toBeDefined();
+      expect([...(mirror?.values ?? [])].sort()).toEqual([...rust.values].sort());
+    });
+
+    it(`treats an unrecognised ${name} the way the recorder does`, () => {
+      expect(TYPESCRIPT_ENUMERATIONS[name]?.toleratesUnrecognised).toBe(
+        rust.tolerates_unrecognised,
+      );
+    });
+  }
+});
+
+describe('the structures', () => {
+  it('describe the same set of objects', () => {
+    expect(Object.keys(TYPESCRIPT_STRUCTURES).sort()).toEqual(
+      Object.keys(schema.structures).sort(),
+    );
+  });
+
+  for (const [name, rust] of Object.entries(schema.structures)) {
+    it(`has the fields of ${name}`, () => {
+      const mirror = TYPESCRIPT_STRUCTURES[name];
+      expect(mirror, `${name} is on the wire and not in protocol.ts`).toBeDefined();
+      expect([...(mirror?.required ?? [])]).toEqual([...rust.required]);
+      expect([...(mirror?.optional ?? [])]).toEqual([...rust.optional]);
+    });
+  }
+});
+
+describe('the envelopes', () => {
+  it('carry the same payloads', () => {
+    expect(TYPESCRIPT_ENVELOPES).toEqual(schema.envelopes);
+  });
+});
+
+describe('every frame the recorder can send', () => {
+  for (const sample of schema.samples) {
+    it(`reads ${sample.name} exactly as the recorder does`, () => {
+      const result =
+        sample.direction === 'client'
+          ? parseClientMessage(sample.frame)
+          : parseServerMessage(sample.frame);
+
+      expect(
+        result.ok,
+        result.ok ? '' : `the recorder read this frame and this build did not: ${result.problem}`,
+      ).toBe(sample.parses);
+
+      if (result.ok) {
+        const discriminant =
+          sample.direction === 'client'
+            ? clientDiscriminant(result.message as ClientMessage)
+            : serverDiscriminant(result.message as ServerMessage);
+        expect(discriminant).toBe(sample.discriminant);
+      }
+    });
+  }
+});
+
+describe('a recorder newer than this build', () => {
+  it('keeps the message of a refusal whose code was invented later', () => {
+    const result = parseServerMessage(sampleNamed('an error code invented later').frame);
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.message.type !== 'response' || !('error' in result.message.outcome)) {
+      throw new Error('the sample is a refused response');
+    }
+
+    expect(result.message.outcome.error.code).toBe('gpu_on_fire');
+    expect(result.message.outcome.error.message).toBe('the graphics card is on fire');
+  });
+
+  it('keeps a detail it cannot read rather than losing the refusal with it', () => {
+    const result = parseServerMessage(sampleNamed('an error detail invented later').frame);
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.message.type !== 'response' || !('error' in result.message.outcome)) {
+      throw new Error('the sample is a refused response');
+    }
+
+    const detail = result.message.outcome.error.detail;
+    if (detail === undefined || isRecognisedErrorDetail(detail)) {
+      throw new Error('a detail invented later is not one this build recognises');
+    }
+
+    expect(detail.unrecognised).toEqual({ detail: 'disk_full', free_bytes: 0 });
+    expect(result.message.outcome.error.message).toBe(
+      'the disk the recording was being written to is full',
+    );
+  });
+
+  it('advertises a feature it has never heard of rather than refusing the welcome', () => {
+    const result = parseServerMessage(sampleNamed('a feature invented later').frame);
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.message.type !== 'welcome') {
+      throw new Error('the sample is a welcome');
+    }
+
+    expect(result.message.features).toEqual(['recording', 'status_events', 'telepathy']);
+  });
+
+  it('ignores a field invented later rather than falling back to the catch-all', () => {
+    const result = parseServerMessage(sampleNamed('a field invented later').frame);
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.message.type !== 'event' || result.message.event === undefined) {
+      throw new Error('the sample is a recognised event');
+    }
+    if (result.message.event !== 'status_changed' || result.message.status.state !== 'recording') {
+      throw new Error('the sample is a recording status');
+    }
+
+    expect(result.message.status.elapsed_ms).toBe(4200);
+    expect(result.message.status).not.toHaveProperty('gpu_temperature_c');
+  });
+
+  it('refuses to read a recorder state it does not know, rather than guessing', () => {
+    // The asymmetry the compatibility policy turns on, and the one thing here
+    // that must fail. An interface showing "idle" for a recorder in a state it
+    // has never heard of would be telling the user something untrue.
+    const result = parseServerMessage(
+      sampleNamed('a recorder state invented later, inside a reply').frame,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error('an unknown state must not be readable');
+    }
+    expect(result.problem).toContain('paused');
+  });
+});

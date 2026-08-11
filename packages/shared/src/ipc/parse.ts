@@ -1,0 +1,428 @@
+/**
+ * Reading a frame into the types in `protocol.ts`.
+ *
+ * A type is a claim about what arrived; these functions are what checks it.
+ * Without them the interface would be casting whatever came off the pipe and
+ * calling it a `ServerMessage`, which is the same as having no types at all —
+ * the first recorder that answered differently would produce `undefined` deep
+ * inside a component rather than a refusal anybody could report.
+ *
+ * # Nothing here throws
+ *
+ * Every parser returns a {@link ParseResult}. A frame that cannot be read is a
+ * fact about the connection, not an exception: it has to reach the interface as
+ * something it can render, and an exception thrown out of a message handler
+ * would take the subscription with it.
+ *
+ * # It reads what `crates/ipc` reads
+ *
+ * The rules below are not a reasonable interpretation of the protocol; they are
+ * what `serde` does in `crates/ipc`, sample by sample, and
+ * `conformance.test.ts` runs both sides over the same frames to prove it:
+ *
+ * - An unknown field is ignored, everywhere.
+ * - An unknown error code, end reason, feature, stream or command name is kept
+ *   as it arrived.
+ * - An event whose name this build does not know — **or whose contents it
+ *   cannot read** — becomes an {@link UnrecognisedEvent} holding the raw JSON,
+ *   which is where `serde`'s untagged catch-all puts it. The same goes for an
+ *   error detail.
+ * - An unknown reply, outcome or envelope `type` fails the frame. Those are the
+ *   tags that decide what a message *is*, and there is nothing to do with a
+ *   message whose kind is unknown.
+ * - An unknown recorder state is never rendered, and where it goes depends on
+ *   what carried it. In a reply it fails the frame: the interface asked what
+ *   the recorder was doing and has no answer it can show. In a `status_changed`
+ *   event it fails the *event*, which then lands in the catch-all with every
+ *   other event this build cannot read — so the subscription survives, and the
+ *   state is still not shown. `crates/ipc` does exactly the same thing for the
+ *   same reason, and the schema carries a sample of each.
+ */
+
+import type {
+  ClientMessage,
+  ErrorDetail,
+  Hello,
+  JsonObject,
+  JsonValue,
+  ProtocolError,
+  RecorderEvent,
+  RecorderRequest,
+  RecorderResponse,
+  RecorderStatus,
+  RecordingSummary,
+  Reply,
+  ServerMessage,
+  Welcome,
+} from './protocol';
+
+/** What reading a frame produced, or why it produced nothing. */
+export type ParseResult<T> =
+  | {
+      /** It was a message this build can read. */
+      readonly ok: true;
+      /** The message. */
+      readonly message: T;
+    }
+  | {
+      /** It was not. */
+      readonly ok: false;
+      /** One sentence saying what was wrong, for a log or a diagnostic panel. */
+      readonly problem: string;
+    };
+
+/**
+ * Why a frame could not be read.
+ *
+ * Internal: it is thrown while walking a frame and caught at the boundary, so
+ * that the readers below can be written as though every field were there. It
+ * never escapes this module.
+ */
+class Unreadable extends Error {}
+
+/** Reads a frame the recorder sent. Never throws. */
+export function parseServerMessage(frame: unknown): ParseResult<ServerMessage> {
+  return attempt(() => readServerMessage(frame));
+}
+
+/** Reads a frame the desktop application sent. Never throws. */
+export function parseClientMessage(frame: unknown): ParseResult<ClientMessage> {
+  return attempt(() => readClientMessage(frame));
+}
+
+/**
+ * Runs a reader and turns the one exception it can raise into a result.
+ *
+ * Anything else is a bug in this module rather than a fact about the frame, and
+ * is left to propagate: swallowing it would report a protocol problem for what
+ * was actually a mistake here.
+ */
+function attempt<T>(read: () => T): ParseResult<T> {
+  try {
+    return { ok: true, message: read() };
+  } catch (thrown) {
+    if (thrown instanceof Unreadable) {
+      return { ok: false, problem: thrown.message };
+    }
+    throw thrown;
+  }
+}
+
+function unreadable(problem: string): never {
+  throw new Unreadable(problem);
+}
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function object(value: unknown, what: string): JsonObject {
+  return isObject(value) ? value : unreadable(`${what} is not a JSON object`);
+}
+
+function stringField(source: JsonObject, name: string, what: string): string {
+  const value = source[name];
+  return typeof value === 'string' ? value : unreadable(`${what} has no \`${name}\` string`);
+}
+
+function numberField(source: JsonObject, name: string, what: string): number {
+  const value = source[name];
+  return typeof value === 'number' ? value : unreadable(`${what} has no \`${name}\` number`);
+}
+
+function optionalNumberField(source: JsonObject, name: string, what: string): number | undefined {
+  const value = source[name];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return typeof value === 'number' ? value : unreadable(`${what}'s \`${name}\` is not a number`);
+}
+
+function stringArrayField(source: JsonObject, name: string, what: string): readonly string[] {
+  const value = source[name];
+  if (!Array.isArray(value)) {
+    unreadable(`${what} has no \`${name}\` array`);
+  }
+  return value.map((entry, index) =>
+    typeof entry === 'string'
+      ? entry
+      : unreadable(`${what}'s \`${name}[${index}]\` is not a string`),
+  );
+}
+
+function optionalStringArrayField(
+  source: JsonObject,
+  name: string,
+  what: string,
+): readonly string[] | undefined {
+  return source[name] === undefined ? undefined : stringArrayField(source, name, what);
+}
+
+function numberArrayField(source: JsonObject, name: string, what: string): readonly number[] {
+  const value = source[name];
+  if (!Array.isArray(value)) {
+    unreadable(`${what} has no \`${name}\` array`);
+  }
+  return value.map((entry, index) =>
+    typeof entry === 'number'
+      ? entry
+      : unreadable(`${what}'s \`${name}[${index}]\` is not a number`),
+  );
+}
+
+/**
+ * Everything but the envelope's tag, which is what the catch-alls keep.
+ *
+ * `crates/ipc` sees the same thing: `serde` strips the tag it dispatched on
+ * before handing the rest to the variant, so an unrecognised event kept here
+ * and one kept there are the same object.
+ */
+function withoutType(frame: JsonObject): JsonValue {
+  const rest: Record<string, JsonValue> = {};
+  for (const [key, value] of Object.entries(frame)) {
+    if (key !== 'type' && value !== undefined) {
+      rest[key] = value;
+    }
+  }
+  return rest;
+}
+
+function readClientMessage(frame: unknown): ClientMessage {
+  const envelope = object(frame, 'a frame');
+  const type = stringField(envelope, 'type', 'a frame');
+  switch (type) {
+    case 'hello':
+      return { type: 'hello', ...readHello(envelope) };
+    case 'request':
+      return { type: 'request', ...readRequest(envelope) };
+    default:
+      return unreadable(`\`${type}\` is not a message this build knows how to read`);
+  }
+}
+
+function readServerMessage(frame: unknown): ServerMessage {
+  const envelope = object(frame, 'a frame');
+  const type = stringField(envelope, 'type', 'a frame');
+  switch (type) {
+    case 'welcome':
+      return { type: 'welcome', ...readWelcome(envelope) };
+    case 'refused':
+      return { type: 'refused', ...readProtocolError(envelope, 'a refusal') };
+    case 'response':
+      return { type: 'response', ...readResponse(envelope) };
+    case 'event':
+      return { type: 'event', ...readEvent(envelope) };
+    default:
+      return unreadable(`\`${type}\` is not a message this build knows how to read`);
+  }
+}
+
+function readPeerIdentity(value: JsonValue | undefined, what: string) {
+  const peer = object(value, what);
+  return {
+    name: stringField(peer, 'name', what),
+    version: stringField(peer, 'version', what),
+  };
+}
+
+function readHello(frame: JsonObject): Hello {
+  const role = frame['role'];
+  const streams = optionalStringArrayField(frame, 'streams', 'a handshake');
+  return {
+    protocol_version: numberField(frame, 'protocol_version', 'a handshake'),
+    client: readPeerIdentity(frame['client'], "a handshake's client"),
+    ...(role === undefined
+      ? {}
+      : { role: typeof role === 'string' ? role : unreadable('a handshake role is not a string') }),
+    ...(streams === undefined ? {} : { streams }),
+  };
+}
+
+function readWelcome(frame: JsonObject): Welcome {
+  const streams = optionalStringArrayField(frame, 'streams', 'a welcome');
+  return {
+    protocol_version: numberField(frame, 'protocol_version', 'a welcome'),
+    recorder: readPeerIdentity(frame['recorder'], "a welcome's recorder"),
+    role: stringField(frame, 'role', 'a welcome'),
+    features: stringArrayField(frame, 'features', 'a welcome'),
+    ...(streams === undefined ? {} : { streams }),
+  };
+}
+
+function readRequest(frame: JsonObject): RecorderRequest {
+  const params = frame['params'];
+  return {
+    id: numberField(frame, 'id', 'a request'),
+    command: stringField(frame, 'command', 'a request'),
+    ...(params === undefined || params === null ? {} : { params }),
+  };
+}
+
+function readResponse(frame: JsonObject): RecorderResponse {
+  const id = numberField(frame, 'id', 'a response');
+  const outcome = object(frame['outcome'], "a response's outcome");
+  const tags = Object.keys(outcome);
+  if (tags.length !== 1) {
+    unreadable(`a response's outcome carries ${tags.length} tags, and it carries exactly one`);
+  }
+
+  switch (tags[0]) {
+    case 'ok':
+      return { id, outcome: { ok: readReply(outcome['ok']) } };
+    case 'error':
+      return { id, outcome: { error: readProtocolError(outcome['error'], 'a refusal') } };
+    default:
+      return unreadable(`\`${String(tags[0])}\` is neither \`ok\` nor \`error\``);
+  }
+}
+
+function readReply(value: JsonValue | undefined): Reply {
+  const reply = object(value, 'a reply');
+  const tag = stringField(reply, 'reply', 'a reply');
+  switch (tag) {
+    case 'pong':
+      return { reply: 'pong' };
+    case 'status':
+      return { reply: 'status', status: readStatus(reply['status']) };
+    case 'recording_started':
+      return {
+        reply: 'recording_started',
+        recording_id: stringField(reply, 'recording_id', 'a started recording'),
+        output: stringField(reply, 'output', 'a started recording'),
+      };
+    case 'recording_stopped':
+      return { reply: 'recording_stopped', summary: readSummary(reply['summary']) };
+    default:
+      // No catch-all, deliberately: a reply this build cannot read is a command
+      // whose outcome it does not know, and reporting that is the honest answer.
+      return unreadable(`\`${tag}\` is not a reply this build knows`);
+  }
+}
+
+function readStatus(value: JsonValue | undefined): RecorderStatus {
+  const status = object(value, 'a status');
+  const state = stringField(status, 'state', 'a status');
+  switch (state) {
+    case 'idle':
+      return { state: 'idle' };
+    case 'recording':
+      return {
+        state: 'recording',
+        recording_id: stringField(status, 'recording_id', 'a recording'),
+        output: stringField(status, 'output', 'a recording'),
+        target: stringField(status, 'target', 'a recording'),
+        elapsed_ms: numberField(status, 'elapsed_ms', 'a recording'),
+      };
+    default:
+      // The one unknown value that must not be tolerated. Showing "idle" for a
+      // recorder in a state this build has never heard of would be a lie; not
+      // being able to read the message is only a gap.
+      //
+      // This fails whatever is reading the status: the reply, and with it the
+      // frame; or, inside a `status_changed` event, the event — which
+      // {@link readEvent} then keeps as unrecognised rather than losing the
+      // subscription over. Either way nothing is rendered from a state this
+      // build cannot name, which is the whole of the promise.
+      return unreadable(`\`${state}\` is not a recorder state this build knows`);
+  }
+}
+
+function readSummary(value: JsonValue | undefined): RecordingSummary {
+  const summary = object(value, 'a recording summary');
+  const what = 'a recording summary';
+  const sustained = optionalNumberField(summary, 'sustained_framerate', what);
+  return {
+    output: stringField(summary, 'output', what),
+    duration_ms: numberField(summary, 'duration_ms', what),
+    end_reason: stringField(summary, 'end_reason', what),
+    frames_encoded: numberField(summary, 'frames_encoded', what),
+    frames_skipped_for_rate: numberField(summary, 'frames_skipped_for_rate', what),
+    frames_dropped_writer_behind: numberField(summary, 'frames_dropped_writer_behind', what),
+    ...(sustained === undefined ? {} : { sustained_framerate: sustained }),
+    encoder: stringField(summary, 'encoder', what),
+    codec: stringField(summary, 'codec', what),
+    width: numberField(summary, 'width', what),
+    height: numberField(summary, 'height', what),
+  };
+}
+
+function readProtocolError(value: JsonValue | undefined, what: string): ProtocolError {
+  const error = object(value, what);
+  const detail = error['detail'];
+  return {
+    code: stringField(error, 'code', what),
+    message: stringField(error, 'message', what),
+    ...(detail === undefined || detail === null ? {} : { detail: readErrorDetail(detail) }),
+  };
+}
+
+/**
+ * A detail this build knows, or the JSON it arrived as.
+ *
+ * The catch-all is what keeps an unfamiliar detail from costing the refusal its
+ * code and its message, which is the whole of the additive half of the
+ * compatibility policy.
+ */
+function readErrorDetail(value: JsonValue): ErrorDetail {
+  if (isObject(value)) {
+    try {
+      switch (value['detail']) {
+        case 'unsupported_protocol_version':
+          return {
+            detail: 'unsupported_protocol_version',
+            requested: numberField(value, 'requested', 'a version refusal'),
+            supported: numberArrayField(value, 'supported', 'a version refusal'),
+            recorder_version: stringField(value, 'recorder_version', 'a version refusal'),
+          };
+        case 'not_implemented':
+          return {
+            detail: 'not_implemented',
+            subsystem: stringField(value, 'subsystem', 'a missing subsystem'),
+            milestone: stringField(value, 'milestone', 'a missing subsystem'),
+            tracking_issue: numberField(value, 'tracking_issue', 'a missing subsystem'),
+          };
+        default:
+          break;
+      }
+    } catch (thrown) {
+      if (!(thrown instanceof Unreadable)) {
+        throw thrown;
+      }
+      // A tag this build knows carrying contents it cannot read is still kept
+      // rather than failing the refusal, which is where `serde`'s untagged
+      // catch-all puts it too.
+    }
+  }
+
+  return { unrecognised: value };
+}
+
+/**
+ * An event this build knows, or the JSON it arrived as.
+ *
+ * Anything unreadable lands in the catch-all rather than failing the frame: an
+ * events connection that dropped because the recorder sent something new would
+ * be the exact failure the compatibility policy exists to prevent.
+ */
+function readEvent(frame: JsonObject): RecorderEvent {
+  try {
+    switch (frame['event']) {
+      case 'status_changed':
+        return { event: 'status_changed', status: readStatus(frame['status']) };
+      case 'recording_failed':
+        return {
+          event: 'recording_failed',
+          recording_id: stringField(frame, 'recording_id', 'a failed recording'),
+          error: readProtocolError(frame['error'], 'a failed recording'),
+        };
+      default:
+        break;
+    }
+  } catch (thrown) {
+    if (!(thrown instanceof Unreadable)) {
+      throw thrown;
+    }
+  }
+
+  return { unrecognised: withoutType(frame) };
+}

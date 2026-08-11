@@ -1,0 +1,917 @@
+{
+  "schema_format": 1,
+  "regenerate_with": "cargo run -p clipped-ipc --bin protocol-schema",
+  "protocol_version": 1,
+  "supported_protocol_versions": [
+    1
+  ],
+  "framing": {
+    "length_prefix_bytes": 4,
+    "length_prefix_endianness": "little",
+    "max_frame_bytes": 1048576
+  },
+  "max_concurrent_connections": 8,
+  "envelopes": {
+    "client": {
+      "hello": "hello",
+      "request": "request"
+    },
+    "server": {
+      "event": "event",
+      "refused": "protocol_error",
+      "response": "response",
+      "welcome": "welcome"
+    }
+  },
+  "enumerations": {
+    "client_message_type": {
+      "values": [
+        "hello",
+        "request"
+      ],
+      "tolerates_unrecognised": false
+    },
+    "command": {
+      "values": [
+        "ping",
+        "get_status",
+        "start_recording",
+        "stop_recording",
+        "save_replay",
+        "add_bookmark",
+        "take_screenshot",
+        "apply_settings"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "connection_role": {
+      "values": [
+        "control",
+        "events"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "end_reason": {
+      "values": [
+        "stopped",
+        "target_lost",
+        "target_resized"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "error_code": {
+      "values": [
+        "unsupported_protocol_version",
+        "handshake_required",
+        "malformed_frame",
+        "unknown_command",
+        "invalid_parameters",
+        "not_implemented",
+        "already_recording",
+        "not_recording",
+        "target_not_found",
+        "recording_failed",
+        "too_many_connections",
+        "internal"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "error_detail": {
+      "values": [
+        "unsupported_protocol_version",
+        "not_implemented"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "event": {
+      "values": [
+        "status_changed",
+        "recording_failed"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "event_stream": {
+      "values": [
+        "status",
+        "errors",
+        "metrics"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "feature": {
+      "values": [
+        "recording",
+        "status_events"
+      ],
+      "tolerates_unrecognised": true
+    },
+    "outcome": {
+      "values": [
+        "ok",
+        "error"
+      ],
+      "tolerates_unrecognised": false
+    },
+    "recorder_state": {
+      "values": [
+        "idle",
+        "recording"
+      ],
+      "tolerates_unrecognised": false
+    },
+    "reply": {
+      "values": [
+        "pong",
+        "status",
+        "recording_started",
+        "recording_stopped"
+      ],
+      "tolerates_unrecognised": false
+    },
+    "server_message_type": {
+      "values": [
+        "welcome",
+        "refused",
+        "response",
+        "event"
+      ],
+      "tolerates_unrecognised": false
+    }
+  },
+  "structures": {
+    "error_detail.not_implemented": {
+      "required": [
+        "detail",
+        "milestone",
+        "subsystem",
+        "tracking_issue"
+      ],
+      "optional": []
+    },
+    "error_detail.unsupported_protocol_version": {
+      "required": [
+        "detail",
+        "recorder_version",
+        "requested",
+        "supported"
+      ],
+      "optional": []
+    },
+    "event.recording_failed": {
+      "required": [
+        "error",
+        "event",
+        "recording_id"
+      ],
+      "optional": []
+    },
+    "event.status_changed": {
+      "required": [
+        "event",
+        "status"
+      ],
+      "optional": []
+    },
+    "hello": {
+      "required": [
+        "client",
+        "protocol_version"
+      ],
+      "optional": [
+        "role",
+        "streams"
+      ]
+    },
+    "outcome.error": {
+      "required": [
+        "error"
+      ],
+      "optional": []
+    },
+    "outcome.ok": {
+      "required": [
+        "ok"
+      ],
+      "optional": []
+    },
+    "peer_identity": {
+      "required": [
+        "name",
+        "version"
+      ],
+      "optional": []
+    },
+    "protocol_error": {
+      "required": [
+        "code",
+        "message"
+      ],
+      "optional": [
+        "detail"
+      ]
+    },
+    "recorder_status.idle": {
+      "required": [
+        "state"
+      ],
+      "optional": []
+    },
+    "recorder_status.recording": {
+      "required": [
+        "elapsed_ms",
+        "output",
+        "recording_id",
+        "state",
+        "target"
+      ],
+      "optional": []
+    },
+    "recording_summary": {
+      "required": [
+        "codec",
+        "duration_ms",
+        "encoder",
+        "end_reason",
+        "frames_dropped_writer_behind",
+        "frames_encoded",
+        "frames_skipped_for_rate",
+        "height",
+        "output",
+        "width"
+      ],
+      "optional": [
+        "sustained_framerate"
+      ]
+    },
+    "reply.pong": {
+      "required": [
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.recording_started": {
+      "required": [
+        "output",
+        "recording_id",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.recording_stopped": {
+      "required": [
+        "reply",
+        "summary"
+      ],
+      "optional": []
+    },
+    "reply.status": {
+      "required": [
+        "reply",
+        "status"
+      ],
+      "optional": []
+    },
+    "request": {
+      "required": [
+        "command",
+        "id"
+      ],
+      "optional": [
+        "params"
+      ]
+    },
+    "response": {
+      "required": [
+        "id",
+        "outcome"
+      ],
+      "optional": []
+    },
+    "start_recording": {
+      "required": [],
+      "optional": [
+        "codec",
+        "encoder",
+        "framerate",
+        "microphone",
+        "output",
+        "overwrite",
+        "pid",
+        "process",
+        "resolution",
+        "system_audio",
+        "window"
+      ]
+    },
+    "stop_recording": {
+      "required": [],
+      "optional": [
+        "recording_id"
+      ]
+    },
+    "welcome": {
+      "required": [
+        "features",
+        "protocol_version",
+        "recorder",
+        "role"
+      ],
+      "optional": [
+        "streams"
+      ]
+    }
+  },
+  "commands": [
+    {
+      "name": "ping",
+      "params": null,
+      "reply": "reply.pong",
+      "available_in_this_build": true
+    },
+    {
+      "name": "get_status",
+      "params": null,
+      "reply": "reply.status",
+      "available_in_this_build": true
+    },
+    {
+      "name": "start_recording",
+      "params": "start_recording",
+      "reply": "reply.recording_started",
+      "available_in_this_build": true
+    },
+    {
+      "name": "stop_recording",
+      "params": "stop_recording",
+      "reply": "reply.recording_stopped",
+      "available_in_this_build": true
+    },
+    {
+      "name": "save_replay",
+      "params": null,
+      "reply": null,
+      "available_in_this_build": false
+    },
+    {
+      "name": "add_bookmark",
+      "params": null,
+      "reply": null,
+      "available_in_this_build": false
+    },
+    {
+      "name": "take_screenshot",
+      "params": null,
+      "reply": null,
+      "available_in_this_build": false
+    },
+    {
+      "name": "apply_settings",
+      "params": null,
+      "reply": null,
+      "available_in_this_build": false
+    }
+  ],
+  "samples": [
+    {
+      "name": "a control handshake",
+      "direction": "client",
+      "frame": {
+        "client": {
+          "name": "clipped-desktop",
+          "version": "0.1.0"
+        },
+        "protocol_version": 1,
+        "role": "control",
+        "streams": [
+          "status"
+        ],
+        "type": "hello"
+      },
+      "parses": true,
+      "discriminant": "hello.control.status"
+    },
+    {
+      "name": "an events handshake, naming its streams",
+      "direction": "client",
+      "frame": {
+        "client": {
+          "name": "clipped-desktop",
+          "version": "0.1.0"
+        },
+        "protocol_version": 1,
+        "role": "events",
+        "streams": [
+          "status",
+          "errors"
+        ],
+        "type": "hello"
+      },
+      "parses": true,
+      "discriminant": "hello.events.status+errors"
+    },
+    {
+      "name": "a command with no parameters",
+      "direction": "client",
+      "frame": {
+        "command": "get_status",
+        "id": 7,
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.get_status"
+    },
+    {
+      "name": "a command with parameters",
+      "direction": "client",
+      "frame": {
+        "command": "start_recording",
+        "id": 1,
+        "params": {
+          "codec": "auto",
+          "encoder": "auto",
+          "framerate": 60,
+          "microphone": "none",
+          "output": "D:\\clips\\session.mkv",
+          "overwrite": false,
+          "pid": 4242,
+          "process": "cs2.exe",
+          "resolution": "source",
+          "system_audio": "none",
+          "window": "Counter-Strike"
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.start_recording"
+    },
+    {
+      "name": "a control connection accepted",
+      "direction": "server",
+      "frame": {
+        "features": [
+          "recording",
+          "status_events"
+        ],
+        "protocol_version": 1,
+        "recorder": {
+          "name": "clipped-recorder",
+          "version": "0.1.0"
+        },
+        "role": "control",
+        "streams": [
+          "status"
+        ],
+        "type": "welcome"
+      },
+      "parses": true,
+      "discriminant": "welcome.control"
+    },
+    {
+      "name": "a connection refused for its protocol version",
+      "direction": "server",
+      "frame": {
+        "code": "unsupported_protocol_version",
+        "detail": {
+          "detail": "unsupported_protocol_version",
+          "recorder_version": "0.1.0",
+          "requested": 2,
+          "supported": [
+            1
+          ]
+        },
+        "message": "this recorder speaks protocol version 1, and 2 was asked for",
+        "type": "refused"
+      },
+      "parses": true,
+      "discriminant": "refused.unsupported_protocol_version.unsupported_protocol_version"
+    },
+    {
+      "name": "a reply with nothing in it",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "pong"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.pong"
+    },
+    {
+      "name": "the status of a recorder doing nothing",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "state": "idle"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.idle"
+    },
+    {
+      "name": "the status of a recorder that is recording",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "elapsed_ms": 4200,
+              "output": "D:\\clips\\session.mkv",
+              "recording_id": "r-1",
+              "state": "recording",
+              "target": "process `cs2.exe`"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.recording"
+    },
+    {
+      "name": "a recording started",
+      "direction": "server",
+      "frame": {
+        "id": 1,
+        "outcome": {
+          "ok": {
+            "output": "D:\\clips\\session.mkv",
+            "recording_id": "r-1",
+            "reply": "recording_started"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.recording_started"
+    },
+    {
+      "name": "a recording stopped, and what it turned out to be",
+      "direction": "server",
+      "frame": {
+        "id": 2,
+        "outcome": {
+          "ok": {
+            "reply": "recording_stopped",
+            "summary": {
+              "codec": "av1",
+              "duration_ms": 3800,
+              "encoder": "nvenc",
+              "end_reason": "stopped",
+              "frames_dropped_writer_behind": 0,
+              "frames_encoded": 115,
+              "frames_skipped_for_rate": 0,
+              "height": 720,
+              "output": "D:\\clips\\session.mkv",
+              "sustained_framerate": 30.0,
+              "width": 1280
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.recording_stopped.stopped"
+    },
+    {
+      "name": "a recording too short to measure a frame rate over",
+      "direction": "server",
+      "frame": {
+        "id": 2,
+        "outcome": {
+          "ok": {
+            "reply": "recording_stopped",
+            "summary": {
+              "codec": "av1",
+              "duration_ms": 3800,
+              "encoder": "nvenc",
+              "end_reason": "stopped",
+              "frames_dropped_writer_behind": 0,
+              "frames_encoded": 115,
+              "frames_skipped_for_rate": 0,
+              "height": 720,
+              "output": "D:\\clips\\session.mkv",
+              "width": 1280
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.recording_stopped.stopped"
+    },
+    {
+      "name": "a command this build cannot perform",
+      "direction": "server",
+      "frame": {
+        "id": 3,
+        "outcome": {
+          "error": {
+            "code": "not_implemented",
+            "detail": {
+              "detail": "not_implemented",
+              "milestone": "M3",
+              "subsystem": "the replay buffer",
+              "tracking_issue": 37
+            },
+            "message": "the replay buffer is not in this build"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.not_implemented.not_implemented"
+    },
+    {
+      "name": "a refusal with no detail",
+      "direction": "server",
+      "frame": {
+        "id": 4,
+        "outcome": {
+          "error": {
+            "code": "not_recording",
+            "message": "there is nothing to stop"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.not_recording"
+    },
+    {
+      "name": "the state an events connection opens with",
+      "direction": "server",
+      "frame": {
+        "event": "status_changed",
+        "status": {
+          "state": "idle"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.status_changed.idle"
+    },
+    {
+      "name": "a recording appearing on the status stream",
+      "direction": "server",
+      "frame": {
+        "event": "status_changed",
+        "status": {
+          "elapsed_ms": 4200,
+          "output": "D:\\clips\\session.mkv",
+          "recording_id": "r-1",
+          "state": "recording",
+          "target": "process `cs2.exe`"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.status_changed.recording"
+    },
+    {
+      "name": "a recording that ended by itself",
+      "direction": "server",
+      "frame": {
+        "error": {
+          "code": "recording_failed",
+          "message": "the encoder stopped accepting frames"
+        },
+        "event": "recording_failed",
+        "recording_id": "r-1",
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.recording_failed"
+    },
+    {
+      "name": "an error code invented later",
+      "direction": "server",
+      "frame": {
+        "id": 5,
+        "outcome": {
+          "error": {
+            "code": "gpu_on_fire",
+            "message": "the graphics card is on fire"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.gpu_on_fire"
+    },
+    {
+      "name": "an error detail invented later",
+      "direction": "server",
+      "frame": {
+        "id": 5,
+        "outcome": {
+          "error": {
+            "code": "recording_failed",
+            "detail": {
+              "detail": "disk_full",
+              "free_bytes": 0
+            },
+            "message": "the disk the recording was being written to is full"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.recording_failed.unrecognised"
+    },
+    {
+      "name": "an end reason invented later",
+      "direction": "server",
+      "frame": {
+        "id": 2,
+        "outcome": {
+          "ok": {
+            "reply": "recording_stopped",
+            "summary": {
+              "codec": "av1",
+              "duration_ms": 3800,
+              "encoder": "nvenc",
+              "end_reason": "display_disconnected",
+              "frames_dropped_writer_behind": 0,
+              "frames_encoded": 115,
+              "frames_skipped_for_rate": 0,
+              "height": 720,
+              "output": "D:\\clips\\session.mkv",
+              "width": 1280
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.recording_stopped.display_disconnected"
+    },
+    {
+      "name": "a field invented later",
+      "direction": "server",
+      "frame": {
+        "event": "status_changed",
+        "status": {
+          "elapsed_ms": 4200,
+          "gpu_temperature_c": 71,
+          "output": "D:\\clips\\session.mkv",
+          "recording_id": "r-1",
+          "state": "recording",
+          "target": "process `cs2.exe`"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.status_changed.recording"
+    },
+    {
+      "name": "an event invented later",
+      "direction": "server",
+      "frame": {
+        "event": "disk_filling_up",
+        "free_bytes": 1024,
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.unrecognised"
+    },
+    {
+      "name": "a feature invented later",
+      "direction": "server",
+      "frame": {
+        "features": [
+          "recording",
+          "status_events",
+          "telepathy"
+        ],
+        "protocol_version": 1,
+        "recorder": {
+          "name": "clipped-recorder",
+          "version": "9.0.0"
+        },
+        "role": "control",
+        "type": "welcome"
+      },
+      "parses": true,
+      "discriminant": "welcome.control"
+    },
+    {
+      "name": "an event stream invented later",
+      "direction": "client",
+      "frame": {
+        "client": {
+          "name": "clipped-desktop",
+          "version": "9.0.0"
+        },
+        "protocol_version": 1,
+        "role": "events",
+        "streams": [
+          "status",
+          "telemetry"
+        ],
+        "type": "hello"
+      },
+      "parses": true,
+      "discriminant": "hello.events.status+telemetry"
+    },
+    {
+      "name": "a command invented later",
+      "direction": "client",
+      "frame": {
+        "command": "defrost_the_gpu",
+        "id": 9,
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.defrost_the_gpu"
+    },
+    {
+      "name": "a recorder state invented later, inside a reply",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "state": "paused"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": false,
+      "discriminant": null
+    },
+    {
+      "name": "a recorder state invented later, inside an event",
+      "direction": "server",
+      "frame": {
+        "event": "status_changed",
+        "status": {
+          "state": "paused"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.unrecognised"
+    },
+    {
+      "name": "a reply invented later",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "teleported"
+          }
+        },
+        "type": "response"
+      },
+      "parses": false,
+      "discriminant": null
+    },
+    {
+      "name": "an outcome that is neither ok nor error",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "maybe": {}
+        },
+        "type": "response"
+      },
+      "parses": false,
+      "discriminant": null
+    },
+    {
+      "name": "an envelope type invented later",
+      "direction": "server",
+      "frame": {
+        "type": "telemetry",
+        "watts": 400
+      },
+      "parses": false,
+      "discriminant": null
+    },
+    {
+      "name": "a frame that is not an object at all",
+      "direction": "server",
+      "frame": "hello?",
+      "parses": false,
+      "discriminant": null
+    }
+  ]
+}
