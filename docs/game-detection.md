@@ -325,6 +325,17 @@ reports why the preferred source was not used, so a diagnostics screen can say
 wonder why detection feels slow. If the fallback is lost too, the watcher
 reports `WatchEvent::Stopped` and goes quiet — it never pretends to be watching.
 
+The end of the stream is a distinct answer rather than an absence. `next_event`
+returns `Next::Idle` when nothing happened in the timeout, which is the normal
+state of a machine nobody is playing anything on, and `Next::Finished` once
+every source is gone, which is not normal and means the user has to be told that
+automatic detection has stopped. Spelling both as "no event" would leave a
+consumer looping forever on the one that never changes, so they are different
+values, and `Next` is deliberately not `#[non_exhaustive]`: a wildcard arm is
+exactly the mistake the type exists to prevent. A finished watcher still waits
+out its timeout, so that a loop which ignores the answer idles rather than
+occupying a processor for the rest of the session.
+
 #### A game launch is not one process
 
 Steam starts a launcher, the launcher starts the game, an anti-cheat wrapper may
@@ -366,14 +377,36 @@ All figures measured on:
 | | |
 | --- | --- |
 | Machine | AMD Ryzen 9 9950X3D, 16 cores / 32 logical processors, Windows 11 Pro 26200 |
-| Processes running | 382–390 |
+| Processes running | 370–390 |
 | Build | `--release` |
-| Window | 180 seconds per measurement |
+| Window | 180 seconds per idle measurement; 20 runs for latency and for start-up |
 | Method | cumulative `\Process V2(…)\% Processor Time` raw counters for the `Winmgmt` service host and every `WmiPrvSE.exe`, sampled before and after; `GetProcessTimes` for the watcher's own process (`examples/process_watch_probe.rs`) |
 
 The machine was in ordinary use during these runs rather than quiescent — the
 watcher saw 79 real process events in the 180-second window at the default
 settings — so the control row is what the numbers are read against.
+
+#### Starting the watcher
+
+Paid once, and it is the most expensive thing the watcher ever does in its own
+process: the baseline opens every process on the machine to ask what it is
+running, because a game that was already running when Clipped opened still needs
+a name to report when it exits.
+
+| | min | median | max |
+| --- | --- | --- | --- |
+| `ProcessWatcher::start`, 20 runs | 167.6 ms | 240.6 ms | 305.5 ms |
+
+370 processes were running. Windows gave up an executable path for 222 of them
+and refused the other 148, which is the ordinary outcome rather than a fault: an
+unelevated application cannot open a protected or higher-integrity process at
+all. The figure includes establishing both WMI subscriptions as well as the
+snapshot, so it is an upper bound on the baseline rather than the baseline
+alone.
+
+A quarter of a second, once, while the application is starting anyway. Measured
+because the code claimed it was cheap, and a claim in a comment is not a
+measurement (AGENTS.md section 7).
 
 #### Idle cost
 
@@ -388,24 +421,46 @@ and that is the load the WMI comparison is doing work about.
 | **`WITHIN 2` (the default)** | **13.78** | **+11.4** | **0.017** |
 | `WITHIN 4` | 7.51 | +5.1 | below the 15.6 ms clock granularity |
 
-Read the two halves separately, because they are not the same kind of cost.
+A second run of the same method, taken independently during review of
+[#231](https://github.com/wildware-uk/clipped/pull/231), gave 2.08% for the
+control and 14.43% at the default: +12.4 rather than +11.4. Read the default row
+as *twelve per cent of one core, give or take one*. The shape either side of it
+— roughly inverse in the interval — is what the sweep is for, and both runs
+agree about that.
+
+Read the two halves of the table separately, because they are not the same kind
+of cost.
 
 **The watcher's own process is close to free**: 31 ms of processor time in 180
 seconds at the default settings, 0.017% of one core, or 0.0005% of a
 32-processor machine. That is the point of not polling — the thread is asleep
 except when something happens.
 
-**The WMI service is not.** The cost of the subscriptions is roughly inverse in
-the interval, which is what the sweep above shows, because the service compares
-the whole process table with itself once per interval per subscription and there
-are two of them. At the default two-second interval it is **11.4% of one core,
-or 0.36% of this 32-processor machine**. On a four-core machine the same absolute
-cost would be about 2.9% of the machine, which is most of SPEC.md section 38's
-entire 3% budget for the recorder, and that is not acceptable — it is the reason
-the default is not one second, and it is the reason for
-[issue #230](https://github.com/wildware-uk/clipped/issues/230), which proposes
-detecting exits by waiting on process handles instead of by a second
-subscription.
+**The cost is in the WMI service, not here.** It lands in `Winmgmt` and
+`WmiPrvSE.exe`, because the service compares the whole `Win32_Process` table with
+itself once per interval, per subscription, and this watcher opens two. That is
+work done on Clipped's behalf and it counts against Clipped, but no profile of
+Clipped's own process will ever show it, which is exactly why it is measured with
+performance counters here rather than assumed to be small.
+
+**At the shipped default it is most of the recorder's entire idle CPU budget.**
+SPEC.md section 38 allows the recorder 3% of the machine. Eleven to twelve per
+cent of one core is 0.36% of this 32-processor machine, but about **2.9% of a
+four-core machine** — spent while idle, before a game has been detected, before
+anything is being recorded, and on top of whatever recording then costs. Two
+seconds is already double the interval that would give the best latency, and it
+is still not a comfortable number.
+
+**[Issue #230](https://github.com/wildware-uk/clipped/issues/230) is what closes
+the gap**, and it is a design change rather than a tuning one: exit detection
+moves off the second subscription and onto waiting on process handles, which
+removes half of this standing cost outright and takes exit latency from two
+seconds to milliseconds at the same time. Until that lands, a machine with few
+cores pays measurably for detection it may not be using. Whether the interim
+default should be four seconds instead — 5.1% of one core, about 1.3% of a
+four-core machine, for two more seconds of worst-case launch latency — is argued
+on that issue rather than settled here, because it is a product decision about
+latency and not a fact about the measurement.
 
 Reporting this rather than a flattering summary is deliberate (AGENTS.md
 section 19). "Negligible" would have been wrong by an order of magnitude.
@@ -435,11 +490,14 @@ has only to be recording by then.
 ```powershell
 cargo run --release -p clipped-game-detection --example process_watch_probe -- latency 20
 cargo run --release -p clipped-game-detection --example process_watch_probe -- idle 180
+cargo run --release -p clipped-game-detection --example process_watch_probe -- start 20
 # and, for the WMI side, the counters named in the table above
 ```
 
 A third argument overrides the notification interval in seconds, which is how
-the sweep was taken.
+the sweep was taken. The counter samples are taken either side of the `idle` run
+and divided by its wall time; there is no sampling loop, so the measurement does
+not pay for itself.
 
 ### Testing it
 
@@ -447,7 +505,8 @@ the sweep was taken.
 | --- | --- | --- |
 | The debounce rules — launcher and game, re-exec, two games at once, a process that comes and goes inside the window, exit ordering, identifier reuse | `src/process_watcher/debounce.rs` | nothing; constructed process trees and an explicit clock |
 | The process table, the executable name, the stop latch | `src/process_watcher/windows/` | Windows |
-| That WMI answers at all, and that the fallback poller really reports a process starting and exiting | `src/process_watcher/windows/{wmi,mod}.rs` | Windows, and a working WMI service for the first |
+| That WMI answers at all, that the fallback poller really reports a process starting and exiting, and that it honours the one-second floor rather than the interval it was handed | `src/process_watcher/windows/{wmi,mod}.rs` | Windows, and a working WMI service for the first |
+| What a watcher that has lost every source answers, and that it waits rather than spins | `src/process_watcher/watcher.rs` | Windows |
 | The whole watcher against a real process | `tests/process_watcher.rs` | Windows |
 
 The split matters. "What did Windows say?" can only be answered by Windows and
@@ -480,3 +539,10 @@ the exact moment the process began and the exact moment it ended.
 - **Shutdown waits for the notification interval.** A thread blocked inside a
   COM call cannot be interrupted, so dropping the watcher takes up to
   `notification_interval` while that call returns.
+- **The notification interval has a floor of one second, on both paths.**
+  `WatchConfig` is public and so are its fields, so a consumer can ask for fifty
+  milliseconds; it will get one second. The WQL `WITHIN` clause and the fallback
+  poller's sleep are both derived from the same clamped value, because a floor
+  that held only for the subscription would leave the poller enumerating every
+  process on the machine twenty times a second — the thing this design exists to
+  avoid.

@@ -348,13 +348,15 @@ contributor working in it needs.
 | [av-sync.md](av-sync.md) | Which clock a recording is timed against, how every source is expressed against it, what happens on a gap or a step, and the measured drift | M1 |
 | [audio-routing.md](audio-routing.md) | Per-source capture, application-to-track routing, drift correction, the compatibility mix | M2 |
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
+| [game-detection.md](game-detection.md) | The game catalogue and how a process is matched against it; watching for processes starting and stopping, why the source is a subscription rather than a poll, how a launcher and the game it starts become one launch, and what detection costs while nothing is happening | M4 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 | [ipc.md](ipc.md) | The recorder control protocol: transport, framing, the handshake, the compatibility policy, the commands and events, and the security a local endpoint does and does not promise | M5 |
 | [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
 
 All but [capture-pipeline.md](capture-pipeline.md),
 [encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md),
-[av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md) and [ipc.md](ipc.md)
+[av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md), [ipc.md](ipc.md) and
+[game-detection.md](game-detection.md)
 are stubs today, stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
@@ -372,7 +374,12 @@ correcting that drift rather than measuring it. `desktop-ui.md` covers the shell
 that exists and is explicit that no feature screen behind it does. `ipc.md` is a
 specification rather than a description: it is the schema both ends are written
 against, and it says which of the commands it defines this build refuses and
-where each is being built. The rest
+where each is being built. `game-detection.md` covers the two halves of
+detection that are written — the game catalogue and the process watcher — and is
+explicit that nothing yet joins them, so no running process is matched against
+the catalogue by anything. It records what the watcher costs while idle, which
+is more than was expected and is the reason for
+[issue #230](https://github.com/wildware-uk/clipped/issues/230). The rest
 stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 
