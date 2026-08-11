@@ -182,7 +182,7 @@
   /* The three edge weights, heaviest last, so that the three jobs read as
      different at a glance: the hairline around a control and under a table row,
      the rule that divides two sections, and the mark that singles one out - the
-     accent edge on the open navigation item and on an unbuilt screen's panel. */
+     accent edge on the open navigation item and down a marked panel. */
   --hairline: 1px;
   --rule-weight: 2px;
   --marker-weight: 3px;
