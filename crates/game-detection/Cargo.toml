@@ -68,6 +68,9 @@ clipped-windows.workspace = true
 # - Win32_System_Diagnostics_ToolHelp    the process table, for the baseline and
 #                                        for the polling fallback
 # - Win32_System_Ole                     required by the VARIANT definition below
+# - Win32_System_Registry                where Steam records its own install
+#                                        directory, and the only place it does
+#                                        (src/launcher/steam/registry.rs)
 # - Win32_System_Rpc                     the authentication service constants
 #                                        CoSetProxyBlanket takes
 # - Win32_System_Variant                 VARIANT and VariantClear: how a WMI
@@ -83,6 +86,7 @@ windows = { workspace = true, features = [
     "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Ole",
+    "Win32_System_Registry",
     "Win32_System_Rpc",
     "Win32_System_Variant",
     "Win32_System_Wmi",

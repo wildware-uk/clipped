@@ -271,7 +271,7 @@ fn covers_segments(path: &str, fragment: &str) -> bool {
 ///
 /// Empty ones are dropped so that a leading, trailing or doubled separator in
 /// either the fragment or the path changes nothing about what matches.
-fn segments(normalised: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn segments(normalised: &str) -> impl Iterator<Item = &str> {
     normalised.split('/').filter(|segment| !segment.is_empty())
 }
 

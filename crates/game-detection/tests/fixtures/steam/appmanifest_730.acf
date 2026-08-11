@@ -1,0 +1,90 @@
+"AppState"
+{
+	"appid"		"730"
+	"Universe"		"1"
+	"LauncherPath"		"C:\\Program Files (x86)\\Steam\\steam.exe"
+	"name"		"Counter-Strike 2"
+	"StateFlags"		"6"
+	"installdir"		"Counter-Strike Global Offensive"
+	"LastUpdated"		"1785516146"
+	"LastPlayed"		"0"
+	"SizeOnDisk"		"71589109540"
+	"StagingSize"		"0"
+	"buildid"		"24442510"
+	"LastOwner"		"0"
+	"DownloadType"		"4"
+	"UpdateResult"		"0"
+	"BytesToDownload"		"886200784"
+	"BytesDownloaded"		"0"
+	"BytesToStage"		"0"
+	"BytesStaged"		"0"
+	"TargetBuildID"		"24537688"
+	"AutoUpdateBehavior"		"0"
+	"AllowOtherDownloadsWhileRunning"		"0"
+	"ScheduledAutoUpdate"		"1786939332"
+	"InstalledDepots"
+	{
+		"732"
+		{
+			"manifest"		"8865603041742505094"
+			"size"		"8"
+		}
+		"731"
+		{
+			"manifest"		"2177642409584128815"
+			"size"		"8"
+		}
+		"735"
+		{
+			"manifest"		"5985333859037771963"
+			"size"		"8"
+		}
+		"736"
+		{
+			"manifest"		"2564487739876505594"
+			"size"		"8"
+		}
+		"737"
+		{
+			"manifest"		"5114115648805693971"
+			"size"		"8"
+		}
+		"738"
+		{
+			"manifest"		"7957225838203103176"
+			"size"		"8"
+		}
+		"2347770"
+		{
+			"manifest"		"7357001356549703767"
+			"size"		"62784439847"
+		}
+		"2347771"
+		{
+			"manifest"		"5814144478477689230"
+			"size"		"7662613561"
+		}
+		"2347774"
+		{
+			"manifest"		"6880616264887178762"
+			"size"		"1142056124"
+		}
+	}
+	"SharedDepots"
+	{
+		"228988"		"228980"
+		"228990"		"228980"
+	}
+	"UserConfig"
+	{
+		"language"		"english"
+		"DisabledDLC"		"2279721"
+		"BetaKey"		"public"
+	}
+	"MountedConfig"
+	{
+		"language"		"english"
+		"DisabledDLC"		"2279721"
+		"BetaKey"		"public"
+	}
+}
