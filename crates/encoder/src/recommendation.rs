@@ -9,25 +9,44 @@
 //!
 //! # The order, and why it is that
 //!
-//! 1. **Hardware before software.** The recorder runs alongside a game and CPU
+//! 1. **An encoder this build can open before one it cannot.** Detection
+//!    reports what the *machine* has, and
+//!    [`EncoderKind::is_implemented`](crate::EncoderKind::is_implemented) says
+//!    which of those Clipped has a backend proven to drive. A family with no
+//!    proven backend is still reported and still ranked — a user is entitled to
+//!    know their GPU has an encoder Clipped cannot yet use — but it ranks below
+//!    the software fallback, which does work. Recording on the CPU costs the
+//!    game frames; being handed an encoder that has never encoded one costs the
+//!    user the recording ([#175](https://github.com/wildware-uk/clipped/issues/175)).
+//! 2. **Hardware before software.** The recorder runs alongside a game and CPU
 //!    time is the scarcest thing on the machine (AGENTS.md section 18). A
 //!    software encoder takes frames away from the thing being recorded.
-//! 2. **An adapter with video memory of its own before one without.** An
+//! 3. **An adapter with video memory of its own before one without.** An
 //!    adapter that shares system memory with the CPU shares its bandwidth too,
 //!    and on a machine with both, the game is running on the other one — so
 //!    encoding there avoids copying every frame across the bus.
-//! 3. **Then the most video memory.** The tie-break between two adapters that
+//! 4. **Then the most video memory.** The tie-break between two adapters that
 //!    both have some, and a measured number rather than a guess about which of
 //!    them is "the graphics card": an integrated GPU with a memory carve-out
 //!    and a card are indistinguishable to DXGI except by how much they have
 //!    (see [`AdapterKind`]).
-//! 4. **Then the order SPEC.md section 9 lists**: NVIDIA, AMD, Intel.
+//! 5. **Then the order SPEC.md section 9 lists**: NVIDIA, AMD, Intel.
 //!
 //! Within an encoder, the codec is the most efficient one whose support was
 //! **measured**. An inferred claim never wins a codec: that is the whole point
 //! of [`Claim`](crate::Claim), and picking AV1 because a table said the vendor
 //! supports it is the exact failure this crate is built to avoid. H.264 is the
 //! fallback, and every encoder here can produce it.
+//!
+//! # Showing a choice and making one
+//!
+//! Two different questions, and rule 1 is why they are not the same function:
+//!
+//! - **What should this machine be told?** [`recommend`], which ranks every
+//!   available encoder including the ones this build cannot open, each carrying
+//!   [`Recommendation::is_openable`] and printing the fact when it is `false`.
+//! - **Which encoder should be opened?** [`Recommendation::for_opening`], which
+//!   can only return one this build has a proven backend for.
 
 use core::cmp::Reverse;
 use core::fmt;
@@ -38,6 +57,9 @@ use crate::codec::{Codec, EncoderKind};
 use crate::detection::{CapabilityReport, CodecSupport, EncoderReport};
 
 /// Why an encoder is where it is in the ranking.
+///
+/// Declared in ranking order, which is the order [`rank`](Self::rank) states
+/// and the derived [`Ord`] agrees with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ChoiceReason {
     /// Dedicated encoding silicon on an adapter with video memory of its own:
@@ -48,8 +70,20 @@ pub enum ChoiceReason {
     /// Dedicated encoding silicon on an adapter this detection could not
     /// attribute.
     UnattributedHardware,
-    /// The CPU. Always available, always last.
+    /// The CPU. Available on every machine, and last of the encoders that work.
     SoftwareFallback,
+    /// The machine has this encoder and this build cannot drive it: detection
+    /// found the hardware and the runtime, and
+    /// [`EncoderKind::is_implemented`](crate::EncoderKind::is_implemented)
+    /// reports no backend proven to encode with it.
+    ///
+    /// Last, below the CPU. The two costs are not comparable: encoding on the
+    /// CPU takes frames from the game, and encoding with a backend nobody has
+    /// watched produce a frame takes the recording. This is why the class is
+    /// part of the ranking rather than a caveat printed beside it — a reason
+    /// that only *described* the hardware would leave the entry sorted above
+    /// the fallback that works.
+    NoProvenBackend,
 }
 
 impl ChoiceReason {
@@ -60,6 +94,7 @@ impl ChoiceReason {
             Self::HardwareWithSharedMemory => 1,
             Self::UnattributedHardware => 2,
             Self::SoftwareFallback => 3,
+            Self::NoProvenBackend => 4,
         }
     }
 }
@@ -75,6 +110,10 @@ impl fmt::Display for ChoiceReason {
             }
             Self::UnattributedHardware => "hardware encoding",
             Self::SoftwareFallback => "CPU encoding, which costs the game frames",
+            Self::NoProvenBackend => {
+                "detected on this machine, and this build has no backend proven to encode \
+                 with it, so it is not chosen"
+            }
         })
     }
 }
@@ -123,6 +162,41 @@ impl Recommendation {
     pub const fn reason(&self) -> ChoiceReason {
         self.reason
     }
+
+    /// Whether this build can actually open this encoder.
+    ///
+    /// `false` for a family the machine has and Clipped has no proven backend
+    /// for. Such an entry is still returned by [`recommend`], because a
+    /// capability report that hid it would be answering a question nobody
+    /// asked — but it is ranked below the software fallback and no caller
+    /// should open it. A settings screen offering the ranked list should
+    /// present it as unavailable rather than as a choice.
+    #[must_use]
+    pub const fn is_openable(&self) -> bool {
+        self.kind.is_implemented()
+    }
+
+    /// Which encoder to *open* for "Automatic".
+    ///
+    /// The counterpart of [`recommend`], and the one to call when the answer
+    /// will be handed to a backend rather than printed: it can only return an
+    /// encoder [`is_openable`](Self::is_openable) accepts, so a caller cannot
+    /// forget to ask. Ranking alone would very nearly do — rule 1 puts every
+    /// openable encoder above every unopenable one, so the head of the list is
+    /// already safe — and "very nearly" is not a property to rest a recording
+    /// on when it costs one function to make it exact.
+    ///
+    /// `None` means no encoder in the report can be opened at all. Detection
+    /// never produces such a report: the software fallback needs no hardware,
+    /// is available on every machine, and has a proven backend. It is an
+    /// `Option` rather than an infallible answer because a [`CapabilityReport`]
+    /// can also be deserialised from the capability cache, and a caller that
+    /// has to handle "nothing to open" is one that cannot be handed a
+    /// fabricated encoder instead.
+    #[must_use]
+    pub fn for_opening(report: &CapabilityReport) -> Option<Self> {
+        recommend(report).into_iter().find(Self::is_openable)
+    }
 }
 
 impl fmt::Display for Recommendation {
@@ -131,16 +205,30 @@ impl fmt::Display for Recommendation {
         if self.codec_evidence == Evidence::Inferred {
             formatter.write_str(" (codec support inferred, not measured)")?;
         }
-        write!(formatter, " — {}", self.reason)
+        write!(formatter, " — {}", self.reason)?;
+        if !self.is_openable() {
+            // The issue number, because "no backend proven" without somewhere
+            // to follow it reads as an apology rather than as a status
+            // (AGENTS.md section 27). It is the same number the capability
+            // report's footer prints, from the same function.
+            write!(formatter, " (#{})", self.kind.backend_issue())?;
+        }
+        Ok(())
     }
 }
 
-/// Ranks every usable encoder, best first.
+/// Ranks every available encoder, best first.
 ///
 /// The first entry is what "Automatic" resolves to. The list is never empty:
 /// the software encoder is available on every machine, which is what makes
 /// "Automatic" a setting that always has an answer rather than one that can
 /// fail.
+///
+/// "Available" is what the *machine* has, so the list can include an encoder
+/// this build cannot open — marked by [`Recommendation::is_openable`], ranked
+/// below the software fallback, and printed with the reason. That is the list
+/// to show. To choose an encoder to open, call
+/// [`Recommendation::for_opening`], which cannot return one.
 #[must_use]
 pub fn recommend(report: &CapabilityReport) -> Vec<Recommendation> {
     let mut recommendations: Vec<Recommendation> = report
@@ -201,6 +289,16 @@ fn best_codec(encoder: &EncoderReport) -> Option<(Codec, Evidence)> {
 
 /// Which class an available encoder belongs to.
 fn reason_for(encoder: &EncoderReport, report: &CapabilityReport) -> ChoiceReason {
+    // Asked before anything about the hardware, because it outranks all of it:
+    // how good an adapter is at encoding decides nothing if this build cannot
+    // ask it to. The question is put to `EncoderKind::is_implemented`, which
+    // lives beside the backends, so that a backend becoming proven moves the
+    // ranking with it rather than leaving a list here to be updated by hand
+    // (the failure #167 was raised for).
+    if !encoder.kind().is_implemented() {
+        return ChoiceReason::NoProvenBackend;
+    }
+
     if !encoder.kind().is_hardware() {
         return ChoiceReason::SoftwareFallback;
     }
@@ -317,10 +415,17 @@ mod tests {
 
     #[test]
     fn a_card_with_its_own_memory_wins_over_a_vendor_the_specification_lists_first() {
-        // An Intel part sharing system memory and an AMD card with its own:
-        // SPEC.md section 9 lists AMD before Intel, so what this separates is
-        // the memory rule from the published order — the AMD entry has to come
-        // first for the right reason.
+        // An NVIDIA part reporting no dedicated video memory of its own — the
+        // shape DXGI reports for a virtualised adapter — beside an AMD card
+        // with 24 GiB. SPEC.md section 9 lists NVIDIA before AMD, so what this
+        // separates is the memory rule from the published order: the AMD entry
+        // has to come first, and for the right reason.
+        //
+        // It is that pair rather than the Intel one this test used to use,
+        // because with rule 1 in place an Intel entry's position no longer
+        // says anything about memory: it is last whatever adapter it is on.
+        // Both families here have a proven backend, so nothing but the memory
+        // rule decides the order.
         let discrete_amd = Adapter::new(
             AdapterId::from_luid(5, 0),
             "AMD Radeon RX 7900 XTX",
@@ -329,27 +434,183 @@ mod tests {
             24 * 1024 * 1024 * 1024,
             false,
         );
-        let integrated_intel = Adapter::new(
+        let shared_nvidia = Adapter::new(
             AdapterId::from_luid(6, 0),
-            "Intel(R) UHD Graphics",
-            Vendor::Intel,
-            0x9BC8,
+            "NVIDIA GRID vGPU",
+            Vendor::Nvidia,
+            0x1BB3,
             0,
             false,
         );
         let facts = SystemFacts::new(
-            vec![integrated_intel, discrete_amd],
+            vec![shared_nvidia, discrete_amd],
             EncoderObservations::none()
                 .with_runtime(loaded(EncoderKind::Amf, "amfrt64.dll"))
-                .with_runtime(loaded(EncoderKind::QuickSync, "libmfxhw64.dll")),
+                .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll")),
         );
 
         let recommendations = recommend(&detect(&facts));
         assert_eq!(recommendations[0].encoder(), EncoderKind::Amf);
-        assert_eq!(recommendations[1].encoder(), EncoderKind::QuickSync);
+        assert_eq!(
+            recommendations[0].reason(),
+            ChoiceReason::HardwareWithOwnMemory
+        );
+        assert_eq!(recommendations[1].encoder(), EncoderKind::Nvenc);
         assert_eq!(
             recommendations[1].reason(),
             ChoiceReason::HardwareWithSharedMemory
+        );
+    }
+
+    #[test]
+    fn a_machine_whose_only_hardware_encoder_is_unproven_records_on_the_cpu() {
+        // The machine this whole change is about: an Intel GPU and nothing
+        // else. Quick Sync's hardware is there, its runtime loads, and its
+        // backend has never encoded a frame — so ranking it above the software
+        // fallback would hand a session layer an encoder that cannot record
+        // (#175). Every fact here is one an Intel machine would produce,
+        // injected through `SystemFacts` because there is no Intel GPU on the
+        // machine this was written on.
+        let integrated_intel = Adapter::new(
+            AdapterId::from_luid(6, 0),
+            "Intel(R) UHD Graphics 770",
+            Vendor::Intel,
+            0x4680,
+            0,
+            false,
+        );
+        let facts = SystemFacts::new(
+            vec![integrated_intel],
+            EncoderObservations::none()
+                .with_runtime(loaded(EncoderKind::QuickSync, "libmfxhw64.dll"))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Intel,
+                    Codec::Hevc,
+                    "Intel® Hardware HEVC Encoder MFT",
+                )),
+        );
+        let report = detect(&facts);
+
+        // What a caller that will open an encoder is given: the CPU.
+        let choice = Recommendation::for_opening(&report)
+            .expect("the software fallback is available on every machine");
+        assert_eq!(
+            choice.encoder(),
+            EncoderKind::Software,
+            "an encoder with no proven backend was chosen to open: {choice}"
+        );
+        assert!(choice.is_openable());
+
+        // And the ranking says the same thing, so a caller that reads the head
+        // of the list without asking is safe too.
+        let recommendations = recommend(&report);
+        assert_eq!(recommendations[0].encoder(), EncoderKind::Software);
+
+        // Quick Sync is still reported — the machine has it, and a user whose
+        // GPU can encode HEVC is entitled to know Clipped cannot yet use it —
+        // but below the fallback, saying why, and naming the issue.
+        let quick_sync = recommendations
+            .iter()
+            .find(|recommendation| recommendation.encoder() == EncoderKind::QuickSync)
+            .expect("a detected encoder stays in the report");
+        assert!(
+            !quick_sync.is_openable(),
+            "Quick Sync has no proven backend, so nothing may open it: {quick_sync}"
+        );
+        assert_eq!(quick_sync.reason(), ChoiceReason::NoProvenBackend);
+        let position = recommendations
+            .iter()
+            .position(|recommendation| recommendation.encoder() == EncoderKind::QuickSync)
+            .expect("a detected encoder stays in the report");
+        assert!(
+            position > 0,
+            "an encoder this build cannot open must not head the ranking: {recommendations:?}"
+        );
+        let printed = quick_sync.to_string();
+        assert!(
+            printed.contains("no backend proven"),
+            "an entry nothing can open must say so: {printed}"
+        );
+        assert!(
+            printed.contains(&format!("#{}", EncoderKind::QuickSync.backend_issue())),
+            "the reader needs somewhere to follow it: {printed}"
+        );
+    }
+
+    #[test]
+    fn nothing_this_build_cannot_open_is_ever_offered_to_open() {
+        // The property rather than one machine's answer: for every machine
+        // these facts can describe, what `for_opening` returns is a family
+        // `is_implemented` accepts. The hardware is varied because the failure
+        // being guarded against is a hardware encoder outranking the fallback.
+        let machines = [
+            SystemFacts::new(Vec::new(), EncoderObservations::none()),
+            SystemFacts::new(
+                vec![Adapter::new(
+                    AdapterId::from_luid(6, 0),
+                    "Intel(R) Arc(TM) A770",
+                    Vendor::Intel,
+                    0x56A0,
+                    16 * 1024 * 1024 * 1024,
+                    false,
+                )],
+                EncoderObservations::none()
+                    .with_runtime(loaded(EncoderKind::QuickSync, "libmfxhw64.dll")),
+            ),
+            SystemFacts::new(
+                vec![nvidia_card(), integrated_amd()],
+                EncoderObservations::none()
+                    .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll"))
+                    .with_runtime(loaded(EncoderKind::Amf, "amfrt64.dll"))
+                    .with_runtime(loaded(EncoderKind::QuickSync, "libmfxhw64.dll")),
+            ),
+        ];
+
+        for facts in machines {
+            let report = detect(&facts);
+            let choice = Recommendation::for_opening(&report)
+                .expect("the software fallback is available on every machine");
+            assert!(
+                choice.encoder().is_implemented(),
+                "{choice} has no backend proven to encode with it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_intel_arc_card_does_not_outrank_the_cpu_on_its_own_memory() {
+        // The strongest form of the failure: a discrete Intel card, which wins
+        // every hardware rule in the ranking — dedicated memory, most of it,
+        // and a runtime that loads. None of that matters while no backend has
+        // encoded a frame on one.
+        let arc = Adapter::new(
+            AdapterId::from_luid(9, 0),
+            "Intel(R) Arc(TM) A770 Graphics",
+            Vendor::Intel,
+            0x56A0,
+            16 * 1024 * 1024 * 1024,
+            false,
+        );
+        let facts = SystemFacts::new(
+            vec![arc],
+            EncoderObservations::none()
+                .with_runtime(loaded(EncoderKind::QuickSync, "libmfxhw64.dll"))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Intel,
+                    Codec::Av1,
+                    "Intel® Hardware AV1 Encoder MFT",
+                )),
+        );
+
+        let recommendations = recommend(&detect(&facts));
+        let order: Vec<EncoderKind> = recommendations
+            .iter()
+            .map(Recommendation::encoder)
+            .collect();
+        assert_eq!(
+            order,
+            vec![EncoderKind::Software, EncoderKind::QuickSync],
+            "measured AV1 on a card with 16 GiB is still an encoder this build cannot open"
         );
     }
 

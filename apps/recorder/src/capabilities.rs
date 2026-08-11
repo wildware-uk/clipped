@@ -276,6 +276,12 @@ fn codec_line(support: &CodecSupport) -> String {
 }
 
 /// The ranked list "Automatic" resolves through.
+///
+/// Printed in full, including any encoder the machine has that this build
+/// cannot open: those rank below the software fallback and say why, so the list
+/// reads as "here is everything you have, and here is what would be used"
+/// rather than quietly omitting the encoder a reader can see in the table above
+/// (`crates/encoder/src/recommendation.rs`).
 fn automatic_lines(report: &CapabilityReport) -> String {
     let mut out = String::from("Automatic would choose\n\n");
     for (position, recommendation) in clipped_encoder::recommend(report).iter().enumerate() {
@@ -540,6 +546,70 @@ mod tests {
         assert!(
             output.contains("CPU encoding, which costs the game frames"),
             "the ranking must explain what falling back to the CPU means: {output}"
+        );
+    }
+
+    #[test]
+    fn an_encoder_this_build_cannot_open_is_shown_and_not_chosen() {
+        // An Intel-only machine, which is the one the two halves of this report
+        // could contradict each other on: the table above must still show the
+        // Quick Sync hardware it has, and "Automatic would choose" must put the
+        // software fallback first, because no backend has ever encoded a frame
+        // with Quick Sync (#175). The machine is injected rather than found —
+        // there is no Intel GPU here.
+        let facts = SystemFacts::new(
+            vec![Adapter::new(
+                clipped_encoder::AdapterId::from_luid(6, 0),
+                "Intel(R) UHD Graphics 770",
+                Vendor::Intel,
+                0x4680,
+                0,
+                false,
+            )],
+            EncoderObservations::none()
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::QuickSync,
+                    "libmfxhw64.dll",
+                    RuntimeOutcome::Loaded,
+                ))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Intel,
+                    Codec::Hevc,
+                    "Intel® Hardware HEVC Encoder MFT",
+                )),
+        );
+        let output = rendered(&facts);
+
+        // The encoder table still reports the hardware, measured.
+        let hevc = output
+            .lines()
+            .find(|line| line.trim_start().starts_with("HEVC"))
+            .expect("the detected HEVC encoder has a row");
+        assert_eq!(
+            hevc.split_whitespace().nth(1),
+            Some("yes"),
+            "the machine's own capability must still be reported: {hevc}"
+        );
+
+        // And the ranking chooses the encoder that works.
+        let ranked: Vec<&str> = output
+            .lines()
+            .skip_while(|line| !line.starts_with("Automatic would choose"))
+            .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .collect();
+        assert!(
+            ranked[0].contains("Software (CPU)"),
+            "a machine whose only encoder has no proven backend must be told to use the \
+             CPU: {output}"
+        );
+        let quick_sync = ranked
+            .iter()
+            .find(|line| line.contains("Intel Quick Sync"))
+            .expect("a detected encoder is still listed");
+        assert!(
+            quick_sync.contains("no backend proven")
+                && quick_sync.contains(&format!("#{}", EncoderKind::QuickSync.backend_issue())),
+            "the entry that cannot be opened must say so and name its issue: {quick_sync}"
         );
     }
 

@@ -119,6 +119,15 @@ impl EncoderKind {
     /// encoder was implemented for two of them
     /// ([#167](https://github.com/wildware-uk/clipped/issues/167)).
     ///
+    /// The separation is for *reporting*. Choosing is not allowed to keep it:
+    /// [`crate::recommendation`] asks this question first, ranks a family it
+    /// rejects below the software fallback, and offers
+    /// [`Recommendation::for_opening`](crate::Recommendation::for_opening) so
+    /// that a caller opening an encoder cannot be given one this returns
+    /// `false` for ([#175](https://github.com/wildware-uk/clipped/issues/175)).
+    /// A new backend therefore becomes selectable by changing this function and
+    /// nothing else.
+    ///
     /// NVENC is implemented, in [`NvencEncoder`](crate::NvencEncoder); so is
     /// AMF, in [`AmfEncoder`](crate::AmfEncoder); and so is the software
     /// fallback, in [`SoftwareEncoder`](crate::SoftwareEncoder)
