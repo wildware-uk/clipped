@@ -29,12 +29,40 @@ pub enum SampleOrigin {
 /// so the compiler refuses to let a caller hold two at once or keep one across
 /// the next read — which is what lets the capture reuse one allocation for the
 /// whole recording instead of allocating per packet.
-#[derive(Debug)]
+///
+/// # Privacy
+///
+/// [`Debug`] describes the buffer and never its contents; see the
+/// implementation below. Nothing else in this crate can print the samples
+/// either, but this type is the one that leaves it, and the guarantee
+/// `docs/audio-routing.md` makes about microphone audio never reaching a log
+/// (AGENTS.md section 13) is only worth making if it survives the first
+/// consumer that writes `tracing::debug!(?buffer)`.
 pub struct CapturedAudio<'a> {
     samples: &'a [f32],
     format: AudioFormat,
     timestamp: AudioTimestamp,
     origin: SampleOrigin,
+}
+
+impl core::fmt::Debug for CapturedAudio<'_> {
+    /// Describes the buffer: how many frames, when, in what shape, from where.
+    ///
+    /// Written by hand rather than derived because the derived one prints the
+    /// samples, and these samples may be a microphone — a whole instalment of
+    /// somebody's room, in a log file, from one `{:?}` written months from now
+    /// in another crate. `clipped-logging` keeps its fields safe by giving them
+    /// types that cannot hold user content; this does the same thing for the
+    /// one type in this crate that holds any.
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("CapturedAudio")
+            .field("frames", &self.frames())
+            .field("timestamp", &self.timestamp)
+            .field("format", &self.format)
+            .field("origin", &self.origin)
+            .finish()
+    }
 }
 
 impl<'a> CapturedAudio<'a> {
@@ -123,5 +151,43 @@ mod tests {
 
         assert_eq!(buffer.frames(), 480);
         assert_eq!(buffer.duration(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn printing_a_buffer_describes_it_and_never_prints_what_it_contains() {
+        // AGENTS.md section 13: microphone content must not reach a log. A
+        // derived `Debug` would put a whole instalment of it there the first
+        // time anybody wrote `tracing::debug!(?buffer)`, so the samples here
+        // are values that could not occur by accident and must not appear.
+        let format = AudioFormat::new(
+            NonZeroU32::new(48_000).expect("48 kHz is not zero"),
+            NonZeroU16::new(1).expect("mono is not zero channels"),
+            ChannelMask::from_bits(0x4),
+            SampleFormat::Float32,
+        );
+        let samples = [0.123_456_79_f32, -0.987_654_3, 0.246_913_58];
+        let buffer = CapturedAudio::new(
+            &samples,
+            format,
+            AudioTimestamp::from_nanos(1_000),
+            SampleOrigin::Endpoint,
+        );
+
+        let printed = format!("{buffer:?}");
+        for sample in samples {
+            let value = format!("{sample}");
+            assert!(
+                !printed.contains(&value),
+                "a captured sample ({value}) reached a printed buffer: {printed}"
+            );
+        }
+        assert!(
+            printed.contains("frames: 3"),
+            "the buffer still has to describe itself: {printed}"
+        );
+        assert!(
+            printed.contains("Endpoint"),
+            "the buffer still has to say where its samples came from: {printed}"
+        );
     }
 }

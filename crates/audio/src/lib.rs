@@ -6,24 +6,32 @@
 //!
 //! # What exists
 //!
-//! System audio capture, on Windows: [`windows::SystemAudioCapture`] records
-//! the endpoint Windows is playing through, using WASAPI loopback, and produces
-//! timestamped `f32` buffers that form a continuous timeline whatever the
-//! endpoint does. That is the foundation the rest of the audio work is built on
-//! — it is one stream, not a track model — and
-//! [`docs/audio-routing.md`](../../../docs/audio-routing.md) describes its
-//! behaviour in full.
+//! Two independent captures, on Windows, built on one engine:
+//!
+//! - [`windows::SystemAudioCapture`] records the endpoint Windows is playing
+//!   through, using WASAPI loopback;
+//! - [`windows::MicrophoneCapture`] records an input device, chosen with
+//!   [`windows::MicrophoneSelection`] from the devices
+//!   [`windows::microphones`] lists.
+//!
+//! Both produce timestamped `f32` buffers that form a continuous timeline
+//! whatever the device does, and either can run without the other. That is the
+//! foundation the rest of the audio work is built on — two streams, not a track
+//! model — and [`docs/audio-routing.md`](../../../docs/audio-routing.md)
+//! describes their behaviour in full.
 //!
 //! Nothing else is built. Process-scoped capture, which is what actually
 //! separates the game from everything else, is milestone M2 and
-//! [ADR 0003](../../../docs/adr/0003-process-specific-audio-capture.md).
-//! Microphone capture is
-//! [issue #20](https://github.com/wildware-uk/clipped/issues/20), the
+//! [ADR 0003](../../../docs/adr/0003-process-specific-audio-capture.md). The
 //! compatibility mix is
-//! [issue #29](https://github.com/wildware-uk/clipped/issues/29), and
+//! [issue #29](https://github.com/wildware-uk/clipped/issues/29), microphone
+//! processing and the optional raw microphone track are
+//! [issue #31](https://github.com/wildware-uk/clipped/issues/31) and
+//! [issue #32](https://github.com/wildware-uk/clipped/issues/32), and
 //! resampling between capture clocks is
 //! [issue #30](https://github.com/wildware-uk/clipped/issues/30). Nothing
-//! consumes what this crate produces yet: the muxer is
+//! consumes what this crate produces yet, so no recording contains a microphone
+//! track: writing several audio tracks into one file is
 //! [issue #28](https://github.com/wildware-uk/clipped/issues/28).
 //!
 //! # Responsibilities
@@ -59,8 +67,17 @@
 //! **A recording outlives its audio device.** The default endpoint changing,
 //! being unplugged, or not existing at all does not end a capture; the track
 //! becomes silence of the right length and the capture moves to whatever
-//! Windows is playing through now (AGENTS.md sections 16 and 17). The only
-//! thing that stops a capture is the caller.
+//! Windows is playing through now, or waits for the microphone the user chose
+//! to come back (AGENTS.md sections 16 and 17). The only thing that stops a
+//! capture is the caller.
+//!
+//! A fourth rule applies to the microphone alone: **its samples never leave
+//! this process except to the caller.** Nothing here writes them anywhere, and
+//! no log line is derived from their values (AGENTS.md section 13). That is a
+//! property of the type rather than a convention followed at each call site:
+//! [`CapturedAudio`]'s [`Debug`] describes the buffer — frames, timestamp,
+//! format, origin — and cannot print what is in it, so a consumer that writes
+//! `tracing::debug!(?buffer)` still logs no audio.
 //!
 //! # Example
 //!
