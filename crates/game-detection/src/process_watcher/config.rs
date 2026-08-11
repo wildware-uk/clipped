@@ -103,16 +103,48 @@ impl Default for WatchConfig {
     ///
     /// Worst-case latency from a process starting to a launch being reported is
     /// `notification_interval + launch_quiet_period`, so these values cost up
-    /// to four and a half seconds, and about three and a half in practice. That
-    /// is cheap against the ten to sixty seconds a game takes to reach anything
-    /// worth recording, and it is deliberately bought: at a one-second interval
-    /// the same watcher detects a launch a second sooner and costs the machine
-    /// twice as much for every second it is not detecting anything.
-    /// `docs/game-detection.md` records both measurements.
+    /// to nine seconds. That is cheap against the ten to sixty seconds a game
+    /// takes to reach anything worth recording, and it is deliberately bought
+    /// — see below for what it buys.
+    ///
+    /// # Why four seconds and not two
+    ///
+    /// The interval is the WQL `WITHIN` clause, which is how often WMI
+    /// enumerates and diffs the whole `Win32_Process` table on this watcher's
+    /// behalf — so the standing cost is close to linear in how often it looks.
+    /// Measured over 180-second windows on an idle machine with ~385 processes
+    /// (`docs/game-detection.md` has the method): `WITHIN 1` costs +23.3% of one
+    /// core, `WITHIN 2` +11.4%, and `WITHIN 4` +5.1%, all of it inside the WMI
+    /// service rather than in this process.
+    ///
+    /// SPEC.md section 38 budgets 3% of the machine for the recorder. On a
+    /// four-core machine +11.4% of one core is about 2.9% of the machine, which
+    /// spends nearly the whole budget before anything is being recorded; +5.1%
+    /// is about 1.3%.
+    ///
+    /// # The interval drags the quiet period with it
+    ///
+    /// Halving the cost does not cost two seconds of latency, it costs four and
+    /// a half, and the reason is a constraint rather than a choice.
+    /// `the_quiet_period_outlasts_the_interval_it_watches` requires
+    /// `launch_quiet_period > notification_interval`: a parent and its child can
+    /// arrive in consecutive batches, and a quiet period shorter than one batch
+    /// could not hold a launch open long enough to join them — which would
+    /// report a launcher as a game and start recording the wrong window. So a
+    /// four-second interval needs a quiet period longer than four seconds, and
+    /// the worst case moves from 4.5 seconds to 9.
+    ///
+    /// Nine seconds is still cheap against the ten to sixty a game takes to
+    /// reach anything worth recording, which is why this is the default anyway
+    /// — but it is a real cost and a bigger one than it first looks.
+    /// [Issue #230](https://github.com/wildware-uk/clipped/issues/230) removes
+    /// the trade-off rather than tuning it, by not standing a subscription for
+    /// exits at all, and asks whether the snapshot poller this crate already
+    /// ships as its fallback should be the primary source instead.
     fn default() -> Self {
         Self {
-            notification_interval: Duration::from_secs(2),
-            launch_quiet_period: Duration::from_millis(2_500),
+            notification_interval: Duration::from_secs(4),
+            launch_quiet_period: Duration::from_secs(5),
             max_launch_window: Duration::from_secs(15),
             exit_settle_period: Duration::from_millis(500),
         }

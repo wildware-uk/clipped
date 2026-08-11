@@ -420,15 +420,45 @@ and that is the load the WMI comparison is doing work about.
 | --- | --- | --- | --- |
 | No watcher (control, two runs) | 2.47, 2.37 | — | — |
 | `WITHIN 1` | 25.73 | +23.3 | 0.069 |
-| **`WITHIN 2` (the default)** | **13.78** | **+11.4** | **0.017** |
-| `WITHIN 4` | 7.51 | +5.1 | below the 15.6 ms clock granularity |
+| `WITHIN 2` | 13.78 | +11.4 | 0.017 |
+| **`WITHIN 4` (the default)** | **7.51** | **+5.1** | **below the 15.6 ms clock granularity** |
 
 A second run of the same method, taken independently during review of
 [#231](https://github.com/wildware-uk/clipped/pull/231), gave 2.08% for the
-control and 14.43% at the default: +12.4 rather than +11.4. Read the default row
-as *twelve per cent of one core, give or take one*. The shape either side of it
-— roughly inverse in the interval — is what the sweep is for, and both runs
-agree about that.
+control and 14.43% at `WITHIN 2`: +12.4 rather than +11.4. Read that row as
+*twelve per cent of one core, give or take one*. The shape either side of it —
+roughly inverse in the interval — is what the sweep is for, and both runs agree
+about that.
+
+**The default is `WITHIN 4`.** SPEC.md section 38 budgets 3% of the machine for
+the recorder; on a four-core machine `WITHIN 2` is about 2.9% of it, spent
+before anything is being recorded, and `WITHIN 4` is about 1.3%. The two extra
+seconds of detection latency are invisible against the ten to sixty seconds a
+game takes to reach anything worth recording, so the cheaper interval is the
+one that ships. [#230](https://github.com/wildware-uk/clipped/issues/230)
+removes the trade-off rather than tuning it, by not standing a subscription for
+exits at all — and questions whether a WMI subscription is the right primary
+source when the snapshot poller this crate already ships as its fallback may
+cost less than either.
+
+**The interval drags the debounce with it.** `launch_quiet_period` must exceed
+`notification_interval`, because a parent and its child can arrive in
+consecutive notification batches and a quiet period shorter than one batch
+cannot hold a launch open long enough to join them — it would report a launcher
+as a game and record the wrong window. `the_quiet_period_outlasts_the_interval_it_watches`
+enforces that, and it is what caught this when the interval was changed without
+the debounce. So the quiet period moved from 2.5 s to 5 s alongside, and the
+worst case from 4.5 s to **9 s**, not the 6.5 s the interval change alone would
+suggest.
+
+Nine seconds is still cheap against the ten to sixty a game takes to reach
+anything worth recording, which is why this is the default anyway — but it is a
+real cost and a bigger one than halving the CPU first appears to ask.
+
+Detection latency was measured at `WITHIN 1` and `WITHIN 2`, **not** at
+`WITHIN 4`, and not with the longer quiet period. The figures below are those
+runs. The nine-second worst case is arithmetic from the two constants, not
+something anybody has watched.
 
 Read the two halves of the table separately, because they are not the same kind
 of cost.
