@@ -8,5 +8,17 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The event model is a `serde` type from end to end: the same definitions are
+# what a plugin produces, what the timeline reads and what SQLite stores
+# (crates/events/src/schema.rs). Pinned in the root manifest because more than
+# one crate persists structured data and two copies of serde in one binary
+# means two derive macros. Dual MIT/Apache-2.0.
+serde = { workspace = true }
+# JSON is the stored form, and `serde_json::Value` is also what an event's
+# payload and an unrecognised kind are kept in — the catch-alls that let a build
+# read an event a newer one wrote without understanding it. Dual MIT/Apache-2.0.
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
