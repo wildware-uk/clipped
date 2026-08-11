@@ -4,9 +4,10 @@ The Clipped desktop application: a Tauri window hosting a React interface.
 
 The desktop application is a _client_ of the recorder. It talks to the recorder
 process over the IPC boundary rather than linking the recording crates
-directly, so that closing or crashing the UI cannot interrupt a recording. No
-crate under `crates/` may depend on anything in this directory, which
-`tests/integration/tests/workspace_layering.rs` asserts.
+directly, so that closing or crashing the UI cannot interrupt a recording.
+`tests/integration/tests/workspace_layering.rs` asserts both halves of that: no
+crate in the Cargo workspace names `clipped-desktop`, and `src-tauri` names no
+crate of the Cargo workspace.
 
 ## What exists today
 

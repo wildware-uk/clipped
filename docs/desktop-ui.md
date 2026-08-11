@@ -12,9 +12,25 @@ This document covers the shape of the application and the decisions behind it.
 The desktop application is a **client** of the recorder, not a host for it. The
 recorder is a separate process that owns capture, encoding and session state
 ([ADR 0002](adr/0002-separate-recorder-process.md)), so closing or crashing this
-window cannot interrupt a recording. Nothing under `crates/` may depend on
-anything here, which `tests/integration/tests/workspace_layering.rs` asserts
-rather than hopes.
+window cannot interrupt a recording.
+
+That is a rule about linking, and
+`tests/integration/tests/workspace_layering.rs` asserts it in both directions
+rather than hoping. It reads every dependency each manifest declares — including
+the ones that are not members of the workspace being read, which is the only way
+either question can be answered at all:
+
+- no crate in the Cargo workspace names `clipped-desktop`, whatever the
+  dependency's source;
+- `apps/desktop/src-tauri` names no crate of the Cargo workspace, so the window
+  reaches the recorder over IPC rather than by linking capture or encoding into
+  its own process;
+- `apps/desktop`, `packages/ui` and `packages/shared` are not Cargo packages at
+  all, so turning one into a crate has to be a deliberate decision.
+
+The layering table itself covers only workspace members, and `clipped-desktop`
+is not one — which is why these are separate assertions and not something the
+layer table could have caught.
 
 The two processes will speak over the IPC protocol defined by issue #49. **That
 protocol does not exist yet**, and neither does anything in this application

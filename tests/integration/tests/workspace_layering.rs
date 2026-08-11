@@ -96,16 +96,32 @@ impl WorkspaceDependency {
     }
 }
 
-/// Reads the workspace's own packages and their intra-workspace dependencies.
-fn workspace_dependencies() -> HashMap<String, Vec<WorkspaceDependency>> {
+/// Every dependency each member of the workspace at `manifest` declares,
+/// whether or not the dependency is itself a member of that workspace.
+///
+/// `--no-deps` keeps this to the workspace's own manifests, which is what makes
+/// it fast and offline; it does not filter what those manifests *name*. Keeping
+/// the non-member entries is the difference between the two questions this file
+/// asks. Layering is about members and drops the rest, but "does anything here
+/// reach out of the workspace and into the desktop application?" can only be
+/// answered by an entry that is not a member - and dropping those first is
+/// exactly how that check would silently pass.
+fn declared_dependencies(manifest: &Path) -> HashMap<String, Vec<WorkspaceDependency>> {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
-        .current_dir(workspace_root())
+        .arg("--manifest-path")
+        .arg(manifest)
         .output()
-        .expect("cargo metadata should run from the workspace root");
+        .unwrap_or_else(|error| {
+            panic!(
+                "cargo metadata should run for {}: {error}",
+                manifest.display()
+            )
+        });
     assert!(
         output.status.success(),
-        "cargo metadata failed: {}",
+        "cargo metadata failed for {}: {}",
+        manifest.display(),
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -114,16 +130,6 @@ fn workspace_dependencies() -> HashMap<String, Vec<WorkspaceDependency>> {
     let packages = metadata["packages"]
         .as_array()
         .expect("metadata contains a packages array");
-
-    let member_names: Vec<String> = packages
-        .iter()
-        .map(|package| {
-            package["name"]
-                .as_str()
-                .expect("package has a name")
-                .to_owned()
-        })
-        .collect();
 
     packages
         .iter()
@@ -137,17 +143,30 @@ fn workspace_dependencies() -> HashMap<String, Vec<WorkspaceDependency>> {
                 .expect("package has a dependencies array")
                 .iter()
                 .filter_map(|dependency| {
-                    let name = dependency["name"].as_str()?;
-                    member_names
-                        .iter()
-                        .any(|member| member == name)
-                        .then(|| WorkspaceDependency {
-                            name: name.to_owned(),
-                            kind: dependency["kind"].as_str().map(str::to_owned),
-                        })
+                    Some(WorkspaceDependency {
+                        name: dependency["name"].as_str()?.to_owned(),
+                        kind: dependency["kind"].as_str().map(str::to_owned),
+                    })
                 })
                 .collect();
             (name, dependencies)
+        })
+        .collect()
+}
+
+/// The root workspace's own packages and their intra-workspace dependencies.
+fn workspace_dependencies() -> HashMap<String, Vec<WorkspaceDependency>> {
+    let declared = declared_dependencies(&workspace_root().join("Cargo.toml"));
+    let member_names: Vec<String> = declared.keys().cloned().collect();
+
+    declared
+        .into_iter()
+        .map(|(name, dependencies)| {
+            let internal = dependencies
+                .into_iter()
+                .filter(|dependency| member_names.contains(&dependency.name))
+                .collect();
+            (name, internal)
         })
         .collect()
 }
@@ -236,12 +255,18 @@ fn test_only_packages_are_never_linked_into_the_product() {
     );
 }
 
+/// The desktop application's crate, which lives in its own Cargo workspace.
+const DESKTOP_CRATE: &str = "clipped-desktop";
+
+/// Where that workspace's single manifest is, relative to the repository root.
+const DESKTOP_MANIFEST: &str = "apps/desktop/src-tauri/Cargo.toml";
+
 #[test]
-fn no_crate_depends_on_the_desktop_application() {
-    // The desktop application and the web packages are not Cargo packages at
-    // all, which is what keeps them unreachable from the Rust dependency
-    // graph. Assert that property directly, so that turning one of them into a
-    // crate is a deliberate decision rather than an accident.
+fn the_javascript_side_never_becomes_a_cargo_package() {
+    // The interface and the packages it is drawn from are not Cargo packages at
+    // all, which is what keeps them unreachable from the Rust dependency graph.
+    // Assert that property directly, so that turning one of them into a crate is
+    // a deliberate decision rather than an accident.
     let root = workspace_root();
 
     for directory in ["apps/desktop", "packages/ui", "packages/shared"] {
@@ -252,4 +277,72 @@ fn no_crate_depends_on_the_desktop_application() {
              talks to the recorder over IPC, not by linking to it"
         );
     }
+}
+
+#[test]
+fn no_crate_depends_on_the_desktop_application() {
+    // `apps/desktop/src-tauri` *is* a Cargo package - it is the Tauri binary -
+    // and the only thing keeping it out of the layering test above is that it
+    // belongs to a different workspace, which `layer_of` therefore knows
+    // nothing about. That is not a guarantee: a path dependency on it from
+    // anywhere under crates/ would resolve perfectly well and be dropped before
+    // any layering assertion saw it. This is the assertion that catches it, and
+    // it reads every dependency each member declares rather than only the ones
+    // that are members themselves.
+    let mut violations: Vec<String> = declared_dependencies(&workspace_root().join("Cargo.toml"))
+        .into_iter()
+        .flat_map(|(crate_name, dependencies)| {
+            dependencies
+                .into_iter()
+                .filter(|dependency| dependency.name == DESKTOP_CRATE)
+                .map(move |dependency| {
+                    format!(
+                        "{crate_name} names {DESKTOP_CRATE} as a {} dependency",
+                        dependency.kind.as_deref().unwrap_or("normal")
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    violations.sort();
+
+    assert!(
+        violations.is_empty(),
+        "nothing in this workspace may depend on the desktop application: it is a \
+         client of the recorder over IPC, and closing or crashing a window must not \
+         be able to interrupt a recording (docs/architecture.md, ADR 0002): {violations:#?}"
+    );
+}
+
+#[test]
+fn the_desktop_application_links_no_crate_of_this_workspace() {
+    // The other direction, and the one apps/desktop/README.md claims: the window
+    // "talks to the recorder process over the IPC boundary rather than linking
+    // the recording crates directly". Linking one would put capture or encoding
+    // inside the window's process, which is the whole thing ADR 0002 separates.
+    //
+    // Its manifest is read through `cargo metadata` like any other, rather than
+    // by searching the file for a string, so a dependency renamed with `package
+    // = "..."` is still reported under the name it actually resolves to.
+    let root = workspace_root();
+    let members: Vec<String> = workspace_dependencies().into_keys().collect();
+
+    let desktop = declared_dependencies(&root.join(DESKTOP_MANIFEST));
+    let mut violations: Vec<String> = desktop
+        .into_iter()
+        .flat_map(|(crate_name, dependencies)| {
+            dependencies
+                .into_iter()
+                .filter(|dependency| members.contains(&dependency.name))
+                .map(move |dependency| format!("{crate_name} names {}", dependency.name))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    violations.sort();
+
+    assert!(
+        violations.is_empty(),
+        "the desktop application must reach the recorder over IPC rather than by \
+         linking it (docs/architecture.md, apps/desktop/README.md): {violations:#?}"
+    );
 }
