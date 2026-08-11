@@ -27,6 +27,18 @@
 //! while it is blocked, the game shares the GPU with a stalled encoder, and the
 //! user sees the recorder as a stutter in the game.
 //!
+//! # What that guarantee rests on
+//!
+//! [`is_behind`](MuxingThread::is_behind) is read once per frame, before the
+//! frame is submitted, and [`write`](MuxingThread::write) sends on a bounded
+//! queue — so a submission made at [`HIGH_WATER`] whose packets do not fit in
+//! [`HEADROOM`] would block the capture thread inside `send`. Nothing in the
+//! type system stops an encoder from emitting nine packets from one frame; what
+//! stands behind the guarantee is that no encoder in this workspace emits more
+//! than one, in the low-latency configuration a recording opens them with.
+//! `crate::recording::report_submission_over_headroom` says so, once, if that
+//! ever stops being true, rather than leaving a stall with no explanation.
+//!
 //! # Ownership
 //!
 //! The writer thread owns the [`MkvWriter`], which owns the file. Nothing else
@@ -62,10 +74,18 @@ const QUEUE_CAPACITY: usize = 128;
 /// under the limit could produce a packet with nowhere to go, and the only
 /// remaining choices would be to block the capture thread or to lose an encoded
 /// packet, which are the two things this design exists to avoid.
-const HEADROOM: usize = 8;
+///
+/// Eight is a bound on one submission's output, not a proof: every encoder in
+/// this workspace emits at most one packet per submitted frame in the
+/// low-latency configuration a recording opens them with, so eight is seven
+/// more than is needed. It is stated rather than assumed because nothing in the
+/// type system holds an encoder to it —
+/// `crate::recording::report_submission_over_headroom` is what notices if one
+/// stops obeying it.
+pub(crate) const HEADROOM: usize = 8;
 
 /// The depth at which the capture loop stops submitting frames.
-const HIGH_WATER: usize = QUEUE_CAPACITY - HEADROOM;
+pub(crate) const HIGH_WATER: usize = QUEUE_CAPACITY - HEADROOM;
 
 /// One encoded packet, copied out of the encoder's own buffer so that it can
 /// cross to another thread.

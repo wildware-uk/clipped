@@ -11,10 +11,12 @@ method, and `clipped-encoder` can both say what this machine could encode with
 ([encoder-capabilities.md](encoder-capabilities.md)) and encode a frame it is
 handed, on NVENC or on the CPU ([encoder-pipeline.md](encoder-pipeline.md)).
 
-What is still missing is what joins them up. `clipped-session` is still a
-documentation-only crate, so nothing takes a frame from a backend and gives it
-to an encoder: `recorder record` still reports that the capture engine is not
-implemented, because a pipeline needs more than its stages.
+What joins them up is `clipped-session`, which since
+[issue #126](https://github.com/wildware-uk/clipped/issues/126) takes a frame
+from a backend, gives it to an encoder and writes the packets into a Matroska
+file: `recorder record` records. The loop is
+`crates/session/src/recording.rs` and it obeys the ownership and threading rules
+this document sets out.
 
 So this document describes an interface, the rules a backend has to obey, and
 the two backends that obey them. Where it describes behaviour that does not
@@ -162,12 +164,13 @@ is not a frame-rate control.
 Selection runs before any of this and can happen on any thread, because reading
 a declaration touches nothing.
 
-The *capture thread itself* does not exist yet: `clipped-session` owns it and is
-still a documentation-only crate. What exists is a backend that obeys the rules
-above — see "Windows Graphics Capture" below — and the `Send`/`Sync` bounds that
-will hold the session to them. `crates/capture/examples/wgc_probe.rs` runs the
-loop on its main thread, which is the shape a session's capture thread will
-take.
+The *capture thread itself* belongs to `clipped-session`, and is the thread that
+calls `clipped_session::record`: `crates/session/src/recording.rs` acquires,
+submits to the encoder, drains the packets into a bounded queue and polls the
+stop signal, all on that one thread. Nothing but bytes crosses to the thread
+that owns the file, which is what keeps the capture thread out of a write.
+`crates/capture/examples/wgc_probe.rs` runs the same loop on its main thread
+without an encoder, which is the smallest version of it.
 
 ## Timestamps
 
@@ -850,12 +853,10 @@ platform actually exists is a question for then.
 
 ## Still to be written
 
-These belong to this document and are not in it, because the code they would
-describe does not exist:
+These belong to this document and are not in it, either because the code they
+would describe does not exist or because it landed elsewhere and the prose here
+has not caught up:
 
-- The path from a frame to a packet in the container, and the thread that owns
-  each stage past capture — with `clipped-encoder`, `clipped-muxer` and
-  `clipped-session` still empty, there is no path to describe.
 - Target selection and enumeration: how a window or monitor is chosen
   ([issue #10](https://github.com/wildware-uk/clipped/issues/10)), and what
   happens when it moves between displays or disappears
@@ -863,12 +864,10 @@ describe does not exist:
 - Encoder selection across NVENC, AMF, Quick Sync and the software fallback
   ([issue #14](https://github.com/wildware-uk/clipped/issues/14)).
 - Back-pressure: what happens when the encoder cannot keep up, and which frames
-  are dropped when some must be.
-- How to run a capture from the command line. `recorder record` still reports
-  that the capture engine is not implemented, because a capture backend on its
-  own is not a recording; `crates/capture/examples/wgc_probe.rs` is how a
-  capture is exercised today. The shared test applications and the media
-  validation harness are issues #23 and #24.
+  are dropped when some must be. The answer the session gives today is in
+  `crates/session/src/muxing.rs` — the loop stops submitting frames while the
+  writer is behind and counts every frame it skipped — and belongs here in
+  prose.
 - HDR ([issue #99](https://github.com/wildware-uk/clipped/issues/99)) and
   multi-monitor and ultrawide behaviour
   ([issue #98](https://github.com/wildware-uk/clipped/issues/98)).

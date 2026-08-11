@@ -18,11 +18,18 @@
 //! Asserted: the container opens, it holds exactly one video stream, that
 //! stream carries the codec and the picture size the recorder said it wrote,
 //! its timestamps increase, its duration matches how long the recording ran,
-//! and **every frame the recorder says it encoded is a frame that decodes out
-//! of the file**. That last one is what makes this more than "a file exists":
-//! the recorder's own count and the decoder's count are two independent
-//! accounts of the same recording, and a pipeline that dropped packets, wrote
-//! them to the wrong track or duplicated them would have to be wrong in both.
+//! the frame rate it declares is the rate it sustained rather than the
+//! `--framerate` ceiling it was recorded under, and **every frame the recorder
+//! says it encoded is a frame that decodes out of the file**. That last one is
+//! what makes this more than "a file exists": the recorder's own count and the
+//! decoder's count are two independent accounts of the same recording, and a
+//! pipeline that dropped packets, wrote them to the wrong track or duplicated
+//! them would have to be wrong in both.
+//!
+//! The Ctrl+C test additionally asserts that the three finalisation lines
+//! appear **in the order they happen**
+//! ([`assert_finalisation_was_logged_in_order`]), which is what separates
+//! "flushed, then the trailer written" from the other way round.
 //!
 //! **Not** asserted: that the decoded pictures are the *frames the source drew*,
 //! in order. The video pattern draws a decodable counter into every frame for
@@ -149,21 +156,7 @@ fn ctrl_c_during_a_recording_leaves_a_playable_file() {
          {diagnostics}"
     );
 
-    // The finalisation hook is *shown* to have run, rather than the file merely
-    // happening to be readable — which is acceptance criterion 2 of #126. Three
-    // separate lines, in the order they happen: the encoder was told the stream
-    // had ended and drained, the container's trailer was written, and the
-    // recorder's own shutdown seam ran its hook knowing why the run ended.
-    for expected in [
-        "the encoder was flushed and the container is being closed",
-        "recording file finished",
-        "the recording was finalised and the finalisation hook ran",
-    ] {
-        assert!(
-            diagnostics.contains(expected),
-            "the recorder never logged `{expected}`:\n{diagnostics}"
-        );
-    }
+    assert_finalisation_was_logged_in_order(&diagnostics);
     assert!(
         diagnostics.contains("reason=interrupted"),
         "the finalisation hook should have been told the run was interrupted:\n{diagnostics}"
@@ -231,6 +224,42 @@ fn a_recording_ends_when_the_window_closes_and_leaves_valid_media() {
         "the pattern rendered for {PATTERN_SECONDS}s and only {:.2}s was recorded:\n{diagnostics}",
         summary.seconds
     );
+}
+
+/// The three lines that say the recording was finalised deliberately, in the
+/// order the finalisation happens in.
+///
+/// This is acceptance criterion 2 of #126 — the hook is *shown* to have run,
+/// rather than the file merely happening to be readable. The order is part of
+/// the claim and is checked as such: the encoder is told the stream has ended
+/// and drained of the pictures it was holding back, *then* the container's
+/// trailer is written, *then* the recorder's own shutdown seam runs its hook
+/// knowing why the run ended. A pipeline that wrote the trailer before flushing
+/// the encoder would lose the last fraction of a second — which is the part
+/// somebody who pressed Ctrl+C was watching — and would satisfy three
+/// unordered `contains` checks perfectly well.
+const FINALISATION_LINES: [&str; 3] = [
+    "the encoder was flushed and the container is being closed",
+    "recording file finished",
+    "the recording was finalised and the finalisation hook ran",
+];
+
+/// Asserts that [`FINALISATION_LINES`] all appear, in that order.
+///
+/// Each line is searched for in what is left of the diagnostics after the
+/// previous one, so a line that appears only *before* its predecessor fails
+/// exactly as a missing line does.
+fn assert_finalisation_was_logged_in_order(diagnostics: &str) {
+    let mut rest = diagnostics;
+    for expected in FINALISATION_LINES {
+        let found = rest.find(expected).unwrap_or_else(|| {
+            panic!(
+                "the recorder never logged `{expected}` after the finalisation lines before \
+                 it; the three are expected in the order {FINALISATION_LINES:?}:\n{diagnostics}"
+            )
+        });
+        rest = &rest[found + expected.len()..];
+    }
 }
 
 /// The arguments a recording of `process_id` is made with.
@@ -397,8 +426,66 @@ fn assert_playable(output: &Path, summary: &Summary, client: (u32, u32)) {
         .monotonic_timestamps()
         .assert_valid();
 
+    assert_declared_frame_rate_is_the_one_recorded(&media, summary);
+
     assert!(
         summary.frames > 0,
         "a recording of no frames is not a recording"
     );
+}
+
+/// How far the rate the container declares may be from the rate the recording
+/// sustained, as a fraction of it.
+///
+/// A tenth is far tighter than the failure it exists to catch — declaring the
+/// `--framerate` ceiling of 60 over a 30 fps source is out by a factor of two —
+/// and loose enough for the difference between a rate derived from `n - 1`
+/// intervals and one derived from a container duration that includes the last
+/// frame.
+const FRAME_RATE_TOLERANCE: f64 = 0.1;
+
+/// Asserts the file never claims a frame rate the recording did not achieve.
+///
+/// `--framerate` is a ceiling: a 30 fps source recorded with the default
+/// `--framerate 60` is a real 30 fps recording. `avg_frame_rate` is by
+/// definition the *average* the file carries, so declaring the ceiling there is
+/// incorrect codec metadata (AGENTS.md section 22) — and it is what every
+/// editor, player and transcoder reads to label the clip.
+///
+/// A recording made here declares no nominal rate of its own, so what
+/// `avg_frame_rate` holds is whatever FFmpeg derived from the timestamps: the
+/// rate the recording really ran at, or `0/0` when it declined to derive one at
+/// all. Both are correct and both are accepted, and the failure this catches is
+/// the third case — a number that came from the settings rather than from the
+/// recording. `0/0` is not a way for a broken file to slip through: a track
+/// carrying the ceiling reports `60/1`, which is a rate, and is checked.
+fn assert_declared_frame_rate_is_the_one_recorded(media: &Media, summary: &Summary) {
+    let sustained = sustained_framerate(summary);
+
+    match declared_frame_rate(media) {
+        None => eprintln!("declared rate  : none; read from the timestamps\n"),
+        Some(declared) => {
+            eprintln!("declared rate  : {declared:.1} fps\n");
+            assert!(
+                (declared - sustained).abs() <= sustained * FRAME_RATE_TOLERANCE,
+                "the file declares {declared:.2} fps and the recording sustained \
+                 {sustained:.2} fps. A container that names the `--framerate` ceiling rather \
+                 than the rate it holds is wrong in the way nothing downstream can see: a \
+                 player labels the clip with it, and an editor lays it on a timeline at it.\n{}",
+                media.inventory()
+            );
+        }
+    }
+}
+
+/// The average frame rate the container declares, as a number.
+///
+/// `ffprobe` reports it as a fraction — `30/1`, or `0/0` for a stream that
+/// declares none, which is [`None`] here rather than a rate of zero.
+fn declared_frame_rate(media: &Media) -> Option<f64> {
+    let stream = media.video_streams().into_iter().next()?;
+    let (numerator, denominator) = stream.field("avg_frame_rate")?.split_once('/')?;
+    let numerator: f64 = numerator.parse().ok()?;
+    let denominator: f64 = denominator.parse().ok()?;
+    (denominator != 0.0).then_some(numerator / denominator)
 }

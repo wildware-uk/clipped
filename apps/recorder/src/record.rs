@@ -143,11 +143,17 @@ pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
     let settings = settings_for(&config, window);
 
     let signal = ShutdownSignal::new();
-    // A recorder started in a process group of its own — which is how a
-    // launcher isolates a long-running child — inherits Ctrl+C disabled, and a
-    // recorder that cannot be interrupted is one that has to be killed.
-    crate::shutdown::allow_ctrl_c();
+    // The handler first, then the flag — in that order, deliberately. A
+    // recorder started in a process group of its own, which is how a launcher
+    // isolates a long-running child, inherits Ctrl+C *disabled*: safe, but
+    // uninterruptible, and a recorder that can only be killed is the failure
+    // the whole shutdown path exists to prevent. `allow_ctrl_c` turns it back
+    // on, so doing that before the handler is installed would open a window in
+    // which Ctrl+C terminates the process with default handling. Installing
+    // first cannot: a handler on a process that ignores Ctrl+C simply never
+    // runs.
     install_ctrl_c_handler(&signal)?;
+    crate::shutdown::allow_ctrl_c();
     tracing::debug!("Ctrl+C will stop the recording at the next frame boundary");
 
     let report = run_until_shutdown(

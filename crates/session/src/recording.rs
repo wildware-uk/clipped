@@ -34,7 +34,7 @@
 //! else, and a bug in this file must still leave something that plays.
 
 use core::time::Duration;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use clipped_capture::{
@@ -43,7 +43,7 @@ use clipped_capture::{
 };
 use clipped_encoder::{Codec, Resolution, SourceFrame, SourceTexture, SurfaceKind, VideoEncoder};
 use clipped_logging::{RedactedPath, SessionContext, SessionId};
-use clipped_muxer::{FrameRate, MkvWriter, RecordingLayout, VideoCodec, VideoTrack};
+use clipped_muxer::{MkvWriter, RecordingLayout, VideoCodec, VideoTrack};
 
 use crate::encoding;
 use crate::error::SessionError;
@@ -129,12 +129,16 @@ fn record_frames(
     settings: &RecordingSettings,
     stop: &dyn crate::StopSignal,
     backend: &mut dyn CaptureBackend,
-    format: FrameFormat,
+    mut format: FrameFormat,
     method: CaptureMethod,
 ) -> Result<RecordingReport, SessionError> {
     // Held for the whole of the recording: the encoder session is opened
-    // against it and may not outlive it.
-    let device = first_frame_device(backend, stop)?;
+    // against it and may not outlive it. `format` is passed by mutable
+    // reference rather than by value because waiting for the first frame is
+    // also where a target that resized between being measured and being
+    // captured is followed, and everything below — the encoder, the size on
+    // every submitted frame, the track in the header — is configured from it.
+    let device = first_frame_device(backend, stop, &mut format)?;
 
     let encode_size = settings.encode_size(format.size())?;
     let opened = encoding::open(
@@ -218,7 +222,7 @@ fn record_frames(
 
     let summary = match muxing.finish() {
         Ok(summary) => summary,
-        Err(error) => return Err(failure.unwrap_or(error)),
+        Err(error) => return Err(reported_failure(failure, error)),
     };
 
     let report = RecordingReport {
@@ -256,6 +260,29 @@ fn record_frames(
     match failure {
         Some(error) => Err(error),
         None => Ok(report),
+    }
+}
+
+/// Which of the loop's failure and the writer thread's failure a user is told
+/// about.
+///
+/// [`SessionError::WriterLost`] is a placeholder and not a diagnosis.
+/// [`MuxingThread::write`] returns it whenever the writer thread has already
+/// stopped, which is how a failed write — a full disk, a disconnected drive —
+/// reaches the capture loop at all; the real reason stays on that thread and
+/// comes back from `finish`. Preferring the placeholder would give somebody
+/// whose disk filled the message "the thread writing the recording stopped
+/// unexpectedly", whose own documentation says it means a bug rather than an
+/// operating condition — hiding the cause and misdescribing it at once
+/// (AGENTS.md section 15).
+///
+/// Any other loop failure is kept: an encoder that died mid-recording is the
+/// first cause, and the writer's own complaint afterwards is a consequence of
+/// the recording ending.
+fn reported_failure(loop_failure: Option<SessionError>, writer: SessionError) -> SessionError {
+    match loop_failure {
+        None | Some(SessionError::WriterLost) => writer,
+        Some(error) => error,
     }
 }
 
@@ -331,11 +358,15 @@ fn offer(
 
     encoder.submit(&source)?;
     counters.encoded += 1;
-    drain(encoder, muxing)
+    let packets = drain(encoder, muxing)?;
+    report_submission_over_headroom(packets);
+    Ok(())
 }
 
-/// Moves every packet the encoder has ready into the writer's queue.
-fn drain(encoder: &mut dyn VideoEncoder, muxing: &MuxingThread) -> Result<(), SessionError> {
+/// Moves every packet the encoder has ready into the writer's queue, and
+/// reports how many that was.
+fn drain(encoder: &mut dyn VideoEncoder, muxing: &MuxingThread) -> Result<usize, SessionError> {
+    let mut moved = 0;
     while let Some(packet) = encoder.next_packet()? {
         // Both timestamps are nanoseconds from the same zero as the frames that
         // went in, which is what the muxer's `PacketTimestamp` wants
@@ -346,8 +377,42 @@ fn drain(encoder: &mut dyn VideoEncoder, muxing: &MuxingThread) -> Result<(), Se
             nanos_of(packet.decode_time()),
             packet.is_keyframe(),
         )?;
+        moved += 1;
     }
-    Ok(())
+    Ok(moved)
+}
+
+/// Says so, once, when one submission produced more packets than the queue
+/// keeps in reserve.
+///
+/// `crate::muxing` states that the capture thread never waits on the
+/// filesystem, and what makes that true is a pair of numbers: the loop stops
+/// submitting at [`crate::muxing::HIGH_WATER`], leaving
+/// [`crate::muxing::HEADROOM`] slots for the packets of a submission made just
+/// under it. Above that the bounded queue's `send` blocks, and the capture
+/// thread is inside a write after all. Every encoder in this workspace emits at
+/// most one packet per submitted frame in the low-latency configuration a
+/// recording opens, so this has never fired — but the invariant had nothing
+/// watching it, and a stated guarantee that nothing checks is a guarantee only
+/// until an encoder changes.
+///
+/// Once, not per frame: an encoder that does this does it on every submission,
+/// and a warning a second is a log nobody reads. The flush at the end of a
+/// recording is deliberately not checked — it drains everything the encoder
+/// held back, so it is *expected* to exceed the headroom, and blocking there is
+/// blocking at shutdown with nothing left to capture.
+fn report_submission_over_headroom(packets: usize) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+
+    if packets > crate::muxing::HEADROOM && !REPORTED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            packets,
+            headroom = crate::muxing::HEADROOM,
+            "one submitted frame produced more encoded packets than the writer's queue keeps \
+             in reserve, so the capture thread can be made to wait on the filesystem; please \
+             report this with the encoder and codec from the lines above"
+        );
+    }
 }
 
 /// Ends the stream and drains what the encoder was holding back.
@@ -363,7 +428,7 @@ fn flush(
 ) -> Result<(), SessionError> {
     let before = counters.encoded;
     encoder.finish()?;
-    let result = drain(encoder, muxing);
+    let result = drain(encoder, muxing).map(|_| ());
     // At `info` rather than `debug`: it happens once per recording, and it is
     // the line that says the pictures the encoder was holding back reached the
     // file — which is the difference between a recording that ends where the
@@ -388,9 +453,22 @@ fn nanos_of(time: Duration) -> i64 {
 /// wrong — but the encoder does not exist yet, and holding a frame across the
 /// encoder being opened and a file being created would keep a frame-pool slot
 /// for as long as both take.
+///
+/// `format` is the format [`CaptureBackend::initialise`] reported, and it is
+/// **updated in place** whenever the target resizes before the first frame
+/// arrives. That is not bookkeeping: the wait here is up to
+/// [`FIRST_FRAME_TIMEOUT`], which is long enough for somebody to drag a window
+/// edge while `record` starts, and the format is what configures the encoder,
+/// the resolution stamped on every submitted frame and the dimensions the
+/// Matroska track declares. Handing the encoder a texture of one size while
+/// telling it another is either a garbled picture in a track that declares the
+/// wrong dimensions or a driver-level failure, and nothing downstream can
+/// detect it (AGENTS.md section 22). It is passed by reference so that there is
+/// only ever one `FrameFormat` for a recording and no stale copy to pick up.
 fn first_frame_device(
     backend: &mut dyn CaptureBackend,
     stop: &dyn crate::StopSignal,
+    format: &mut FrameFormat,
 ) -> Result<FrameDevice, SessionError> {
     let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
 
@@ -404,7 +482,21 @@ fn first_frame_device(
             // second needs the backend rebuilt before it will produce anything.
             Acquisition::Timeout => {}
             Acquisition::SizeChanged(size) => {
-                backend.resize(size)?;
+                let resized = backend.resize(size)?;
+                if resized != *format {
+                    // At `info` because it changes what the file will contain:
+                    // somebody reading the log to explain why a recording is
+                    // 1284x741 rather than the size they measured needs this
+                    // line to exist.
+                    tracing::info!(
+                        width = resized.size().width(),
+                        height = resized.size().height(),
+                        pixel_format = %resized.pixel_format(),
+                        "the target changed size before the first frame; the recording will be \
+                         made at the new size"
+                    );
+                }
+                *format = resized;
             }
         }
     }
@@ -439,16 +531,27 @@ fn open_output(
             .map_err(|source| SessionError::OutputDirectory { source })?;
     }
 
-    let mut track = VideoTrack::new(container_codec(codec), size.0, size.1)
+    // Deliberately no `with_frame_rate`. `--framerate` is the ceiling the
+    // capture loop holds a recording to, not the rate it achieved: a 30 fps
+    // source recorded with the default `--framerate 60` produces a real 30 fps
+    // file. `clipped-muxer` writes a declared rate into the stream's
+    // `avg_frame_rate` (`crates/muxer/src/writer.rs`), which is by definition
+    // the *average* the file carries, so declaring the ceiling there is
+    // incorrect codec metadata (AGENTS.md section 22). Measured rather than
+    // argued: putting the rate back and recording the 30 fps test pattern gave
+    // `ffprobe` `60/1 fps, 115 decoded frames` over 3.806 s.
+    // Leaving it out lets a player derive the rate from the timestamps, which
+    // are the recording's own account of when its frames happened. The
+    // encoder is still configured for the ceiling; what that costs is in
+    // `docs/recorder-cli.md` and is
+    // [issue #191](https://github.com/wildware-uk/clipped/issues/191).
+    let track = VideoTrack::new(container_codec(codec), size.0, size.1)
         // The encoder's out-of-band header: the sequence and picture parameter
         // sets for H.264 and HEVC, the sequence header for AV1. Matroska needs
         // it in the track entry, before the first frame, which is why
         // `VideoEncoder::parameter_sets` is available from the moment a session
         // opens (`crates/encoder/src/backend.rs`).
         .with_codec_private(encoder.parameter_sets().to_vec());
-    if let Some(rate) = FrameRate::per_second(settings.framerate()) {
-        track = track.with_frame_rate(rate);
-    }
 
     Ok(MkvWriter::create(
         settings.output(),
@@ -495,7 +598,197 @@ fn session_id() -> SessionId {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
+    use clipped_capture::{CaptureTarget, FrameSize, PixelFormat};
+    use clipped_muxer::{MuxError, TrackId};
+
     use super::*;
+
+    /// What a scripted backend hands back from one `acquire`.
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        /// Nothing drew.
+        Nothing,
+        /// The target changed shape, which is what a window being dragged by
+        /// its edge looks like from here.
+        Resized(u32, u32),
+    }
+
+    /// A capture backend that replays a script and never produces a frame.
+    ///
+    /// A real frame would need a real Direct3D texture and therefore a GPU, and
+    /// the behaviour under test is what happens to the *format* on the way to
+    /// the first frame — which the script can drive without one.
+    #[derive(Debug)]
+    struct ScriptedBackend {
+        steps: VecDeque<Step>,
+        format: FrameFormat,
+        resizes: u32,
+    }
+
+    impl ScriptedBackend {
+        fn new(format: FrameFormat, steps: impl IntoIterator<Item = Step>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                format,
+                resizes: 0,
+            }
+        }
+    }
+
+    impl CaptureBackend for ScriptedBackend {
+        fn method(&self) -> CaptureMethod {
+            CaptureMethod::WindowsGraphicsCapture
+        }
+
+        fn initialise(
+            &mut self,
+            _target: &CaptureTarget,
+            _config: &CaptureConfig,
+        ) -> Result<FrameFormat, CaptureError> {
+            Ok(self.format)
+        }
+
+        fn acquire(&mut self, _timeout: Duration) -> Result<Acquisition<'_>, CaptureError> {
+            match self.steps.pop_front() {
+                Some(Step::Resized(width, height)) => Ok(Acquisition::SizeChanged(
+                    FrameSize::new(width, height).expect("a real size"),
+                )),
+                Some(Step::Nothing) | None => Ok(Acquisition::Timeout),
+            }
+        }
+
+        fn resize(&mut self, size: FrameSize) -> Result<FrameFormat, CaptureError> {
+            self.resizes += 1;
+            // What a real backend does: rebuild the frame pool and report the
+            // format it will now produce.
+            self.format = FrameFormat::new(size, self.format.pixel_format());
+            Ok(self.format)
+        }
+
+        fn shut_down(&mut self) {}
+    }
+
+    /// A stop signal that trips after a fixed number of polls.
+    ///
+    /// So that a test asking what happens when no frame arrives finishes in
+    /// milliseconds instead of waiting out [`FIRST_FRAME_TIMEOUT`].
+    #[derive(Debug)]
+    struct StopAfter {
+        polls: AtomicU64,
+        limit: u64,
+    }
+
+    impl StopAfter {
+        const fn polls(limit: u64) -> Self {
+            Self {
+                polls: AtomicU64::new(0),
+                limit,
+            }
+        }
+    }
+
+    impl crate::StopSignal for StopAfter {
+        fn is_requested(&self) -> bool {
+            self.polls.fetch_add(1, Ordering::Relaxed) >= self.limit
+        }
+    }
+
+    fn format_of(width: u32, height: u32) -> FrameFormat {
+        FrameFormat::new(
+            FrameSize::new(width, height).expect("a real size"),
+            PixelFormat::Bgra8Unorm,
+        )
+    }
+
+    #[test]
+    fn a_target_resized_before_the_first_frame_carries_the_new_format_forward() {
+        // The wait for the first frame is up to ten seconds, which is long
+        // enough for somebody to drag a window edge while `record` starts.
+        // Everything after this point — the encoder's configuration, the
+        // resolution stamped on every submitted frame, the dimensions the
+        // Matroska track declares — is read out of this one `FrameFormat`, so
+        // dropping what `resize` returned records the new pictures under the
+        // old size: a garbled picture in a track that declares the wrong
+        // dimensions, and nothing downstream that can tell (AGENTS.md section
+        // 22).
+        let mut format = format_of(1280, 720);
+        let mut backend = ScriptedBackend::new(format, [Step::Resized(1920, 1080)]);
+        let stop = StopAfter::polls(2);
+
+        let error = first_frame_device(&mut backend, &stop, &mut format)
+            .expect_err("a scripted backend never produces a frame");
+
+        assert!(
+            matches!(error, SessionError::NoFrames),
+            "the wait should end with `no frames`, not {error}"
+        );
+        assert_eq!(backend.resizes, 1, "the backend should have been rebuilt");
+        assert_eq!(
+            format,
+            format_of(1920, 1080),
+            "the recording must be configured from the format `resize` returned, not the one \
+             `initialise` did"
+        );
+    }
+
+    #[test]
+    fn a_target_that_never_changes_size_keeps_the_format_it_was_initialised_with() {
+        let mut format = format_of(1280, 720);
+        let mut backend = ScriptedBackend::new(format, [Step::Nothing]);
+        let stop = StopAfter::polls(2);
+
+        let _ = first_frame_device(&mut backend, &stop, &mut format);
+
+        assert_eq!(backend.resizes, 0);
+        assert_eq!(format, format_of(1280, 720));
+    }
+
+    /// A muxer failure with a reason in it, which is what a full disk produces.
+    fn writer_failure() -> SessionError {
+        SessionError::Mux(MuxError::InvalidTrack {
+            track: TrackId::Video,
+            reason: "there is no space left on the device",
+        })
+    }
+
+    #[test]
+    fn a_failed_write_is_reported_with_the_writers_reason_and_not_the_placeholder() {
+        // What a full disk does: the loop breaks with `WriterLost` because the
+        // writer thread has already stopped, and the reason it stopped comes
+        // back from `finish`. Reporting the placeholder would tell somebody
+        // whose disk filled that a thread "stopped unexpectedly", which that
+        // variant's own documentation says means a bug rather than an
+        // operating condition.
+        let reported = reported_failure(Some(SessionError::WriterLost), writer_failure());
+
+        assert!(
+            reported
+                .to_string()
+                .contains("there is no space left on the device"),
+            "the user should be told why the write failed: {reported}"
+        );
+    }
+
+    #[test]
+    fn a_failure_the_capture_loop_diagnosed_itself_survives_the_writers_complaint() {
+        // An encoder that died mid-recording is the first cause; the writer
+        // failing afterwards is a consequence of the recording ending, and
+        // replacing the diagnosis with it would lose the diagnosis.
+        let reported = reported_failure(Some(SessionError::NoGraphicsDevice), writer_failure());
+
+        assert!(
+            matches!(reported, SessionError::NoGraphicsDevice),
+            "the first cause should be kept, not {reported}"
+        );
+    }
+
+    #[test]
+    fn a_writer_failure_with_nothing_else_wrong_is_reported_as_itself() {
+        let reported = reported_failure(None, writer_failure());
+        assert!(matches!(reported, SessionError::Mux(_)), "{reported}");
+    }
 
     #[test]
     fn every_codec_the_encoder_produces_has_a_container_name() {

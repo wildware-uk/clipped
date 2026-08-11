@@ -131,9 +131,10 @@ impl EncoderKind {
     /// the same reason AV1 is refused on AMF. The verification is
     /// [#160](https://github.com/wildware-uk/clipped/issues/160); see
     /// `docs/encoder-pipeline.md#the-quick-sync-backend` for exactly what has
-    /// and has not run. This says nothing about *recording*: nothing yet
-    /// connects any backend to a capture or a container, so no build records
-    /// anything.
+    /// and has not run. This says nothing about *recording*: it answers "can
+    /// this family encode a frame", and which family a recording actually opens
+    /// is `clipped-session`'s choice at the moment it records
+    /// (`crates/session/src/encoding.rs`).
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         match self {

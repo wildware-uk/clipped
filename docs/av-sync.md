@@ -110,7 +110,8 @@ The two alternatives, and why not:
 **Not implemented here.** `clipped-capture` gives a session the signed
 `MediaTime` the rule needs, and `crates/capture/src/time.rs` is where the epoch
 is fixed, but applying the rule belongs to whoever owns the recording's sources —
-`clipped-session`, which does not exist yet.
+`clipped-session`, which exists and records video but has no audio source to
+align against yet ([issue #180](https://github.com/wildware-uk/clipped/issues/180)).
 [Issue #174](https://github.com/wildware-uk/clipped/issues/174) tracks doing it.
 Until then a recording assembled from these parts inherits the muxer's clamp,
 which is a known error at the head of the file rather than a hidden one.
@@ -401,11 +402,15 @@ resampling against the reference clock, which is issue #30.
   quoting a drift rate, not a verdict on a recording.
 - **It does not apply the start-time alignment rule.** The rule is stated
   [above](#start-time-alignment-what-happens-to-audio-before-the-epoch); the
-  component that would apply it, `clipped-session`, does not exist yet.
+  component that would apply it, `clipped-session`, records video with no audio
+  track beside it, so there is nothing yet to align
+  ([issue #174](https://github.com/wildware-uk/clipped/issues/174)).
 - **It does not own a session's threads.** `CaptureClock` is `Copy` and
   stateless once built, so each thread holds its own copy and no capture thread
   waits on a lock to time a packet (AGENTS.md section 20). Who creates the clock
-  and when is `clipped-session`'s decision.
+  and when is `clipped-session`'s decision, and it makes it in
+  `crates/session/src/recording.rs`: the clock starts at the timestamp of the
+  first frame the recording keeps.
 
 ## Running the measurement
 

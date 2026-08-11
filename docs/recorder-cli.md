@@ -96,6 +96,22 @@ a source faster than it has frames skipped before they are encoded, and the
 count is reported when the recording ends. Nothing is ever duplicated to pad a
 recording out to a nominal rate.
 
+Because it is a ceiling, **the file does not declare it**. The track carries no
+nominal frame rate at all, so a player or an editor reads the rate off the
+timestamps — which is where the recording's own account of when its frames
+happened lives. Declaring the ceiling instead would label a real 30 fps
+recording as 60 fps for having been made with the default `--framerate`.
+
+What the ceiling *is* still used for is configuring the encoder, and that has
+two consequences worth knowing when a source is much slower than the ceiling:
+the bitrate is budgeted for the ceiling's worth of frames, and the keyframe
+interval is two seconds converted into a number of frames at the ceiling — so a
+30 fps source recorded at `--framerate 60` gets keyframes four seconds apart.
+Deriving those from the rate the source is actually producing is
+[#191](https://github.com/wildware-uk/clipped/issues/191); until then, passing
+`--framerate` close to the source's rate is what a recording of a slow source
+wants.
+
 `--codec auto` and `--encoder auto` pick from what
 [`capabilities`](#capabilities) measured, most efficient first, and fall back to
 the next candidate when one refuses to open a session on the device the frames
@@ -379,11 +395,14 @@ right reason. It needs no GPU, so it runs in CI on every change.
 a real `CTRL_C_EVENT` four seconds in, and the file it leaves read back with the
 pinned FFmpeg build through `clipped-media-validation`. It asserts the container
 opens, holds one video stream of the codec and size the recorder said it wrote,
-has a plausible duration and monotonic timestamps, and that **every frame the
-recorder reported encoding decodes out of the file**. It also asserts the three
-finalisation lines above appear in order, so the hook is shown to have run
-rather than the file merely happening to be readable. That test needs a GPU, an
-encoder and a desktop session, so it is `#[ignore]`d:
+has a plausible duration and monotonic timestamps, declares the frame rate it
+sustained rather than the `--framerate` ceiling it was recorded under, and that
+**every frame the recorder reported encoding decodes out of the file**. It also
+asserts the three finalisation lines above appear in order — each one searched
+for in what is left after the one before it, so a trailer written before the
+flush fails exactly as a missing line does — which is how the hook is shown to
+have run rather than the file merely happening to be readable. That test needs a
+GPU, an encoder and a desktop session, so it is `#[ignore]`d:
 
 ```text
 cargo test -p clipped-recorder --test record_end_to_end -- --ignored --nocapture --test-threads=1

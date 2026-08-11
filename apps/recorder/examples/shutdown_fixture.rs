@@ -41,15 +41,16 @@ fn main() -> ExitCode {
     // The test spawns this fixture with `CREATE_NEW_PROCESS_GROUP`, which is
     // what lets it send a console control event to the child alone rather than
     // to the whole test run — and what leaves Ctrl+C disabled until it is asked
-    // for back. The recorder does the same thing for the same reason, through
-    // the same function.
-    allow_ctrl_c();
-
+    // for back. The recorder does the same two things in the same order, for
+    // the same reasons: the handler is installed first, so that there is never
+    // a moment in which Ctrl+C is enabled and nothing is listening for it
+    // (`apps/recorder/src/record.rs`).
     let signal = ShutdownSignal::new();
     if let Err(error) = install_ctrl_c_handler(&signal) {
         eprintln!("shutdown_fixture: {error}");
         return ExitCode::FAILURE;
     }
+    allow_ctrl_c();
 
     // The test waits for this before sending the signal.
     println!("ready");

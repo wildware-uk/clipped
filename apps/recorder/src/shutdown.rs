@@ -200,8 +200,16 @@ impl fmt::Display for StopReason {
 /// `recording` is given the signal and is expected to poll
 /// [`ShutdownSignal::is_requested`] at a point where stopping is safe — between
 /// frames, not between the two halves of a write. When it returns, or unwinds,
-/// `finalise` runs exactly once with the reason, and is where the encoder is
-/// flushed and the container closed.
+/// `finalise` runs exactly once with the reason.
+///
+/// `finalise` is *not* where the encoder is flushed and the container closed.
+/// Both belong to whatever `recording` is — `clipped-session` owns the encoder
+/// and the writer and finalises them on every path out, including a panic — and
+/// reaching back into them from a hook here would be a second owner for the
+/// same file handle (`apps/recorder/src/record.rs`). What the hook is for is
+/// the work that has to happen *after* the file is finished and exactly once
+/// however the run ended: saying so, and in later milestones telling the
+/// library about the new recording.
 ///
 /// The hook runs during a panic unwind as well, which is the case that matters
 /// most: a bug in the pipeline should still leave a file that plays.
