@@ -161,8 +161,9 @@ the user the recording, which is the thing this project protects above almost
 everything else (AGENTS.md section 17). Today that names exactly one family —
 Quick Sync, until [#160](https://github.com/wildware-uk/clipped/issues/160)
 verifies it on Intel hardware — and a machine with an Intel GPU and nothing else
-therefore records on the CPU. Making a backend selectable is a change to
-`is_implemented` and nothing else; the ranking and the report both follow it
+would therefore record on the CPU, once anything records at all. Making a
+backend selectable is a change to `is_implemented` and nothing else; the ranking
+and the report both follow it
 ([#175](https://github.com/wildware-uk/clipped/issues/175)).
 
 ## Ownership: who owns what, and for how long

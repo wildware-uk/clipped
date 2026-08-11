@@ -1,12 +1,21 @@
-//! The software fallback: encoding on the CPU, for a machine with no encoder in
-//! it.
+//! The software fallback: encoding on the CPU, for a machine with no hardware
+//! encoder this build can use.
 //!
 //! This is the encoder of last resort. SPEC.md section 9 asks for hardware
 //! encoding to be preferred automatically, and [`recommend`](crate::recommend)
 //! already ranks [`EncoderKind::Software`] behind every hardware encoder that is
-//! available — so this backend is what a machine reaches when NVENC, AMF and
-//! Quick Sync are all absent or broken, and it is never what a machine with a
-//! working GPU encoder reaches.
+//! available *and* has a backend proven to drive it — so this backend is what a
+//! machine reaches when NVENC, AMF and Quick Sync are all absent, broken, or not
+//! implemented yet.
+//!
+//! That last case is why "a working GPU encoder" is not the test. Quick Sync is
+//! detected and reported wherever the silicon has it, but
+//! [`EncoderKind::is_implemented`] rejects it until
+//! [#160](https://github.com/wildware-uk/clipped/issues/160) verifies a backend
+//! against Intel hardware, and `recommend` ranks a family it rejects below this
+//! one. A machine whose only GPU is an Intel one is therefore pointed here with
+//! its GPU encoder neither absent nor broken. See "Choosing an encoder to open"
+//! in `docs/encoder-pipeline.md` for the rule and the reasoning behind it.
 //!
 //! # What it costs, and where
 //!

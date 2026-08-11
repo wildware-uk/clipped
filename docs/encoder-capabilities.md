@@ -166,7 +166,7 @@ choose a measured H.264 over an inferred AV1 every time.
 Within an encoder, the codec is the most efficient one whose support was
 measured, falling back to H.264.
 
-Rules 2 and 3 exist instead of "prefer the discrete GPU" because DXGI cannot
+Rules 3 and 4 exist instead of "prefer the discrete GPU" because DXGI cannot
 tell you which adapter is discrete. It reports how much video memory an adapter
 has of its own, and an AMD APU with a BIOS carve-out reports gigabytes of it —
 the machine this was developed on does exactly that. So the ranking uses the

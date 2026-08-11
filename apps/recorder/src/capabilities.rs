@@ -30,7 +30,8 @@ use std::fmt;
 
 use clipped_encoder::{
     detect_cached, Adapter, CapabilityCache, CapabilityReport, Claim, CodecSupport, Detection,
-    DetectionSource, EncoderKind, EncoderReport, ProbeError, Resolution, Signal, SystemProbe,
+    DetectionSource, EncoderKind, EncoderReport, ProbeError, Recommendation, Resolution, Signal,
+    SystemProbe,
 };
 
 use crate::cli::CapabilitiesArgs;
@@ -275,19 +276,36 @@ fn codec_line(support: &CodecSupport) -> String {
     )
 }
 
-/// The ranked list "Automatic" resolves through.
+/// The ranked list "Automatic" resolves through, and what it will not resolve
+/// to.
 ///
-/// Printed in full, including any encoder the machine has that this build
-/// cannot open: those rank below the software fallback and say why, so the list
-/// reads as "here is everything you have, and here is what would be used"
-/// rather than quietly omitting the encoder a reader can see in the table above
+/// Every available encoder is printed, including one the machine has that this
+/// build cannot open — quietly omitting an encoder a reader can see in the
+/// table above would answer a question nobody asked. But it is printed in a
+/// group of its own rather than as a numbered entry under "Automatic would
+/// choose": that heading asserts every line beneath it is a choice, and an
+/// entry reading "so it is not chosen" denies it. The two groups are
+/// [`Recommendation::is_openable`] either way round, so a family becoming
+/// implemented moves it between them with no edit here
 /// (`crates/encoder/src/recommendation.rs`).
 fn automatic_lines(report: &CapabilityReport) -> String {
+    let (openable, unopenable): (Vec<_>, Vec<_>) = clipped_encoder::recommend(report)
+        .into_iter()
+        .partition(Recommendation::is_openable);
+
     let mut out = String::from("Automatic would choose\n\n");
-    for (position, recommendation) in clipped_encoder::recommend(report).iter().enumerate() {
+    for (position, recommendation) in openable.iter().enumerate() {
         out.push_str(&format!("  {}. {recommendation}\n", position + 1));
     }
     out.push('\n');
+
+    if !unopenable.is_empty() {
+        out.push_str("Detected on this machine, and not available to choose\n\n");
+        for recommendation in &unopenable {
+            out.push_str(&format!("  - {recommendation}\n"));
+        }
+        out.push('\n');
+    }
     out
 }
 
@@ -591,10 +609,13 @@ mod tests {
             "the machine's own capability must still be reported: {hevc}"
         );
 
-        // And the ranking chooses the encoder that works.
+        // And the ranking chooses the encoder that works. Only the numbered
+        // entries under "Automatic would choose" count as choices, and Quick
+        // Sync must not be among them.
         let ranked: Vec<&str> = output
             .lines()
             .skip_while(|line| !line.starts_with("Automatic would choose"))
+            .take_while(|line| !line.starts_with("Detected on this machine"))
             .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
             .collect();
         assert!(
@@ -602,8 +623,17 @@ mod tests {
             "a machine whose only encoder has no proven backend must be told to use the \
              CPU: {output}"
         );
-        let quick_sync = ranked
-            .iter()
+        assert!(
+            !ranked.iter().any(|line| line.contains("Intel Quick Sync")),
+            "nothing under a heading that says it would be chosen may be an encoder that \
+             is not: {output}"
+        );
+
+        // The encoder that cannot be opened is still shown, in the group that
+        // says what it is.
+        let quick_sync = output
+            .lines()
+            .skip_while(|line| !line.starts_with("Detected on this machine"))
             .find(|line| line.contains("Intel Quick Sync"))
             .expect("a detected encoder is still listed");
         assert!(

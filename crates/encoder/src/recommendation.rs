@@ -111,8 +111,12 @@ impl fmt::Display for ChoiceReason {
             Self::UnattributedHardware => "hardware encoding",
             Self::SoftwareFallback => "CPU encoding, which costs the game frames",
             Self::NoProvenBackend => {
-                "detected on this machine, and this build has no backend proven to encode \
-                 with it, so it is not chosen"
+                // Not "detected on this machine, and …": an entry is only in
+                // this list because detection found it, and a caller that
+                // groups the unopenable entries under a heading of their own —
+                // as the capability report does — would say it twice in two
+                // lines.
+                "this build has no backend proven to encode with it, so it is not chosen"
             }
         })
     }
@@ -541,24 +545,36 @@ mod tests {
     fn nothing_this_build_cannot_open_is_ever_offered_to_open() {
         // The property rather than one machine's answer: for every machine
         // these facts can describe, what `for_opening` returns is a family
-        // `is_implemented` accepts. The hardware is varied because the failure
-        // being guarded against is a hardware encoder outranking the fallback.
+        // `is_implemented` accepts.
+        //
+        // Only a machine that *has* an unopenable encoder can break it, so both
+        // machines with hardware here have an Intel adapter, and in each of
+        // them the Intel adapter is the one that wins every hardware rule —
+        // dedicated memory, and more of it than anything else present. Those
+        // are the cases that fail if `for_opening` stops filtering and the
+        // ranking rule goes with it. The machine with no adapters cannot fail
+        // and is not pretending to: it is here so the property is stated over
+        // the machine that has nothing to rank, which is the one a caller is
+        // likeliest to forget.
+        let arc = |luid| {
+            Adapter::new(
+                AdapterId::from_luid(luid, 0),
+                "Intel(R) Arc(TM) A770",
+                Vendor::Intel,
+                0x56A0,
+                32 * 1024 * 1024 * 1024,
+                false,
+            )
+        };
         let machines = [
             SystemFacts::new(Vec::new(), EncoderObservations::none()),
             SystemFacts::new(
-                vec![Adapter::new(
-                    AdapterId::from_luid(6, 0),
-                    "Intel(R) Arc(TM) A770",
-                    Vendor::Intel,
-                    0x56A0,
-                    16 * 1024 * 1024 * 1024,
-                    false,
-                )],
+                vec![arc(6)],
                 EncoderObservations::none()
                     .with_runtime(loaded(EncoderKind::QuickSync, "libmfxhw64.dll")),
             ),
             SystemFacts::new(
-                vec![nvidia_card(), integrated_amd()],
+                vec![nvidia_card(), integrated_amd(), arc(6)],
                 EncoderObservations::none()
                     .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll"))
                     .with_runtime(loaded(EncoderKind::Amf, "amfrt64.dll"))
@@ -566,13 +582,13 @@ mod tests {
             ),
         ];
 
-        for facts in machines {
+        for (machine, facts) in machines.into_iter().enumerate() {
             let report = detect(&facts);
             let choice = Recommendation::for_opening(&report)
                 .expect("the software fallback is available on every machine");
             assert!(
                 choice.encoder().is_implemented(),
-                "{choice} has no backend proven to encode with it"
+                "machine {machine}: {choice} has no backend proven to encode with it"
             );
         }
     }
