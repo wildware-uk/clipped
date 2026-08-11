@@ -219,6 +219,24 @@ applications:
 | `av_sync.rs` | Two runs: that video and system audio captured at the same time stay within a documented tolerance of each other and by how much per minute they drift, and — against a subject playing a tone at the moment it presents a named frame — what the *absolute* A/V offset of a capture is ([av-sync.md](av-sync.md)) |
 | `readback.rs` | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it |
 
+## The end-to-end recorder tests
+
+`tests/capture/` stops at the capture backend. The tests that drive the whole
+recorder — capture, encoder and muxer, as a user gets it — live beside the
+binary in `apps/recorder/tests/`, because what they exercise is the executable
+rather than any one crate:
+
+| Test | What it decides |
+| --- | --- |
+| `record_end_to_end.rs` | That `clipped-recorder record` against a real window produces media the harness accepts — and, in `ctrl_c_during_a_recording_leaves_a_playable_file`, that a real `CTRL_C_EVENT` mid-recording leaves a file that **plays**, with the three finalisation lines appearing in the diagnostics *in order*, so "the trailer was written and then the encoder was flushed" fails exactly as a missing line does. Also that a recording ends when its window closes, and still leaves valid media |
+| `ipc_protocol.rs` | That `clipped-recorder serve` speaks the protocol in [ipc.md](ipc.md) over a real named pipe to a real child process: the handshake and a version it does not speak, a frame that is not a message, a length prefix that would allocate the machine, a client that vanishes mid-request, commands whose subsystem is not built, the connection cap and its slot coming back, a second recorder refusing to compete for the endpoint — and a recording driven **entirely over the protocol** producing a playable file |
+| `ctrl_c.rs` | The half of Ctrl+C that needs no capture engine: that the finalisation hook runs exactly once and the process exits cleanly, against a real child sent a real console event. `record_end_to_end.rs` is what proves the resulting *file* plays |
+| `command_line.rs` | The command-line surface: that `record --help` documents a default for every option, that invalid values are usage errors and not panics, that a missing target names all three ways of giving one, that an existing recording is not overwritten without being asked, and that `list-windows` and `capabilities` report what they claim to |
+
+Most of these need a GPU and a display, so they skip themselves without one and
+`CLIPPED_REQUIRE_CAPTURE` turns that skip into a failure. The command-line and
+Ctrl+C tests do not, and run anywhere.
+
 ### How a test drives an application
 
 ```rust

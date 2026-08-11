@@ -20,12 +20,18 @@ vocabulary a stream is described in, and four implementations of it:
   CPU — what a machine with no usable encoding hardware records with, and never
   what a machine with one does.
 
-What is still missing is everything around them. `clipped-muxer` does not mux
-yet ([#21](https://github.com/wildware-uk/clipped/issues/21)), and no session
-wires capture to encoding ([#19](https://github.com/wildware-uk/clipped/issues/19),
-[#20](https://github.com/wildware-uk/clipped/issues/20)), so `recorder record`
-still reports that the capture engine is not implemented, and packets go into a
-`Vec` in a test rather than through `clipped-muxer` into a file a user can play.
+Everything around them now exists. `clipped-muxer` writes Matroska
+([#21](https://github.com/wildware-uk/clipped/issues/21)), `clipped-session`
+owns the thread that wires capture to encoding
+([#126](https://github.com/wildware-uk/clipped/issues/126)), and
+`clipped-recorder record` produces a file a user can play — including when it is
+interrupted part way through. Packets go through `clipped-muxer` into that file,
+rather than into a `Vec` in a test.
+
+What is still missing from a *recording* is its sound: the session writes no
+audio track yet ([#180](https://github.com/wildware-uk/clipped/issues/180)),
+which is why `docs/audio-routing.md` describes two captures rather than a track
+model.
 
 This document describes the interface, the rules a backend has to obey, and the
 four backends that obey them. Where it describes something that does not exist
