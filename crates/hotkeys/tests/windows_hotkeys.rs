@@ -627,8 +627,13 @@ fn hotkeys_fire_while_a_fullscreen_subject_holds_a_display() {
         // is running, and then the game starts.
         let (service, events) = HotkeyService::start(
             &binding(HotkeyAction::ToggleRecording, hotkey),
-            Handlers::new().on(HotkeyAction::ToggleRecording, move |press| {
-                ran.send(press.at()).expect("the test is listening");
+            // `Instant::now()` taken *inside* the handler, on the handler's own
+            // thread and as its first instruction. Forwarding `press.at()`
+            // instead would report the message loop's timestamp a second time,
+            // which is a number that cannot differ from `latency=` below and
+            // therefore says nothing about when the handler ran.
+            Handlers::new().on(HotkeyAction::ToggleRecording, move |_press| {
+                ran.send(Instant::now()).expect("the test is listening");
             }),
         )
         .expect("starting a hotkey service");
@@ -691,12 +696,20 @@ fn hotkeys_fire_while_a_fullscreen_subject_holds_a_display() {
             .recv_timeout(DELIVERY)
             .expect("the handler runs on its own thread");
 
+        // Two different quantities, deliberately named for what each one
+        // measures. `latency` is this process asking Windows for a keystroke to
+        // the message loop taking the press off its queue — it is Windows's
+        // number far more than Clipped's. `dispatch` is the loop's own
+        // timestamp to the handler's first instruction on another thread, which
+        // is the only part of the path this crate is responsible for. Neither
+        // is asserted; `recv_timeout` above is the assertion, and it fails if
+        // the handler never runs at all.
         let _ = writeln!(
             std::io::stderr(),
-            "[result] mode={mode} exclusive={} delivered=yes latency={:?} handler={:?}",
+            "[result] mode={mode} exclusive={} delivered=yes latency={:?} dispatch={:?}",
             self::yes_or_no(subject.exclusive),
             event.press().at().duration_since(pressed),
-            ran_at.duration_since(pressed),
+            ran_at.duration_since(event.press().at()),
         );
 
         if mode == "exclusive" && !subject.exclusive {
