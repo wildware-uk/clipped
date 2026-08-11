@@ -90,10 +90,30 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[PROTOCOL_VERSION];
 /// asking here, so that it never presents a button whose command will be
 /// refused (AGENTS.md section 27).
 pub mod features {
-    /// The recorder can start and stop a recording.
-    pub const RECORDING: &str = "recording";
-    /// The recorder can report its status, and push status events.
-    pub const STATUS_EVENTS: &str = "status_events";
+    /// Names the capabilities, and the list of all of them.
+    ///
+    /// Unlike the rest of the protocol's vocabularies a feature is a constant
+    /// rather than a variant, so there is no `match` a new one can fail to
+    /// compile against. This macro is what stands in for that: [`ALL`] is
+    /// generated from the same lines that define the constants, so a capability
+    /// added here reaches `schema.rs` — and through it the TypeScript mirror
+    /// and its conformance check — without anybody remembering to list it
+    /// twice.
+    macro_rules! capabilities {
+        ($($(#[$description:meta])* $name:ident = $wire:literal;)+) => {
+            $($(#[$description])* pub const $name: &str = $wire;)+
+
+            /// Every capability name the protocol defines, in the order above.
+            pub const ALL: &[&str] = &[$($name),+];
+        };
+    }
+
+    capabilities! {
+        /// The recorder can start and stop a recording.
+        RECORDING = "recording";
+        /// The recorder can report its status, and push status events.
+        STATUS_EVENTS = "status_events";
+    }
 }
 
 /// Who is at the other end of a connection.

@@ -1,3 +1,4 @@
+import { type RecorderStatus } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState } from 'react';
@@ -7,17 +8,19 @@ import { useEffect, useState } from 'react';
  *
  * These four shapes mirror `RecorderLinkState` in `crates/ipc`, which is what
  * the Rust side serialises. They are written here rather than in
- * `packages/shared` because they are not part of the recorder control protocol —
- * no recorder ever sends one — and the protocol's TypeScript view is issue #209.
- * When that lands, the shared types are where a description of the *protocol*
- * belongs; this one describes a connection to it.
+ * `packages/shared` because they are not part of the recorder control protocol:
+ * no recorder ever sends one, so `crates/ipc`'s schema does not describe one and
+ * the conformance test in `packages/shared/src/ipc` has nothing to check them
+ * against. What the recorder itself says — `RecorderStatus` — *is* a protocol
+ * message, and is taken from `@clipped/shared` rather than written a second time
+ * here (AGENTS.md section 55).
  */
 export type RecorderLinkState =
   | { readonly link: 'connecting' }
   | {
       readonly link: 'attached';
       readonly recorder_process_id: number;
-      readonly status: RecorderStatusPayload;
+      readonly status: RecorderStatus;
     }
   | {
       readonly link: 'reconnecting';
@@ -27,17 +30,6 @@ export type RecorderLinkState =
       readonly reason: string;
     }
   | { readonly link: 'unavailable'; readonly reason: string };
-
-/** What the recorder itself says it is doing. */
-export type RecorderStatusPayload =
-  | { readonly state: 'idle' }
-  | {
-      readonly state: 'recording';
-      readonly recording_id: string;
-      readonly output: string;
-      readonly target: string;
-      readonly elapsed_ms: number;
-    };
 
 /** Everything the Rust side sends on the `recorder-link` event. */
 type RecorderLinkEvent =

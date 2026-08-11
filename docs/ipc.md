@@ -13,14 +13,18 @@ is the map from one to the other.
 
 **Status.** The transport, the framing, the handshake, the compatibility policy
 and the command and event vocabulary are implemented and tested.
-`clipped-recorder serve` speaks it, and the desktop application drives it —
-starting a recorder if none is listening and following its status
-([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). Four of the commands belong to subsystems
+`clipped-recorder serve` speaks it. Four of the commands belong to subsystems
 that do not exist yet and are refused with a typed "not in this build" error;
 they are listed, with the issue that builds each, in
-[Commands this build cannot perform](#commands-this-build-cannot-perform). No
-TypeScript client exists yet — see
-[What is deliberately not here](#what-is-deliberately-not-here).
+[Commands this build cannot perform](#commands-this-build-cannot-perform). The
+messages exist in TypeScript as well, checked against the Rust on every build —
+see [The TypeScript types](#the-typescript-types).
+
+The desktop application opens the pipe for one purpose: it attaches to a
+recorder or starts one, subscribes to its status, and shows what it is told
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). Nothing in the
+*interface* sends a command yet — no request crosses the webview boundary —
+which is [issue #217](https://github.com/wildware-uk/clipped/issues/217).
 
 Related: SPEC.md section 5, AGENTS.md sections 5, 27, 43 and 44,
 [privacy.md](privacy.md), [ADR 0002](adr/0002-separate-recorder-process.md),
@@ -43,6 +47,7 @@ Related: SPEC.md section 5, AGENTS.md sections 5, 27, 43 and 44,
 - [Errors](#errors)
 - [When something goes wrong](#when-something-goes-wrong)
 - [Trying it by hand](#trying-it-by-hand)
+- [The TypeScript types](#the-typescript-types)
 - [How it is tested](#how-it-is-tested)
 - [What is deliberately not here](#what-is-deliberately-not-here)
 
@@ -704,6 +709,97 @@ Read-Frame $pipe
 
 Being able to do that at all is one of the reasons the format is JSON.
 
+## The TypeScript types
+
+The desktop application's front end is TypeScript and needs a view of these
+messages. It is at `packages/shared/src/ipc`, and it is **mirrored by hand from
+`crates/ipc` rather than generated from it**, with a check that fails when the
+two disagree. Both halves of that sentence matter, and the second is what makes
+the first defensible.
+
+```text
+packages/shared/src/ipc/
+  protocol.ts             every message, and the open and closed sets of wire strings
+  parse.ts                a frame into one of those types, never throwing
+  frame.ts                the little-endian u32 prefix and the 1 MiB limit
+  protocol-schema.json    generated from crates/ipc; do not edit
+  conformance.test.ts     holds the first three against the fourth
+```
+
+### Why mirrored rather than generated
+
+Generation — `ts-rs`, `typeshare` or `schemars` and an emitter — cannot drift,
+and it was the expected answer. It was not taken, for three reasons in this
+order:
+
+- **It gets this protocol's hard parts wrong.** The compatibility policy above
+  lives in `#[serde(from = "String", into = "String")]` on `ErrorCode` and
+  `EndReason`, in `#[serde(untagged)]` catch-alls on `ErrorDetail` and `Event`,
+  and in the deliberate *absence* of one on `RecorderStatus`. Those attributes
+  are exactly the ones a Rust-to-TypeScript emitter does not follow: the string
+  conversions are invisible to it, and a `serde_json::Value` catch-all becomes
+  `any` — which erases the distinction this document spends a section on and
+  hands the interface a type that cannot be wrong because it says nothing.
+- **It would put a TypeScript concern inside the protocol crate.** `crates/ipc`
+  is a leaf crate that both ends depend on, and the derive would have to sit on
+  the types themselves rather than beside them.
+- **The interesting drift is not in the field names.** It is in what happens to
+  a value neither side was compiled against, and no generator checks that. A
+  check that runs real frames past both implementations does.
+
+### What the check actually checks
+
+`crates/ipc/src/schema.rs` **derives** a description of the protocol from the
+Rust types and writes it to `protocol-schema.json`. Nothing in it is typed out
+by hand:
+
+- field names and which fields may be left out come from `serde` — each field is
+  removed in turn and offered back to the deserialiser, so the answer is the
+  deserialiser's rather than a reading of the attributes;
+- wire strings come from serialising real values;
+- every enumeration is walked through an exhaustive `match`, so a variant added
+  to the Rust stops the crate compiling until it is named in the schema, beside
+  the list it belongs in;
+- naming a variant and still leaving it out of that list is a hole the compiler
+  cannot see, so the closed enumerations — `reply`, `outcome`, `recorder_state`
+  and the two envelope types — are checked a second way, against the list
+  `serde` itself publishes in the error it raises for a tag it does not know.
+  `event` and `error_detail` have untagged catch-alls and so never raise that
+  error; their `match` is what covers them. A capability is a constant rather
+  than a variant and has no `match` at all: `features::ALL` is generated from
+  the same lines that define the constants, which is the same guarantee by
+  another route;
+- and every sample frame — including ones carrying an error code, an end reason,
+  an event or a field invented after this build — records what the **real**
+  deserialiser made of it.
+
+Three tests then hold the ends together, across the two CI jobs:
+
+| Test | Fails when |
+| --- | --- |
+| `a_closed_enumeration_lists_every_variant_the_deserialiser_has` (`cargo test`) | a variant exists that the schema does not list |
+| `the_committed_schema_is_the_one_this_build_produces` (`cargo test`) | the committed schema is no longer what the Rust types produce |
+| `conformance.test.ts` (`npm test`) | the TypeScript no longer matches the committed schema |
+
+The TypeScript side is not free to lie to the check either: its enumerations are
+the arrays its union types are built from, and its field descriptors are mapped
+types over the interfaces themselves, so a descriptor that disagrees with its
+interface does not compile.
+
+The asymmetry this document is built on survives the crossing. An unknown error
+code, end reason, error detail or event parses on the TypeScript side and keeps
+what it could not understand; an unknown **recorder state** fails whatever
+carried it, in both languages — the reply, and with it the frame, or the
+`status_changed` event, which then becomes an unrecognised event rather than
+costing the connection its subscription. Either way nothing renders a state the
+build cannot name, and there is a sample of each case proving both sides agree.
+
+Regenerate the schema after changing anything on the wire:
+
+```powershell
+cargo run -p clipped-ipc --bin protocol-schema
+```
+
 ## How it is tested
 
 | Where | What it covers |
@@ -712,6 +808,8 @@ Being able to do that at all is one of the reasons the format is JSON.
 | `crates/ipc/src/transport/windows.rs` tests | A real pipe: a round trip, endpoint exclusivity, connecting to nothing, stopping a blocked listener |
 | `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, and Ctrl+C |
 | `apps/recorder/tests/supervision.rs` | Supervision against real processes that are really killed: a recorder outliving the process that started it, a second launch attaching rather than competing, a killed recorder reported and replaced, and a bounded restart policy |
+| `crates/ipc/src/schema.rs` tests | That the description of the protocol the TypeScript is checked against is derived rather than asserted — a tag is never reported as optional because a catch-all absorbed it, every sample records what the real deserialiser did with it — and that the committed schema is still what this build produces |
+| `packages/shared/src/ipc/conformance.test.ts` | The TypeScript mirror against that schema: every enumeration both ways, every field of every object, and every sample frame parsed to the same verdict the recorder reached |
 
 The rejection tests each end by asserting that the *next* client is still
 served. The interesting half of "a bad client is refused" is that a bad client
@@ -726,16 +824,16 @@ over the protocol and validates the file it produces.
 cargo test -p clipped-ipc
 cargo test -p clipped-recorder --test ipc_protocol
 cargo test -p clipped-recorder --test ipc_protocol -- --ignored --nocapture --test-threads=1
+npm test --workspace @clipped/desktop -- ipc/conformance
 ```
 
 ## What is deliberately not here
 
-- **A TypeScript client.** The desktop application will need the message types
-  in TypeScript, either generated from the Rust or mirrored and checked against
-  it. Which of the two, and where the check lives, is
-  [issue #209](https://github.com/wildware-uk/clipped/issues/209) rather than a
-  decision to make here with no consumer to test it against. Until then this
-  document is the schema.
+- **A TypeScript client.** The messages are in TypeScript
+  ([The TypeScript types](#the-typescript-types)); the thing that opens the
+  pipe, performs the handshake and matches replies to requests is
+  [issue #217](https://github.com/wildware-uk/clipped/issues/217). Nothing in
+  `packages/shared/src/ipc` does any I/O.
 - **Preview frames, waveforms and thumbnails.** High-bandwidth data does not go
   through a JSON control channel; it gets its own transport decision when
   something needs it.
