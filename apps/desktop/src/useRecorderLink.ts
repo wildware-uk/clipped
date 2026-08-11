@@ -108,13 +108,27 @@ export function useRecorderLink(): RecorderLinkState | null {
       if (current && payload.event === 'state') {
         setState(withoutTag(payload));
       }
+    }).catch((error: unknown) => {
+      // Subscribing needs `core:event:allow-listen` in
+      // `src-tauri/capabilities/default.json`; without it Tauri rejects this
+      // and the first answer above would be the last thing the window ever
+      // learned, going stale in silence. A window that cannot follow the
+      // recorder has to say so rather than show an answer from a minute ago
+      // (AGENTS.md section 27).
+      if (current) {
+        setState({
+          link: 'unavailable',
+          reason: `This window cannot follow the recorder: ${String(error)}`,
+        });
+      }
+      return undefined;
     });
 
     return () => {
       current = false;
       subscription
         .then((unlisten) => {
-          unlisten();
+          unlisten?.();
         })
         .catch(() => {
           // Nothing to do: the listener is going away with the window.

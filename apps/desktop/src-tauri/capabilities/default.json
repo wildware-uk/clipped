@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "What the interface is allowed to ask the Tauri runtime for. Tauri denies everything that is not listed, so this file is the whole of the window's privilege - keep it that way, and add a permission in the change that needs it rather than in advance.",
   "windows": ["main"],
-  "permissions": ["core:window:allow-set-title"]
+  "permissions": [
+    "core:window:allow-set-title",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
 }
