@@ -317,38 +317,59 @@ mod tests {
     /// unmistakable against it.
     const TIMEOUT: Duration = Duration::from_millis(200);
 
+    /// Settings that keep these tests quick.
+    ///
+    /// The debounce windows are short because a machine running a test suite
+    /// starts processes constantly, and everything the source said before it
+    /// died is still owed to the caller; a default 2.5-second quiet period would
+    /// have the drain below take that long for no benefit.
+    fn config() -> WatchConfig {
+        WatchConfig {
+            notification_interval: Duration::from_secs(1),
+            launch_quiet_period: Duration::from_millis(100),
+            max_launch_window: Duration::from_millis(300),
+            exit_settle_period: Duration::from_millis(50),
+        }
+    }
+
     /// A watcher whose sources have all been lost, reached the way a real one
     /// reaches that state.
     ///
-    /// Nothing is faked and no private field is set: the preferred source is
-    /// declared lost, which makes the watcher fall back, and then the fallback
-    /// is declared lost too, which is the path in [`ProcessWatcher::replace_source`]
-    /// that gives up.
+    /// Nothing is faked and no private field is set to get there: sources are
+    /// declared lost until none is left, which walks
+    /// [`ProcessWatcher::replace_source`] down to the branch that gives up.
+    ///
+    /// How many there are to lose depends on the machine — one where WMI does
+    /// not answer starts on the fallback already — so the loop stops when the
+    /// watcher says it has, rather than counting.
     fn exhausted_watcher() -> ProcessWatcher {
-        let config = WatchConfig {
-            notification_interval: Duration::from_secs(1),
-            ..WatchConfig::default()
-        };
         let mut watcher =
-            ProcessWatcher::start(config).expect("a watcher can be started on this machine");
+            ProcessWatcher::start(config()).expect("a watcher can be started on this machine");
 
-        watcher.replace_source(SourceError::new("test", "the subscription was lost"));
+        let mut stopped = false;
+        for _ in 0..2 {
+            watcher.replace_source(SourceError::new("test", "the source was lost"));
+            match watcher.next_event(TIMEOUT) {
+                Next::Event(WatchEvent::SourceChanged { .. }) => {}
+                Next::Event(WatchEvent::Stopped(_)) => {
+                    stopped = true;
+                    break;
+                }
+                other => panic!("losing a source reported {other:?}"),
+            }
+        }
         assert!(
-            matches!(
-                watcher.next_event(TIMEOUT),
-                Next::Event(WatchEvent::SourceChanged { .. })
-            ),
-            "losing the preferred source falls back rather than stopping"
+            stopped,
+            "the watcher never ran out of sources, so nothing below is being tested"
         );
 
-        watcher.replace_source(SourceError::new("test", "the fallback was lost"));
-        assert!(
-            matches!(
-                watcher.next_event(TIMEOUT),
-                Next::Event(WatchEvent::Stopped(_))
-            ),
-            "losing the fallback as well stops the watcher, once, with a reason"
-        );
+        // Whatever the sources reported while they still worked is owed to the
+        // caller and is delivered even now, so it is drained here rather than
+        // left to arrive in the middle of a measurement. Nothing can join it:
+        // a stopped watcher never reads from a source again.
+        while watcher.debouncer.next_deadline().is_some() || !watcher.ready.is_empty() {
+            watcher.next_event(TIMEOUT);
+        }
 
         watcher
     }
@@ -382,11 +403,8 @@ mod tests {
         // The two answers call for opposite responses — keep waiting, or tell
         // the user detection has stopped — so they must not be spelled the same
         // way. Before this distinction existed both were `None`.
-        let mut live = ProcessWatcher::start(WatchConfig {
-            notification_interval: Duration::from_secs(1),
-            ..WatchConfig::default()
-        })
-        .expect("a watcher can be started on this machine");
+        let mut live =
+            ProcessWatcher::start(config()).expect("a watcher can be started on this machine");
 
         // An idle machine may genuinely start something during the wait, so the
         // assertion is that a live watcher never says `Finished`, not that it

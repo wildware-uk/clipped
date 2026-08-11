@@ -114,8 +114,10 @@ pub(crate) fn process_table() -> Result<Vec<TableRow>, SourceError> {
 /// Every process running now, with its executable path where Windows gives one.
 ///
 /// This is the watcher's baseline, and it is the expensive call in this module:
-/// resolving a path means opening every process on the machine. It is paid once
-/// at start, and `docs/game-detection.md` records what it cost.
+/// resolving a path means opening every process on the machine, which on an
+/// ordinary desktop is a few hundred `OpenProcess` calls. It is paid once, while
+/// the application is starting anyway, and `docs/game-detection.md` measures
+/// what building a watcher costs rather than leaving that as an assertion.
 ///
 /// # Errors
 ///
