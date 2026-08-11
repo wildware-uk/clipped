@@ -544,8 +544,7 @@ tracks = ["game", "microphone"]
 
     #[test]
     fn an_unknown_launcher_is_refused_with_its_line() {
-        let error = rejected(
-            r#"
+        let body = r#"
 [[game]]
 game_id = "a-game"
 name = "A Game"
@@ -553,19 +552,30 @@ name = "A Game"
 name = "a-game.exe"
 [game.launcher]
 kind = "not-a-launcher"
-"#,
-        );
+"#;
+        let error = rejected(body);
         let message = error.to_string();
         assert!(
             message.contains("not-a-launcher"),
             "the message should quote what was written: {message}"
         );
-        // Line 9 is the `kind` line: one for `schema_version`, one blank, then
-        // the seven lines of the entry. The parser pointing at the exact line
-        // is half the reason the format is TOML.
+
+        // The parser pointing at the exact line is half the reason the format
+        // is TOML, so the number is worth asserting — but the words around it
+        // are `toml`'s prose and not ours, and pinning `line 9` would turn a
+        // patch release that rewords it red for no behavioural reason. What is
+        // asserted is that the number appears, and it is computed from the
+        // fixture so that editing the fixture cannot silently satisfy it.
+        let kind_line = file(body)
+            .lines()
+            .position(|line| line.starts_with("kind ="))
+            .expect("the fixture has a `kind` line")
+            + 1;
         assert!(
-            message.contains("line 9"),
-            "the message should carry the line: {message}"
+            message
+                .split(|character: char| !character.is_ascii_digit())
+                .any(|number| number == kind_line.to_string()),
+            "the message should carry line {kind_line}: {message}"
         );
     }
 

@@ -197,7 +197,13 @@ name = "cs2.exe"
 }
 
 #[test]
-fn a_broken_overlay_names_the_file_and_the_entry_and_does_not_take_the_seed_down_with_it() {
+fn one_bad_entry_fails_the_whole_load_with_the_file_and_the_entry_named() {
+    // Note what this does *not* say: there is no fallback to the shipped
+    // catalogue. A typo in a user's own file means no catalogue loads at all,
+    // and the caller decides what to do about it — which is the decision
+    // argued in `catalogue/mod.rs`, on the grounds that an entry silently
+    // dropped is a game that silently never records. Whoever wires this into
+    // the process watcher (#41) has to handle the `Err`.
     let directory = TestDirectory::new("broken");
     let path = directory.overlay(
         r#"schema_version = 1
@@ -225,12 +231,6 @@ name = "C:/Games/MyGame/my-game.exe"
         message.contains("entry 1 (`my-game`)"),
         "the message should name the entry: {message}"
     );
-
-    // A caller that wants to carry on has somewhere to carry on from.
-    assert!(!Catalogue::seed()
-        .expect("the seed is valid")
-        .entries()
-        .is_empty());
 }
 
 #[test]
