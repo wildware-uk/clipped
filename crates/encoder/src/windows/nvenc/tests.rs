@@ -1246,7 +1246,12 @@ fn env_is_set(name: &str) -> bool {
 /// them fills it deliberately. libtest runs tests in parallel by default, so
 /// without this the suite would be a race whose outcome depends on which test
 /// reached the driver first (AGENTS.md section 25).
-static SESSIONS: Mutex<()> = Mutex::new(());
+///
+/// Visible to the rest of `windows` because the capability probe's own tests
+/// open NVENC sessions too, through `WindowsProbe` rather than through
+/// [`TestGpu`], and a second mutex would serialise them against a different set
+/// of tests from the one that competes with them (`crate::windows::tests`).
+pub(in crate::windows) static SESSIONS: Mutex<()> = Mutex::new(());
 
 /// A Direct3D 11 device on the NVIDIA adapter, and the textures the tests feed
 /// through it.
@@ -1324,10 +1329,14 @@ impl TestGpu {
 
     /// Opens an encoder against this device.
     fn open_encoder(&self, config: EncoderConfig) -> Result<NvencEncoder, EncodeError> {
-        // SAFETY: the device is alive for as long as `self` is, and every
-        // encoder opened from it is dropped inside the test that opened it.
-        let device = unsafe { GraphicsDevice::new(DeviceKind::D3d11, self.device.as_raw()) };
-        NvencEncoder::open(&device, config)
+        NvencEncoder::open(&self.graphics_device(), config)
+    }
+
+    /// This device, as the crate's own borrowed handle.
+    fn graphics_device(&self) -> GraphicsDevice {
+        // SAFETY: the device is alive for as long as `self` is, and everything
+        // opened from it is dropped inside the test that opened it.
+        unsafe { GraphicsDevice::new(DeviceKind::D3d11, self.device.as_raw()) }
     }
 
     /// A texture holding a moving pattern, so that successive frames differ and
@@ -1501,6 +1510,75 @@ const fn extension(codec: Codec) -> &'static str {
         Codec::H264 => "h264",
         Codec::Hevc => "hevc",
         Codec::Av1 => "obu",
+    }
+}
+
+#[test]
+fn the_capability_queries_describe_every_codec_this_card_encodes() {
+    // Issue #133: the limits `recorder capabilities` prints come from here on a
+    // machine with an NVIDIA card. Nothing asserts a particular number — a 4090
+    // is not every card — but an encoder that says it produces a codec has to
+    // say how large a picture it takes, whether it has B-frames and whether it
+    // encodes 10-bit, or there was no point opening the session.
+    let Some(gpu) = TestGpu::open() else { return };
+    let measured = super::measure_limits(&gpu.graphics_device());
+
+    assert_eq!(
+        measured.len(),
+        Codec::EFFICIENCY_ORDER.len(),
+        "every codec has to be asked about, including the ones the card refuses"
+    );
+
+    for limits in &measured {
+        let supported = limits
+            .supported()
+            .unwrap_or_else(|| panic!("{} support was not answered", limits.codec()));
+        if !supported {
+            continue;
+        }
+
+        let resolution = limits
+            .max_resolution()
+            .unwrap_or_else(|| panic!("{} has no maximum size", limits.codec()));
+        assert!(
+            resolution.width >= 1920 && resolution.height >= 1080,
+            "{} reported a maximum of {resolution}, which no NVENC generation would say",
+            limits.codec()
+        );
+        assert!(
+            limits.b_frames().is_some(),
+            "{} did not answer whether it has B-frames",
+            limits.codec()
+        );
+        assert!(
+            limits.hdr().is_some(),
+            "{} did not answer whether it encodes 10-bit",
+            limits.codec()
+        );
+    }
+}
+
+#[test]
+fn the_framerate_ceiling_is_left_inferred_because_the_driver_understates_it() {
+    // The one capability this backend declines to report. NVENC answers
+    // `NV_ENC_CAPS_MB_PER_SEC_MAX` with 983,040 on a GeForce RTX 4090 — 121
+    // frames a second at 1080p — and the same card encodes 1280x720 at over a
+    // thousand frames a second through this very backend. Publishing the
+    // driver's figure as a *measurement* would tell a user their encoder cannot
+    // do something it demonstrably can, with no `(i)` to soften it.
+    //
+    // So this asserts the decision rather than the number: whatever NVENC says
+    // about its throughput, none of it reaches the report.
+    let Some(gpu) = TestGpu::open() else { return };
+
+    for limits in super::measure_limits(&gpu.graphics_device()) {
+        assert_eq!(
+            limits.max_luma_samples_per_second(),
+            None,
+            "{} published a framerate ceiling from a driver figure this backend does not \
+             trust",
+            limits.codec()
+        );
     }
 }
 

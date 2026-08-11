@@ -89,6 +89,70 @@ pub(super) const fn component_id(codec: Codec) -> Option<&'static [u16]> {
     }
 }
 
+/// The capability properties an encoder's `AMFCaps` answers to, for one codec.
+///
+/// AMF namespaces its property names by codec — `MaxThroughput` for H.264 and
+/// `HevcMaxThroughput` for HEVC — so the names have to be chosen per codec
+/// rather than shared. A name AMF does not recognise is answered with
+/// `AMF_NOT_FOUND` rather than an error, which would turn a typo here into a
+/// measurement quietly never taken; the test at the bottom of this file
+/// compares each one against the constant bindgen generated from AMD's headers.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CapabilityNames {
+    /// How many macroblocks a second the encoder can process.
+    pub(super) max_throughput: &'static [u16],
+    /// Whether B-frames are available, where the codec's encoder has such a
+    /// capability at all.
+    pub(super) b_frames: Option<&'static [u16]>,
+    /// The highest profile the encoder offers, which is where 10-bit is
+    /// answered from (see [`ten_bit_from_profile`]).
+    pub(super) max_profile: &'static [u16],
+}
+
+/// The capability names for a codec this backend can create a component for.
+pub(super) const fn capability_names(codec: Codec) -> Option<CapabilityNames> {
+    match codec {
+        Codec::H264 => Some(CapabilityNames {
+            max_throughput: wide!("MaxThroughput"),
+            b_frames: Some(wide!("BFrames")),
+            max_profile: wide!("MaxProfile"),
+        }),
+        // AMF's HEVC encoder has no B-frame capability to ask about: the
+        // property does not exist in `VideoEncoderHEVC.h`, because the encoder
+        // does not produce them. That is a fact about the API rather than a
+        // measurement of this machine, so it is left to the reference table
+        // rather than reported as measured.
+        Codec::Hevc => Some(CapabilityNames {
+            max_throughput: wide!("HevcMaxThroughput"),
+            b_frames: None,
+            max_profile: wide!("HevcMaxProfile"),
+        }),
+        // No component identifier, so no component and nothing to ask.
+        Codec::Av1 => None,
+    }
+}
+
+/// Whether the highest profile an encoder offers implies 10-bit encoding.
+///
+/// [`None`] means the question cannot be answered from a profile number, and
+/// the published limit stands:
+///
+/// - **HEVC** can be answered. `AMF_VIDEO_ENCODER_HEVC_PROFILE_ENUM` is `Main`
+///   then `Main10`, in that order, so a maximum at or above `Main10` is an
+///   encoder that produces 10-bit and one below it is an encoder that does not.
+/// - **H.264** cannot. `AMF_VIDEO_ENCODER_PROFILE_ENUM` has no 10-bit profile
+///   in it at all — it ends at Constrained High — so the largest value it can
+///   report says nothing about bit depth, and a comparison would be arithmetic
+///   on unrelated numbers. AMD's H.264 encoder is 8-bit, which is what the
+///   reference table already infers, and inferring it is honest where measuring
+///   it is not available.
+pub(super) const fn ten_bit_from_profile(codec: Codec, max_profile: i64) -> Option<bool> {
+    match codec {
+        Codec::Hevc => Some(max_profile >= sys::AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10 as i64),
+        Codec::H264 | Codec::Av1 => None,
+    }
+}
+
 /// The property holding the out-of-band parameter sets a container needs.
 pub(super) const fn extra_data(codec: Codec) -> &'static [u16] {
     match codec {
@@ -893,6 +957,82 @@ mod tests {
                 "{name} is an H.264 property in the HEVC set"
             );
         }
+    }
+
+    #[test]
+    fn every_capability_name_is_the_one_amd_s_headers_define() {
+        // The names below are hand-written, because AMF's are wide-string
+        // macros and the generated bindings hold them as ASCII bytes. A typo
+        // in one is not a failure: `GetProperty` answers AMF_NOT_FOUND, the
+        // measurement is quietly never taken, and the report goes on showing an
+        // inferred limit that a refresh was supposed to replace. So each one is
+        // checked against the constant bindgen produced from the header.
+        let header = |bytes: &'static [u8]| {
+            String::from_utf8(bytes[..bytes.len() - 1].to_vec()).expect("AMF names are ASCII")
+        };
+
+        let h264 = capability_names(Codec::H264).expect("H.264 has a component");
+        assert_eq!(
+            api::name_to_string(h264.max_throughput),
+            header(sys::AMF_VIDEO_ENCODER_CAP_MAX_THROUGHPUT)
+        );
+        assert_eq!(
+            h264.b_frames.map(api::name_to_string),
+            Some(header(sys::AMF_VIDEO_ENCODER_CAP_BFRAMES))
+        );
+        assert_eq!(
+            api::name_to_string(h264.max_profile),
+            header(sys::AMF_VIDEO_ENCODER_CAP_MAX_PROFILE)
+        );
+
+        let hevc = capability_names(Codec::Hevc).expect("HEVC has a component");
+        assert_eq!(
+            api::name_to_string(hevc.max_throughput),
+            header(sys::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_THROUGHPUT)
+        );
+        assert_eq!(
+            hevc.b_frames, None,
+            "AMF's HEVC encoder has no B-frame capability to ask about"
+        );
+        assert_eq!(
+            api::name_to_string(hevc.max_profile),
+            header(sys::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_PROFILE)
+        );
+
+        assert!(
+            capability_names(Codec::Av1).is_none(),
+            "there is no AV1 component to ask, so there is nothing to name"
+        );
+    }
+
+    #[test]
+    fn ten_bit_is_read_from_a_profile_only_where_the_profile_says_it() {
+        // HEVC's enumeration is Main, then Main10, so the comparison means what
+        // it looks like it means.
+        assert_eq!(
+            ten_bit_from_profile(Codec::Hevc, sys::AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN.into()),
+            Some(false)
+        );
+        assert_eq!(
+            ten_bit_from_profile(
+                Codec::Hevc,
+                sys::AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10.into()
+            ),
+            Some(true)
+        );
+
+        // H.264's does not: `AMF_VIDEO_ENCODER_PROFILE_HIGH` is 100 and
+        // `AMF_VIDEO_ENCODER_PROFILE_CONSTRAINED_HIGH` is 257, neither of them
+        // a 10-bit profile, so no comparison against a maximum can answer the
+        // question and this must decline to.
+        assert_eq!(
+            ten_bit_from_profile(
+                Codec::H264,
+                sys::AMF_VIDEO_ENCODER_PROFILE_CONSTRAINED_HIGH.into()
+            ),
+            None
+        );
+        assert_eq!(ten_bit_from_profile(Codec::Av1, 0), None);
     }
 
     #[test]

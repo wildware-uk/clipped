@@ -279,14 +279,13 @@ as something "Automatic would choose" is a thing it would not
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `--refresh` | off | Ignore the cached report, ask the machine again, and store the new answer |
+| `--refresh` | off | Ignore the cached report, ask the machine again — including the encoders themselves — and store the new answer |
 
 The report distinguishes what was **measured on this machine** from what was
 **inferred** from published limits, and marks every inferred value `(i)`. That
-distinction is the point of the command rather than a detail of it: codec
-support is measured, and the numeric limits beside it are not. A limit shown as
-`—` is one the report declines to state, because the codec's support is unknown
-and a limit beside that word reads as a promise.
+distinction is the point of the command rather than a detail of it. A limit
+shown as `—` is one the report declines to state, because the encoder will not
+produce that codec and a limit beside that word reads as a promise.
 
 An encoder counts as **available** when its vendor runtime loads, because that
 is the library Clipped will encode through. A driver that registers media
@@ -295,8 +294,22 @@ with the transforms listed underneath as the evidence.
 [encoder-capabilities.md](encoder-capabilities.md) explains how each answer is
 arrived at, what the cache does and when it is thrown away.
 
-Detection does not open an encoder session, so running this while a game is
-recording cannot take a session slot from it.
+**Without `--refresh`, detection opens no encoder session**, so running this
+while a game is recording cannot take a session slot from it. The numeric limits
+are then the published ones, marked `(i)`.
+
+`--refresh` is the exception, and it is deliberate: it opens one session per
+*available* hardware encoder — a few hundred milliseconds in total, and nothing
+at all on an adapter whose encoder runtime will not load — and asks each for its
+own maximum resolution, throughput, B-frame and 10-bit support, which is the
+only way those stop being inferred. The answers are cached, so the next plain
+run shows them for nothing, and no later plain run takes them away again: a run
+that opens no session never overwrites a stored measurement of the same machine
+([encoder-capabilities.md](encoder-capabilities.md)). Do not run it mid-match;
+that session slot may belong to the game. The report itself names the command while an encoder has
+never been asked, and stops mentioning it once every encoder has — some limits
+stay `(i)` for ever, and being told to measure them again would waste a session
+slot.
 
 **A supported codec is not a recording.** The footer separates the two. NVENC
 ([#15](https://github.com/wildware-uk/clipped/issues/15)), AMF

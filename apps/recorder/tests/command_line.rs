@@ -242,13 +242,27 @@ fn capabilities_reports_encoders_and_codecs() {
 }
 
 #[test]
-fn capabilities_refreshes_without_the_cache_and_agrees_with_itself() {
-    // The cached and the freshly probed answer have to be the same answer, or
-    // the cache is not a cache. Run in this order deliberately: the first call
-    // populates or reuses the cache, the second ignores it and probes.
-    let cached = recorder(&["capabilities"]);
+fn capabilities_refreshes_and_the_cache_gives_the_same_answer_back() {
+    // The probed and the cached answer have to be the same answer, or the cache
+    // is not a cache. Run in this order deliberately: `--refresh` ignores what
+    // is stored, probes — opening an encoder session, which is the only run
+    // that does (issue #133) — and stores what it found; the plain call then
+    // has to read that back unchanged, measurements included.
+    //
+    // The order used to be the other way round, and cannot be any more: a plain
+    // run opens no session, so on a machine whose cache holds an unmeasured
+    // report it would print inferred limits where the refresh prints measured
+    // ones. Comparing those two would be asserting that measuring changes
+    // nothing.
+    //
+    // The other tests in this file run against the same real cache file at the
+    // same time, and that is not a race any more: a run that opens no session
+    // never overwrites a stored measurement of the same machine, so no
+    // interleaving of theirs can put published limits between these two calls
+    // (`clipped_encoder::detect_cached`, and the tests that hold that rule).
     let refreshed = recorder(&["capabilities", "--refresh"]);
-    assert!(cached.status.success() && refreshed.status.success());
+    let cached = recorder(&["capabilities"]);
+    assert!(refreshed.status.success() && cached.status.success());
 
     // Everything up to the footer, which differs by design: it says where the
     // answer came from and how long it took.
@@ -260,14 +274,19 @@ fn capabilities_refreshes_without_the_cache_and_agrees_with_itself() {
             .to_owned()
     };
     assert_eq!(
-        body(&cached),
         body(&refreshed),
-        "a cached report and a probed one describe the same machine"
+        body(&cached),
+        "a probed report and the cached copy of it describe the same machine"
     );
     assert!(
         stdout(&refreshed).contains("probed just now"),
         "--refresh must actually probe:\n{}",
         stdout(&refreshed)
+    );
+    assert!(
+        stdout(&cached).contains("read from"),
+        "the run after a refresh must be answered by the cache it wrote:\n{}",
+        stdout(&cached)
     );
 }
 

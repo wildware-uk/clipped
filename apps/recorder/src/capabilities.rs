@@ -34,8 +34,8 @@ use std::fmt;
 
 use clipped_encoder::{
     detect_cached, Adapter, CapabilityCache, CapabilityReport, Claim, CodecSupport, Detection,
-    DetectionSource, EncoderKind, EncoderReport, ProbeError, Recommendation, Resolution, Signal,
-    SystemProbe,
+    DetectionSource, EncoderKind, EncoderReport, ProbeError, Probing, Recommendation, Resolution,
+    Signal, SystemProbe,
 };
 
 use crate::cli::CapabilitiesArgs;
@@ -103,10 +103,31 @@ impl From<ProbeError> for CapabilitiesError {
 pub fn run(args: &CapabilitiesArgs) -> Result<(), CapabilitiesError> {
     let probe = system_probe();
     let cache = cache(args.refresh);
-    let detection = detect_cached(probe.as_ref(), &cache)?;
+    let detection = detect_cached(probe.as_ref(), &cache, probing(args.refresh))?;
 
     print!("{}", render(&detection, &cache));
     Ok(())
+}
+
+/// Whether this run may open an encoder session to measure the numeric limits.
+///
+/// Only `--refresh`, and that is the whole rule. Opening a session is how the
+/// maximum resolution, the throughput, B-frames and 10-bit stop being inferred,
+/// and it is also how a game mid-match loses an encode session slot to a
+/// process the user did not ask to run — so the two are tied together: a user
+/// who asks for a fresh look gets the measurements, and a user who asks what
+/// their machine can do gets the published limits, marked, in a few
+/// milliseconds.
+///
+/// Nothing else in this build reaches [`Probing::WithSessions`], which is what
+/// keeps the promise that probing never happens during a recording: there is
+/// one caller, and it is a subcommand that records nothing.
+const fn probing(refresh: bool) -> Probing {
+    if refresh {
+        Probing::WithSessions
+    } else {
+        Probing::WithoutSessions
+    }
 }
 
 /// The cache to use, which `--refresh` turns into one that never answers.
@@ -147,6 +168,13 @@ fn system_probe() -> Box<dyn SystemProbe> {
         }
 
         fn encoders(&self) -> Result<clipped_encoder::EncoderObservations, ProbeError> {
+            Err(ProbeError::UnsupportedPlatform)
+        }
+
+        fn encoder_limits(
+            &self,
+            _adapters: &[Adapter],
+        ) -> Result<Vec<clipped_encoder::EncoderLimits>, ProbeError> {
             Err(ProbeError::UnsupportedPlatform)
         }
     }
@@ -248,17 +276,24 @@ fn encoder_lines(encoder: &EncoderReport, report: &CapabilityReport) -> String {
 
 /// One codec's row.
 ///
-/// A codec whose support is unknown prints no limits. The limits are inferred
-/// from published documentation for the encoder family, so printing
-/// `unknown  8192x4352 (i)  …  yes (i)` puts a 10-bit ceiling beside a codec
-/// that may not exist on this machine at all, and the eye reads the row as a
-/// promise. The support column is the one the rest depends on.
+/// A codec this encoder will not produce prints no limits, whether that is
+/// because nothing knows — `unknown` — or because the encoder itself said no.
+/// The limits come from published documentation for the encoder family, so
+/// printing `unknown  8192x4352 (i)  …  yes (i)` puts a 10-bit ceiling beside a
+/// codec that may not exist on this machine at all, and the eye reads the row
+/// as a promise. The support column is the one the rest depends on.
 fn codec_line(support: &CodecSupport) -> String {
-    if matches!(support.supported(), Claim::Unknown) {
+    let unavailable = match support.supported() {
+        Claim::Unknown => Some("unknown".to_owned()),
+        Claim::Measured(false) => Some("no".to_owned()),
+        Claim::Inferred(false) => Some(format!("no {INFERRED_MARKER}")),
+        Claim::Measured(true) | Claim::Inferred(true) => None,
+    };
+    if let Some(supported) = unavailable {
         return format!(
             "    {:<7}{:<12}{:<17}{:<22}{:<11}{}\n",
             support.codec().to_string(),
-            "unknown",
+            supported,
             UNSTATED,
             UNSTATED,
             UNSTATED,
@@ -320,12 +355,14 @@ fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
     out.push_str(&format!(
         "{INFERRED_MARKER} inferred from published limits, not measured on this machine. \
          A value without it\n    was measured here. Codec support is measured when Windows \
-         reports a hardware\n    encoder for that codec; the framerate ceiling is what the \
-         codec's level allows,\n    not what the silicon can sustain. A cell reading \
-         {UNSTATED} is a limit left unstated,\n    because a codec whose support is unknown \
-         has no limits worth quoting. See\n    docs/encoder-capabilities.md.\n\n"
+         reports a hardware\n    encoder for that codec, or when the encoder itself was \
+         asked. A measured\n    framerate ceiling is the encoder's own throughput; an \
+         inferred one is what the\n    codec's level allows, which no silicon reaches. A \
+         cell reading {UNSTATED} is a limit\n    left unstated, because a codec this encoder \
+         will not produce has no limits\n    worth quoting. See docs/encoder-capabilities.md.\n\n"
     ));
 
+    out.push_str(&measurement_lines(detection.report()));
     out.push_str(&implementation_lines());
 
     let source = match (detection.source(), cache.path()) {
@@ -341,6 +378,32 @@ fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
         detection.elapsed().as_millis()
     ));
     out
+}
+
+/// How to turn published limits into measured ones, for a machine where that
+/// would still change something.
+///
+/// The limits an encoder can be asked for are only asked for on `--refresh`,
+/// because asking costs an encode session slot on a machine that may be in the
+/// middle of a match (`docs/encoder-capabilities.md`). A reader looking at a row
+/// full of `(i)` deserves to know that a better answer is one command away.
+///
+/// The condition is "has any encoder not been asked", not "is anything
+/// inferred", and the difference matters: some limits stay inferred whatever
+/// happens — NVENC's framerate ceiling is deliberately never published from the
+/// driver's figure — so the second question would go on advertising a refresh
+/// to somebody who had just done one, and cost them a session slot for nothing.
+fn measurement_lines(report: &CapabilityReport) -> String {
+    if !report.has_unasked_encoder() {
+        return String::new();
+    }
+
+    format!(
+        "Some limits above are {INFERRED_MARKER} because no encoder has been asked. \
+         `clipped-recorder\n    capabilities --refresh` asks them, which opens one session per \
+         available\n    hardware encoder for a few hundred milliseconds and stores what they \
+         say. It\n    is not done automatically: that session slot may belong to a game.\n\n"
+    )
 }
 
 /// What this build can encode with, what it only detects, and what it still
@@ -443,15 +506,19 @@ mod tests {
 
     /// Renders a report the way `run` would, without probing anything.
     fn rendered(facts: &SystemFacts) -> String {
-        let report = detect(facts);
+        rendered_report(&detect(facts))
+    }
+
+    /// The same, for a report that has already been detected.
+    fn rendered_report(report: &CapabilityReport) -> String {
         let mut out = String::from("Adapters\n\n");
         for adapter in report.adapters() {
             out.push_str(&adapter_lines(adapter));
         }
         for encoder in report.encoders() {
-            out.push_str(&encoder_lines(encoder, &report));
+            out.push_str(&encoder_lines(encoder, report));
         }
-        out.push_str(&automatic_lines(&report));
+        out.push_str(&automatic_lines(report));
         out
     }
 
@@ -504,6 +571,131 @@ mod tests {
     }
 
     #[test]
+    fn a_limit_the_encoder_itself_answered_prints_without_the_marker() {
+        // Issue #133, at the only place a user meets it. The same row is
+        // rendered twice — once from a report nobody measured the limits of,
+        // once from a report an encoder session answered — and the difference
+        // has to be visible, in the direction that the measured one loses the
+        // marker rather than the inferred one gaining a number.
+        let runtime = RuntimeObservation::new(
+            EncoderKind::Nvenc,
+            "nvEncodeAPI64.dll",
+            RuntimeOutcome::Loaded,
+        );
+        let transform =
+            HardwareEncoder::new(Vendor::Nvidia, Codec::Hevc, "NVIDIA HEVC Encoder MFT");
+
+        let published = rendered(&SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(runtime.clone())
+                .with_hardware_encoder(transform.clone()),
+        ));
+        let answered = clipped_encoder::EncoderLimits::new(EncoderKind::Nvenc, Codec::Hevc)
+            .with_max_resolution(clipped_encoder::Resolution::new(8192, 8192))
+            .with_b_frames(true)
+            .with_hdr(true);
+        let partly_measured = rendered(&SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(runtime.clone())
+                .with_hardware_encoder(transform.clone())
+                .with_limits(answered),
+        ));
+        let fully_measured = rendered(&SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(runtime)
+                .with_hardware_encoder(transform)
+                .with_limits(answered.with_max_luma_samples_per_second(500_000_000)),
+        ));
+
+        let hevc = |output: &str| {
+            output
+                .lines()
+                .find(|line| line.trim_start().starts_with("HEVC"))
+                .expect("HEVC has a row")
+                .to_owned()
+        };
+
+        // Two published values and two the table declines to state: NVENC's
+        // HEVC B-frames and 10-bit arrived with a generation, so the reference
+        // table leaves both `Unknown` rather than guessing.
+        assert_eq!(
+            hevc(&published).matches(INFERRED_MARKER).count(),
+            2,
+            "every published limit in this row must be marked: {}",
+            hevc(&published)
+        );
+        assert_eq!(
+            hevc(&published).matches("unknown").count(),
+            2,
+            "the table states no B-frame or 10-bit claim for NVENC HEVC: {}",
+            hevc(&published)
+        );
+
+        // The NVENC-shaped answer: the size, B-frames and 10-bit come from the
+        // session and the framerate ceiling deliberately does not, so exactly
+        // one marker survives and the size is not the value carrying it.
+        assert!(
+            hevc(&partly_measured).contains("8192x8192"),
+            "the measured size has to be the one the encoder gave: {}",
+            hevc(&partly_measured)
+        );
+        assert_eq!(
+            hevc(&partly_measured).matches(INFERRED_MARKER).count(),
+            1,
+            "only the framerate ceiling was left unmeasured: {}",
+            hevc(&partly_measured)
+        );
+        assert!(
+            !hevc(&partly_measured).contains(&format!("8192x8192 {INFERRED_MARKER}")),
+            "the marker that is left belongs to the framerate, not the size: {}",
+            hevc(&partly_measured)
+        );
+
+        assert!(
+            !hevc(&fully_measured).contains(INFERRED_MARKER),
+            "every limit in this row was measured and none of it may be marked: {}",
+            hevc(&fully_measured)
+        );
+    }
+
+    #[test]
+    fn a_codec_the_encoder_says_it_cannot_produce_is_given_no_limits_either() {
+        // A measured "no" is not the same cell as `unknown`, and neither of
+        // them may carry a maximum resolution: a row that reads
+        // `no  8192x4352 (i)` invites the reading that the limit applies to
+        // something, when the codec is not there at all.
+        let facts = SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::Nvenc,
+                    "nvEncodeAPI64.dll",
+                    RuntimeOutcome::Loaded,
+                ))
+                .with_limits(
+                    clipped_encoder::EncoderLimits::new(EncoderKind::Nvenc, Codec::Av1)
+                        .with_supported(false),
+                ),
+        );
+        let output = rendered(&facts);
+        let av1 = output
+            .lines()
+            .find(|line| line.trim_start().starts_with("AV1"))
+            .expect("AV1 has a row");
+
+        let columns: Vec<&str> = av1.split_whitespace().collect();
+        assert_eq!(columns[1], "no", "the encoder was asked and said no: {av1}");
+        assert!(
+            !av1.contains(INFERRED_MARKER),
+            "a codec the encoder will not produce must not be given limits: {av1}"
+        );
+        assert!(av1.contains(UNSTATED), "{av1}");
+    }
+
+    #[test]
     fn a_codec_whose_support_is_unknown_is_not_given_limits() {
         // The AMD AV1 row on the development machine: the driver registers no
         // AV1 transform, so support is unknown. Printing `8192x4352 (i)` and
@@ -532,6 +724,58 @@ mod tests {
         assert!(
             av1.contains(UNSTATED),
             "the unstated limits need a mark of their own: {av1}"
+        );
+    }
+
+    #[test]
+    fn the_refresh_hint_appears_only_where_asking_would_change_the_report() {
+        // A report nobody has measured should say how to do better; a report of
+        // a machine that has been asked should not tell its reader to ask again,
+        // even though limits stay `(i)` there — NVENC's framerate ceiling always
+        // does. Neither should a machine with no hardware encoder to ask.
+        let runtime = RuntimeObservation::new(
+            EncoderKind::Nvenc,
+            "nvEncodeAPI64.dll",
+            RuntimeOutcome::Loaded,
+        );
+        let unasked = detect(&SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none().with_runtime(runtime.clone()),
+        ));
+        assert!(
+            measurement_lines(&unasked).contains("--refresh"),
+            "a report of published limits should say how to measure them"
+        );
+
+        // Asked, and answered about the size alone: the framerate ceiling is
+        // still inferred and always will be, so the report must stop
+        // advertising a command that would produce this same page again.
+        let asked = detect(&SystemFacts::new(
+            vec![nvidia_card()],
+            [Codec::Av1, Codec::Hevc, Codec::H264].into_iter().fold(
+                EncoderObservations::none().with_runtime(runtime),
+                |observations, codec| {
+                    observations.with_limits(
+                        clipped_encoder::EncoderLimits::new(EncoderKind::Nvenc, codec)
+                            .with_supported(true)
+                            .with_max_resolution(clipped_encoder::Resolution::new(8192, 8192)),
+                    )
+                },
+            ),
+        ));
+        assert!(
+            rendered_report(&asked).contains(INFERRED_MARKER),
+            "this report should still have inferred values in it, or it tests nothing"
+        );
+        assert!(
+            measurement_lines(&asked).is_empty(),
+            "the encoder has been asked and the report is still advertising --refresh"
+        );
+
+        let no_hardware = detect(&SystemFacts::new(Vec::new(), EncoderObservations::none()));
+        assert!(
+            measurement_lines(&no_hardware).is_empty(),
+            "there is no encoder to open a session on, so there is nothing to suggest"
         );
     }
 
@@ -671,10 +915,19 @@ mod tests {
                     fn encoders(&self) -> Result<EncoderObservations, ProbeError> {
                         Ok(EncoderObservations::none())
                     }
+                    fn encoder_limits(
+                        &self,
+                        _adapters: &[Adapter],
+                    ) -> Result<Vec<clipped_encoder::EncoderLimits>, ProbeError>
+                    {
+                        // No adapters, so no encoder to open a session on.
+                        Ok(Vec::new())
+                    }
                 }
                 NoMachine
             },
             &CapabilityCache::disabled(),
+            Probing::WithoutSessions,
         )
         .expect("a machine with no adapters detects successfully");
 

@@ -100,6 +100,13 @@ features = [
     # `DXGI_FORMAT_NV12` and the rest of the formats those textures are created
     # in.
     "Win32_Graphics_Dxgi_Common",
+    # `D3D11CreateDevice` — which is declared in terms of `D3D_DRIVER_TYPE` and
+    # `D3D_FEATURE_LEVEL`, so it needs this feature as well as the Direct3D 11
+    # one above. Encoding still creates no device: the backends are handed the
+    # one the capture created. What needs it is capability probing, which has no
+    # capture to borrow a device from and must make its own to open an encoder
+    # session against (crates/encoder/src/windows/device.rs, issue #133).
+    "Win32_Graphics_Direct3D",
 ]
 
 # Creating a device is a test concern, and only a test concern. The backends are

@@ -63,9 +63,14 @@
 //!   their driver versions, from DXGI; whether each vendor's encoder runtime
 //!   loads; and which codecs the display driver registers a hardware encoder
 //!   for, from Media Foundation.
-//! - **Inferred**, from published limits: maximum resolution, the codec level's
-//!   framerate ceiling, B-frame and 10-bit support. Labelled as inferred
-//!   everywhere they appear.
+//! - **Measured by asking an encoder**, which costs a session and therefore
+//!   happens only when a user asks for it ([`Probing::WithSessions`], reached
+//!   through `capabilities --refresh`): the maximum resolution, the encoder's
+//!   own throughput, B-frames and 10-bit, for the vendors whose runtime answers
+//!   ([`EncoderLimits`]).
+//! - **Inferred**, from published limits, wherever nothing measured: maximum
+//!   resolution, the codec level's framerate ceiling, B-frame and 10-bit
+//!   support. Labelled as inferred everywhere they appear.
 //! - **Unknown** wherever neither applies. In particular, no table entry in
 //!   this crate claims HEVC or AV1 support: those become `true` only when the
 //!   operating system reports an encoder for them. A user cannot be talked into
@@ -129,8 +134,8 @@ pub use error::{EncodeContext, EncodeError, EncodeErrorKind};
 pub use frame::{DeviceKind, GraphicsDevice, SourceFrame, SourceTexture, SurfaceKind};
 pub use packet::{EncodedPacket, PictureKind};
 pub use probe::{
-    probe, EncoderObservations, HardwareEncoder, ProbeError, RuntimeObservation, RuntimeOutcome,
-    SystemFacts, SystemProbe,
+    probe, EncoderLimits, EncoderObservations, HardwareEncoder, ProbeError, Probing,
+    RuntimeObservation, RuntimeOutcome, SystemFacts, SystemProbe,
 };
 pub use recommendation::{measured_codecs, recommend, ChoiceReason, Recommendation};
 

@@ -85,8 +85,10 @@ mod sys;
 mod api;
 mod settings;
 
+// Visible to the rest of `windows` for one item: the mutex that serialises
+// every test which takes an NVENC session (`tests::SESSIONS`).
 #[cfg(test)]
-mod tests;
+pub(in crate::windows) mod tests;
 
 use core::cell::Cell;
 use core::ffi::c_void;
@@ -102,6 +104,7 @@ use crate::config::EncoderConfig;
 use crate::error::{EncodeContext, EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice, SourceFrame, SurfaceKind};
 use crate::packet::{EncodedPacket, PictureKind};
+use crate::probe::EncoderLimits;
 
 /// The kinds of graphics resource this backend can bind.
 const SUPPORTED_SURFACES: &[SurfaceKind] = &[SurfaceKind::D3d11Texture2D];
@@ -392,6 +395,75 @@ impl VideoEncoder for NvencEncoder {
             );
         }
     }
+}
+
+/// Asks NVENC what it can do, on the device it would encode on.
+///
+/// **One session, opened and destroyed inside this call, and asked about every
+/// codec.** That is the whole cost of a `--refresh` on an NVIDIA card: one
+/// encode session slot, for the length of the queries. (Its AMF sibling has to
+/// create a component per codec, which is why the two read differently.) The
+/// session is never initialised — `nvEncGetEncodeCaps` answers from the session
+/// alone — so nothing is configured, no bitstream buffer is allocated and no
+/// picture is coded. Nothing calls this unless a user asked (see
+/// [`crate::probe::Probing`]).
+///
+/// A failure at any point is a measurement that did not happen, not an error: a
+/// machine whose session table is full because a game is recording gets the
+/// published limits it would have had anyway, and a line in the diagnostics
+/// saying why (AGENTS.md sections 15 and 16).
+pub(in crate::windows) fn measure_limits(device: &GraphicsDevice) -> Vec<EncoderLimits> {
+    // No picture is being encoded, so there is no resolution to name. Nothing
+    // built from this context reaches a user: the failures below are logged as
+    // diagnostics about a query, by kind, never shown as "could not encode".
+    let context = EncodeContext::new(EncoderKind::Nvenc, Codec::H264, Resolution::new(0, 0));
+
+    let runtime = match api::NvencRuntime::load() {
+        Ok(runtime) => runtime,
+        Err(failure) => {
+            tracing::debug!(
+                library = api::LIBRARY,
+                %failure,
+                "NVENC could not be loaded, so its limits were not measured"
+            );
+            return Vec::new();
+        }
+    };
+
+    let session = match Session::open(runtime, device.as_raw(), context) {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!(
+                reason = %error.kind(),
+                "an NVENC session could not be opened, so its limits were not measured and \
+                 the published ones stand"
+            );
+            return Vec::new();
+        }
+    };
+
+    // Which codecs the hardware lists is a property of the session, not of the
+    // codec being asked about, so it is read once for all three.
+    let guids = match session.encode_guids() {
+        Ok(guids) => guids,
+        Err(error) => {
+            tracing::debug!(
+                reason = %error.kind(),
+                "NVENC would not say which codecs it encodes, so nothing was measured"
+            );
+            return Vec::new();
+        }
+    };
+
+    let measured = Codec::EFFICIENCY_ORDER
+        .into_iter()
+        .map(|codec| session.limits(codec, &guids))
+        .collect();
+
+    // The session is destroyed here, by `Session::drop`, which gives the
+    // encode session slot back (AGENTS.md section 58).
+    drop(session);
+    measured
 }
 
 /// The configuration checks that do not need a session.
@@ -747,6 +819,16 @@ impl Session {
 
     /// Whether the hardware lists this codec among the ones it encodes.
     fn supports_codec(&self, codec: Codec) -> Result<bool, EncodeError> {
+        Ok(lists_codec(&self.encode_guids()?, codec))
+    }
+
+    /// The codecs the hardware lists, as the GUIDs NVENC names them by.
+    ///
+    /// Asked once and read many times where more than one codec is in
+    /// question: the list is a property of the session, and enumerating it per
+    /// codec would be three round trips through the driver for one answer
+    /// ([`measure_limits`]).
+    fn encode_guids(&self) -> Result<Vec<sys::GUID>, EncodeError> {
         let count_fn = self
             .runtime
             .functions()
@@ -780,9 +862,99 @@ impl Session {
         let status = unsafe { list_fn(self.encoder, guids.as_mut_ptr(), count, &raw mut written) };
         self.check(status, "nvEncGetEncodeGUIDs")?;
         guids.truncate(written as usize);
+        Ok(guids)
+    }
 
-        let wanted = settings::codec_guid(codec);
-        Ok(guids.iter().any(|guid| settings::same_guid(guid, &wanted)))
+    /// Everything the capability queries say about one codec.
+    ///
+    /// Each answer is taken on its own: a driver that will not answer one query
+    /// still answers the others, and the fields that came back are measured
+    /// while the rest fall back to the published limits
+    /// (`crate::detection::codec_support`).
+    ///
+    /// A codec the hardware does not list gets `supported: false` and nothing
+    /// else. That is not the reference table's `Unknown`, and the difference is
+    /// the point: NVENC enumerating its own codecs is the encoder Clipped would
+    /// record through saying it cannot produce this one, which is a measurement
+    /// in a way that Windows failing to register a transform is not.
+    ///
+    /// `guids` is what the session listed, from [`encode_guids`](Self::encode_guids).
+    fn limits(&self, codec: Codec, guids: &[sys::GUID]) -> EncoderLimits {
+        let supported = lists_codec(guids, codec);
+        let measured = EncoderLimits::new(EncoderKind::Nvenc, codec).with_supported(supported);
+        if !supported {
+            return measured;
+        }
+
+        // `nvEncGetEncodeCaps` reports a numeric answer per capability, and
+        // zero means "none" for every one of these: no maximum size, no
+        // throughput and no B-frames are all answers a driver gives for a
+        // capability it does not implement rather than for a limit of zero. A
+        // zero is therefore treated as "did not say", leaving the published
+        // limit in place instead of reporting a GPU that encodes nothing.
+        //
+        // The two are independent axis maxima and the pair is not a size the
+        // driver was asked about: NVENC says how wide and how tall a picture
+        // may be, not that a picture that wide *and* that tall will be
+        // accepted. That is what makes this an upper bound rather than a
+        // promise, measured or not, and only opening a session at a size
+        // settles that size (`docs/encoder-capabilities.md`).
+        let size = Resolution::new(
+            self.capability_or_zero(codec, sys::NV_ENC_CAPS_WIDTH_MAX, "NV_ENC_CAPS_WIDTH_MAX"),
+            self.capability_or_zero(codec, sys::NV_ENC_CAPS_HEIGHT_MAX, "NV_ENC_CAPS_HEIGHT_MAX"),
+        );
+        let measured = if size.width > 0 && size.height > 0 {
+            measured.with_max_resolution(size)
+        } else {
+            measured
+        };
+
+        // The framerate ceiling is deliberately not measured here. NVENC does
+        // answer `NV_ENC_CAPS_MB_PER_SEC_MAX`, and the answer is not a ceiling:
+        // on a GeForce RTX 4090 (driver 32.0.16.1074) it reports 983,040
+        // macroblocks a second — 121 frames a second at 1080p — and this
+        // backend encodes 1280x720 at 1,034 frames a second on that card,
+        // synchronously, in a release build. That is 3.7 times the figure. So
+        // reporting it as measured would put a number on the screen that is
+        // wrong in the direction that matters: a user who wants to record at
+        // 240 would be told the encoder cannot, by a value with no `(i)` beside
+        // it to warn them. The codec level's ceiling is left in its place,
+        // marked inferred, which is at least honest about being an upper bound
+        // (`docs/encoder-capabilities.md`).
+
+        // These two are different: a zero *is* the answer. "No B-frames" and
+        // "not 10-bit" are what NVENC reports for hardware that has neither,
+        // and both are true of real generations — AV1 on Ada has no B-frames,
+        // and H.264 is 8-bit on every NVENC there has ever been. So they are
+        // read only when the query itself succeeded, and a query that failed
+        // leaves them unmeasured.
+        let measured = match self.capability(codec, sys::NV_ENC_CAPS_NUM_MAX_BFRAMES) {
+            Ok(maximum) => measured.with_b_frames(maximum > 0),
+            Err(error) => {
+                log_unanswered(codec, "NV_ENC_CAPS_NUM_MAX_BFRAMES", &error);
+                measured
+            }
+        };
+        match self.capability(codec, sys::NV_ENC_CAPS_SUPPORT_10BIT_ENCODE) {
+            Ok(supported) => measured.with_hdr(supported > 0),
+            Err(error) => {
+                log_unanswered(codec, "NV_ENC_CAPS_SUPPORT_10BIT_ENCODE", &error);
+                measured
+            }
+        }
+    }
+
+    /// One numeric capability, with a failure to answer read as zero.
+    fn capability_or_zero(
+        &self,
+        codec: Codec,
+        capability: sys::NV_ENC_CAPS,
+        name: &'static str,
+    ) -> u32 {
+        self.capability(codec, capability).unwrap_or_else(|error| {
+            log_unanswered(codec, name, &error);
+            0
+        })
     }
 
     /// One numeric capability of this encoder for this codec.
@@ -1471,6 +1643,28 @@ fn missing(context: EncodeContext, operation: &'static str) -> EncodeError {
             detail: format!("the runtime does not provide {operation}"),
         },
     )
+}
+
+/// Whether a codec is in the list the hardware gave.
+fn lists_codec(guids: &[sys::GUID], codec: Codec) -> bool {
+    let wanted = settings::codec_guid(codec);
+    guids.iter().any(|guid| settings::same_guid(guid, &wanted))
+}
+
+/// Logs a capability query the driver would not answer.
+///
+/// The measurement is simply not made and the published limit stands, so this
+/// is a diagnostic rather than a failure — but a silent one would leave a
+/// machine quietly reporting inferred limits after a refresh that looked like
+/// it worked (AGENTS.md section 15).
+fn log_unanswered(codec: Codec, capability: &'static str, error: &EncodeError) {
+    tracing::debug!(
+        encoder = %EncoderKind::Nvenc.log_encoder_family(),
+        codec = codec.log_value(),
+        capability,
+        reason = %error.kind(),
+        "NVENC would not answer a capability query, so the published limit stands"
+    );
 }
 
 /// Logs a failure to release something, which is all a caller could do with it.

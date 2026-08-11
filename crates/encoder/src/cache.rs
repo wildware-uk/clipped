@@ -41,6 +41,15 @@
 //! that is somehow never caching says so in the diagnostics rather than just
 //! being slow.
 //!
+//! With one exception, and it is about not losing something the user paid for.
+//! Two runs on the same machine no longer produce the same report: one that
+//! opened an encoder session knows the encoder's own limits and one that did
+//! not knows the published ones. So "the file is overwritten" holds for a run
+//! that knows at least as much, and a run that opened no session leaves a
+//! stored measurement alone rather than replacing it with a table entry
+//! (AGENTS.md section 56). [`CapabilityCache::stored`] is how a writer asks
+//! what it would be replacing; [`crate::detect_cached`] holds the rule.
+//!
 //! The file is written to a temporary name and renamed into place, so a process
 //! that dies mid-write leaves the previous answer intact rather than a
 //! half-written one.
@@ -89,7 +98,29 @@ pub const CACHE_FORMAT: u32 = 2;
 /// added `libmfx64.dll` to the two already there — so a machine that has not
 /// changed gets an extra measured line, and one that installs only that name
 /// changes availability outright.
-pub const DETECTION_REVISION: u32 = 2;
+///
+/// Revision 3: encoder sessions can now be asked for their own limits
+/// ([#133](https://github.com/wildware-uk/clipped/issues/133)). A stored
+/// revision 2 report has the published limits everywhere, marked inferred, and
+/// this build would answer with measured ones for the same machine — so
+/// without this bump every installation that had already cached would go on
+/// showing yesterday's inferred numbers until its GPU changed.
+///
+/// # Why the key did not have to change with it
+///
+/// The stored report now depends on something outside the key: whether the run
+/// that wrote it opened an encoder session. That does not make the key wrong,
+/// because a measured report and an inferred one are both true of the same
+/// machine — one simply says more. Everything that could make a *measurement*
+/// stale is already in the key, since the encoder's own limits change when the
+/// adapter or its driver changes and at no other time.
+///
+/// What follows from that is worth stating, because it is the one surprising
+/// behaviour: a plain `capabilities` run after a driver update finds the cache
+/// stale, re-probes without opening a session, and replaces measured limits
+/// with published ones. That is correct — the measurements described the
+/// previous driver — and `capabilities --refresh` takes them again.
+pub const DETECTION_REVISION: u32 = 3;
 
 /// The directory name Clipped uses under `%LOCALAPPDATA%`.
 ///
@@ -346,12 +377,32 @@ impl CapabilityCache {
     /// Reads the cache, if it still describes this machine.
     #[must_use]
     pub fn load(&self, signature: &HardwareSignature) -> CacheState {
-        let Some(path) = self.path.as_deref() else {
+        if self.path.is_none() {
             return CacheState::Stale(StaleReason::Disabled);
-        };
+        }
         if self.ignore_stored {
             return CacheState::Stale(StaleReason::Refreshed);
         }
+        self.stored(signature)
+    }
+
+    /// What is on disk for this machine, whatever the caller asked to ignore.
+    ///
+    /// [`load`](Self::load) answers "should this run use the stored report?",
+    /// and `--refresh` answers no to that. This answers a different question —
+    /// "what would writing now replace?" — which is not the same question and
+    /// must not be given the same answer: a run that opened no encoder session
+    /// has to know that the file it is about to overwrite holds measurements it
+    /// did not take (see [`crate::detect_cached`]).
+    ///
+    /// Asked immediately before the write, because the gap between asking and
+    /// writing is the only window in which another process can still lose a
+    /// measurement here.
+    #[must_use]
+    pub fn stored(&self, signature: &HardwareSignature) -> CacheState {
+        let Some(path) = self.path.as_deref() else {
+            return CacheState::Stale(StaleReason::Disabled);
+        };
 
         let contents = match fs::read_to_string(path) {
             Ok(contents) => contents,
@@ -467,6 +518,45 @@ fn application_directory() -> Option<PathBuf> {
     }
 }
 
+/// A directory of one test's own, removed when it is dropped.
+///
+/// Lives here rather than in a test module because the cache is not the only
+/// thing whose tests need a cache file nobody else is writing:
+/// [`crate::detect_cached`]'s are about what happens to that file, and two
+/// copies of this would be two chances to leave a temporary directory behind
+/// (AGENTS.md section 55).
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct TestDirectory(PathBuf);
+
+#[cfg(test)]
+impl TestDirectory {
+    /// A directory named for `label`, the process and the thread, so that tests
+    /// running in parallel cannot share one.
+    pub(crate) fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "clipped-encoder-cache-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("the temporary directory can be created");
+        Self(path)
+    }
+
+    /// A cache inside it.
+    pub(crate) fn cache(&self) -> CapabilityCache {
+        CapabilityCache::at(self.0.join(CACHE_FILE_NAME))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,33 +564,6 @@ mod tests {
     use crate::codec::Vendor;
     use crate::detect;
     use crate::probe::{EncoderObservations, SystemFacts};
-
-    /// A directory of this test's own, removed when it is dropped.
-    #[derive(Debug)]
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "clipped-encoder-cache-{label}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("the temporary directory can be created");
-            Self(path)
-        }
-
-        fn cache(&self) -> CapabilityCache {
-            CapabilityCache::at(self.0.join(CACHE_FILE_NAME))
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn cache_path(cache: &CapabilityCache) -> PathBuf {
         cache.path().expect("this cache has a path").to_path_buf()
@@ -537,6 +600,34 @@ mod tests {
         match cache.load(&signature) {
             CacheState::Fresh { report: stored, .. } => assert_eq!(stored, report),
             CacheState::Stale(reason) => panic!("the cache should have answered: {reason}"),
+        }
+    }
+
+    #[test]
+    fn a_run_that_ignores_the_stored_report_can_still_see_what_it_would_replace() {
+        // The two questions the module doc separates. `--refresh` answers "no"
+        // to "should I use this?" and still has to be able to ask "what is
+        // there?", because the rule that a cheap probe does not overwrite a
+        // measurement is enforced where the write happens.
+        let directory = TestDirectory::new("stored-while-ignored");
+        let adapters = vec![card(1)];
+        let signature = HardwareSignature::of(&adapters);
+        let report = report_for(adapters);
+        directory
+            .cache()
+            .store(&signature, &report)
+            .expect("the cache is written");
+
+        let ignoring = directory.cache().ignoring_stored();
+        assert_eq!(
+            ignoring.load(&signature),
+            CacheState::Stale(StaleReason::Refreshed)
+        );
+        match ignoring.stored(&signature) {
+            CacheState::Fresh { report: stored, .. } => assert_eq!(stored, report),
+            CacheState::Stale(reason) => {
+                panic!("the file is there and describes this machine: {reason}")
+            }
         }
     }
 

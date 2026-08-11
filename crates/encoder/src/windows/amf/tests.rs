@@ -63,6 +63,7 @@ use crate::config::{
 };
 use crate::error::{EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice, SourceFrame, SourceTexture, SurfaceKind};
+use crate::probe::EncoderLimits;
 
 use super::{classify, sys, AmfEncoder};
 
@@ -1165,7 +1166,12 @@ fn env_is_set(name: &str) -> bool {
 /// it. libtest runs tests in parallel by default, so without this the suite
 /// would be a race whose outcome depends on which test reached the driver first
 /// (AGENTS.md section 25).
-static SESSIONS: Mutex<()> = Mutex::new(());
+///
+/// Visible to the rest of `windows` for the same reason NVENC's is: the
+/// capability probe's tests create AMF components through `WindowsProbe`, which
+/// competes with these for the same hardware encoder
+/// (`crate::windows::tests`).
+pub(in crate::windows) static SESSIONS: Mutex<()> = Mutex::new(());
 
 /// A Direct3D 11 device on the AMD adapter, and the textures the tests feed
 /// through it.
@@ -1241,10 +1247,14 @@ impl TestGpu {
 
     /// Opens an encoder against this device.
     fn open_encoder(&self, config: EncoderConfig) -> Result<AmfEncoder, EncodeError> {
-        // SAFETY: the device is alive for as long as `self` is, and every
-        // encoder opened from it is dropped inside the test that opened it.
-        let device = unsafe { GraphicsDevice::new(DeviceKind::D3d11, self.device.as_raw()) };
-        AmfEncoder::open(&device, config)
+        AmfEncoder::open(&self.graphics_device(), config)
+    }
+
+    /// This device, as the crate's own borrowed handle.
+    fn graphics_device(&self) -> GraphicsDevice {
+        // SAFETY: the device is alive for as long as `self` is, and everything
+        // opened from it is dropped inside the test that opened it.
+        unsafe { GraphicsDevice::new(DeviceKind::D3d11, self.device.as_raw()) }
     }
 
     /// An encoder for the tests' standard configuration, or [`None`] with a
@@ -1438,6 +1448,71 @@ impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+#[test]
+fn the_capabilities_describe_every_codec_this_backend_can_create_a_component_for() {
+    // Issue #133: the limits `recorder capabilities` prints come from here on a
+    // machine with an AMD GPU. Nothing asserts a particular number — the
+    // integrated part this was written against is not every Radeon — but a
+    // component that was created has to describe the size it takes, and a codec
+    // this backend has no component for must not be answered at all, because
+    // AMF was never asked.
+    let Some(gpu) = TestGpu::open() else { return };
+    let measured = super::measure_limits(&gpu.graphics_device());
+
+    let asked: Vec<Codec> = measured.iter().map(EncoderLimits::codec).collect();
+    assert_eq!(
+        asked,
+        vec![Codec::Hevc, Codec::H264],
+        "AV1 has no component in this backend, so it must not appear as an answer"
+    );
+
+    for limits in &measured {
+        if limits.supported() != Some(true) {
+            continue;
+        }
+        let resolution = limits
+            .max_resolution()
+            .unwrap_or_else(|| panic!("{} has no maximum size", limits.codec()));
+        assert!(
+            resolution.width >= 1920 && resolution.height >= 1080,
+            "{} reported a maximum of {resolution}, which no AMF encoder would say",
+            limits.codec()
+        );
+    }
+}
+
+#[test]
+fn ten_bit_is_answered_for_hevc_and_left_alone_for_h264() {
+    // The asymmetry `settings::ten_bit_from_profile` explains, checked against
+    // the hardware rather than only against the mapping: AMF's HEVC profile
+    // enumeration reaches Main10 and can therefore answer, and its H.264 one
+    // has no 10-bit profile in it at all, so the H.264 row must stay with the
+    // published limit rather than being handed a number derived from unrelated
+    // profile values.
+    let Some(gpu) = TestGpu::open() else { return };
+    let measured = super::measure_limits(&gpu.graphics_device());
+
+    let for_codec = |codec| {
+        measured
+            .iter()
+            .find(|limits| limits.codec() == codec)
+            .unwrap_or_else(|| panic!("{codec} was asked about"))
+    };
+
+    let hevc = for_codec(Codec::Hevc);
+    if hevc.supported() == Some(true) {
+        assert!(
+            hevc.hdr().is_some(),
+            "AMF answered its HEVC profile and 10-bit was still not decided"
+        );
+    }
+    assert_eq!(
+        for_codec(Codec::H264).hdr(),
+        None,
+        "H.264 10-bit cannot be read from an AMF profile number and must not be claimed"
+    );
 }
 
 /// The file extension that tells `ffprobe` what an elementary stream is.
