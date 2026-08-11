@@ -194,10 +194,23 @@ What it prints, on standard error:
 
 ```text
 Watching for games. Recordings go to D:\clips. Press Ctrl+C to stop.
+Counter-Strike 2 started. Looking for its window.
 Recording Counter-Strike 2 to D:\clips\clipped-counter-strike-2-20260811-143205.mkv.
 Session counter-strike-2-20260811-143205 of Counter-Strike 2: 1 recording totalling 1084s.
   D:\clips\clipped-counter-strike-2-20260811-143205.mkv
 Automatic recording stopped.
+```
+
+Those first two are two different facts and are printed at two different
+moments. A launch is noticed before there is anything to capture — a game can
+spend a minute compiling shaders before it draws — and the search for a window
+can also fail. Announcing a recording at the moment the game was noticed would
+be claiming a recording that may never happen. When the search does give up, or
+a recording fails, that is printed too, rather than being left as an absence in
+the summary at the end:
+
+```text
+Nothing was recorded of Counter-Strike 2: no window to record appeared within 120s: …
 ```
 
 Standard output is left empty, as it is for `record`: what this command produces

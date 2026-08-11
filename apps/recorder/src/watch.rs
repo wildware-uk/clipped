@@ -442,10 +442,15 @@ impl Driver {
             return;
         }
 
+        // Not "Recording …" — nothing is being recorded yet. A game reported as
+        // launched has usually not drawn anything, and the search for its
+        // window can take up to `--window-timeout` and can fail. The line that
+        // says a recording started is printed by the recording thread once
+        // there is a window to record (`record_process`), so the console never
+        // claims a recording that never happened (AGENTS.md section 27).
         eprintln!(
-            "Recording {} to {}.",
-            request.game.display_name(),
-            request.output.display()
+            "{} started. Looking for its window.",
+            request.game.display_name()
         );
 
         let stop = ShutdownSignal::new();
@@ -531,6 +536,32 @@ fn record_process(
     plan: &RecordingPlan,
     stop: &ShutdownSignal,
 ) -> RecordingOutcome {
+    let outcome = attempt(request, plan, stop);
+
+    // An attempt that produced nothing is said out loud. The summary printed
+    // when the session ends counts files, so a recording that never happened
+    // would otherwise be an absence the user has to notice rather than a
+    // sentence they can read — and "why was my game not recorded" deserves an
+    // answer at the moment it is known (AGENTS.md section 27).
+    match &outcome {
+        RecordingOutcome::Recorded(_) => {}
+        RecordingOutcome::NoWindow { detail } => eprintln!(
+            "Nothing was recorded of {}: {detail}",
+            request.game.display_name()
+        ),
+        RecordingOutcome::Failed { detail } => {
+            eprintln!("Recording {} failed: {detail}", request.game.display_name())
+        }
+    }
+    outcome
+}
+
+/// The attempt itself, with nothing printed.
+fn attempt(
+    request: &RecordingRequest,
+    plan: &RecordingPlan,
+    stop: &ShutdownSignal,
+) -> RecordingOutcome {
     let args = plan.args_for(request.process_id, &request.output);
     let config = match RecordingConfig::resolve(&args) {
         Ok(config) => config,
@@ -541,6 +572,14 @@ fn record_process(
         Ok(window) => window,
         Err(detail) => return RecordingOutcome::NoWindow { detail },
     };
+
+    // Here, and not when the recording was asked for: this is the first moment
+    // at which there is something to record.
+    eprintln!(
+        "Recording {} to {}.",
+        request.game.display_name(),
+        request.output.display()
+    );
 
     let settings = settings_for(&config, &window);
     match std::panic::catch_unwind(AssertUnwindSafe(|| {
