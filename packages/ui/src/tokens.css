@@ -2,15 +2,19 @@
  * Design tokens for the Clipped desktop application.
  *
  * These are the "Modernist" design system's tokens - flat, one red accent on a
- * light ground, zero corner radius, strong 2px rules - copied here as tokens
+ * light ground, zero corner radius, strong 2px rules - held here as tokens
  * rather than as values, so that a component never names a colour or a distance
- * directly. Issue #79 brings the system's full token set and its component
- * layer into this package; because everything above is written against
- * `var(--...)`, that is an extension of this file rather than a rewrite of the
- * components.
+ * directly. This file is the one place in the package where a literal colour, a
+ * literal type size or a literal distance is allowed to appear;
+ * `stylesheet.test.ts` fails the suite if one appears anywhere else.
  *
- * Two deliberate differences from the published system are marked below. Both
- * exist because this is a desktop application rather than a web page.
+ * Where the system lives, and how to consume what is below, is in
+ * `docs/desktop-ui.md`.
+ *
+ * The differences from the published system are marked below. Each is either a
+ * measured accessibility failure of the system's own value - the ratios are
+ * computed by `contrast.test.ts`, not asserted here - or a consequence of this
+ * being a desktop application rather than a web page.
  */
 
 :root {
@@ -20,26 +24,56 @@
   --color-text: #201e1d;
   --color-accent: #ec3013;
   --color-accent-2: #e15b47;
-  --color-divider: color-mix(in srgb, #201e1d 40%, transparent);
+  --color-divider: color-mix(in srgb, var(--color-text) 40%, transparent);
 
   /*
    * Secondary text. The design system draws this at 55% of the ink, which
    * measures 3.65:1 on `--color-bg` and 3.54:1 on `--color-neutral-200` - short
    * of the 4.5:1 that AGENTS.md section 46 asks of body text. 70% measures
-   * 5.81:1 and 5.55:1 on the same two grounds, which are the only two the shell
-   * draws it on. `contrast.test.ts` measures both.
+   * 5.81:1 and 5.55:1 on the same two grounds, and 5.59:1 on `--color-surface`,
+   * which are the only three the interface draws it on. `contrast.test.ts`
+   * measures all three.
+   *
+   * It also stands in for the system's several softening opacities - the card
+   * body at 0.8, the dialog body at 0.85, the card meta row at 50% ink and the
+   * table header at 60% - because an opacity is a value nothing can measure
+   * without knowing what is behind it, and a role can be.
    */
-  --color-text-muted: color-mix(in srgb, #201e1d 70%, transparent);
+  --color-text-muted: color-mix(in srgb, var(--color-text) 70%, transparent);
 
   /*
    * Accent text. `--color-accent` on the light ground measures 3.76:1, so it is
-   * used for marks and rules rather than for words, and never as the ground
-   * under words either; `--color-accent-700` measures 6.41:1 against both
-   * `--color-text` above it and `--color-bg` on it, which is why accent-coloured
-   * words and the accent-coloured skip link are both drawn from it.
-   * `contrast.test.ts` measures these pairs rather than trusting the comment.
+   * used for marks and rules rather than for words; `--color-accent-700`
+   * measures 6.41:1 on `--color-bg` and 5.91:1 on `--color-surface`, which is
+   * why accent-coloured words - the ghost button, a link, a card's kicker - are
+   * all drawn from it. `contrast.test.ts` measures these pairs rather than
+   * trusting the comment.
    */
-  --color-accent-text: #ae1800;
+  --color-accent-text: var(--color-accent-700);
+
+  /*
+   * The accent as a ground *under* words: the primary button, the selected
+   * segment, the skip link. The system fills these with `--color-accent`, but
+   * `--color-bg` on it measures 3.76:1 and the labels are 14px at weight 800,
+   * which is not WCAG large text - the same defect that shipped in the skip
+   * link once already. One step down the ramp measures 6.41:1, so the pressed
+   * and hovered states shift down a step with it.
+   */
+  --color-accent-solid: var(--color-accent-700);
+  --color-accent-solid-hover: var(--color-accent-800);
+  --color-accent-solid-active: var(--color-accent-900);
+
+  /*
+   * The edge that says "this is a control": an input's border, a secondary
+   * button's border, a radio's ring. The system draws these in
+   * `--color-divider`, which measures 2.41:1 on the window ground - below the
+   * 3:1 WCAG 2.1 non-text contrast (1.4.11) asks of anything that identifies a
+   * control. `--color-neutral-600` measures 3.85:1 on `--color-bg` and 3.55:1
+   * on `--color-surface`. `--color-divider` keeps the rules *between* things,
+   * where 1.4.11 does not apply.
+   */
+  --color-control-edge: var(--color-neutral-600);
+  --color-control-edge-hover: var(--color-neutral-800);
 
   /* Tonal ramps - generated in OKLCH on one shared lightness scale, so the
      same step of any role matches the others in visual value. */
@@ -63,6 +97,20 @@
   --color-accent-800: #7c1405;
   --color-accent-900: #4d170e;
 
+  /*
+   * Interaction tints. The system writes these as `color-mix()` at the point of
+   * use; they are named here instead so that "the pressed state" is one value
+   * rather than a percentage repeated in nine rules, and so that a component
+   * stylesheet contains no numbers at all.
+   */
+  --tint-hover: color-mix(in srgb, var(--color-text) 7%, transparent);
+  --tint-pressed: color-mix(in srgb, var(--color-text) 14%, transparent);
+  --tint-row-hover: color-mix(in srgb, var(--color-text) 4%, transparent);
+  --tint-accent-hover: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  --tint-accent-pressed: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  --tint-selection: color-mix(in srgb, var(--color-accent) 30%, transparent);
+  --tint-scrim: color-mix(in srgb, var(--color-neutral-900) 50%, transparent);
+
   /* — type — */
   --font-heading: 'Archivo', system-ui, sans-serif;
   --font-heading-weight: 800;
@@ -75,6 +123,10 @@
    * to the Windows text-size setting or to the application's zoom, and
    * scalable text is required (AGENTS.md section 46). The values are the
    * system's: 11, 13, 14, 15, 17, 20 and 26 pixels at the default root size.
+   *
+   * Seven steps is the whole scale. The component reference pages also draw
+   * 10px, 12px and 18px; each of those snaps to its nearest step here, because
+   * a scale with ten sizes is a list of sizes.
    */
   --text-xs: 0.6875rem;
   --text-sm: 0.8125rem;
@@ -84,6 +136,8 @@
   --text-2xl: 1.25rem;
   --text-3xl: 1.625rem;
 
+  --tracking-heading: -0.015em;
+  --tracking-tag: 0.02em;
   --tracking-caps: 0.1em;
   --tracking-brand: 0.16em;
 
@@ -99,17 +153,30 @@
   --radius-sm: 0px;
   --radius-md: 0px;
   --radius-lg: 0px;
-  --rule-weight: 2px;
 
-  /* The rule that marks a thing rather than divides two: the accent edge on the
-     open navigation item and on an unbuilt screen's panel. Heavier than
-     `--rule-weight` so the two read as different jobs at a glance. */
+  /* The three edge weights, heaviest last, so that the three jobs read as
+     different at a glance: the hairline around a control and under a table row,
+     the rule that divides two sections, and the mark that singles one out - the
+     accent edge on the open navigation item and on an unbuilt screen's panel. */
+  --hairline: 1px;
+  --rule-weight: 2px;
   --marker-weight: 3px;
 
+  /* A link's underline sits clear of its descenders. Not a point on any scale;
+     it is here because tokens.css is the only file allowed to hold a literal. */
+  --underline-offset: 3px;
+
+  /* — control metrics — */
+  /* One height for everything that takes input, so that a button and the field
+     beside it line up: the system's 36px, which is also its icon button. */
+  --control-height: 36px;
+  --radio-size: 16px;
+  --dialog-width: 440px;
+
   /* — elevation — */
-  --shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
-  --shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
-  --shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
+  --shadow-sm: 0 1px 2px color-mix(in srgb, var(--color-neutral-900) 14%, transparent);
+  --shadow-md: 0 3px 10px color-mix(in srgb, var(--color-neutral-900) 16%, transparent);
+  --shadow-lg: 0 12px 32px color-mix(in srgb, var(--color-neutral-900) 22%, transparent);
 
   /* — shell metrics — */
   --shell-sidebar-width: 210px;

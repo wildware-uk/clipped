@@ -1,0 +1,397 @@
+/*
+ * The Clipped component layer.
+ *
+ * These are the "Modernist" design system's components - the classes its
+ * reference pages are built from - restated against the tokens in
+ * `tokens.css`. The set is exactly the one the Clipped application deck draws
+ * with: rules, buttons, tags, fields, radios, the segmented control, cards, the
+ * table and the dialog. The header and the sidebar navigation the deck also
+ * uses are the shell's own, in `styles.css`.
+ *
+ * Nothing below contains a colour, a typeface, a type size or a distance as a
+ * value. `stylesheet.test.ts` fails the suite if one appears, and
+ * `contrast.test.ts` measures every pairing of words and ground the classes
+ * below draw.
+ *
+ * Three things are done differently from the reference pages, and all three are
+ * because the reference value does not clear WCAG 2.1. They are marked at the
+ * point of use and explained against the token they reach for instead:
+ * `--color-accent-solid` under words, `--color-accent-text` for accent words,
+ * and `--color-control-edge` for the edge that identifies a control. The type
+ * sizes the pages draw between the seven steps of the scale snap to the nearest
+ * step; `tokens.css` says why.
+ *
+ * Classes are `clipped-block__element--modifier`, following the shell rather
+ * than the reference pages' bare `.btn` / `.card`. `docs/desktop-ui.md` carries
+ * the mapping from one to the other, so markup copied out of a reference page
+ * is renamed mechanically.
+ */
+
+/* — rules — */
+
+.clipped-rule {
+  height: var(--rule-weight);
+  margin: var(--space-4) 0;
+  border: 0;
+  background: var(--color-divider);
+}
+
+/* — buttons — */
+
+.clipped-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-4);
+  border: var(--hairline) solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: var(--text-md);
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.clipped-btn svg {
+  display: block;
+}
+
+/*
+ * WCAG 2.1 does not require a disabled control to meet 1.4.3 or 1.4.11 - both
+ * exempt an inactive component - so the system's 45% is kept as it is. It is
+ * the only place in the interface where text is dimmed by opacity.
+ */
+.clipped-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The one solid accent fill in the interface. `--color-accent-solid` rather
+   than `--color-accent`: see tokens.css. */
+.clipped-btn--primary {
+  background: var(--color-accent-solid);
+  color: var(--color-bg);
+}
+
+.clipped-btn--primary:hover {
+  background: var(--color-accent-solid-hover);
+}
+
+.clipped-btn--primary:active {
+  background: var(--color-accent-solid-active);
+}
+
+.clipped-btn--secondary {
+  border-color: var(--color-control-edge);
+}
+
+.clipped-btn--secondary:hover {
+  background: var(--tint-hover);
+}
+
+.clipped-btn--secondary:active {
+  background: var(--tint-pressed);
+}
+
+.clipped-btn--ghost {
+  padding-inline: var(--space-1);
+  color: var(--color-accent-text);
+}
+
+.clipped-btn--ghost:hover {
+  background: var(--tint-accent-hover);
+}
+
+.clipped-btn--ghost:active {
+  background: var(--tint-accent-pressed);
+}
+
+.clipped-btn--icon {
+  width: var(--control-height);
+  padding: 0;
+}
+
+/* A button wider than its label starts the label at the left padding edge,
+   never centred: the system's one layout rule about buttons. */
+.clipped-btn--block {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+/* — tags — */
+
+.clipped-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  border: var(--hairline) solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-tag);
+}
+
+.clipped-tag--accent {
+  background: var(--color-accent-100);
+  color: var(--color-accent-800);
+}
+
+.clipped-tag--neutral {
+  background: var(--color-neutral-100);
+  color: var(--color-neutral-800);
+}
+
+.clipped-tag--outline {
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+/* — fields — */
+
+.clipped-field__label {
+  display: block;
+  margin-bottom: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.clipped-input {
+  width: 100%;
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
+  border: var(--hairline) solid var(--color-control-edge);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  caret-color: var(--color-accent);
+  font: inherit;
+  font-size: var(--text-md);
+}
+
+.clipped-input:hover {
+  border-color: var(--color-control-edge-hover);
+}
+
+/* The focus ring is the border itself, so it needs no offset: an outline
+   outside a field in a dense form would collide with the field above it. */
+.clipped-input:focus-visible {
+  border-color: var(--color-accent);
+  outline-offset: 0;
+}
+
+textarea.clipped-input {
+  min-height: calc(var(--control-height) * 2.5);
+  resize: vertical;
+}
+
+/* — radios — */
+
+/*
+ * A native radio, drawn on. The input keeps the keyboard behaviour - arrow keys
+ * within the group, the checked state, the accessibility tree - and the square
+ * beside it is what is painted.
+ */
+.clipped-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+
+.clipped-radio input,
+.clipped-segment__option input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.clipped-radio__dot {
+  flex: none;
+  width: var(--radio-size);
+  height: var(--radio-size);
+  border: var(--rule-weight) solid var(--color-control-edge);
+  border-radius: 50%;
+}
+
+.clipped-radio:hover .clipped-radio__dot {
+  border-color: var(--color-accent);
+}
+
+.clipped-radio input:checked + .clipped-radio__dot {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  box-shadow: inset 0 0 0 var(--space-1) var(--color-bg);
+}
+
+/* The input is off-screen, so the ring has to be drawn on its stand-in. */
+.clipped-radio input:focus-visible + .clipped-radio__dot {
+  outline: var(--rule-weight) solid var(--color-accent);
+  outline-offset: var(--rule-weight);
+}
+
+/* — segmented control — */
+
+.clipped-segment {
+  display: inline-flex;
+  overflow: hidden;
+  border: var(--hairline) solid var(--color-control-edge);
+  border-radius: var(--radius-md);
+}
+
+.clipped-segment__option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.clipped-segment__option + .clipped-segment__option {
+  border-left: var(--hairline) solid var(--color-control-edge);
+}
+
+.clipped-segment__option:has(input:checked) {
+  background: var(--color-accent-solid);
+  color: var(--color-bg);
+}
+
+.clipped-segment__option:not(:has(input:checked)):hover {
+  background: var(--tint-hover);
+}
+
+/* Inward, because the control clips its children and an outward ring on the
+   first or last option would be cut off by `overflow: hidden`. */
+.clipped-segment__option:has(input:focus-visible) {
+  outline: var(--rule-weight) solid var(--color-accent);
+  outline-offset: calc(var(--rule-weight) * -1);
+}
+
+/* — cards — */
+
+.clipped-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.clipped-card__kicker {
+  color: var(--color-accent-text);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.clipped-card__title {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: var(--text-xl);
+  line-height: 1.2;
+}
+
+.clipped-card__body {
+  flex: 1;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.clipped-card__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+/* — elevation — */
+
+.clipped-elevation-sm {
+  box-shadow: var(--shadow-sm);
+}
+
+.clipped-elevation-md {
+  box-shadow: var(--shadow-md);
+}
+
+.clipped-elevation-lg {
+  box-shadow: var(--shadow-lg);
+}
+
+/* — tables — */
+
+.clipped-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-md);
+}
+
+.clipped-table th {
+  padding: var(--space-2);
+  border-bottom: var(--rule-weight) solid var(--color-divider);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-caps);
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.clipped-table td {
+  padding: var(--space-2);
+  border-bottom: var(--hairline) solid var(--color-divider);
+}
+
+.clipped-table tbody tr:hover {
+  background: var(--tint-row-hover);
+}
+
+/* — dialog — */
+
+.clipped-scrim {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: var(--tint-scrim);
+}
+
+.clipped-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(var(--dialog-width), 100%);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.clipped-dialog__title {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: var(--text-2xl);
+}
+
+.clipped-dialog__body {
+  color: var(--color-text-muted);
+  font-size: var(--text-md);
+}
+
+.clipped-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}

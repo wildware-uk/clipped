@@ -1,14 +1,16 @@
 /*
  * The Clipped shell stylesheet: the design tokens, the typeface, element
- * defaults, and the handful of classes the application shell is built from.
+ * defaults, and the classes the application shell is built from.
  *
- * No colour, type size, spacing step or typeface appears below as a value:
- * each names a token, so issue #79 can retune the system in `tokens.css` and
- * bring in the full component layer without editing a component. What is left
- * as a literal here is one-off geometry that is not a point on any scale — the
- * hairline that hides the skip link until it is focused, the underline offset
- * on a link, and the half-step of vertical padding the utility navigation is
- * drawn at. Turning those into tokens would name them, not systematise them.
+ * The design system's components — buttons, tags, fields, radios, the segmented
+ * control, cards, the table and the dialog — are in `components.css` beside
+ * this file, imported below. What stays here is the chrome itself: the title
+ * strip, the sidebar, the navigation and the recorder status, which are the
+ * shell and not a component library.
+ *
+ * No colour, typeface, type size or distance appears in either file as a value.
+ * `tokens.css` is the only place a literal is allowed, and
+ * `stylesheet.test.ts` fails the suite if one appears anywhere else.
  */
 
 /*
@@ -25,6 +27,7 @@
 @import '@fontsource/archivo/latin-800.css';
 
 @import './tokens.css';
+@import './components.css';
 
 *,
 *::before,
@@ -59,7 +62,7 @@ h6 {
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
   line-height: 1.12;
-  letter-spacing: -0.015em;
+  letter-spacing: var(--tracking-heading);
   margin: 0 0 var(--space-2);
 }
 
@@ -69,7 +72,7 @@ p {
 
 a {
   color: var(--color-accent-text);
-  text-underline-offset: 3px;
+  text-underline-offset: var(--underline-offset);
 }
 
 :focus {
@@ -82,7 +85,7 @@ a {
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+  background: var(--tint-selection);
 }
 
 /* — text roles — */
@@ -122,11 +125,12 @@ a {
 
 /*
  * The first control a keyboard-only user meets, so its contrast is the one that
- * matters most. The ground is `--color-accent-700` rather than `--color-accent`
- * because 14px at weight 800 is not WCAG large text: `--color-bg` on
- * `--color-accent` measures 3.76:1, short of the 4.5:1 issue #48 asks for, and
- * on `--color-accent-700` it measures 6.41:1. `contrast.test.ts` reads this
- * rule and fails if it drops back below the threshold.
+ * matters most. The ground is `--color-accent-solid` rather than
+ * `--color-accent` because 14px at weight 800 is not WCAG large text:
+ * `--color-bg` on `--color-accent` measures 3.76:1, short of the 4.5:1 issue
+ * #48 asks for, and on `--color-accent-solid` it measures 6.41:1.
+ * `contrast.test.ts` reads this rule and fails if it drops back below the
+ * threshold.
  */
 .clipped-skip-link {
   position: absolute;
@@ -134,7 +138,7 @@ a {
   left: var(--space-2);
   z-index: 1;
   padding: var(--space-2) var(--space-3);
-  background: var(--color-accent-700);
+  background: var(--color-accent-solid);
   color: var(--color-bg);
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
@@ -148,9 +152,9 @@ a {
  * be the first navigation item and there would be nothing to skip with.
  */
 .clipped-skip-link:not(:focus-visible) {
-  width: 1px;
-  height: 1px;
-  margin: -1px;
+  width: var(--hairline);
+  height: var(--hairline);
+  margin: calc(var(--hairline) * -1);
   padding: 0;
   overflow: hidden;
   clip-path: inset(50%);
@@ -237,7 +241,7 @@ a {
 }
 
 .clipped-nav__link:hover {
-  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  background: var(--tint-hover);
 }
 
 .clipped-nav__link:focus-visible {
@@ -258,9 +262,11 @@ a {
   font-weight: var(--font-heading-weight);
 }
 
+/* The utility list is quieter than the screens above it: one step down the type
+   scale, and a half step of the spacing scale rather than a whole one. */
 .clipped-nav--utility .clipped-nav__link {
   font-size: var(--text-sm);
-  padding-block: 6px;
+  padding-block: calc(var(--space-1) * 1.5);
 }
 
 /* — recorder status — */

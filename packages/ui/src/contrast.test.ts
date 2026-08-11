@@ -1,6 +1,8 @@
 // @vitest-environment node
 //
-// Measures the shell's text against WCAG 2.1 contrast minimum 1.4.3.
+// Measures the shell and the component layer against WCAG 2.1's contrast
+// minima: 1.4.3 for text, and 1.4.11 for the edges and rings that identify a
+// control without being text.
 //
 // Issue #48 asks for sufficient contrast and AGENTS.md section 46 repeats it,
 // and a comment in `tokens.css` saying a pair "measures about 6.4:1" is not a
@@ -35,8 +37,15 @@ function read(name: string): string {
 
 const tokensCss = read('tokens.css');
 const stylesCss = read('styles.css');
+const componentsCss = read('components.css');
 
 const AA_NORMAL_TEXT = 4.5;
+
+/**
+ * WCAG 2.1 1.4.11, the minimum for anything that is not text but still has to
+ * be seen: the edge that says "this is a text field", and the focus ring.
+ */
+const AA_NON_TEXT = 3;
 
 /** A colour as sRGB channels in 0..255, with the alpha it is painted at. */
 interface Colour {
@@ -157,11 +166,11 @@ function contrastRatio(foreground: string, background: string): number {
   return (Math.max(ink, paper) + 0.05) / (Math.min(ink, paper) + 0.05);
 }
 
-/** One declaration from the first rule matching `selector` in `styles.css`. */
-function declaration(selector: string, property: string): string {
-  const rule = new RegExp(`(^|\\n)${selector}\\s*\\{([^}]*)\\}`).exec(stylesCss);
+/** One declaration from the first rule matching `selector` in a stylesheet. */
+function declaration(css: string, selector: string, property: string): string {
+  const rule = new RegExp(`(^|\\n)${selector}\\s*\\{([^}]*)\\}`).exec(css);
   if (!rule) {
-    throw new Error(`styles.css has no "${selector}" rule`);
+    throw new Error(`no "${selector}" rule`);
   }
 
   const body = group(rule, 2, `the body of the "${selector}" rule`);
@@ -180,8 +189,8 @@ describe('the shell', () => {
    */
   it('draws the skip link, the first control a keyboard reaches, at 4.5:1 or better', () => {
     const ratio = contrastRatio(
-      declaration('\\.clipped-skip-link', 'color'),
-      declaration('\\.clipped-skip-link', 'background'),
+      declaration(stylesCss, '\\.clipped-skip-link', 'color'),
+      declaration(stylesCss, '\\.clipped-skip-link', 'background'),
     );
 
     expect(ratio).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
@@ -205,5 +214,76 @@ describe('the shell', () => {
 
   it.each(PAIRINGS)('draws %s at 4.5:1 or better', (_name, foreground, background) => {
     expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+});
+
+describe('the component layer', () => {
+  /*
+   * The accent fills that carry words are read out of `components.css` rather
+   * than named here, for the reason the skip link is: the failure this guards
+   * against is a rule pointing back at `--color-accent`, whose 3.76:1 under
+   * `--color-bg` fails, and a hard-coded pair would go on passing. The hovered
+   * and pressed states declare only a ground, so the ink comes from the rule
+   * they modify.
+   */
+  const FILLS: readonly (readonly [string, string, string])[] = [
+    ['the primary button', '\\.clipped-btn--primary', '\\.clipped-btn--primary'],
+    ['the primary button hovered', '\\.clipped-btn--primary', '\\.clipped-btn--primary:hover'],
+    ['the primary button pressed', '\\.clipped-btn--primary', '\\.clipped-btn--primary:active'],
+    [
+      'the selected segment',
+      '\\.clipped-segment__option:has\\(input:checked\\)',
+      '\\.clipped-segment__option:has\\(input:checked\\)',
+    ],
+  ];
+
+  it.each(FILLS)('draws %s at 4.5:1 or better', (_name, inkRule, groundRule) => {
+    const ratio = contrastRatio(
+      declaration(componentsCss, inkRule, 'color'),
+      declaration(componentsCss, groundRule, 'background'),
+    );
+
+    expect(ratio).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+
+  /*
+   * Every remaining pairing of words and ground the component layer draws. Two
+   * grounds are new here and neither existed when issue #48 measured the shell:
+   * `--color-surface`, which cards, fields and the dialog are filled with, and
+   * the 100 steps of the two ramps, which the tags are tinted from.
+   */
+  const PAIRINGS: readonly (readonly [string, string, string])[] = [
+    ['body text on a card, a field or a dialog', 'var(--color-text)', 'var(--color-surface)'],
+    ['secondary text on a card or a dialog', 'var(--color-text-muted)', 'var(--color-surface)'],
+    ["a card's kicker", 'var(--color-accent-text)', 'var(--color-surface)'],
+    ["a field's label", 'var(--color-text-muted)', 'var(--color-bg)'],
+    ["a table's header", 'var(--color-text-muted)', 'var(--color-bg)'],
+    ['the accent tag', 'var(--color-accent-800)', 'var(--color-accent-100)'],
+    ['the neutral tag', 'var(--color-neutral-800)', 'var(--color-neutral-100)'],
+    ['the outlined tag', 'var(--color-accent-text)', 'var(--color-bg)'],
+    ['the ghost button', 'var(--color-accent-text)', 'var(--color-bg)'],
+  ];
+
+  it.each(PAIRINGS)('draws %s at 4.5:1 or better', (_name, foreground, background) => {
+    expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+
+  /*
+   * What is not text but still has to be seen. The edge is what tells someone
+   * a field is a field, and the ring is what tells them where the keyboard is;
+   * WCAG 2.1 1.4.11 puts both at 3:1. `--color-divider`, which the design
+   * system draws the edge in, measures 2.41:1 on the window ground - which is
+   * the whole reason `--color-control-edge` exists.
+   */
+  const NON_TEXT: readonly (readonly [string, string, string])[] = [
+    ["a control's edge on the window ground", 'var(--color-control-edge)', 'var(--color-bg)'],
+    ["a control's edge on a card or a dialog", 'var(--color-control-edge)', 'var(--color-surface)'],
+    ['the focus ring on the window ground', 'var(--color-accent)', 'var(--color-bg)'],
+    ['the focus ring on a card or a dialog', 'var(--color-accent)', 'var(--color-surface)'],
+    ['the focus ring in the sidebar', 'var(--color-accent)', 'var(--color-neutral-200)'],
+  ];
+
+  it.each(NON_TEXT)('draws %s at 3:1 or better', (_name, foreground, background) => {
+    expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(AA_NON_TEXT);
   });
 });

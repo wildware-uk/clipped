@@ -2,10 +2,12 @@
  * `@clipped/ui` — the application shell's components and the design tokens
  * they are drawn with.
  *
- * The shell is all that is here. The Clipped design system's full token set and
- * its component layer - buttons, fields, tables, dialogs - arrive with issue
- * #79; everything in this package is written against `var(--...)` tokens so
- * that lands as an addition rather than a rewrite.
+ * The exports here are the shell. The design system's component layer -
+ * buttons, tags, fields, radios, the segmented control, cards, the table and
+ * the dialog - is classes rather than components, in `components.css`, because
+ * that is what the system itself is: a screen writes
+ * `className="clipped-btn clipped-btn--primary"`. `docs/desktop-ui.md` has the
+ * whole set and the rules for consuming it.
  *
  * Consumers import the stylesheet once, at the application's entry point:
  *
