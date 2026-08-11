@@ -97,6 +97,7 @@ clipped-encoder = { path = "crates/encoder", version = "0.1.0" }
 clipped-events = { path = "crates/events", version = "0.1.0" }
 clipped-ffmpeg-runtime = { path = "crates/ffmpeg-runtime", version = "0.1.0" }
 clipped-game-detection = { path = "crates/game-detection", version = "0.1.0" }
+clipped-hotkeys = { path = "crates/hotkeys", version = "0.1.0" }
 clipped-ipc = { path = "crates/ipc", version = "0.1.0" }
 clipped-library = { path = "crates/library", version = "0.1.0" }
 clipped-logging = { path = "crates/logging", version = "0.1.0" }

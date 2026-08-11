@@ -42,12 +42,19 @@ const LAYERS: &[&[&str]] = &[
     // ends, and it deliberately depends on no other crate in this workspace —
     // a protocol crate that reached into the recording engine could not be
     // linked by a client.
+    //
+    // `clipped-hotkeys` is here for the same reason and one more of its own: a
+    // hotkey is a key combination and a handler somebody else supplies
+    // (docs/hotkeys.md), so the dependency points *into* it — the process that
+    // owns a recording session plugs a handler in, and a hotkey crate that
+    // reached back into the session could be linked by neither end.
     &[
         "clipped-windows",
         "clipped-events",
         "clipped-storage",
         "clipped-logging",
         "clipped-ipc",
+        "clipped-hotkeys",
         "clipped-media-validation",
         "clipped-ffmpeg-runtime",
     ],
