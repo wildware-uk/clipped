@@ -129,6 +129,27 @@ impl AudioDeviceSetting {
     /// `microphone` rather than "a device".
     pub fn named(key: SettingKey, name: impl Into<String>) -> Result<Self, SettingError> {
         let name = name.into();
+        Self::check_name(key, &name)?;
+        Ok(Self::Named(name))
+    }
+
+    /// Whether this value is one the settings file can hold and read back.
+    ///
+    /// [`Self::Named`] is a public variant, so a caller can build one without
+    /// going through [`Self::named`]; this is what the setters check so that
+    /// the two routes cannot disagree.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::named`].
+    fn check(&self, key: SettingKey) -> Result<(), SettingError> {
+        match self {
+            Self::Default | Self::Disabled => Ok(()),
+            Self::Named(name) => Self::check_name(key, name),
+        }
+    }
+
+    fn check_name(key: SettingKey, name: &str) -> Result<(), SettingError> {
         if name.trim().is_empty() {
             return Err(SettingError::OutOfRange {
                 key,
@@ -150,7 +171,7 @@ impl AudioDeviceSetting {
                 accepted: "a device name without control characters".to_owned(),
             });
         }
-        Ok(Self::Named(name))
+        Ok(())
     }
 }
 
@@ -160,6 +181,13 @@ impl AudioDeviceSetting {
 /// exists is a `Preferences` whose values are in range. That invariant is what
 /// lets [`super::ConfigurationStore`] promise that a rejected file leaves the
 /// previous configuration standing — there is no half-applied state to unwind.
+///
+/// "In range" is defined by what the settings file can carry, not only by what
+/// the type can hold: every value a setter accepts is one
+/// `crate::config::document` can write and read back unchanged. That is why a
+/// blank device name and a fractional replay window are refused here — each
+/// would produce a file this same build could not read, or could read only as
+/// something other than what was set.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Preferences {
     capture_target: Option<CaptureTargetSetting>,
@@ -281,8 +309,22 @@ impl Preferences {
     }
 
     /// Sets, or with `None` clears, the microphone selection.
-    pub fn set_microphone(&mut self, value: Option<AudioDeviceSetting>) {
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError::OutOfRange`] for a device name
+    /// [`AudioDeviceSetting::named`] would refuse. The variant is public, so
+    /// this is the check that keeps the invariant true whichever way the value
+    /// was built.
+    pub fn set_microphone(
+        &mut self,
+        value: Option<AudioDeviceSetting>,
+    ) -> Result<(), SettingError> {
+        if let Some(device) = &value {
+            device.check(SettingKey::Microphone)?;
+        }
         self.microphone = value;
+        Ok(())
     }
 
     /// Which system-audio endpoint to record, if this layer says.
@@ -292,8 +334,19 @@ impl Preferences {
     }
 
     /// Sets, or with `None` clears, the system-audio selection.
-    pub fn set_system_audio(&mut self, value: Option<AudioDeviceSetting>) {
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_microphone`], with the message naming `system_audio`.
+    pub fn set_system_audio(
+        &mut self,
+        value: Option<AudioDeviceSetting>,
+    ) -> Result<(), SettingError> {
+        if let Some(device) = &value {
+            device.check(SettingKey::SystemAudio)?;
+        }
         self.system_audio = value;
+        Ok(())
     }
 
     /// How much video the replay buffer keeps, if this layer says.
@@ -311,6 +364,11 @@ impl Preferences {
     /// which is the range the buffer itself accepts. Validating here as well
     /// means the refusal reaches the user at the moment they set it rather than
     /// at the moment a game launches.
+    ///
+    /// A window that is not a whole number of seconds is refused for a
+    /// different reason: `replay_window_seconds` is whole seconds, so half a
+    /// second would be dropped by the writer and the setting would come back
+    /// from the file as something other than what was set.
     pub fn set_replay_window(&mut self, value: Option<Duration>) -> Result<(), SettingError> {
         if let Some(window) = value {
             if !(MINIMUM_WINDOW..=MAXIMUM_WINDOW).contains(&window) {
@@ -322,6 +380,14 @@ impl Preferences {
                         MINIMUM_WINDOW.as_secs(),
                         MAXIMUM_WINDOW.as_secs()
                     ),
+                });
+            }
+            if window.subsec_nanos() != 0 {
+                return Err(SettingError::OutOfRange {
+                    key: SettingKey::ReplayWindow,
+                    value: format!("{} seconds", window.as_secs_f64()),
+                    accepted: "a whole number of seconds, which is what the settings file holds"
+                        .to_owned(),
                 });
             }
         }

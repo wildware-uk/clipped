@@ -122,9 +122,9 @@ does nothing (AGENTS.md section 27).
 | `framerate` | number | `60` | 1–480 |
 | `codec` | text | `auto` | `auto`, `h264`, `hevc`, `av1` |
 | `encoder` | text | `auto` | `auto`, `nvenc`, `amf`, `quicksync`, `software` |
-| `microphone` | text | `default` | `default`, `none`, or a device name |
-| `system_audio` | text | `default` | `default`, `none`, or a device name |
-| `replay_window_seconds` | number | `300` | 30–1800 |
+| `microphone` | text | `default` | `default`, `none`, or a device name of 1–256 characters |
+| `system_audio` | text | `default` | `default`, `none`, or a device name of 1–256 characters |
+| `replay_window_seconds` | number | `300` | 30–1800, whole seconds |
 
 The vocabulary is the command line's, deliberately: `--codec hevc` and
 `"codec": "hevc"` mean the same thing, because a settings file and a command
@@ -149,6 +149,21 @@ Every setter validates, so a `Preferences` that exists is one whose values are
 in range, and a `Configuration` that exists is valid. That is what makes "the
 previous valid configuration is retained" a property of the type rather than a
 discipline every caller has to keep.
+
+"In range" means *the file can carry it and give it back unchanged*, not merely
+that the Rust type can hold it. Two of the settings are wider than the file, and
+the setters are where that is caught:
+
+- `AudioDeviceSetting::Named` is a public variant, so a caller can build one
+  without `AudioDeviceSetting::named`. `set_microphone` and `set_system_audio`
+  apply the same rule — not blank, no control characters, at most 256 characters
+  — because a name the writer renders as `"name:"` is one the reader refuses,
+  and the user would be left with a settings file their own build cannot open.
+- `replay_window_seconds` is whole seconds, so a `Duration` carrying part of one
+  is refused rather than silently truncated by the writer.
+
+`every_device_name_a_setter_accepts_survives_the_writer_and_the_reader` is that
+property as a test: whatever a setter accepts is saved and read back equal.
 
 Messages name the setting, the value and what would have been accepted:
 
@@ -224,6 +239,37 @@ A temporary file and a rename, so that a crash or a full disk leaves either the
 previous settings or the new ones and never half of each (AGENTS.md section 17).
 The directory is created if it is not there. Nothing else writes the file.
 
+**Saving looks at the file before it replaces it, and refuses if this build
+could not read it.** Refusing to *read* a newer build's file preserves nothing on
+its own: the user whose other machine is a version ahead opens the settings here,
+sees the defaults, changes one thing, and the save is what destroys their file —
+the same loss, arrived at one step later. So `ConfigurationStore::store` parses
+what is on disk first and fails with `ConfigurationError::WouldOverwrite` rather
+than replacing something it does not understand.
+
+It checks the file rather than remembering what the last `load` found, because a
+store that was never asked to load has no such memory, and because a file that
+changed since the load — the other machine's sync client landed it — is exactly
+the case worth catching. What is left is the window between that read and the
+rename, which cross-process locking
+([issue #194](https://github.com/wildware-uk/clipped/issues/194)) is what would
+close.
+
+The refusal has to leave the user somewhere to go (AGENTS.md section 45), so the
+message says what is in the way and what to do about it:
+
+```text
+the settings were not saved: settings.json is settings version 2 and this
+build understands up to 1; update Clipped, or move the file aside to start
+again from the defaults. The file was left exactly as it is, because saving
+over settings this build cannot read would destroy them; move it aside to
+start again from the defaults
+```
+
+Moving it aside is a real recovery and not just advice —
+`moving_the_unreadable_file_aside_is_the_recovery_the_message_promises` follows
+it through to a successful save.
+
 ### Versions and migration
 
 `version` is the format, and this build writes version 1.
@@ -232,7 +278,7 @@ The directory is created if it is not there. Nothing else writes the file.
 | --- | --- |
 | no `version` key | version 0: migrated in memory, reported as `Loaded::Migrated { from: 0 }` |
 | `1` | read as written |
-| `2` or higher | **refused**, and the file is left exactly as it was |
+| `2` or higher | **refused**, and the file is left exactly as it was — by the next save as well as by the read |
 
 A migration runs **in memory**. The file on disk is not touched until the user
 next saves something, because rewriting a file for somebody who only wanted to
@@ -280,20 +326,29 @@ it cannot, because it has never heard of them — so `set_global`, `set_game` an
 ## Failure, and what survives it
 
 `ConfigurationStore` holds the last configuration it knows to be good. Every
-failure leaves it standing and leaves the file alone:
+failure leaves it standing and leaves the file alone — reading *and* saving:
 
-| Went wrong | Configuration in force | The file |
-| --- | --- | --- |
-| file absent | the defaults | not created |
-| not JSON | unchanged | untouched |
-| a value out of range | unchanged | untouched |
-| two actions on one hotkey | unchanged | untouched |
-| version newer than this build | unchanged | untouched |
-| both `fps` and `framerate` at version 0 | unchanged | untouched |
-| the save failed | unchanged | previous contents intact |
+| Went wrong | Configuration in force | The file | The next save |
+| --- | --- | --- | --- |
+| file absent | the defaults | not created | writes it |
+| not JSON | unchanged | untouched | **refused**, `WouldOverwrite` |
+| a value out of range | unchanged | untouched | **refused**, `WouldOverwrite` |
+| two actions on one hotkey | unchanged | untouched | **refused**, `WouldOverwrite` |
+| version newer than this build | unchanged | untouched | **refused**, `WouldOverwrite` |
+| both `fps` and `framerate` at version 0 | unchanged | untouched | **refused**, `WouldOverwrite` |
+| the file cannot be read at all (permissions) | unchanged | untouched | **refused**, `Read` |
+| the save itself failed | unchanged | previous contents intact | writes it, if the disk lets it |
 
-A user who hand-edits their settings into nonsense while Clipped is running
-keeps recording with the settings they had.
+A user who hand-edits their settings into nonsense while Clipped is running keeps
+recording with the settings they had, and their file stays as they left it until
+they move it aside themselves. The last column is the half that matters: a
+refusal to read that was followed by a save which overwrote anyway would preserve
+nothing at all.
+
+Note the deliberate asymmetry in the last two rows. A *content* the reader cannot
+understand means the file belongs to somebody — a newer build, or the user's own
+hand — and this build does not get to replace it. A *write* that failed says
+nothing about what is in the file, so the next save simply tries again.
 
 ## What #61 consumes
 

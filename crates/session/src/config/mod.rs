@@ -54,7 +54,10 @@
 //!
 //! [`ConfigurationStore`] is the same configuration with a file behind it: it
 //! reads [`settings.json`](document::FILE_NAME), migrates an older one, and
-//! keeps the configuration in force when a file cannot be read.
+//! keeps both the configuration in force *and* the file itself when one cannot
+//! be read — a save over a file this build could not understand is refused
+//! rather than performed, which is the half that makes the refusal worth
+//! anything (AGENTS.md section 56).
 //!
 //! # What reads this, and what does not yet
 //!

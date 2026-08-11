@@ -140,7 +140,9 @@ impl fmt::Display for Section {
 /// Every variant leaves the file on disk exactly as it was. Nothing here is
 /// recovered from by rewriting the user's settings, because a file that cannot
 /// be understood is far more likely to be one this build is too old for than
-/// one that is worthless (AGENTS.md section 56).
+/// one that is worthless (AGENTS.md section 56). That is why refusing to *read*
+/// a file has a counterpart in [`Self::WouldOverwrite`]: a refusal to read only
+/// preserves anything if the next save refuses as well.
 #[derive(Debug)]
 pub enum ConfigurationError {
     /// The file exists and could not be read.
@@ -198,6 +200,22 @@ pub enum ConfigurationError {
         /// Which value, and what it should have been.
         source: SettingError,
     },
+    /// Saving would have replaced a settings file this build cannot read.
+    ///
+    /// Refusing to read such a file is only half of preserving it. The other
+    /// half is here: the settings in it belong to whoever wrote it — most
+    /// likely a Clipped one version ahead, on the user's other machine — and
+    /// rendering this build's configuration over them would destroy every key
+    /// they hold, which is precisely what AGENTS.md section 56 forbids.
+    ///
+    /// The recovery is in the message and is the user's to make: move that
+    /// file aside, and the next save starts again from the defaults.
+    WouldOverwrite {
+        /// The file that was left alone.
+        path: PathBuf,
+        /// Why it could not be read, which is what says how to recover.
+        source: Box<Self>,
+    },
 }
 
 impl fmt::Display for ConfigurationError {
@@ -247,6 +265,14 @@ impl fmt::Display for ConfigurationError {
                 "{} cannot be used: in {section}, {source}",
                 path.display()
             ),
+            // The path is not repeated here: `source` names it, and this
+            // message is already the longest one in the enum.
+            Self::WouldOverwrite { source, .. } => write!(
+                formatter,
+                "the settings were not saved: {source}. The file was left exactly as it is, \
+                 because saving over settings this build cannot read would destroy them; \
+                 move it aside to start again from the defaults"
+            ),
         }
     }
 }
@@ -256,6 +282,7 @@ impl std::error::Error for ConfigurationError {
         match self {
             Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
             Self::Invalid { source, .. } => Some(source),
+            Self::WouldOverwrite { source, .. } => Some(source),
             Self::Syntax { .. } | Self::UnsupportedVersion { .. } | Self::Malformed { .. } => None,
         }
     }

@@ -387,11 +387,11 @@ fn read_setting(
         }
         SettingKey::Microphone => {
             let token = expect_string(key, value, DEVICES)?;
-            preferences.set_microphone(Some(parse_device(key, token)?));
+            preferences.set_microphone(Some(parse_device(key, token)?))?;
         }
         SettingKey::SystemAudio => {
             let token = expect_string(key, value, DEVICES)?;
-            preferences.set_system_audio(Some(parse_device(key, token)?));
+            preferences.set_system_audio(Some(parse_device(key, token)?))?;
         }
         SettingKey::ReplayWindow => {
             let seconds = expect_u32(key, value, "a whole number of seconds")?;

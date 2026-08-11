@@ -167,6 +167,10 @@ fn clearing_an_override_returns_the_game_to_inheriting() {
     assert!(preferences.is_set(SettingKey::Framerate));
     preferences.clear(SettingKey::Framerate);
     assert!(!preferences.is_set(SettingKey::Framerate));
+    assert!(
+        preferences.is_empty(),
+        "the frame rate was the only thing this game said, so it now says nothing"
+    );
     configuration.set_game(counter_strike.clone(), preferences);
 
     let resolved = configuration.resolve_for(&counter_strike);
@@ -302,6 +306,120 @@ fn a_replay_window_the_buffer_would_refuse_is_refused_here_too() {
         .expect("the shortest window the buffer accepts");
 }
 
+/// Everything a setter accepts, saved and read back through the store.
+///
+/// The property the whole layer rests on: a `Preferences` this build will hold
+/// is one this build can write and read again. Returning the configuration
+/// rather than asserting inside lets each caller say what it expected to
+/// survive.
+fn round_trip(label: &str, configuration: &Configuration) -> Configuration {
+    let directory = TestDirectory::new(label);
+    let mut writer = ConfigurationStore::at(directory.file());
+    writer
+        .store(configuration.clone())
+        .unwrap_or_else(|error| panic!("{label} could not be saved: {error}"));
+
+    let mut reader = ConfigurationStore::at(directory.file());
+    reader
+        .load()
+        .unwrap_or_else(|error| panic!("{label} could not be read back: {error}"));
+    reader.current().clone()
+}
+
+#[test]
+fn every_device_name_a_setter_accepts_survives_the_writer_and_the_reader() {
+    // `AudioDeviceSetting::Named` is a public variant, so a settings screen can
+    // build one without going through `named`. If the setter did not check it,
+    // a name the writer renders as something the reader refuses would leave the
+    // user with a settings file their own build cannot open — and, since a file
+    // this build cannot read is never overwritten, unable to save again.
+    let names = [
+        "Shure MV7".to_owned(),
+        // The two words that mean something else in the file, and the escape
+        // that makes them literal.
+        "none".to_owned(),
+        "default".to_owned(),
+        "name:none".to_owned(),
+        // Not trimmed: what the user typed is what is matched against the
+        // endpoint list.
+        "  Shure  ".to_owned(),
+        "Микрофон".to_owned(),
+        "a".repeat(MAXIMUM_DEVICE_NAME),
+    ];
+
+    for name in names {
+        let mut global = Preferences::none();
+        global
+            .set_microphone(Some(AudioDeviceSetting::Named(name.clone())))
+            .unwrap_or_else(|error| panic!("{name:?} should be a device name: {error}"));
+        global
+            .set_system_audio(Some(AudioDeviceSetting::Named(name.clone())))
+            .unwrap_or_else(|error| panic!("{name:?} should be a device name: {error}"));
+        let mut configuration = Configuration::defaults();
+        configuration.set_global(global);
+
+        assert_eq!(
+            round_trip("device-round-trip", &configuration),
+            configuration,
+            "a microphone called {name:?} did not survive being saved and read"
+        );
+    }
+}
+
+#[test]
+fn a_device_name_the_file_could_not_hold_is_refused_by_the_setter() {
+    // The same rule `AudioDeviceSetting::named` applies, reached the other way.
+    let mut preferences = Preferences::none();
+    preferences
+        .set_microphone(Some(AudioDeviceSetting::Default))
+        .expect("the default endpoint is always allowed");
+
+    for rejected in ["", "   ", "head\nset", &"a".repeat(MAXIMUM_DEVICE_NAME + 1)] {
+        let error = preferences
+            .set_microphone(Some(AudioDeviceSetting::Named(rejected.to_owned())))
+            .expect_err("the writer could not render that so the reader could read it");
+        assert!(
+            error.to_string().contains("microphone"),
+            "the refusal must name which of the two audio settings it is about: {error}"
+        );
+        preferences
+            .set_system_audio(Some(AudioDeviceSetting::Named(rejected.to_owned())))
+            .expect_err("system audio takes the same names");
+    }
+    assert_eq!(
+        preferences.microphone(),
+        Some(&AudioDeviceSetting::Default),
+        "a refused device must leave the previous selection standing"
+    );
+    assert_eq!(preferences.system_audio(), None);
+}
+
+#[test]
+fn a_replay_window_the_file_could_not_hold_exactly_is_refused() {
+    // `replay_window_seconds` is whole seconds. Accepting half of one would
+    // mean a setting that came back from the file as something other than what
+    // was set, which is a value silently changing itself.
+    let mut preferences = Preferences::none();
+    let error = preferences
+        .set_replay_window(Some(Duration::from_millis(30_500)))
+        .expect_err("the file holds whole seconds");
+    assert!(
+        error.to_string().contains("whole number of seconds"),
+        "the refusal must say why a value inside the range was refused: {error}"
+    );
+    assert_eq!(preferences.replay_window(), None);
+
+    preferences
+        .set_replay_window(Some(Duration::from_secs(31)))
+        .expect("a whole number of seconds inside the range");
+    let mut configuration = Configuration::defaults();
+    configuration.set_global(preferences);
+    assert_eq!(
+        round_trip("window-round-trip", &configuration),
+        configuration
+    );
+}
+
 #[test]
 fn an_audio_device_name_that_cannot_be_shown_is_refused() {
     for rejected in ["", "   ", "head\nset"] {
@@ -339,10 +457,14 @@ fn fully_populated() -> Configuration {
     global.set_framerate(Some(60)).expect("in range");
     global.set_codec(Some(CodecPreference::Fixed(Codec::Av1)));
     global.set_encoder(Some(EncoderPreference::Fixed(EncoderKind::Nvenc)));
-    global.set_microphone(Some(
-        AudioDeviceSetting::named(SettingKey::Microphone, "Shure MV7").expect("a real name"),
-    ));
-    global.set_system_audio(Some(AudioDeviceSetting::Disabled));
+    global
+        .set_microphone(Some(
+            AudioDeviceSetting::named(SettingKey::Microphone, "Shure MV7").expect("a real name"),
+        ))
+        .expect("a real name");
+    global
+        .set_system_audio(Some(AudioDeviceSetting::Disabled))
+        .expect("recording nothing is always allowed");
     global
         .set_replay_window(Some(Duration::from_secs(120)))
         .expect("in range");
@@ -396,9 +518,11 @@ fn a_device_called_none_survives_being_saved() {
     // called "none" would be read back as "record nothing".
     let directory = TestDirectory::new("literal-device");
     let mut global = Preferences::none();
-    global.set_microphone(Some(
-        AudioDeviceSetting::named(SettingKey::Microphone, "none").expect("a real name"),
-    ));
+    global
+        .set_microphone(Some(
+            AudioDeviceSetting::named(SettingKey::Microphone, "none").expect("a real name"),
+        ))
+        .expect("a real name");
     let mut configuration = Configuration::defaults();
     configuration.set_global(global);
 
@@ -553,6 +677,121 @@ fn a_file_from_a_newer_build_is_refused_rather_than_rewritten() {
         "the newer build's file must be left exactly as it was"
     );
     assert_eq!(store.current(), &Configuration::defaults());
+}
+
+#[test]
+fn saving_over_a_newer_builds_file_is_refused_and_the_file_survives() {
+    // The whole point of refusing to *read* a newer file is that the settings
+    // in it survive. They only survive if the next save refuses too: a user
+    // whose other machine is a version ahead opens the settings here, changes
+    // one thing, and the newer build's keys would otherwise be gone (AGENTS.md
+    // section 56).
+    let directory = TestDirectory::new("newer-save");
+    let text = format!(
+        r#"{{"version":{},"global":{{"framerate":120}},"vault":{{"remote":"nas"}}}}"#,
+        SCHEMA_VERSION + 1
+    );
+    fs::write(directory.file(), &text).expect("the file can be written");
+
+    let mut store = ConfigurationStore::at(directory.file());
+    store
+        .load()
+        .expect_err("this build is too old for that file");
+
+    let error = store
+        .store(worked_example())
+        .expect_err("a file this build cannot read must not be overwritten");
+    let message = error.to_string();
+    assert!(
+        message.contains(&(SCHEMA_VERSION + 1).to_string())
+            && message.to_lowercase().contains("not saved"),
+        "the refusal must say nothing was saved, and why: {message}"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.file()).expect("the file reads"),
+        text,
+        "the newer build's file must be exactly as it was"
+    );
+    assert_eq!(
+        store.current(),
+        &Configuration::defaults(),
+        "a refused save must leave the configuration in force standing"
+    );
+}
+
+#[test]
+fn saving_over_an_unreadable_file_is_refused_even_when_it_was_never_read() {
+    // The store does not have to have been asked to `load` for the file to be
+    // somebody's. A caller that constructs a store and saves immediately must
+    // not be the way a newer build's settings are lost.
+    let directory = TestDirectory::new("never-read");
+    let text = format!(r#"{{"version":{}}}"#, SCHEMA_VERSION + 1);
+    fs::write(directory.file(), &text).expect("the file can be written");
+
+    let mut store = ConfigurationStore::at(directory.file());
+    store
+        .store(worked_example())
+        .expect_err("an unread file is still the user's");
+    assert_eq!(
+        fs::read_to_string(directory.file()).expect("the file reads"),
+        text
+    );
+}
+
+#[test]
+fn saving_over_a_file_that_is_not_json_is_refused_and_says_what_to_do() {
+    // Not JSON is the other way a file becomes unreadable, and the same rule
+    // applies: what is in it may be a newer build's, or a user's own editing,
+    // and this build cannot tell. The message has to leave them somewhere to
+    // go (AGENTS.md section 45).
+    let directory = TestDirectory::new("syntax-save");
+    let text = "{\n  \"version\": 1,\n  oops\n}";
+    fs::write(directory.file(), text).expect("the file can be written");
+
+    let mut store = ConfigurationStore::at(directory.file());
+    let error = store
+        .store(worked_example())
+        .expect_err("this build cannot read what is already there");
+    let message = error.to_string();
+    assert!(
+        message.contains("line 3") && message.contains(FILE_NAME),
+        "the refusal must name the file and where it broke: {message}"
+    );
+    assert!(
+        message.contains("move it aside"),
+        "the refusal must leave the user an action: {message}"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.file()).expect("the file reads"),
+        text
+    );
+    assert!(
+        !directory.0.join("settings.json.tmp").exists(),
+        "a refused save must not leave a temporary file behind"
+    );
+}
+
+#[test]
+fn moving_the_unreadable_file_aside_is_the_recovery_the_message_promises() {
+    // The message tells the user to move the file aside. If that did not then
+    // let them save, the refusal would be a dead end rather than a recovery
+    // path (AGENTS.md sections 45 and 56).
+    let directory = TestDirectory::new("recovery");
+    fs::write(
+        directory.file(),
+        format!(r#"{{"version":{}}}"#, SCHEMA_VERSION + 1),
+    )
+    .expect("the file can be written");
+
+    let mut store = ConfigurationStore::at(directory.file());
+    store.store(worked_example()).expect_err("refused");
+
+    fs::rename(directory.file(), directory.0.join("settings.json.old"))
+        .expect("the user moves it aside");
+    store
+        .store(worked_example())
+        .expect("now there is nothing to destroy");
+    assert_eq!(store.current(), &worked_example());
 }
 
 // ---------------------------------------------------------------- migration

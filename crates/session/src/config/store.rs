@@ -13,6 +13,24 @@
 //! The file is equally protected: nothing here rewrites a file it could not
 //! understand. A file this build cannot read is far more likely to have been
 //! written by a newer one than to be worthless.
+//!
+//! # Why saving reads the file first
+//!
+//! Refusing to *read* a newer build's file preserves nothing on its own. The
+//! user whose other machine is a version ahead opens the settings here, sees
+//! the defaults, changes one thing, and the save is what destroys their file —
+//! which is the destruction AGENTS.md section 56 is about, arrived at one step
+//! later. So [`ConfigurationStore::store`] looks at what is on disk before it
+//! replaces it, and refuses if this build could not read it.
+//!
+//! It looks at the file rather than at what the last [`ConfigurationStore::load`]
+//! found, for two reasons. A store that was never asked to load has no such
+//! memory and would otherwise overwrite the file blind; and a file that changed
+//! since the load — the other machine's sync client landed it — is exactly the
+//! case worth catching. What remains is the window between that read and the
+//! rename, which no amount of remembering closes and which cross-process
+//! locking ([issue #194](https://github.com/wildware-uk/clipped/issues/194))
+//! is what would.
 
 use std::path::{Path, PathBuf};
 
@@ -103,16 +121,50 @@ impl ConfigurationStore {
     /// disk leaves either the previous settings or the new ones, never half of
     /// each (AGENTS.md section 17).
     ///
+    /// A settings file that is already there and that this build cannot read is
+    /// never replaced — see the module documentation for why that check lives
+    /// here rather than in [`Self::load`].
+    ///
     /// # Errors
     ///
-    /// [`ConfigurationError::Write`] if the directory cannot be created, the
-    /// temporary file cannot be written, or the rename fails. The configuration
-    /// in force is unchanged in each case.
+    /// [`ConfigurationError::WouldOverwrite`] if the file on disk is one this
+    /// build could not read, and [`ConfigurationError::Write`] if the directory
+    /// cannot be created, the temporary file cannot be written, or the rename
+    /// fails. The configuration in force is unchanged in each case, and so is
+    /// the file.
     pub fn store(&mut self, configuration: Configuration) -> Result<(), ConfigurationError> {
+        self.check_the_file_may_be_replaced()?;
         let text = document::render(&configuration);
         self.write_atomically(&text)?;
         self.current = configuration;
         Ok(())
+    }
+
+    /// Fails when there is a settings file this build cannot read.
+    ///
+    /// An absent file is fine — there is nothing to destroy — and so is one
+    /// that parses, whatever version it is at: a version 0 file is one this
+    /// build understands, and saving is how it becomes a version 1 one.
+    fn check_the_file_may_be_replaced(&self) -> Result<(), ConfigurationError> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // Unreadable for any other reason is reported rather than written
+            // over. A file that cannot be read is not one whose contents are
+            // known to be worthless.
+            Err(source) => {
+                return Err(ConfigurationError::Read {
+                    path: self.path.clone(),
+                    source,
+                })
+            }
+        };
+        document::parse(&self.path, &text)
+            .map(|_| ())
+            .map_err(|source| ConfigurationError::WouldOverwrite {
+                path: self.path.clone(),
+                source: Box::new(source),
+            })
     }
 
     fn write_atomically(&self, text: &str) -> Result<(), ConfigurationError> {
