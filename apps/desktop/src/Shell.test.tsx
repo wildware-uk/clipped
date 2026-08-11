@@ -71,17 +71,39 @@ describe('the application shell', () => {
     expect(links.map((link) => link.textContent)).toEqual(SCREENS.map((entry) => entry.label));
   });
 
-  it('says which issue builds each screen instead of drawing an empty one', async () => {
+  /*
+   * Games is written (issue #107) and is therefore not in this list. It is
+   * named rather than filtered by "has a screen", because a list that computed
+   * itself from the same fact the shell routes on could not fail: the point of
+   * naming it is that building a screen and forgetting to route it, or routing
+   * one that was never built, both show up here.
+   */
+  const PLACEHOLDER_SCREENS = SCREENS.filter((entry) => entry.id !== 'games');
+
+  it('says which issue builds each unwritten screen instead of drawing an empty one', async () => {
     const user = userEvent.setup();
     renderApp();
 
-    for (const entry of SCREENS) {
+    expect(PLACEHOLDER_SCREENS).toHaveLength(SCREENS.length - 1);
+
+    for (const entry of PLACEHOLDER_SCREENS) {
       await user.click(screen.getByRole('link', { name: entry.label }));
 
       expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(entry.label);
       expect(screen.getByRole('heading', { level: 2, name: 'Not built yet' })).toBeVisible();
       expect(screen.getByText(new RegExp(`Issue #${entry.trackedIn} builds it`))).toBeVisible();
     }
+  });
+
+  it('routes Games to the screen that was built rather than to the placeholder', async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(screen.getByRole('link', { name: 'Games' }));
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Games');
+    expect(screen.queryByRole('heading', { level: 2, name: 'Not built yet' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Game detection' })).toBeVisible();
   });
 
   it('offers no recorder controls while the recorder cannot be reached', () => {
