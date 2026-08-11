@@ -123,12 +123,22 @@ impl Toaster {
 
         // Only once Windows has accepted it. A notification that was refused has
         // no toast to be clicked, and holding it would push a live one out.
+        self.retain(notification);
+
+        Ok(())
+    }
+
+    /// Keeps a shown notification alive, and lets the oldest go.
+    ///
+    /// The whole point of this module; see its documentation. Separate from
+    /// [`Self::show`] so that it can be exercised without putting a toast on
+    /// somebody's screen — `show` calling it is the one line of this that only a
+    /// real toast can demonstrate.
+    fn retain(&mut self, notification: ToastNotification) {
         if self.shown.len() == RETAINED {
             self.shown.pop_front();
         }
         self.shown.push_back(notification);
-
-        Ok(())
     }
 
     /// Builds the notification and attaches the handler, without showing it.
@@ -155,15 +165,26 @@ impl Toaster {
 
 /// Which button the user clicked, if it was a button.
 ///
-/// The body of a toast activates with empty arguments, which is reported as
-/// [`None`] so that the caller need not know that.
+/// Unwraps what WinRT hands the handler. The decision itself is
+/// [`button_argument`], which is separate because a `ToastActivatedEventArgs`
+/// can only be made by the notification platform — so this half cannot be
+/// tested, and the half that decides anything can.
 fn chosen_action(arguments: Option<&windows::core::IInspectable>) -> Option<String> {
     let activated = arguments?.cast::<ToastActivatedEventArgs>().ok()?;
-    let chosen = activated.Arguments().ok()?;
-    if chosen.is_empty() {
+    button_argument(&activated.Arguments().ok()?.to_string())
+}
+
+/// The button an activation names, if it names one.
+///
+/// Clicking the *body* of a toast activates it with empty arguments — the
+/// platform's way of saying "the notification, not a control on it" — and that
+/// is reported as [`None`] so that [`crate::notifications`] can raise the window
+/// instead of performing an action nobody chose.
+fn button_argument(arguments: &str) -> Option<String> {
+    if arguments.is_empty() {
         None
     } else {
-        Some(chosen.to_string())
+        Some(arguments.to_owned())
     }
 }
 
@@ -320,18 +341,16 @@ mod tests {
         // only reference this process holds to the object the `Activated` event
         // is raised on. Nothing here may do that.
         //
-        // Composed rather than shown — showing would put a toast on somebody's
-        // screen — so this asserts the retention rule against the same objects
-        // `show` retains.
+        // `Toaster::retain` is the production code and is what is called here.
+        // Only the `Show` between composing and retaining is skipped, because it
+        // would put a toast on somebody's screen; `show` calling `retain` is
+        // therefore the one line this cannot reach.
         let mut toaster = Toaster::new("uk.wildware.clipped.test");
         for _ in 0..RETAINED + 5 {
             let notification = toaster
                 .compose(content(), |_| {})
                 .expect("the notification is composed");
-            if toaster.shown.len() == RETAINED {
-                toaster.shown.pop_front();
-            }
-            toaster.shown.push_back(notification);
+            toaster.retain(notification);
         }
 
         assert_eq!(
@@ -349,9 +368,18 @@ mod tests {
 
     #[test]
     fn the_body_of_a_toast_is_not_the_button() {
-        // `notifications::show` tells the two apart by the argument, and gets
-        // `None` for the body. Clicking the body performing the button's action
-        // would be a click doing something nobody asked for.
+        // `notifications::show` tells the two apart by this argument. Windows
+        // activates a toast whose *body* was clicked with an empty one, and
+        // treating that as the button would perform an action nobody chose —
+        // opening File Explorer because somebody looked at a notification.
+        assert_eq!(button_argument(""), None, "the body of the toast");
+        assert_eq!(
+            button_argument("action"),
+            Some("action".to_owned()),
+            "the button `compose_xml` puts on every toast"
+        );
+        // The handler is given `None` when there are no arguments at all, which
+        // is not a button either.
         assert_eq!(chosen_action(None), None);
     }
 }
