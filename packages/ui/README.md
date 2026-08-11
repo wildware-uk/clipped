@@ -37,9 +37,12 @@ import '@clipped/ui/styles.css';
   defined in `src/styles.css` or `src/components.css`. There is no CSS-in-JS and
   no utility framework: the design system is a stylesheet, and this package
   stays one.
-- A colour, a typeface, a type size or a distance is written as a value only in
-  `src/tokens.css`. Everywhere else it is `var(--token)`, and
-  `src/stylesheet.test.ts` fails the suite if that stops being true.
+- A colour, a typeface, a type size, a distance or a leading is written as a
+  value only in `src/tokens.css`. Everywhere else it is `var(--token)`, and
+  `src/stylesheet.test.ts` fails the suite if that stops being true — for a
+  number in any CSS length unit, in either case, rather than a sample of them.
+- Every control that can be disabled draws itself as disabled, and
+  `src/stylesheet.test.ts` lists the four, so a fifth cannot ship without one.
 - No component reaches for `window`, Tauri or the network. They render what they
   are given, which is what makes them testable in jsdom.
 - Colour is never the only carrier of state (AGENTS.md section 46).
