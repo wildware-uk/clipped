@@ -770,8 +770,11 @@ interface does not compile.
 
 The asymmetry this document is built on survives the crossing. An unknown error
 code, end reason, error detail or event parses on the TypeScript side and keeps
-what it could not understand; an unknown **recorder state** fails the message,
-in both languages, and there is a sample of each proving it.
+what it could not understand; an unknown **recorder state** fails whatever
+carried it, in both languages — the reply, and with it the frame, or the
+`status_changed` event, which then becomes an unrecognised event rather than
+costing the connection its subscription. Either way nothing renders a state the
+build cannot name, and there is a sample of each case proving both sides agree.
 
 Regenerate the schema after changing anything on the wire:
 

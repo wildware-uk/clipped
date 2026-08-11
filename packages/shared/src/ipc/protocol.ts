@@ -31,10 +31,13 @@
  *   known tag never lands in the catch-all and a `switch` over the union is
  *   still exhaustive.
  *
- * {@link RecorderStatus} deliberately has neither. A state this build does not
- * know fails the message that carried it, because a window showing "idle" for a
- * recorder doing something else is a lie, and a message the interface cannot
- * read is not (`docs/ipc.md`, "Compatibility policy").
+ * {@link RecorderStatus} deliberately has neither, because a window showing
+ * "idle" for a recorder doing something else is a lie, and a message the
+ * interface cannot read is not (`docs/ipc.md`, "Compatibility policy"). A state
+ * this build does not know therefore fails whatever carried it: a reply, and
+ * with it the frame; or a `status_changed` event, which is then kept as an
+ * {@link UnrecognisedEvent} like any other event this build cannot read. Never
+ * a state rendered as something it is not.
  */
 
 /** Any value that can arrive as JSON. */

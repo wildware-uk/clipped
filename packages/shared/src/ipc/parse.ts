@@ -27,9 +27,16 @@
  *   cannot read** — becomes an {@link UnrecognisedEvent} holding the raw JSON,
  *   which is where `serde`'s untagged catch-all puts it. The same goes for an
  *   error detail.
- * - An unknown recorder state, reply, outcome or envelope `type` fails the
- *   frame. Those are the tags that decide what a message *is*, and the state is
- *   the one value that would be a lie rather than a gap.
+ * - An unknown reply, outcome or envelope `type` fails the frame. Those are the
+ *   tags that decide what a message *is*, and there is nothing to do with a
+ *   message whose kind is unknown.
+ * - An unknown recorder state is never rendered, and where it goes depends on
+ *   what carried it. In a reply it fails the frame: the interface asked what
+ *   the recorder was doing and has no answer it can show. In a `status_changed`
+ *   event it fails the *event*, which then lands in the catch-all with every
+ *   other event this build cannot read — so the subscription survives, and the
+ *   state is still not shown. `crates/ipc` does exactly the same thing for the
+ *   same reason, and the schema carries a sample of each.
  */
 
 import type {
@@ -310,6 +317,12 @@ function readStatus(value: JsonValue | undefined): RecorderStatus {
       // The one unknown value that must not be tolerated. Showing "idle" for a
       // recorder in a state this build has never heard of would be a lie; not
       // being able to read the message is only a gap.
+      //
+      // This fails whatever is reading the status: the reply, and with it the
+      // frame; or, inside a `status_changed` event, the event — which
+      // {@link readEvent} then keeps as unrecognised rather than losing the
+      // subscription over. Either way nothing is rendered from a state this
+      // build cannot name, which is the whole of the promise.
       return unreadable(`\`${state}\` is not a recorder state this build knows`);
   }
 }
