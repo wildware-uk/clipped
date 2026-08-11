@@ -283,7 +283,9 @@ installed game. The filesystem tests build a small library of their own under th
 system temporary directory, named for the test, the process and the thread so
 that parallel runs cannot share one, and remove it when they finish.
 
-Two tests skip rather than fail on a machine that cannot host them, and say so on
-stderr: creating a directory symlink needs Developer Mode or an elevated shell,
-and the disconnected-drive tests need a drive letter with no volume mounted on
-it.
+Two of them skip rather than fail on a machine that cannot host them, and say so
+on stderr. The disconnected-drive tests need a drive letter with no volume
+mounted on it. The link test needs a directory link: it tries a symbolic link
+first, which needs Developer Mode or an elevated shell, and falls back to a
+junction, which needs no privilege at all and is what a user who moved their
+recordings to another drive is most likely to have made.

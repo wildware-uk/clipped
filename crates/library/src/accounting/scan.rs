@@ -453,17 +453,22 @@ mod tests {
         // against a second reading of the same metadata.
         // docs/storage-management.md documents how this relates to what the
         // volume actually allocates.
+        //
+        // None of these sizes is a multiple of a 4 KiB cluster, deliberately. An
+        // implementation that reported allocated size rather than file length
+        // would agree with this test on round numbers and disagree here, which
+        // is the difference the documented tolerance is about.
         let library = TestLibrary::new("exact-total");
-        library.file("Counter-Strike 2/session-1/match-1.mkv", 1_048_576);
-        library.file("Counter-Strike 2/session-1/match-2.mkv", 524_288);
-        library.file("Minecraft/session-7/full.mkv", 2_097_152);
+        library.file("Counter-Strike 2/session-1/match-1.mkv", 1_000_003);
+        library.file("Counter-Strike 2/session-1/match-2.mkv", 524_289);
+        library.file("Minecraft/session-7/full.mkv", 2_000_001);
 
         let roots = StorageRoots::new()
             .with(StorageCategory::Recordings, library.path())
             .expect("an absolute path");
         let report = scan(&roots, &ScanOptions::new());
 
-        assert_eq!(report.inventory().total_bytes(), 3_670_016);
+        assert_eq!(report.inventory().total_bytes(), 3_524_293);
         assert_eq!(report.files_seen(), 3);
         assert!(report.inventory().is_complete());
     }
@@ -696,6 +701,35 @@ mod tests {
         assert_eq!(report.inventory().total_bytes(), 4_000);
     }
 
+    /// Creates a directory link at `link` pointing at `target`, or reports why
+    /// it could not.
+    ///
+    /// A symbolic link needs Developer Mode or an elevated shell, and a plain
+    /// user account on a default Windows install has neither. A **junction**
+    /// needs no privilege at all, is the same kind of reparse point as far as a
+    /// walk is concerned, and is what a user who moved their recordings to
+    /// another drive is most likely to have made — so the test falls back to one
+    /// rather than skipping, and only skips if both are refused.
+    #[cfg(windows)]
+    fn link_directory(link: &Path, target: &Path) -> Result<(), String> {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return Ok(());
+        }
+
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map_err(|error| format!("mklink could not be run: {error}"))?;
+
+        if output.status.success() && link.exists() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_directory_link_is_skipped_rather_than_followed() {
@@ -703,12 +737,11 @@ mod tests {
         // at an ancestor would walk for ever.
         let library = TestLibrary::new("links");
         library.file("real/a.mkv", 5_000);
-        let link = library.path().join("link");
 
-        if std::os::windows::fs::symlink_dir(library.path().join("real"), &link).is_err() {
-            eprintln!(
-                "skipping: creating a directory symlink needs Developer Mode or an elevated shell"
-            );
+        if let Err(reason) =
+            link_directory(&library.path().join("link"), &library.path().join("real"))
+        {
+            eprintln!("skipping: no directory link could be created ({reason})");
             return;
         }
 
@@ -717,6 +750,11 @@ mod tests {
             .expect("an absolute path");
         let report = scan(&roots, &ScanOptions::new());
 
+        assert_eq!(
+            report.files_seen(),
+            1,
+            "the file behind the link is one file"
+        );
         assert_eq!(report.inventory().total_bytes(), 5_000, "counted once");
         assert_eq!(report.links_skipped(), 1);
     }
