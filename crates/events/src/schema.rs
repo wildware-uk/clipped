@@ -27,7 +27,8 @@
 //!   build does not recognise fails the whole document it is part of. An event
 //!   whose kind means nothing to this build is still a mark it can place,
 //!   attribute and draw.
-//! - **A document from a newer schema is read, and flagged.** The envelope is
+//! - **A document from a schema this build does not know is read, and
+//!   flagged.** In practice that is a newer one. The envelope is
 //!   frozen, so its times and its source are still exactly what they say they
 //!   are; what a bump can change is what lies *inside* — the meaning of a
 //!   payload, or of a kind. [`ReadEvent::schema`] says which build wrote it so
@@ -77,7 +78,7 @@ impl SchemaVersion {
     }
 
     /// The version a number names, or [`None`] when this build has never heard
-    /// of it — which today means a document written by a newer build.
+    /// of it — in practice, a document written by a newer build.
     #[must_use]
     pub const fn from_number(number: u32) -> Option<Self> {
         match number {
@@ -160,9 +161,16 @@ pub enum WrittenUnder {
     /// A version this build knows. The event has been upgraded to
     /// [`SchemaVersion::CURRENT`] if it was not already there.
     Known(SchemaVersion),
-    /// A version from the future: this build has been overtaken by one that
-    /// wrote the file. The envelope was still read, because it is frozen.
-    Newer(u32),
+    /// A version this build does not know, carried verbatim.
+    ///
+    /// In practice this is a build from the future: the file was written by a
+    /// newer Clipped than the one reading it. It is deliberately *not* named
+    /// `Newer`, because a number below [`SchemaVersion::CURRENT`] would land
+    /// here too — a corrupted field, or a version this build is too new to
+    /// remember — and calling that "newer" would be a claim the reader cannot
+    /// support (AGENTS.md section 27). The envelope was still read, because it
+    /// is frozen.
+    Unknown(u32),
 }
 
 /// Reads a stored event, upgrading it from whatever version wrote it.
@@ -201,7 +209,7 @@ pub fn read_value(document: Value) -> Result<ReadEvent, ReadError> {
         // Not upgraded, because there is no step from a version this build has
         // never seen. Read anyway: the envelope is frozen, so a newer build's
         // event still has a kind, a time and a source that mean what they say.
-        None => WrittenUnder::Newer(written),
+        None => WrittenUnder::Unknown(written),
     };
 
     let event =
@@ -343,12 +351,26 @@ mod tests {
 
         let read = read(future).expect("a newer document must still be readable");
 
-        assert_eq!(read.schema, WrittenUnder::Newer(7));
+        assert_eq!(read.schema, WrittenUnder::Unknown(7));
         assert!(!read.is_understood());
         assert_eq!(read.event.kind(), &EventKind::Kill);
         assert_eq!(read.event.timing().at().as_media_nanos(), 61_500_000_000);
         assert_eq!(read.event.source().as_str(), "counter-strike-2");
         assert_eq!(read.event.data().fields()["weapon"], json!("ak47"));
+    }
+
+    #[test]
+    fn a_schema_number_this_build_does_not_know_is_not_called_newer() {
+        // `0` is not a version anything wrote. It could only be corruption, or
+        // a build so old this one has forgotten it — and reporting either as
+        // "written by a newer Clipped" would be a claim the reader cannot
+        // support. It is still read, because the envelope is frozen.
+        let odd =
+            r#"{"schema":0,"kind":"kill","at":1,"precision":0,"source":"acme","confidence":1.0}"#;
+        let read = read(odd).expect("an unknown version is still read");
+        assert_eq!(read.schema, WrittenUnder::Unknown(0));
+        assert!(!read.is_understood());
+        assert_eq!(read.event.kind(), &EventKind::Kill);
     }
 
     #[test]
