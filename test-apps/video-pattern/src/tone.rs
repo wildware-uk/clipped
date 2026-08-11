@@ -59,12 +59,16 @@
 //!
 //! # Ownership and threading
 //!
-//! One thread owns the `IAudioClient`, the `IAudioRenderClient` and the
-//! `IAudioClock` for its whole life and stops the client before it returns.
+//! One thread owns the [`RenderStream`] and the `IAudioClock` for its whole
+//! life, and dropping the stream stops the client (`src/render_stream.rs`).
 //! [`ToneOutput::drop`] clears the flag and joins, so no path — panic included —
 //! leaves a render stream open (AGENTS.md section 58). Nothing is shared with
 //! the render loop except an [`AtomicBool`] and two channels (AGENTS.md
 //! section 20).
+//!
+//! Opening the endpoint is [`crate::render_stream`], which the drift
+//! measurement's silent stream in `tests/capture/av_sync.rs` opens through as
+//! well; what is here is only what placing a sample at a *moment* needs.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
@@ -72,15 +76,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
-use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioClient, IAudioClock, IAudioRenderClient, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
-};
-use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoIncrementMTAUsage, CoTaskMemFree, CLSCTX_ALL,
-};
+use windows::Win32::Media::Audio::IAudioClock;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+
+use crate::render_stream::{RenderStream, Samples};
 
 /// The tone, in hertz.
 pub(crate) const FREQUENCY: f32 = 997.0;
@@ -108,15 +107,10 @@ const FADE: Duration = Duration::from_nanos(FADE_NANOS);
 /// reported position forward, and the extrapolation is only ever this long:
 /// sixty milliseconds of a clock accurate to a few parts per million is a
 /// placement error of nanoseconds. A comfortable half-second queue would be no
-/// more robust — the buffer asked for is [`BUFFER_HUNDRED_NANOS`] either way —
-/// and would put the arithmetic further out on a limb.
+/// more robust — the buffer the endpoint is asked for is the same 200 ms either
+/// way (`src/render_stream.rs`) — and would put the arithmetic further out on a
+/// limb.
 const QUEUE: Duration = Duration::from_millis(60);
-
-/// The buffer asked of the audio engine, in 100-nanosecond units: 200 ms.
-///
-/// Larger than [`QUEUE`], so that a late wake-up has somewhere to catch up into
-/// rather than an underrun.
-const BUFFER_HUNDRED_NANOS: i64 = 2_000_000;
 
 /// How long the render thread sleeps between top-ups.
 const TOP_UP: Duration = Duration::from_millis(3);
@@ -406,15 +400,6 @@ fn render(
     emitted: &Sender<Emitted>,
     ready: &Sender<Result<(), String>>,
 ) {
-    // SAFETY: `CoIncrementMTAUsage` takes a process-wide reference to the
-    // multi-threaded apartment, and the reference is deliberately never given
-    // back — which is what makes it safe to take from a thread that will exit.
-    // The same reasoning as `crates/audio/src/windows/apartment.rs`.
-    if let Err(error) = unsafe { CoIncrementMTAUsage() } {
-        let _ = ready.send(Err(format!("COM is unavailable: {error}")));
-        return;
-    }
-
     let endpoint = match open_endpoint() {
         Ok(endpoint) => endpoint,
         Err(reason) => {
@@ -422,16 +407,10 @@ fn render(
             return;
         }
     };
-
-    // SAFETY: `endpoint.client` is initialised and has not been started.
-    if let Err(error) = unsafe { endpoint.client.Start() } {
-        let _ = ready.send(Err(format!("the render stream would not start: {error}")));
-        return;
-    }
     let _ = ready.send(Ok(()));
 
-    let rate = f64::from(endpoint.rate);
-    let channels = usize::from(endpoint.channels);
+    let rate = f64::from(endpoint.stream.rate());
+    let channels = usize::from(endpoint.stream.channels());
     let queue_frames = (QUEUE.as_secs_f64() * rate) as u32;
     let step = 2.0 * core::f64::consts::PI * f64::from(FREQUENCY) / rate;
 
@@ -449,68 +428,60 @@ fn render(
             .wanted
             .extend(wanted.try_iter().map(|request| request.at_nanos));
 
-        // SAFETY: `endpoint.client` is a started `IAudioClient`.
-        let Ok(padding) = (unsafe { endpoint.client.GetCurrentPadding() }) else {
-            break;
+        let queued = match endpoint.stream.queued_frames() {
+            Ok(queued) => queued,
+            Err(reason) => {
+                eprintln!("[warn] the tone thread stopped: {reason}");
+                break;
+            }
         };
         let want = queue_frames
-            .saturating_sub(padding)
-            .min(endpoint.buffer_frames.saturating_sub(padding));
+            .saturating_sub(queued)
+            .min(endpoint.stream.buffer_frames().saturating_sub(queued));
         if want == 0 {
             std::thread::sleep(TOP_UP);
             continue;
         }
 
         let Some(timeline) = read_timeline(&endpoint) else {
+            eprintln!("[warn] the tone thread stopped: the endpoint's clock stopped answering");
             break;
         };
         if burst.is_none() {
             burst = placer.next(timeline, written, u64::from(want), emitted);
         }
 
-        // SAFETY: `want` is at most the free space `GetCurrentPadding` just
-        // reported, which is what `GetBuffer` requires. The pointer it returns
-        // is valid for `want * channels` floats until `ReleaseBuffer`, which is
-        // called below before anything else happens.
-        let Ok(buffer) = (unsafe { endpoint.render_client.GetBuffer(want) }) else {
-            break;
-        };
-        // SAFETY: as above, and the endpoint was checked to present 32-bit
-        // float samples before the stream was started, so the region is
-        // `want * channels` `f32`s. It is written in full.
-        let samples = unsafe {
-            core::slice::from_raw_parts_mut(buffer.cast::<f32>(), want as usize * channels)
-        };
-        samples.fill(0.0);
-
-        if let Some(sounding) = burst {
+        let written_from = written;
+        let write = endpoint.stream.write(want, |samples| {
+            samples.fill(0.0);
+            let Some(sounding) = burst else {
+                return;
+            };
             let end = sounding.start + sounding.frames;
-            for position in sounding.start.max(written)..end.min(written + u64::from(want)) {
+            for position in
+                sounding.start.max(written_from)..end.min(written_from + u64::from(want))
+            {
                 let along = position - sounding.start;
                 let value = AMPLITUDE
                     * envelope(along, sounding.frames, placer.fade_frames)
                     * (step * along as f64).sin() as f32;
-                let frame = (position - written) as usize * channels;
+                let frame = (position - written_from) as usize * channels;
                 samples[frame..frame + channels].fill(value);
             }
-            if end <= written + u64::from(want) {
+        });
+        if let Err(reason) = write {
+            eprintln!("[warn] the tone thread stopped: {reason}");
+            break;
+        }
+        if let Some(sounding) = burst {
+            if sounding.start + sounding.frames <= written + u64::from(want) {
                 burst = None;
             }
-        }
-
-        // SAFETY: `want` is the frame count `GetBuffer` was asked for and the
-        // buffer has been written in full, so no silence flag is passed.
-        if unsafe { endpoint.render_client.ReleaseBuffer(want, 0) }.is_err() {
-            break;
         }
         written += u64::from(want);
 
         std::thread::sleep(TOP_UP);
     }
-
-    // SAFETY: `endpoint.client` was started, and stopping it is what releases
-    // the endpoint.
-    let _ = unsafe { endpoint.client.Stop() };
 }
 
 /// Reads the endpoint's position and the counter reading it was taken at.
@@ -532,135 +503,38 @@ fn read_timeline(endpoint: &Endpoint) -> Option<Timeline> {
         // `IAudioClock` reports the counter in 100-nanosecond units, as WASAPI
         // does everywhere else.
         anchor_nanos: counter.saturating_mul(100),
-        played_frames: position as f64 / endpoint.clock_frequency as f64 * f64::from(endpoint.rate),
-        rate: f64::from(endpoint.rate),
+        played_frames: position as f64 / endpoint.clock_frequency as f64
+            * f64::from(endpoint.stream.rate()),
+        rate: f64::from(endpoint.stream.rate()),
     })
 }
 
-/// The endpoint, its render client and its clock, all owned by the render
-/// thread for its whole life.
+/// The render stream and the endpoint's clock, both owned by the render thread
+/// for its whole life.
 #[derive(Debug)]
 struct Endpoint {
-    client: IAudioClient,
-    render_client: IAudioRenderClient,
+    stream: RenderStream,
     clock: IAudioClock,
     /// Units of `IAudioClock` position a second, which is what turns a position
     /// into seconds.
     clock_frequency: u64,
-    buffer_frames: u32,
-    rate: u32,
-    channels: u16,
 }
 
-/// Opens the default output device for shared-mode rendering.
+/// Opens the default output device for shared-mode rendering, with the clock
+/// that puts a stream position on the performance counter.
 ///
-/// Refuses anything that does not present 32-bit float samples. The capture
-/// side handles every format Windows can present
-/// (`crates/audio/src/format.rs`); this only knows how to *play* one, and an
-/// endpoint written the wrong format is full-scale noise on somebody's speakers
-/// rather than a quiet tone.
+/// [`Samples::Float32`] because this writes real samples: the capture side
+/// handles every format Windows can present (`crates/audio/src/format.rs`),
+/// and this only knows how to *play* one — an endpoint written the wrong
+/// format is full-scale noise on somebody's speakers rather than a quiet tone.
 fn open_endpoint() -> Result<Endpoint, String> {
-    let opened = (|| -> windows::core::Result<Option<Endpoint>> {
-        // SAFETY: `MMDeviceEnumerator` is the class identifier for
-        // `IMMDeviceEnumerator`, which is the interface the return type asks
-        // for.
-        let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
-        // SAFETY: both arguments are values of the enumerations named, and the
-        // enumerator is live.
-        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
-        // SAFETY: `device` is live; the interface is fixed by the return type.
-        let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
-        // SAFETY: `client` is live and uninitialised, which is when
-        // `GetMixFormat` is valid. The `WAVEFORMATEX` it returns is a
-        // `CoTaskMemAlloc` allocation this function now owns, and both paths
-        // below give it back before returning (AGENTS.md section 58).
-        let mix = unsafe { client.GetMixFormat() }?;
-        // SAFETY: `WAVEFORMATEX` is `#[repr(packed)]`, so its fields are read
-        // by copying the whole structure rather than by reference.
-        let header = unsafe { mix.read_unaligned() };
-        let float32 = is_float32(mix);
-
-        let initialised = if float32 {
-            // SAFETY: `mix` is the format Windows just reported for this
-            // endpoint, so it is a format the endpoint accepts, and shared mode
-            // never takes the device away from anything else. `Initialize`
-            // copies what it needs out of the format.
-            unsafe {
-                client.Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    0,
-                    BUFFER_HUNDRED_NANOS,
-                    0,
-                    mix,
-                    None,
-                )
-            }
-        } else {
-            Ok(())
-        };
-        // SAFETY: `mix` came from `GetMixFormat`, has not been freed, and is
-        // not used again after this point.
-        unsafe { CoTaskMemFree(Some(mix.cast())) };
-        initialised?;
-
-        if !float32 {
-            return Ok(None);
-        }
-
-        // SAFETY: `client` is initialised, which is when `GetService` is valid.
-        let render_client: IAudioRenderClient = unsafe { client.GetService() }?;
-        // SAFETY: as above.
-        let clock: IAudioClock = unsafe { client.GetService() }?;
-        // SAFETY: `clock` is live and `GetFrequency` takes no arguments.
-        let clock_frequency = unsafe { clock.GetFrequency() }?;
-        // SAFETY: `client` is initialised.
-        let buffer_frames = unsafe { client.GetBufferSize() }?;
-
-        if clock_frequency == 0 {
-            return Ok(None);
-        }
-
-        Ok(Some(Endpoint {
-            client,
-            render_client,
-            clock,
-            clock_frequency,
-            buffer_frames,
-            rate: { header.nSamplesPerSec },
-            channels: { header.nChannels },
-        }))
-    })();
-
-    match opened {
-        Ok(Some(endpoint)) => Ok(endpoint),
-        Ok(None) => Err(
-            "the default output device does not present 32-bit float samples on a \
-                         clock this application can read, which is all it knows how to play"
-                .to_owned(),
-        ),
-        Err(error) => Err(format!(
-            "the default output device would not accept a render stream: {error}"
-        )),
-    }
-}
-
-/// Whether a mix format is 32-bit IEEE float.
-fn is_float32(mix: *const WAVEFORMATEX) -> bool {
-    // SAFETY: `mix` is the live `GetMixFormat` allocation, and `WAVEFORMATEX`
-    // is packed, so the structure is copied out rather than borrowed.
-    let header = unsafe { mix.read_unaligned() };
-    if header.wBitsPerSample != 32 {
-        return false;
-    }
-    if header.wFormatTag == 0xfffe {
-        // SAFETY: that tag is `WAVE_FORMAT_EXTENSIBLE`, which says the
-        // allocation is a `WAVEFORMATEXTENSIBLE`.
-        let extensible = unsafe { mix.cast::<WAVEFORMATEXTENSIBLE>().read_unaligned() };
-        return { extensible.SubFormat } == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-    }
-    // 3 is `WAVE_FORMAT_IEEE_FLOAT`.
-    header.wFormatTag == 3
+    let stream = RenderStream::open(Samples::Float32)?;
+    let (clock, clock_frequency) = stream.clock()?;
+    Ok(Endpoint {
+        stream,
+        clock,
+        clock_frequency,
+    })
 }
 
 #[cfg(test)]

@@ -158,6 +158,15 @@ printed per tone as the frame it belongs to is presented:
 tone index=0 frame=60 onset=61420657101866 present=61420657564400 skew=462534
 ```
 
+`onset` is where the endpoint's own clock put the tone and `present` the counter
+reading just after the frame went to the compositor, both in nanoseconds on the
+performance counter. A tone with no moment says which of the two reasons it has:
+`onset=none` is one the render thread refused to place and did not play, and
+`onset=pending` is one it had not reported by the time the frame was presented —
+probably played, but with nothing to measure it from. They are separate states
+because one is a missing sound and the other is a missing report, and a driver
+that counted them together would report a scheduling hiccup as an unplayed tone.
+
 The `ready` line comes after the window exists, the swap chain is presenting
 and — for a fullscreen run — the display has been asked for. Capturing before
 that line is capturing a window that may not be there. The `stopped` line is

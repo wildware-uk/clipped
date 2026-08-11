@@ -36,6 +36,12 @@
 //! the recorder's. It is not assumed to be zero, because a scheduler does not
 //! promise that.
 //!
+//! A tone with no moment says which of the two reasons it has: `onset=none` is
+//! one the render thread refused to place and did not play, and `onset=pending`
+//! is one it had not reported by the time the frame went to the compositor —
+//! probably played, but with nothing to measure it from. They are counted
+//! separately because one is a missing sound and the other is a missing report.
+//!
 //! # Stopping, and never being left behind
 //!
 //! Three things end a run, and all of them end it the same way — the loop
@@ -465,24 +471,25 @@ impl Tones {
 
         let index = (frame - first) / self.every_frames;
         self.emitted.extend(sound.emitted());
-        let onset = self
-            .emitted
-            .iter()
-            .find(|tone| tone.index == index)
-            .and_then(|tone| tone.midpoint_nanos);
+        let placed = self.emitted.iter().find(|tone| tone.index == index);
 
-        match onset {
-            Some(onset) => announce(&format!(
+        // Three outcomes rather than two, because "the render thread refused to
+        // place this tone" and "the render thread has not said yet" are
+        // different things to whoever is counting: the first is a sound that
+        // was never made, and the second is a sound that probably was. Both are
+        // said out loud rather than left out, because a driver counting tones
+        // would otherwise be waiting for a line that is not coming.
+        match placed.map(|tone| tone.midpoint_nanos) {
+            Some(Some(onset)) => announce(&format!(
                 "tone index={index} frame={frame} onset={onset} present={present_nanos} \
                  skew={}",
                 present_nanos as i64 - onset as i64,
             )),
-            // A tone the render thread could not place at the moment it was
-            // asked for, or has not reported yet. Said out loud rather than
-            // left out, because a driver counting tones would otherwise be
-            // waiting for a sound that was never made.
-            None => announce(&format!(
+            Some(None) => announce(&format!(
                 "tone index={index} frame={frame} onset=none present={present_nanos} skew=none"
+            )),
+            None => announce(&format!(
+                "tone index={index} frame={frame} onset=pending present={present_nanos} skew=none"
             )),
         }
     }

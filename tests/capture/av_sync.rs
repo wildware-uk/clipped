@@ -51,8 +51,8 @@
 //! be the other: the skew between them is announced per tone and subtracted.
 //!
 //! **What that number contains that is not the recorder's.** Two Windows
-//! latencies, and they are the reason the tolerance is what it is rather than
-//! zero:
+//! latencies dominate it, and they are the reason the tolerance is what it is
+//! rather than zero:
 //!
 //! - the compositor's, between the application handing over a frame and the
 //!   frame being composed and stamped, which is up to a display refresh;
@@ -60,10 +60,13 @@
 //!   played at the endpoint and the moment the loopback tap reports for the
 //!   same sample.
 //!
-//! Neither is Clipped's to remove, and neither can be separated from the
-//! recorder's own constant error by this measurement — what it bounds is their
-//! sum. `docs/av-sync.md` records the measured value and says which part is
-//! whose.
+//! Neither is Clipped's to remove. Neither is *separable* here either, and that
+//! cuts both ways: each of the two paths this prints holds one of those
+//! latencies **and** whatever this recorder does on that side — the timestamp a
+//! captured frame is reported with, the anchor an audio track is built from — so
+//! a path is not an attribution and is not printed as one. What is bounded is
+//! the total. `docs/av-sync.md` records the measured values and what can and
+//! cannot be concluded about whose they are.
 //!
 //! # What it cannot measure
 //!
@@ -84,7 +87,10 @@
 //! the file's origin to the start of it (`docs/muxing.md`), and both of those
 //! alter the offset a finished recording has in it. This measures the
 //! timestamps the pipeline produces, which is what a writer is given, not what
-//! it wrote.
+//! it wrote. It is not an oversight and it is not deferred taste: no build of
+//! this workspace writes a recording with an audio track in it yet — issue #126
+//! wires capture to encode to mux, issue #180 puts audio in the file — and
+//! measuring this same offset from a produced recording is issue #151.
 //!
 //! **Physical synchronisation** — whether the sound leaving the speakers and the
 //! light leaving the panel are simultaneous. That needs a microphone and a
@@ -163,18 +169,11 @@ use clipped_capture::{
     DEFAULT_DISCONTINUITY_STEP,
 };
 use clipped_media_validation::AudioContent;
-use clipped_video_pattern::harness::{TestApp, Tone, ToneEvent, TonePlan};
+use clipped_video_pattern::harness::{Onset, TestApp, Tone, ToneEvent, TonePlan};
 use clipped_video_pattern::pattern::{self, Surface};
+use clipped_video_pattern::render_stream::{RenderStream, Samples};
 
 use readback::FrameReader;
-
-use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoIncrementMTAUsage, CoTaskMemFree, CLSCTX_ALL,
-};
 
 /// How long a run lasts unless [`RUN_SECONDS`] says otherwise.
 ///
@@ -262,10 +261,11 @@ const MINIMUM_TONES: usize = 5;
 /// How far a run's tones may scatter about their mean before the mean stops
 /// being a measurement, in nanoseconds.
 ///
-/// The offset each tone gives is a constant plus two Windows latencies, and one
-/// of those — the compositor's present-to-compose — varies by a display refresh
-/// or so from frame to frame: measured here it spread six to twenty-eight
-/// milliseconds about a mean of eighteen, for a standard deviation of six.
+/// The offset each tone gives is a constant plus the two latencies the module
+/// documentation names, and one of those — the compositor's present-to-compose —
+/// varies by a display refresh or so from frame to frame: over the two runs in
+/// `docs/av-sync.md` the video path of individual tones spread 6.7 to 28.5 ms,
+/// for standard deviations of 5.7 and 4.3 ms in the offsets themselves.
 /// Fifteen milliseconds is more than twice that and still a quarter of the
 /// tolerance the mean is judged against, so a run whose readings scatter more
 /// than this is measuring something other than a constant and says so rather
@@ -475,6 +475,12 @@ struct VideoRun {
     /// Tones the subject announced and did not play, because it could not put
     /// them at the moment it wanted.
     tones_unplayed: usize,
+    /// Tones the subject played without saying where it put them: its render
+    /// thread had not reported the placement by the time it presented the
+    /// frame. Counted apart from the unplayed ones, because a sound that was
+    /// made and not reported is a different fault from one never made
+    /// ([`Onset`]).
+    tones_unreported: usize,
     /// Set when a sounded run was asked for and the machine could not play a
     /// tone. The run is then a skip rather than a failure: no endpoint is not a
     /// fault in the code under test.
@@ -1345,11 +1351,21 @@ impl Report {
 
 /// How far from a tone's own frame the frame measuring the video half may be.
 ///
-/// Fifteen frames is half a second at [`PATTERN_FPS`], which is far enough to
-/// find a composed frame on a display the compositor is throttling and close
-/// enough that the video path it measures is the same pipeline's, at the same
-/// moment of the run, as the audio path it is subtracted from.
-const NEAREST_FRAME: u32 = PATTERN_FPS / 2;
+/// The same [`NEAR_TONE`] the run decodes around a tone, and deliberately not
+/// wider. The video half of a match is measured on the frame that was found,
+/// and the source moment for that frame is the announced present moved by
+/// [`SOURCE_FRAME_NANOS`] per frame — an extrapolation that assumes the subject
+/// kept its nominal pacing, which is exactly the assumption it abandons when it
+/// falls behind. Six frames of it is bounded by a couple of milliseconds even
+/// on a subject presenting at 28 rather than 30 frames a second; half a second
+/// of it would put tens of milliseconds into a single tone's reading with
+/// nothing but the standard-deviation check to catch it.
+///
+/// Frames further away than this are not decoded on purpose ([`NEAR_TONE`]), so
+/// a match beyond it could only ever be one of the once-a-second samples —
+/// which is the worst case for that extrapolation rather than a useful
+/// fallback. A tone with no frame this close is counted as one, not measured.
+const NEAREST_FRAME: u32 = NEAR_TONE;
 
 /// The nanoseconds between the source's frames at [`PATTERN_FPS`].
 ///
@@ -1443,11 +1459,11 @@ impl ToneHunt {
             return;
         }
 
-        let mut following = next;
-        while following + NEAR_TONE <= counter {
-            following = following.saturating_add(plan.frame_interval.max(1));
-        }
-        self.next = Some(following);
+        // The first frame still worth waiting for is the first whose
+        // neighbourhood has not gone by, and the plan is what knows where that
+        // is (AGENTS.md section 55).
+        let from = counter.saturating_sub(NEAR_TONE).saturating_add(1);
+        self.next = plan.frames_until(from).map(|until| from + until);
     }
 }
 
@@ -1463,9 +1479,16 @@ fn pair_tones(
     decoded: &[(u32, CaptureTimestamp)],
 ) {
     for tone in announced {
-        let Some(onset_nanos) = tone.onset_nanos else {
-            video.tones_unplayed += 1;
-            continue;
+        let onset_nanos = match tone.onset {
+            Onset::At(nanos) => nanos,
+            Onset::NotPlaced => {
+                video.tones_unplayed += 1;
+                continue;
+            }
+            Onset::Unreported => {
+                video.tones_unreported += 1;
+                continue;
+            }
         };
 
         // The nearest decoded frame, which is the tone's own whenever the
@@ -1499,6 +1522,9 @@ struct Absolute {
     /// Tones the subject announced but did not play, because it could not put
     /// them at the moment it wanted.
     unplayed: usize,
+    /// Tones the subject played and did not report the placement of in time,
+    /// which leaves nothing to measure them from.
+    unreported: usize,
     /// Tones whose frame never arrived in the capture.
     frameless: usize,
     /// Tones that were played and whose frame arrived, but which could not be
@@ -1579,6 +1605,7 @@ impl Absolute {
         Self {
             measured,
             unplayed: video.tones_unplayed,
+            unreported: video.tones_unreported,
             frameless: video.tones_without_a_frame,
             unheard,
             truncated: audio.truncated,
@@ -1623,10 +1650,12 @@ impl Absolute {
         let millis = |nanos: i64| nanos as f64 / 1e6;
 
         note(&format!(
-            "absolute: {} tone(s) measured, {} announced but not played, {} whose frame the \
-             capture never delivered, {} played but not found in the audio{}",
+            "absolute: {} tone(s) measured, {} announced but not played, {} played whose \
+             placement was not reported in time, {} whose frame the capture never delivered, \
+             {} played but not found in the audio{}",
             self.measured.len(),
             self.unplayed,
+            self.unreported,
             self.frameless,
             self.unheard.len(),
             if self.truncated {
@@ -1679,33 +1708,58 @@ impl Absolute {
                     self.measured.iter().map(path).sum::<i64>() / self.measured.len() as i64
                 };
                 note(&format!(
-                    "absolute: of which the video path averaged {:+.3} ms (the compositor's) \
-                     and the audio path {:+.3} ms (the audio engine's)",
+                    "absolute: of which the video path averaged {:+.3} ms and the audio path \
+                     {:+.3} ms",
                     millis(mean_of(|tone| tone.video_path_nanos)),
                     millis(mean_of(|tone| tone.audio_path_nanos)),
                 ));
                 note(
-                    "absolute: positive is sound behind picture. This includes the \
-                     compositor's present-to-compose latency and the audio engine's \
-                     render-to-loopback latency, both of which are Windows' and neither of \
-                     which this measurement can separate from the recorder's own constant \
-                     offset (docs/av-sync.md)",
+                    "absolute: positive is sound behind picture. The video path is mostly the \
+                     compositor's present-to-compose latency and the audio path mostly the \
+                     audio engine's render-to-loopback latency, but each also contains \
+                     whatever this recorder does on that side — the frame's own timestamp, \
+                     the audio track's anchor — and this measurement separates neither. What \
+                     it bounds is the total (docs/av-sync.md)",
                 );
             }
             _ => note("absolute: no tone was both played and found, so there is no offset"),
         }
     }
 
+    /// What a run whose tones were mostly *not found* should be read as.
+    ///
+    /// The detector only looks [`SEARCH`] either side of where the recording
+    /// puts a tone's announced moment, so an offset larger than that window
+    /// makes every tone unfindable and the run fails for having too few
+    /// measurements rather than for being out of synchronisation — the harder
+    /// of the two diagnoses. The failure says so rather than leaving it to be
+    /// worked out, because the numbers a run prints do not distinguish "there
+    /// was no tone" from "the tone was not where anybody looked".
+    fn what_unheard_tones_mean(&self) -> String {
+        if self.unheard.len() <= self.unplayed + self.unreported + self.frameless {
+            return String::new();
+        }
+        format!(
+            " Most of them were played, and their frames arrived, but no burst of the \
+             subject's tone was within ±{:.0} ms of where the recording puts the moment it \
+             was announced at — so read this as an offset larger than that search window \
+             before reading it as a detector that failed.",
+            SEARCH.as_secs_f64() * 1e3,
+        )
+    }
+
     fn assert_within(&self, tolerance: &SyncTolerance) {
         assert!(
             self.measured.len() >= MINIMUM_TONES,
-            "only {} of the subject's tones could be measured ({} not played, {} with no \
-             frame, {} not found in the audio), which is too few to call the mean of them a \
-             measurement",
+            "only {} of the subject's tones could be measured ({} not played, {} not reported \
+             in time, {} with no frame, {} not found in the audio), which is too few to call \
+             the mean of them a measurement.{}",
             self.measured.len(),
             self.unplayed,
+            self.unreported,
             self.frameless,
             self.unheard.len(),
+            self.what_unheard_tones_mean(),
         );
 
         // Every burst found has to be the subject's tone rather than something
@@ -1905,9 +1959,13 @@ fn source_interval(decoded: &[(u32, CaptureTimestamp)]) -> Option<f64> {
 ///
 /// # Ownership
 ///
-/// The thread owns the `IAudioClient` and the `IAudioRenderClient` for its whole
-/// life and releases both when it returns; [`Drop`] sets the flag and joins, so
-/// a panicking test cannot leave a render stream open (AGENTS.md section 58).
+/// The thread owns the [`RenderStream`] for its whole life and drops it — which
+/// stops the client — when it returns; [`Drop`] sets the flag and joins, so a
+/// panicking test cannot leave a render stream open (AGENTS.md section 58).
+/// Opening it is `test-apps/video-pattern/src/render_stream.rs`, which the
+/// subject's own tone output opens through as well: one endpoint enumeration,
+/// one mix-format check and one feeding loop between the two, rather than a
+/// copy here (AGENTS.md section 55).
 #[derive(Debug)]
 struct SilenceKeeper {
     running: Arc<AtomicBool>,
@@ -1949,94 +2007,31 @@ impl Drop for SilenceKeeper {
 
 /// The render thread's body: open the default endpoint and feed it silence.
 fn keep_awake(running: &AtomicBool, ready: &std::sync::mpsc::Sender<Result<(), String>>) {
-    // SAFETY: `CoIncrementMTAUsage` takes a process-wide reference to the
-    // multi-threaded apartment. The reference is deliberately never given back,
-    // which is what makes it safe to take from a thread that will exit — the
-    // same reasoning as `crates/audio/src/windows/apartment.rs`.
-    if let Err(error) = unsafe { CoIncrementMTAUsage() } {
-        let _ = ready.send(Err(format!("COM is unavailable: {error}")));
-        return;
-    }
-
-    let prepared = (|| -> windows::core::Result<(IAudioClient, IAudioRenderClient, u32)> {
-        // SAFETY: `MMDeviceEnumerator` is the class identifier for
-        // `IMMDeviceEnumerator`, which is the interface the return type asks
-        // for.
-        let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
-        // SAFETY: both arguments are values of the enumerations named, and the
-        // enumerator is live.
-        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
-        // SAFETY: `device` is live; the interface is fixed by the return type.
-        let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
-        // SAFETY: `client` is live and uninitialised, which is when
-        // `GetMixFormat` is valid. The `WAVEFORMATEX` it returns is a
-        // `CoTaskMemAlloc` allocation this code now owns, and it is given back
-        // below (AGENTS.md section 58).
-        let mix = unsafe { client.GetMixFormat() }?;
-        // SAFETY: `mix` is the format Windows just reported for this endpoint,
-        // so it is a format the endpoint accepts, and shared mode never takes
-        // the device away from anything else. `Initialize` copies what it needs
-        // out of the format, so the allocation is released straight afterwards
-        // whether or not it succeeded.
-        let initialised =
-            unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2_000_000, 0, mix, None) };
-        // SAFETY: `mix` came from `GetMixFormat`, has not been freed, and is
-        // not used again after this point.
-        unsafe { CoTaskMemFree(Some(mix.cast())) };
-        initialised?;
-        // SAFETY: `client` is initialised, which is when `GetService` is valid.
-        let render: IAudioRenderClient = unsafe { client.GetService() }?;
-        // SAFETY: `client` is initialised.
-        let frames = unsafe { client.GetBufferSize() }?;
-        Ok((client, render, frames))
-    })();
-
-    let (client, render, buffer_frames) = match prepared {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            let _ = ready.send(Err(format!(
-                "the default output device would not accept a render stream: {error}"
-            )));
+    // `Samples::Silence` rather than `Float32`: nothing here writes a sample,
+    // so an endpoint presenting a format this could not play is still one whose
+    // clock can be kept running, and refusing it would skip the measurement for
+    // no reason.
+    let stream = match RenderStream::open(Samples::Silence) {
+        Ok(stream) => stream,
+        Err(reason) => {
+            let _ = ready.send(Err(reason));
             return;
         }
     };
-
-    // SAFETY: `client` is initialised and has not been started.
-    if let Err(error) = unsafe { client.Start() } {
-        let _ = ready.send(Err(format!("the render stream would not start: {error}")));
-        return;
-    }
     let _ = ready.send(Ok(()));
 
     while running.load(Ordering::Relaxed) {
-        // SAFETY: `client` is a started `IAudioClient`.
-        let Ok(padding) = (unsafe { client.GetCurrentPadding() }) else {
+        let Ok(queued) = stream.queued_frames() else {
             break;
         };
-        let free = buffer_frames.saturating_sub(padding);
+        let free = stream.buffer_frames().saturating_sub(queued);
         if free == 0 {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
-
-        // SAFETY: `free` is at most the free space `GetCurrentPadding` just
-        // reported, which is what `GetBuffer` requires. The returned pointer is
-        // deliberately not written to: `ReleaseBuffer` below is given
-        // `AUDCLNT_BUFFERFLAGS_SILENT`, which tells the engine to treat the
-        // frames as zero and not to read the buffer at all.
-        let Ok(_buffer) = (unsafe { render.GetBuffer(free) }) else {
-            break;
-        };
-        // SAFETY: `free` is the frame count `GetBuffer` was asked for, and the
-        // silent flag is what makes leaving the buffer unwritten correct.
-        if unsafe { render.ReleaseBuffer(free, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) }.is_err() {
+        if stream.write_silence(free).is_err() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-
-    // SAFETY: `client` was started, and stopping it is what releases the
-    // endpoint.
-    let _ = unsafe { client.Stop() };
 }

@@ -360,20 +360,32 @@ behind picture.
 
 ### What that number contains
 
-Three things, and only one of them is Clipped's:
+The offset is one path minus the other, and each path is one pair of moments —
+where the recording puts the event, minus where the source said it happened:
 
-| Term | Whose | Measured here |
-| --- | --- | --- |
-| The compositor's present-to-compose latency: an application hands over a frame, and DWM composes and stamps it some time later | Windows' | +12 to +14 ms on average, and 6 to 21 ms frame to frame |
-| The audio engine's render-to-loopback latency: the gap between where `IAudioClock` says a sample is played at the endpoint and where the loopback tap reports the same sample | Windows' | −2.3 ms, and remarkably steady — under 0.5 ms of spread across a run |
-| Any constant error of the recorder's own | **Clipped's** | Not separable from the two above by this measurement. What is bounded is their sum |
+| Path | What it is | What is inside it | Measured here |
+| --- | --- | --- | --- |
+| **Video** | The capture's timestamp for the frame, minus the moment the subject handed that frame to the compositor | The compositor's present-to-compose latency, **and** whatever `clipped-capture` does between the timestamp Windows attaches to a frame and the one it reports | +13.8 and +14.3 ms on average over the two runs below; 6.7 to 28.5 ms tone to tone |
+| **Audio** | Where the recording's audio track puts the tone, minus the moment the endpoint's own clock played it | The audio engine's render-to-loopback latency, **and** however `clipped-audio` anchors its track — 3.4 ms of this one is the constant [issue #188](https://github.com/wildware-uk/clipped/issues/188) is about | −2.4 and −2.3 ms on average, and steady: under 0.5 ms of spread across a run |
+| **Their difference** | The A/V offset this measurement reports | Everything above, and nothing here separates one from another | −16.2 and −16.6 ms |
 
-The last row is the honest limit of the method: a recording of a subject on
-Windows contains those two latencies whatever the recorder does, and separating
-them from the recorder's own constant would need a second, independent account
-of when the frame was composed and when the sample was played. What this
-measurement bounds is the total, and the total is what a viewer of the recording
-gets.
+**Which part of it is the operating system's, stated exactly.** The dominant
+term in each path is Windows': a compositor holds an application's frame until
+it composes it, which is up to a display refresh and is the reason the video
+path is both large and scattered, and the loopback tap reports a sample some
+fixed distance from where `IAudioClock` says the endpoint played it, which is
+the reason the audio path is small and steady. A recording made on Windows
+contains both whatever the recorder does, and neither is Clipped's to remove.
+
+What this measurement cannot do is *prove* that division. It has a single
+account of each of the four moments, so a constant the recorder itself adds on
+either side sits inside the same figure and no arithmetic here can lift it out;
+separating them would need a second, independent account of when the frame was
+composed and when the sample was played. The one term that has been separated is
+the 3.4 ms [below](#what-it-found), by measuring the audio path a second time
+against the endpoint's own reported positions — and even that is not yet
+attributed to either side. So the row above that governs is the third one: what
+is bounded is the total, and the total is what a viewer of the recording gets.
 
 ### The numbers
 
@@ -383,47 +395,97 @@ a 1280×720 30 fps pattern window on a non-primary display), two 90-second runs:
 
 | Run | Tones measured | Mean A/V offset | Range | Standard deviation | Video path | Audio path |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 18 of 18 | **−15.939 ms** | −23.196 to −8.856 ms | 4.771 ms | +13.679 ms | −2.260 ms |
-| 2 | 19 of 19 | **−14.473 ms** | −22.081 to −8.823 ms | 4.869 ms | +12.177 ms | −2.295 ms |
+| 1 | 18 of 18 | **−16.176 ms** | −30.755 to −9.166 ms | 5.749 ms | +13.775 ms | −2.401 ms |
+| 2 | 18 of 18 | **−16.587 ms** | −24.337 to −10.971 ms | 4.290 ms | +14.327 ms | −2.260 ms |
 
-Sound **ahead** of picture by about 15 ms, and the reason is in the last two
+Sound **ahead** of picture by about 16 ms, and the reason is in the last two
 columns: the compositor holds a frame for a few milliseconds longer than the
-audio engine holds a sample. The two runs agree to 1.5 ms, which is the useful
-precision of the figure; the scatter within a run is the compositor's, and the
-detector's own resolution — a quarter of a millisecond, on a burst whose peak is
-0.0401 against a floor of zero — is nowhere near it.
+audio engine holds a sample. The two runs agree to 0.4 ms, which flatters the
+figure — two earlier runs of the same measurement, before the match window was
+narrowed to the frames a run decodes around a tone, gave −15.9 and −14.5 ms. A
+millisecond or so is the honest spread between runs.
+
+The scatter *within* a run is the compositor's. Every tone in both runs was
+measured on the tone's own frame, and the video path of individual tones ranged
+from 6.7 to 28.5 ms while the audio path of the same tones moved by less than
+half a millisecond. The detector's own resolution — a quarter of a millisecond,
+on a burst whose peak is 0.0401 against a floor of zero — is nowhere near
+either.
 
 That is well inside `SyncTolerance::default()`, and the tolerance is the right
-one to judge it by even though most of what it is spending is Windows': a
-recording is watched, not audited, and 15 ms of lead is 15 ms of lead however it
-got there. The test therefore asserts the mean against 40 ms of lead and 60 ms of
-lag, and separately asserts that the tones of a run agree with each other to
-within 15 ms — because a mean of readings that disagree is not a measurement of a
-constant.
+one to judge it by even though most of what it is spending is very likely
+Windows': a recording is watched, not audited, and 16 ms of lead is 16 ms of
+lead however it got there. The test therefore asserts the mean against 40 ms of
+lead and 60 ms of lag, and separately asserts that the tones of a run agree with
+each other to within 15 ms — because a mean of readings that disagree is not a
+measurement of a constant.
 
 ### What it found
 
-**The track this recorder builds sits about 3.6 ms ahead of the endpoint's own
-positions for the same samples.** The test reports each tone twice: once against
-`CapturedAudio::timestamp`, the track `clipped-audio` builds by counting samples,
-and once against `CapturedAudio::device_timestamp`, the position WASAPI attached
-to the packet. Run 1's means were −15.939 ms and −12.334 ms — a constant 3.6 ms
-between the two accounts, present from the first tone two seconds into the run
-rather than accumulated, so it is not the drift measured above (which is a
-thousand times smaller over that period).
+**The track this recorder builds sits about 3.4 ms ahead of the endpoint's own
+positions for the same samples, and it is there within the first seconds of a
+run.** The test reports each tone twice: once against `CapturedAudio::timestamp`,
+the track `clipped-audio` builds by counting samples, and once against
+`CapturedAudio::device_timestamp`, the position WASAPI attached to the packet the
+samples came from. In both runs above the two accounts were 3.43 ms apart at the
+first tone and 3.79 ms apart at the last — 0.36 ms of separation over 85
+seconds, which is the drift rate the same run measured (−4.1 ppm, a quarter of a
+millisecond a minute) and nothing more. So it is a step, taken early, and not
+the rate.
 
-It is a small fraction of the tolerance and it is *inside* the audio path figure
-quoted in the table, not on top of it. It is recorded here because it is exactly
-the class of thing the relative measurement was blind to — a constant introduced
-where a track is anchored — and because a number nobody has explained should be
-written down rather than rounded off. Whether it is the anchor, the position
-WASAPI reports for a packet, or the endpoint's own buffering is
+**The relative measurement is not blind to it, and saying otherwise would be
+wrong.** The same runs' drift lines read `first −0.002 ms, last −3.792 ms, peak
+−4.368 ms, in tolerance (8971 observations, 1 discontinuities)` and `first
++0.000 ms, last −3.792 ms, peak −4.370 ms … 1 discontinuities`: the step happens
+*after* the track's anchor, so it is inside the interval those numbers cover, and
+the estimator reports it as its latest and peak offset and counts it as a
+discontinuity. The class of error that measurement genuinely cannot see is one
+already present when the capture started — before the anchor, where the first
+observation is zero by construction — and this is not that.
+
+**The silent runs do not show it at all**, which is the third thing worth
+recording and came out of running both measurements on this machine within
+minutes of each other. A thirty-second drift run taken while writing this
+reported `first +0.000 ms, last −0.128 ms, peak −0.697 ms … 0 discontinuities`,
+and the runs in the drift table further up say the same: the ninety-second one
+peaked at −0.947 ms, and the thirty-minute one at −8.415 ms with no
+discontinuity at all — which is a quarter of a millisecond a minute accumulating
+for half an hour, not a step. The difference between those runs and these is
+what the endpoint is being given: `AUDCLNT_BUFFERFLAGS_SILENT` buffers, against
+a real 997 Hz tone. So whatever the 3.4 ms is, it turns up when the endpoint has
+audio to play. That is a clue for #188 rather than an explanation, and it is
+here because it is easy to observe now and hard to reconstruct later.
+
+What the absolute measurement adds, then, is a moment known to be simultaneous
+at the source to hold both accounts against, so the disagreement can be read as
+a placement rather than as a movement, and so that the offset each account gives
+can be quoted: run 1's mean was −16.176 ms with the track and −12.561 ms with
+the endpoint's own positions, run 2's −16.587 and −12.983 ms. Both are well
+inside the tolerance, the difference is *inside* the audio path figure in the
+table above rather than on top of it, and nothing is wrong with a recording
+because of it. It is written down because a number nobody has explained should
+be, and because which of the two accounts a recording ought to be built from is
+a question worth an answer. Whether it is the anchor, the position WASAPI
+reports for a packet, or the endpoint's own buffering is
 [issue #188](https://github.com/wildware-uk/clipped/issues/188).
 
 ### What it still does not do
 
 - **No file is written.** As with the drift measurement, these are the timestamps
-  the pipeline produces, not what a writer wrote.
+  the pipeline produces, not what a writer wrote. It is the half of
+  [issue #173](https://github.com/wildware-uk/clipped/issues/173) that is not
+  done, and it is not done because it cannot be yet: a recording with an audio
+  track in it needs
+  [#126](https://github.com/wildware-uk/clipped/issues/126) to wire capture,
+  encode and mux together and
+  [#180](https://github.com/wildware-uk/clipped/issues/180) to route audio into
+  the same file. Measuring this offset from a produced recording, with the media
+  harness reading the pattern's counter out of the video track and the tone out
+  of the audio track, is
+  [#151](https://github.com/wildware-uk/clipped/issues/151). The stages that
+  could change the number between here and there are named in `docs/muxing.md`:
+  the rescale to 1 ms container ticks, and the clamp of anything before the
+  file's origin.
 - **It is not physical synchronisation.** Whether the sound leaving the speakers
   and the light leaving the panel are simultaneous still needs a microphone and a
   photodiode; the endpoint's own output latency — which for a wireless headset is

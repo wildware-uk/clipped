@@ -115,14 +115,6 @@ pub struct TonePlan {
 }
 
 impl TonePlan {
-    /// Which tone of the run frame `counter` carries, if it carries one.
-    #[must_use]
-    pub fn index_of(&self, counter: u32) -> Option<u32> {
-        let past = counter.checked_sub(self.first_frame)?;
-        (self.frame_interval > 0 && past % self.frame_interval == 0)
-            .then_some(past / self.frame_interval)
-    }
-
     /// How many frames it is from `counter` to the next frame carrying a tone,
     /// counting the frame itself as zero.
     ///
@@ -155,27 +147,42 @@ pub struct ToneEvent {
     pub index: u32,
     /// The counter of the frame it belongs to.
     pub frame: u32,
-    /// Where the endpoint's own clock puts the tone's half-amplitude point.
-    ///
-    /// [`None`] when the application could not place the tone at the moment it
-    /// wanted and did not play it, which is reported rather than hidden.
-    pub onset_nanos: Option<u64>,
+    /// Where the endpoint's own clock puts the tone's half-amplitude point, or
+    /// why there is no such moment.
+    pub onset: Onset,
     /// The counter reading immediately after the frame was handed to the
     /// compositor.
+    ///
+    /// How far this is from [`Onset::At`] is how far apart the two halves of
+    /// the event were **at the source**, which a measurement of a recording has
+    /// to subtract before calling what is left the recorder's: nothing makes a
+    /// thread present a frame at exactly the moment an endpoint plays a sample.
     pub present_nanos: u64,
 }
 
-impl ToneEvent {
-    /// How far apart the two halves of this event were at the source: the
-    /// present minus the onset, in nanoseconds.
-    ///
-    /// A measurement of a recording has to subtract this before calling what is
-    /// left the recorder's, because nothing makes a thread present a frame at
-    /// exactly the moment an endpoint plays a sample.
-    #[must_use]
-    pub fn source_skew_nanos(&self) -> Option<i64> {
-        Some(self.present_nanos as i64 - self.onset_nanos? as i64)
-    }
+/// What the application knew about a tone's sound as it presented the frame.
+///
+/// Three states rather than an [`Option`], because the two ways of having no
+/// moment are different faults and counting them together hides one of them: a
+/// tone that was never played is a hole in the subject's sound, and a tone
+/// whose placement had not been reported yet is a late report of a sound that
+/// probably *was* played. A run whose tones are all [`Onset::Unreported`] has a
+/// reporting problem; a run whose tones are all [`Onset::NotPlaced`] has an
+/// audio one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Onset {
+    /// The endpoint's clock puts the half-amplitude point here, in nanoseconds
+    /// on the performance counter.
+    At(u64),
+    /// The render thread could not put the tone at the moment it was asked for
+    /// — the moment had already been queued past — so it did not play it. A
+    /// tone that was not played is reported as one rather than played late
+    /// (AGENTS.md section 54).
+    NotPlaced,
+    /// The render thread had not said what it did with the tone by the time the
+    /// frame was presented. The sound may well have been made; what is missing
+    /// is the report of where it was put, so nothing can be measured from it.
+    Unreported,
 }
 
 impl TestApp {
@@ -557,6 +564,10 @@ fn parse_ready(line: &str) -> Result<Ready, HarnessError> {
 
 /// Parses `tone index=0 frame=60 onset=61420657101866 present=61420657564400 skew=462534`.
 ///
+/// `onset` is `none` for a tone the render thread refused to place and
+/// `pending` for one it had not reported by the time the frame was presented
+/// ([`Onset`]).
+///
 /// `skew` is not read: it is `present − onset`, printed so that a person reading
 /// the output does not have to subtract two eleven-digit numbers, and a test
 /// that took the application's arithmetic on trust would be checking one number
@@ -589,9 +600,10 @@ fn parse_tone(line: &str) -> Result<ToneEvent, HarnessError> {
             .map_err(|_| protocol("the tone index is not a `u32`".to_owned()))?,
         frame: u32::try_from(number("frame")?)
             .map_err(|_| protocol("the frame counter is not a `u32`".to_owned()))?,
-        onset_nanos: match *onset {
-            "none" => None,
-            _ => Some(number("onset")?),
+        onset: match *onset {
+            "none" => Onset::NotPlaced,
+            "pending" => Onset::Unreported,
+            _ => Onset::At(number("onset")?),
         },
         present_nanos: number("present")?,
     })
@@ -809,11 +821,9 @@ mod tests {
         assert!((plan.frequency - 997.0).abs() < f32::EPSILON);
         assert_eq!(plan.length, Duration::from_millis(30));
 
-        // The arithmetic a test uses to decide which frames to decode.
-        assert_eq!(plan.index_of(60), Some(0));
-        assert_eq!(plan.index_of(210), Some(1));
-        assert_eq!(plan.index_of(211), None);
-        assert_eq!(plan.index_of(59), None);
+        // The arithmetic the capture test uses to decide which frames to
+        // decode: it follows the counter and has to know, from any frame, how
+        // far the next tone is.
         assert_eq!(plan.frames_until(0), Some(60));
         assert_eq!(plan.frames_until(60), Some(0));
         assert_eq!(plan.frames_until(61), Some(149));
@@ -832,13 +842,16 @@ mod tests {
 
         assert_eq!(tone.index, 2);
         assert_eq!(tone.frame, 360);
-        assert_eq!(tone.onset_nanos, Some(61_430_657_118_666));
+        assert_eq!(tone.onset, Onset::At(61_430_657_118_666));
         assert_eq!(tone.present_nanos, 61_430_657_907_400);
+        let Onset::At(onset) = tone.onset else {
+            panic!("this line announced a moment, and read as {:?}", tone.onset);
+        };
         assert_eq!(
-            tone.source_skew_nanos(),
-            Some(788_734),
-            "the skew is worked out from the two moments rather than taken from the line, \
-             so that a test is not checking the application's arithmetic against itself"
+            tone.present_nanos as i64 - onset as i64,
+            788_734,
+            "the two moments have to be read exactly, because a measurement subtracts one \
+             from the other; the line's own `skew` field is ignored rather than trusted"
         );
     }
 
@@ -848,8 +861,15 @@ mod tests {
         // application could not place at the moment it wanted.
         let tone = parse_tone("tone index=0 frame=60 onset=none present=61420657564400 skew=none")
             .expect("this is the line the application prints for a tone it did not play");
-        assert_eq!(tone.onset_nanos, None);
-        assert_eq!(tone.source_skew_nanos(), None);
+        assert_eq!(tone.onset, Onset::NotPlaced);
+
+        // And the other way of having no moment, which is a different fault:
+        // the sound was probably made and the report of where it went had not
+        // arrived when the frame was presented.
+        let pending =
+            parse_tone("tone index=0 frame=60 onset=pending present=61420657564400 skew=none")
+                .expect("this is the line the application prints for an unreported tone");
+        assert_eq!(pending.onset, Onset::Unreported);
 
         for line in [
             "tone frame=60 onset=1 present=2",

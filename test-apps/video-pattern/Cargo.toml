@@ -110,21 +110,15 @@ clipped-audio.workspace = true
 # is the sample-analysis half of the harness, which needs no tools at all.
 clipped-media-validation.workspace = true
 
-# `av_sync.rs`'s drift measurement opens a WASAPI render stream of its own and
-# hands the audio engine buffers marked silent, so that the endpoint's clock
-# keeps running for the length of the run — loopback capture delivers nothing at
-# all while the endpoint is idle, and a period the device never described has no
-# position to measure against. (Its absolute measurement needs no such thing: the
-# subject's own `--tone` render stream keeps the endpoint awake.) It names the
-# same two namespaces `src/tone.rs` does, and declares them here rather than
-# leaning on that: a test target's dependencies are the ones its own source
-# names, and the day the tone output is removed this test still needs them.
-#
-# - Win32_Media_Audio   IAudioClient, IAudioRenderClient, the endpoint enumerator
-# - Win32_System_Com    CoCreateInstance and the multi-threaded apartment
-#
-# Dual MIT/Apache-2.0.
-windows = { workspace = true, features = ["Win32_Media_Audio", "Win32_System_Com"] }
+# `av_sync.rs`'s drift measurement holds a render stream open and hands the audio
+# engine buffers marked silent, so that the endpoint's clock keeps running for
+# the length of the run — loopback capture delivers nothing at all while the
+# endpoint is idle, and a period the device never described has no position to
+# measure against. (Its absolute measurement needs no such thing: the subject's
+# own `--tone` render stream keeps the endpoint awake.) It opens that stream
+# through `src/render_stream.rs`, which is this package's own library and needs
+# no dependency of its own — which is why there is no second `windows` entry
+# here naming the same namespaces `src/tone.rs` does (AGENTS.md section 55).
 
 [lints]
 workspace = true
