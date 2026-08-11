@@ -271,6 +271,12 @@ each encoder supports, and the order "Automatic" would try them in. It writes
 the report to standard output and the same findings to the log, through the
 standard `encoder` field ([logging.md](logging.md)).
 
+An encoder the machine has that this build cannot open is still reported, but
+under a heading of its own — "Detected on this machine, and not available to
+choose" — rather than as a numbered entry in the ranking, so that nothing listed
+as something "Automatic would choose" is a thing it would not
+([#175](https://github.com/wildware-uk/clipped/issues/175)).
+
 | Option | Default | Notes |
 | --- | --- | --- |
 | `--refresh` | off | Ignore the cached report, ask the machine again, and store the new answer |

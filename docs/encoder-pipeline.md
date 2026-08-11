@@ -137,6 +137,35 @@ supply. Each backend is constructed by its own function, and a dispatcher over
 `EncoderKind` belongs in the change that has more than one backend to dispatch
 to (AGENTS.md section 1).
 
+### Choosing an encoder to open
+
+**A choice that will open an encoder may only name a family
+`EncoderKind::is_implemented` accepts.** Detection deliberately reports every
+family the *machine* has, whether or not this build can drive it — "your GPU can
+do this" and "Clipped can do this" are different sentences and collapsing them
+would make the capability report useless. Choosing does not get to keep that
+separation, and two things enforce it:
+
+- **`recommend` ranks a family with no proven backend below the software
+  fallback**, with the reason `ChoiceReason::NoProvenBackend` and a printed line
+  that says so and names its issue. It is still in the list, because a user
+  whose GPU has an encoder Clipped cannot yet use should be told that; it is
+  simply never at the top of it.
+- **`Recommendation::for_opening` can only return an openable family**, and
+  `Recommendation::is_openable` is on every entry for a settings screen that
+  offers the whole list. `for_opening` is what a session layer calls.
+
+The rule matters because the two costs are not comparable. Encoding on the CPU
+costs the game frames; opening a backend nobody has watched encode a frame costs
+the user the recording, which is the thing this project protects above almost
+everything else (AGENTS.md section 17). Today that names exactly one family —
+Quick Sync, until [#160](https://github.com/wildware-uk/clipped/issues/160)
+verifies it on Intel hardware — and a machine with an Intel GPU and nothing else
+would therefore record on the CPU, once anything records at all. Making a
+backend selectable is a change to `is_implemented` and nothing else; the ranking
+and the report both follow it
+([#175](https://github.com/wildware-uk/clipped/issues/175)).
+
 ## Ownership: who owns what, and for how long
 
 1. **The encoder owns its session and everything allocated from it** — output
@@ -1038,11 +1067,12 @@ cannot encode, which is a fact about the silicon rather than about the checkout.
 ## The software fallback
 
 `SoftwareEncoder`, in `crates/encoder/src/software`. It produces H.264 on the
-CPU and exists for one situation: a machine where no hardware encoder is
-available. `recommend` ranks it behind every hardware encoder that is (see
-`crates/encoder/src/recommendation.rs`), so it is never chosen ahead of one, and
-it is always available, which is what makes "Automatic" a setting that always
-has an answer.
+CPU and exists for one situation: a machine with no hardware encoder this build
+can use. `recommend` ranks it behind every hardware encoder that is available
+*and* has a proven backend (see `crates/encoder/src/recommendation.rs` and
+[Choosing an encoder to open](#choosing-an-encoder-to-open)), so it is never
+chosen ahead of one that works, and it is always available, which is what makes
+"Automatic" a setting that always has an answer.
 
 ### Which encoder, and the licence
 

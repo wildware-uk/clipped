@@ -146,19 +146,27 @@ choose a measured H.264 over an inferred AV1 every time.
 
 ## What "Automatic" chooses
 
-`recommend` returns every usable encoder, best first, ordered by:
+`recommend` returns every available encoder, best first, ordered by:
 
-1. Hardware before software. The recorder runs alongside a game and CPU time is
+1. An encoder this build can open before one it cannot. Detection reports what
+   the machine has; `EncoderKind::is_implemented` says which of those Clipped
+   has a backend proven to drive, and a family it rejects ranks below the
+   software fallback rather than above it. It is still listed, marked and with
+   its issue named — a user whose GPU has an encoder Clipped cannot yet use
+   should be told — but nothing opens it, and `Recommendation::for_opening`
+   cannot return it. See
+   [encoder-pipeline.md](encoder-pipeline.md#choosing-an-encoder-to-open).
+2. Hardware before software. The recorder runs alongside a game and CPU time is
    the scarcest resource on the machine (AGENTS.md section 18).
-2. An adapter with video memory of its own before one that shares system memory.
-3. Then the most video memory — the tie-break between two adapters that both
+3. An adapter with video memory of its own before one that shares system memory.
+4. Then the most video memory — the tie-break between two adapters that both
    have some.
-4. Then the order SPEC.md section 9 lists: NVIDIA, AMD, Intel.
+5. Then the order SPEC.md section 9 lists: NVIDIA, AMD, Intel.
 
 Within an encoder, the codec is the most efficient one whose support was
 measured, falling back to H.264.
 
-Rules 2 and 3 exist instead of "prefer the discrete GPU" because DXGI cannot
+Rules 3 and 4 exist instead of "prefer the discrete GPU" because DXGI cannot
 tell you which adapter is discrete. It reports how much video memory an adapter
 has of its own, and an AMD APU with a BIOS carve-out reports gigabytes of it —
 the machine this was developed on does exactly that. So the ranking uses the

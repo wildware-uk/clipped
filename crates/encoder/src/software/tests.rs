@@ -167,11 +167,15 @@ fn a_surface_format_this_backend_cannot_read_is_refused_by_name() {
 }
 
 #[test]
-fn the_software_encoder_is_the_answer_when_there_is_no_hardware_and_never_before_one() {
+fn the_software_encoder_is_the_answer_with_no_hardware_and_never_before_one_this_build_can_open() {
     // The two halves of "selectable when no hardware encoder is available, and
-    // never chosen ahead of one that is". The ranking itself lives in
-    // `crate::recommendation`; this asserts the property that makes this
-    // backend a *fallback*, from the crate that implements the fallback.
+    // never chosen ahead of one this build can open". The second half is
+    // narrower than "ahead of one that is available" on purpose: since #175 a
+    // detected family with no proven backend ranks *below* this one, so NVENC
+    // is used here rather than Quick Sync, which would rank the other way by
+    // design. The ranking itself lives in `crate::recommendation`; this asserts
+    // the property that makes this backend a *fallback*, from the crate that
+    // implements the fallback.
     let no_hardware = detect(&SystemFacts::new(Vec::new(), EncoderObservations::none()));
     let first = recommend(&no_hardware)[0];
     assert_eq!(first.encoder(), EncoderKind::Software);
@@ -205,7 +209,7 @@ fn the_software_encoder_is_the_answer_when_there_is_no_hardware_and_never_before
     assert_eq!(
         ranked,
         vec![EncoderKind::Nvenc, EncoderKind::Software],
-        "the CPU must never outrank encoding hardware that is there"
+        "the CPU must never outrank encoding hardware this build has a proven backend for"
     );
 }
 

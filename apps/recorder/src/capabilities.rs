@@ -34,7 +34,8 @@ use std::fmt;
 
 use clipped_encoder::{
     detect_cached, Adapter, CapabilityCache, CapabilityReport, Claim, CodecSupport, Detection,
-    DetectionSource, EncoderKind, EncoderReport, ProbeError, Resolution, Signal, SystemProbe,
+    DetectionSource, EncoderKind, EncoderReport, ProbeError, Recommendation, Resolution, Signal,
+    SystemProbe,
 };
 
 use crate::cli::CapabilitiesArgs;
@@ -279,13 +280,36 @@ fn codec_line(support: &CodecSupport) -> String {
     )
 }
 
-/// The ranked list "Automatic" resolves through.
+/// The ranked list "Automatic" resolves through, and what it will not resolve
+/// to.
+///
+/// Every available encoder is printed, including one the machine has that this
+/// build cannot open — quietly omitting an encoder a reader can see in the
+/// table above would answer a question nobody asked. But it is printed in a
+/// group of its own rather than as a numbered entry under "Automatic would
+/// choose": that heading asserts every line beneath it is a choice, and an
+/// entry reading "so it is not chosen" denies it. The two groups are
+/// [`Recommendation::is_openable`] either way round, so a family becoming
+/// implemented moves it between them with no edit here
+/// (`crates/encoder/src/recommendation.rs`).
 fn automatic_lines(report: &CapabilityReport) -> String {
+    let (openable, unopenable): (Vec<_>, Vec<_>) = clipped_encoder::recommend(report)
+        .into_iter()
+        .partition(Recommendation::is_openable);
+
     let mut out = String::from("Automatic would choose\n\n");
-    for (position, recommendation) in clipped_encoder::recommend(report).iter().enumerate() {
+    for (position, recommendation) in openable.iter().enumerate() {
         out.push_str(&format!("  {}. {recommendation}\n", position + 1));
     }
     out.push('\n');
+
+    if !unopenable.is_empty() {
+        out.push_str("Detected on this machine, and not available to choose\n\n");
+        for recommendation in &unopenable {
+            out.push_str(&format!("  - {recommendation}\n"));
+        }
+        out.push('\n');
+    }
     out
 }
 
@@ -543,6 +567,82 @@ mod tests {
         assert!(
             output.contains("CPU encoding, which costs the game frames"),
             "the ranking must explain what falling back to the CPU means: {output}"
+        );
+    }
+
+    #[test]
+    fn an_encoder_this_build_cannot_open_is_shown_and_not_chosen() {
+        // An Intel-only machine, which is the one the two halves of this report
+        // could contradict each other on: the table above must still show the
+        // Quick Sync hardware it has, and "Automatic would choose" must put the
+        // software fallback first, because no backend has ever encoded a frame
+        // with Quick Sync (#175). The machine is injected rather than found —
+        // there is no Intel GPU here.
+        let facts = SystemFacts::new(
+            vec![Adapter::new(
+                clipped_encoder::AdapterId::from_luid(6, 0),
+                "Intel(R) UHD Graphics 770",
+                Vendor::Intel,
+                0x4680,
+                0,
+                false,
+            )],
+            EncoderObservations::none()
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::QuickSync,
+                    "libmfxhw64.dll",
+                    RuntimeOutcome::Loaded,
+                ))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Intel,
+                    Codec::Hevc,
+                    "Intel® Hardware HEVC Encoder MFT",
+                )),
+        );
+        let output = rendered(&facts);
+
+        // The encoder table still reports the hardware, measured.
+        let hevc = output
+            .lines()
+            .find(|line| line.trim_start().starts_with("HEVC"))
+            .expect("the detected HEVC encoder has a row");
+        assert_eq!(
+            hevc.split_whitespace().nth(1),
+            Some("yes"),
+            "the machine's own capability must still be reported: {hevc}"
+        );
+
+        // And the ranking chooses the encoder that works. Only the numbered
+        // entries under "Automatic would choose" count as choices, and Quick
+        // Sync must not be among them.
+        let ranked: Vec<&str> = output
+            .lines()
+            .skip_while(|line| !line.starts_with("Automatic would choose"))
+            .take_while(|line| !line.starts_with("Detected on this machine"))
+            .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .collect();
+        assert!(
+            ranked[0].contains("Software (CPU)"),
+            "a machine whose only encoder has no proven backend must be told to use the \
+             CPU: {output}"
+        );
+        assert!(
+            !ranked.iter().any(|line| line.contains("Intel Quick Sync")),
+            "nothing under a heading that says it would be chosen may be an encoder that \
+             is not: {output}"
+        );
+
+        // The encoder that cannot be opened is still shown, in the group that
+        // says what it is.
+        let quick_sync = output
+            .lines()
+            .skip_while(|line| !line.starts_with("Detected on this machine"))
+            .find(|line| line.contains("Intel Quick Sync"))
+            .expect("a detected encoder is still listed");
+        assert!(
+            quick_sync.contains("no backend proven")
+                && quick_sync.contains(&format!("#{}", EncoderKind::QuickSync.backend_issue())),
+            "the entry that cannot be opened must say so and name its issue: {quick_sync}"
         );
     }
 
