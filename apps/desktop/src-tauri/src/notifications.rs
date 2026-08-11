@@ -35,12 +35,21 @@
 //! open Clipped with the sentence — are all things this build can actually
 //! perform, and the policy never offers one that would do nothing.
 //!
-//! The handler that performs it lives in this process, which has two
-//! consequences worth knowing. Clicking the toast while Clipped is running works
-//! whether the toast is on screen or has fallen into the Action Centre. Clicking
-//! one after Clipped has exited does nothing at all: there is no COM activator
-//! registered, deliberately, because one would let Windows start Clipped from a
-//! notification it had no other reason to start it for.
+//! The handler that performs it lives in this process, which has three
+//! consequences worth knowing.
+//!
+//! - Clicking the toast while Clipped is running works whether the toast is on
+//!   screen or has fallen into the Action Centre — **provided the notification
+//!   object is still alive**, which is [`crate::toast`]'s single
+//!   responsibility and the reason this module does not use
+//!   `tauri-winrt-notification`.
+//! - Clicking one after Clipped has exited does nothing at all: there is no COM
+//!   activator registered, deliberately, because one would let Windows start
+//!   Clipped from a notification it had no other reason to start it for.
+//! - Whether a click reaches [`perform`] has not been verified on a real
+//!   desktop. Nothing short of clicking a real toast can verify it, and
+//!   `docs/desktop-ui.md` records that as outstanding rather than claiming it
+//!   from the presence of a button in the XML.
 //!
 //! # Threads
 //!
@@ -56,7 +65,6 @@ use std::process::Command;
 
 use clipped_ipc::{RecorderLink, RecorderLinkEvent};
 use tauri::{AppHandle, Manager as _};
-use tauri_winrt_notification::{Duration, Toast};
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
@@ -65,6 +73,7 @@ use crate::notification_policy::{
     Notification, NotificationAction, NotificationCategory, NotificationPolicy,
     NotificationSettings, SETTINGS_VERSION,
 };
+use crate::toast::{ToastContent, Toaster};
 
 /// The file the per-category switches live in, in Clipped's configuration
 /// directory.
@@ -83,9 +92,8 @@ const BUTTON_ARGUMENT: &str = "action";
 /// Shows the user the few things worth interrupting them for.
 #[derive(Debug)]
 pub(crate) struct Notifier {
-    /// The AppUserModelID the toasts are shown under: Clipped's bundle
-    /// identifier, from `tauri.conf.json`, so there is one source for it.
-    app_id: String,
+    /// The Windows toasts, and the objects their buttons call back into.
+    toaster: Toaster,
     /// What to show, and what not to. See [`crate::notification_policy`].
     policy: NotificationPolicy,
 }
@@ -106,7 +114,7 @@ pub(crate) fn install(app: &AppHandle, link: &RecorderLink) -> Notifier {
     }
 
     Notifier {
-        app_id,
+        toaster: Toaster::new(&app_id),
         policy: NotificationPolicy::new(
             settings(app),
             // "Try again" is only offered where there is something to try. A
@@ -141,18 +149,18 @@ impl Notifier {
     }
 
     /// Builds and shows the toast.
-    fn show(&self, app: &AppHandle, notification: &Notification) -> Result<(), String> {
+    fn show(&mut self, app: &AppHandle, notification: &Notification) -> Result<(), String> {
         let action = notification.action.clone();
         let handle = app.clone();
 
-        Toast::new(&self.app_id)
-            .title(&notification.title)
-            .text1(&notification.body)
-            // Long, because every one of these is a failure and a toast that has
-            // gone in five seconds is one the user was not at their desk for.
-            .duration(Duration::Long)
-            .add_button(notification.action.label(), BUTTON_ARGUMENT)
-            .on_activated(move |chosen| {
+        self.toaster.show(
+            ToastContent {
+                title: &notification.title,
+                body: &notification.body,
+                button: notification.action.label(),
+                button_argument: BUTTON_ARGUMENT,
+            },
+            move |chosen| {
                 if chosen.as_deref() == Some(BUTTON_ARGUMENT) {
                     perform(&handle, &action);
                 } else {
@@ -162,10 +170,8 @@ impl Notifier {
                     // user did not ask for.
                     crate::tray::show_window(&handle);
                 }
-                Ok(())
-            })
-            .show()
-            .map_err(|error| error.to_string())
+            },
+        )
     }
 }
 

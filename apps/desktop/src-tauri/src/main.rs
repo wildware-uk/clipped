@@ -60,6 +60,7 @@
 mod foreground;
 mod notification_policy;
 mod notifications;
+mod toast;
 mod tray;
 mod tray_icon;
 mod tray_model;
