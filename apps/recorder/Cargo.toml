@@ -52,14 +52,31 @@ time = { version = "0.3", default-features = false, features = [
     "macros",
 ] }
 
-# Used by `examples/shutdown_fixture.rs` and `tests/ctrl_c.rs` to deliver a real
-# Ctrl+C to a real child process. Test-only, so no Win32 reaches the shipped
-# binary. Dual MIT/Apache-2.0.
+# Console control, for the one Win32 call the recorder itself makes:
+# `SetConsoleCtrlHandler(NULL, FALSE)`, which re-enables Ctrl+C for a process
+# started in a group of its own (`shutdown::allow_ctrl_c`). It is one call with
+# no pointer in it, in the module that owns the shutdown behaviour, which is
+# where AGENTS.md section 5 allows platform code to live when it belongs to the
+# crate rather than to the platform layer. Dual MIT/Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
+
+# `tests/ctrl_c.rs` delivers a real Ctrl+C to a real child process, which needs
+# `GenerateConsoleCtrlEvent` and `AllocConsole` as well.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
 ] }
+
+# What the recordings this binary produces are checked with: the container
+# opens, the video stream is the one that was asked for, the duration is
+# plausible and the timestamps increase (AGENTS.md section 22, docs/testing.md).
+[dev-dependencies]
+clipped-media-validation.workspace = true
 
 [lints]
 workspace = true

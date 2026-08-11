@@ -4,8 +4,13 @@
 //! The parsing rules themselves are unit-tested next to the code that
 //! implements them. What is only observable from outside is asserted here: that
 //! `--help` really does document the defaults, that a bad argument produces a
-//! usage error rather than a panic or a stack trace, and — most importantly —
-//! that `record` does not produce a file, because it cannot record.
+//! usage error rather than a panic or a stack trace, and that a `record`
+//! invocation which cannot get as far as capturing anything leaves no file and
+//! no directory behind.
+//!
+//! What a *successful* recording produces is `tests/record_end_to_end.rs`,
+//! which needs a GPU and a desktop session; nothing in this file starts a
+//! capture.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,9 +24,10 @@ use clipped_recorder::cli::{Cli, TARGET_ARGUMENTS};
 /// changes rather than following it.
 const EXIT_USAGE: i32 = 2;
 
-/// Exit code for "not implemented in this build". Mirrors
-/// `clipped_recorder::EXIT_NOT_IMPLEMENTED`.
-const EXIT_NOT_IMPLEMENTED: i32 = 3;
+/// A window title no window on any machine can have, so that a `record`
+/// invocation using it fails at target resolution, deterministically, without
+/// capturing anything (AGENTS.md section 25).
+const NO_SUCH_WINDOW: &str = "no window is called this: clipped-recorder test 5f3a9c";
 
 /// A directory of this test's own, removed when it is dropped.
 #[derive(Debug)]
@@ -207,7 +213,7 @@ fn capabilities_reports_encoders_and_codecs() {
         "AV1",
         "Automatic would choose",
         "Encoding in this build:",
-        "Nothing records yet",
+        "no audio track",
     ] {
         assert!(
             report.contains(expected),
@@ -222,6 +228,12 @@ fn capabilities_reports_encoders_and_codecs() {
     assert!(
         !report.contains("No encoder is implemented"),
         "this build has encoder backends and must not deny it:\n{report}"
+    );
+    // The same failure a milestone later: the footer went on saying nothing
+    // recorded, which stopped being true when the session landed (#126).
+    assert!(
+        !report.contains("Nothing records yet"),
+        "this build records and must not deny it:\n{report}"
     );
     assert!(
         report.contains("inferred from published limits"),
@@ -304,12 +316,13 @@ fn record_help_documents_a_default_for_every_option() {
 #[test]
 fn record_without_an_output_creates_no_recordings_directory() {
     // The default output path is under the user's videos folder, so this run
-    // is given a home directory of its own. A build that cannot record must
-    // not leave a `Videos\Clipped` behind for a recording that never happened.
+    // is given a home directory of its own. A run that never gets as far as a
+    // frame must not leave a `Videos\Clipped` behind for a recording that never
+    // happened: the directory is created by the recording that goes in it.
     let home = TestDirectory::new("default-output-home");
 
     let output = Command::new(env!("CARGO_BIN_EXE_clipped-recorder"))
-        .args(["record", "--window", "Counter-Strike 2"])
+        .args(["record", "--window", NO_SUCH_WINDOW])
         .env("USERPROFILE", home.path())
         .env("HOME", home.path())
         .output()
@@ -317,7 +330,7 @@ fn record_without_an_output_creates_no_recordings_directory() {
 
     assert_eq!(
         output.status.code(),
-        Some(EXIT_NOT_IMPLEMENTED),
+        Some(EXIT_USAGE),
         "stderr was: {}",
         stderr(&output)
     );
@@ -372,34 +385,39 @@ fn an_invalid_value_is_a_usage_error_and_not_a_panic() {
 }
 
 #[test]
-fn record_says_it_cannot_record_and_writes_no_recording() {
+fn record_with_a_target_that_matches_no_window_writes_no_recording() {
+    // The file is created by the muxer, which is reached only after a window
+    // has been resolved, a backend has been chosen and a frame has arrived. A
+    // run that fails before any of that must leave the output path untouched:
+    // an empty file left behind would make that name permanently unusable,
+    // because the next attempt would refuse to overwrite a recording.
     let directory = TestDirectory::new("no-output-written");
     let output_path = directory.path().join("session.mkv");
 
     let output = recorder(&[
         "record",
         "--window",
-        "Counter-Strike 2",
+        NO_SUCH_WINDOW,
         "--output",
         output_path.to_str().expect("the path is valid UTF-8"),
     ]);
 
     assert_eq!(
         output.status.code(),
-        Some(EXIT_NOT_IMPLEMENTED),
+        Some(EXIT_USAGE),
         "stderr was: {}",
         stderr(&output)
     );
     let message = stderr(&output);
+    assert!(message.contains("no window matches"), "{message}");
     assert!(
-        message.contains("capture engine is not implemented yet"),
-        "{message}"
+        !message.contains("panicked"),
+        "an unmatched selector must not panic: {message}"
     );
-    assert!(message.contains("M1 - Recording Engine"), "{message}");
 
     assert!(
         !output_path.exists(),
-        "a build that cannot record must not create an output file"
+        "a run that never captured a frame must not create an output file"
     );
     let left_behind: Vec<_> = fs::read_dir(directory.path())
         .expect("the directory can be listed")

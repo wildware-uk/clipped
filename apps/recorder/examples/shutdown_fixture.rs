@@ -1,9 +1,13 @@
 //! A process that waits for Ctrl+C, for `tests/ctrl_c.rs` to interrupt.
 //!
-//! Testing signal handling needs a real process to send a real signal to, and
-//! the recorder itself exits immediately because there is no capture engine to
-//! run. This fixture stands in for the recording loop that will replace it: it
-//! installs the same Ctrl+C handler through the same
+//! The signal path, isolated from everything a real recording needs. The
+//! recorder itself is interrupted for real in the same test file, against a
+//! real window and a real file — but that test needs a GPU and a desktop
+//! session, so it is `#[ignore]`d, and this fixture is what keeps the signal,
+//! the seam and the finalisation hook covered on every run and on every
+//! machine.
+//!
+//! It installs the same Ctrl+C handler through the same
 //! [`clipped_recorder::shutdown`] API, waits on the same signal, and finalises
 //! through the same seam. Nothing about the path under test is simulated —
 //! only the frames are missing.
@@ -24,7 +28,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clipped_recorder::shutdown::{install_ctrl_c_handler, run_until_shutdown, ShutdownSignal};
+use clipped_recorder::shutdown::{
+    allow_ctrl_c, install_ctrl_c_handler, run_until_shutdown, ShutdownSignal,
+};
 
 fn main() -> ExitCode {
     let Some(marker) = std::env::args_os().nth(1).map(PathBuf::from) else {
@@ -32,6 +38,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    // The test spawns this fixture with `CREATE_NEW_PROCESS_GROUP`, which is
+    // what lets it send a console control event to the child alone rather than
+    // to the whole test run — and what leaves Ctrl+C disabled until it is asked
+    // for back. The recorder does the same thing for the same reason, through
+    // the same function.
     allow_ctrl_c();
 
     let signal = ShutdownSignal::new();
@@ -65,28 +76,3 @@ fn main() -> ExitCode {
         Err(()) => ExitCode::FAILURE,
     }
 }
-
-/// Re-enables Ctrl+C for this process.
-///
-/// The test spawns this fixture with `CREATE_NEW_PROCESS_GROUP`, which is what
-/// lets it send a console control event to the child alone rather than to the
-/// whole test run. A process created that way starts with Ctrl+C *disabled*, so
-/// it has to ask for it back before a handler can see anything. Nothing outside
-/// this fixture needs to do that, which is why it lives here and not in the
-/// recorder.
-#[cfg(windows)]
-fn allow_ctrl_c() {
-    // SAFETY: `SetConsoleCtrlHandler` takes an optional handler pointer and a
-    // BOOL. Passing `None` with `FALSE` removes the inherited "ignore Ctrl+C"
-    // entry rather than registering anything, so no pointer is dereferenced and
-    // no callback outlives anything. The return value is ignored deliberately:
-    // if the process was not started in a new group there is nothing to remove
-    // and the call fails harmlessly.
-    unsafe {
-        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
-    }
-}
-
-/// Nothing to do: only Windows disables Ctrl+C for a new process group.
-#[cfg(not(windows))]
-fn allow_ctrl_c() {}

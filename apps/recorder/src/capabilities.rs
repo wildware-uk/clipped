@@ -14,16 +14,20 @@
 //! place for that rule to be right or wrong rather than a dozen.
 //!
 //! The second thing is the distance between "your machine can do this" and
-//! "Clipped can do this". A report full of green ticks, from a build that
-//! cannot record, would be worse than no report (AGENTS.md sections 27 and 54),
-//! so the footer names the encoders this build has a *proven* backend for, the
-//! ones it only detects (which includes a backend nobody has watched encode a
-//! real frame — Quick Sync, currently), and the fact that no session yet
-//! connects any of them to a capture and a file. Which encoders those are is
-//! asked of [`EncoderKind::is_implemented`] rather than written out here: the
-//! previous footer was a hand-written sentence, and it went on saying no
-//! encoder was implemented through two of them landing
-//! ([#167](https://github.com/wildware-uk/clipped/issues/167)).
+//! "Clipped can do this". A report full of green ticks, from a build that can
+//! only use some of them, would be worse than no report (AGENTS.md sections 27
+//! and 54), so the footer names the encoders this build has a *proven* backend
+//! for, the ones it only detects (which includes a backend nobody has watched
+//! encode a real frame — Quick Sync, currently), and what a recording made with
+//! any of them does and does not contain. Which encoders those are is asked of
+//! [`EncoderKind::is_implemented`] rather than written out here: the previous
+//! footer was a hand-written sentence, and it went on saying no encoder was
+//! implemented through two of them landing
+//! ([#167](https://github.com/wildware-uk/clipped/issues/167)). The sentence
+//! that replaced it then went on saying nothing recorded, through the session
+//! landing ([#126](https://github.com/wildware-uk/clipped/issues/126)) — which
+//! is why the test below now asserts against both of the claims this report has
+//! made and outlived.
 
 use std::error::Error;
 use std::fmt;
@@ -326,10 +330,9 @@ fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
 /// encode a frame on real hardware — so the second line says "not proven"
 /// rather than "no backend", which would be false for that one
 /// ([`EncoderKind::is_implemented`]'s doc explains why it still counts as not
-/// implemented). And whichever encoder is named, no build records anything
-/// yet, because nothing connects a capture to an encoder and on to a file — a
-/// report that let a reader infer otherwise from a list of working encoders
-/// would be the same failure in a new place.
+/// implemented). And whichever encoder is chosen, a recording made today has a
+/// video track and no audio track, which a report listing working encoders
+/// would otherwise let a reader assume the opposite of.
 fn implementation_lines() -> String {
     let (implemented, detected_only): (Vec<EncoderKind>, Vec<EncoderKind>) = EncoderKind::ALL
         .iter()
@@ -352,10 +355,10 @@ fn implementation_lines() -> String {
         ));
     }
     out.push_str(
-        "Nothing records yet whichever encoder is chosen: no session connects a capture\n    \
-         to an encoder and on to a file, so `record` reports that the capture\n    \
-         engine is not implemented. Progress is at\n    \
-         https://github.com/wildware-uk/clipped/issues.\n\n",
+        "`record` uses the first of these that will open a session on the device the\n    \
+         frames are captured on, and falls back to the next when one refuses. A\n    \
+         recording has a video track and no audio track: capturing audio into a\n    \
+         session is not written yet (issue #180).\n\n",
     );
     out
 }
@@ -619,19 +622,24 @@ mod tests {
             }
         }
 
-        // The claim this replaced. It was true when it was written, stayed in
-        // the shipped binary through NVENC and the software fallback landing,
-        // and is what #167 was raised for; a report that says it again is
-        // worse than one that says nothing.
+        // The two claims this footer has made and outlived. The first was true
+        // when it was written and stayed in the shipped binary through NVENC
+        // and the software fallback landing (#167); the second was true until
+        // the session landed (#126). A report that says either again is worse
+        // than one that says nothing.
         assert!(
             !footer.contains("No encoder is implemented"),
             "two backends exist, so the footer must not deny it: {footer}"
         );
-        // What is genuinely not possible yet still has to be said, or the
-        // corrected footer reads as "this build records".
         assert!(
-            footer.contains("Nothing records yet"),
-            "the footer must still say that no recording completes: {footer}"
+            !footer.contains("Nothing records yet"),
+            "`record` writes a file now, so the footer must not deny it: {footer}"
+        );
+        // What is genuinely still missing has to be said, or the corrected
+        // footer reads as "this build records everything".
+        assert!(
+            footer.contains("no audio track"),
+            "the footer must say a recording has no sound in it yet: {footer}"
         );
         assert!(
             footer.contains(INFERRED_MARKER),

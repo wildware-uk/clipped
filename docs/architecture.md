@@ -169,11 +169,21 @@ large:
   `lib.rs` states that crate's responsibilities, what it is explicitly not
   responsible for, and where it sits in the stack; those doc comments are the
   authoritative statement of a crate's remit and this document defers to them.
-- `apps/recorder` has a command line: `record` parses and validates every
-  argument and installs its Ctrl+C handler, then reports that this build has no
-  capture engine and exits 3; `list-windows` lists what could be captured; and
-  `capabilities` reports the graphics adapters and encoders it found. See
+- `apps/recorder` has a command line, and `record` records: it resolves the
+  target, captures the window, encodes its frames and writes them into a
+  Matroska file, and finishes that file when Ctrl+C stops it
+  ([#126](https://github.com/wildware-uk/clipped/issues/126)). A recording has a
+  video track and no audio track. `list-windows` lists what could be captured
+  and `capabilities` reports the graphics adapters and encoders it found. See
   [recorder-cli.md](recorder-cli.md).
+- `clipped-session` is the crate that joins them, and the only place in the
+  workspace holding `clipped-capture`, `clipped-encoder` and `clipped-muxer` at
+  once. It owns the recording loop and the thread split: capture and encoding
+  share the calling thread, because a captured texture may not outlive the
+  acquisition that produced it, and only encoded packets cross a bounded queue
+  to the thread that writes the file — which is what keeps the capture thread
+  off the filesystem (AGENTS.md section 20). Per-game settings, game detection
+  and the replay buffer are later milestones and are not there.
 - `apps/desktop` and `packages/` are README placeholders.
 - The tests assert the behaviour that exists: the workspace layering test,
   `clipped-logging`'s unit and integration tests, `clipped-capture`'s tests for
@@ -192,16 +202,15 @@ cargo run -p clipped-recorder
 ```
 
 With no arguments that prints the help and exits 2. It has three subcommands.
-`list-windows` lists the windows that could be captured, and works today.
-`capabilities` reports the graphics adapters and encoders it found, which is
-detection rather than encoding
-([encoder-capabilities.md](encoder-capabilities.md)). `record` validates its
-arguments and then reports that this build cannot record, because the capture
-engine does not exist yet. The first useful invocation — capture a window,
-encode it, produce a playable MKV — is the M1 milestone:
+`list-windows` lists the windows that could be captured. `capabilities` reports
+the graphics adapters and encoders it found, which is detection rather than
+encoding ([encoder-capabilities.md](encoder-capabilities.md)). `record` captures
+a window, encodes it and produces a playable MKV, and Ctrl+C stops it leaving a
+finished file:
 
 ```text
 clipped-recorder capabilities
+clipped-recorder list-windows
 clipped-recorder record --window <window>
 ```
 

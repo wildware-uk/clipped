@@ -8,5 +8,31 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The three halves of a recording, joined here and nowhere else. This crate is
+# the only place in the workspace that holds all of them at once, which is the
+# whole reason it exists (README, "Dependency direction").
+clipped-capture.workspace = true
+clipped-encoder.workspace = true
+clipped-muxer.workspace = true
+# The standard session context — `session_id`, `capture_backend`, `encoder` —
+# so that every line a recording produces is searchable by the same fields
+# (docs/logging.md). `RedactedPath` keeps the output path out of the logs.
+clipped-logging.workspace = true
+tracing.workspace = true
+
+# One Direct3D call, and only one: `ID3D11Texture2D::GetDevice`, which is how a
+# session finds the device a captured frame lives on so that it can open an
+# encoder against the same one. `clipped-capture` owns its device privately and
+# hands out only textures, and asking a texture which device it belongs to is
+# both the documented way to answer that and the way `crates/capture`'s own
+# tests do it. Anything else would mean a second device and a cross-adapter
+# copy of every frame.
+#
+# The feature list is exactly what `src/windows/device.rs` names. Dual
+# MIT/Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Graphics_Direct3D11"] }
+
 [lints]
 workspace = true
