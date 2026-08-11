@@ -1,0 +1,108 @@
+/*
+ * Design tokens for the Clipped desktop application.
+ *
+ * These are the "Modernist" design system's tokens - flat, one red accent on a
+ * light ground, zero corner radius, strong 2px rules - copied here as tokens
+ * rather than as values, so that a component never names a colour or a distance
+ * directly. Issue #79 brings the system's full token set and its component
+ * layer into this package; because everything above is written against
+ * `var(--...)`, that is an extension of this file rather than a rewrite of the
+ * components.
+ *
+ * Two deliberate differences from the published system are marked below. Both
+ * exist because this is a desktop application rather than a web page.
+ */
+
+:root {
+  /* — roles — */
+  --color-bg: #f3f2f2;
+  --color-surface: #eae9e9;
+  --color-text: #201e1d;
+  --color-accent: #ec3013;
+  --color-accent-2: #e15b47;
+  --color-divider: color-mix(in srgb, #201e1d 40%, transparent);
+
+  /*
+   * Secondary text. The design system draws this at 55% of the ink, which on
+   * the light ground measures about 3.4:1 - short of the 4.5:1 that AGENTS.md
+   * section 46 asks of body text. 70% measures about 5.3:1 on `--color-bg` and
+   * on `--color-neutral-200`, which is where the shell uses it.
+   */
+  --color-text-muted: color-mix(in srgb, #201e1d 70%, transparent);
+
+  /*
+   * Accent text. `--color-accent` on the light ground measures about 3.7:1, so
+   * it is used for marks and rules rather than for words; `--color-accent-700`
+   * measures about 6.4:1 and is what accent-coloured text uses.
+   */
+  --color-accent-text: #ae1800;
+
+  /* Tonal ramps - generated in OKLCH on one shared lightness scale, so the
+     same step of any role matches the others in visual value. */
+  --color-neutral-100: #f8f4f4;
+  --color-neutral-200: #eae7e7;
+  --color-neutral-300: #d7d3d3;
+  --color-neutral-400: #bab6b6;
+  --color-neutral-500: #9b9797;
+  --color-neutral-600: #7d7979;
+  --color-neutral-700: #605d5d;
+  --color-neutral-800: #444141;
+  --color-neutral-900: #2d2b2b;
+
+  --color-accent-100: #fff2ef;
+  --color-accent-200: #ffe0d9;
+  --color-accent-300: #ffc4b8;
+  --color-accent-400: #ff9783;
+  --color-accent-500: #ff563c;
+  --color-accent-600: #dd2b0f;
+  --color-accent-700: #ae1800;
+  --color-accent-800: #7c1405;
+  --color-accent-900: #4d170e;
+
+  /* — type — */
+  --font-heading: 'Archivo', system-ui, sans-serif;
+  --font-heading-weight: 800;
+  --font-body: 'Archivo', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+
+  /*
+   * The system states its type scale in pixels. It is restated here in `rem`,
+   * against the browser's own 16px root, because a pixel size does not respond
+   * to the Windows text-size setting or to the application's zoom, and
+   * scalable text is required (AGENTS.md section 46). The values are the
+   * system's: 11, 13, 14, 15, 17, 20 and 26 pixels at the default root size.
+   */
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.875rem;
+  --text-lg: 0.9375rem;
+  --text-xl: 1.0625rem;
+  --text-2xl: 1.25rem;
+  --text-3xl: 1.625rem;
+
+  --tracking-caps: 0.1em;
+  --tracking-brand: 0.16em;
+
+  /* — space — */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* — shape — */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --rule-weight: 2px;
+
+  /* — elevation — */
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
+  --shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
+  --shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
+
+  /* — shell metrics — */
+  --shell-sidebar-width: 210px;
+  --shell-header-height: 36px;
+}
