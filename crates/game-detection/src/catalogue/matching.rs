@@ -239,8 +239,13 @@ fn strength(entry: &Entry, candidate: &ProcessCandidate<'_>) -> Option<MatchStre
 /// form, because a game's executable is not guaranteed to be spelled in ASCII
 /// and getting a Japanese title wrong is not a nicer failure for being rarer.
 /// This runs once per process start, so the allocation is irrelevant.
+///
+/// There is deliberately no length check to short-circuit on, because case
+/// folding changes length: `GROẞE.exe` is three bytes of `U+1E9E` and folds to
+/// the two bytes of `ß`, so comparing lengths first would refuse the exact pair
+/// this function exists to accept.
 fn equal_names(left: &str, right: &str) -> bool {
-    left.len() == right.len() && left.to_lowercase() == right.to_lowercase()
+    left.to_lowercase() == right.to_lowercase()
 }
 
 /// Whether `path` contains `fragment` as a run of whole path segments.
@@ -488,6 +493,27 @@ path_contains = "/"
         let outcome = catalogue
             .match_process(&ProcessCandidate::new("game.exe").with_path(r"C:\Anything\game.exe"));
         assert_eq!(outcome, Match::None, "got {outcome:?}");
+    }
+
+    #[test]
+    fn an_executable_name_matches_when_folding_its_case_changes_its_length() {
+        // `ẞ` (U+1E9E) is three bytes and folds to the two bytes of `ß`, so a
+        // byte-length comparison refuses the pair. Names are compared by
+        // `to_lowercase` rather than the ASCII-only form precisely so that a
+        // game whose executable is not spelled in ASCII still matches, and a
+        // length check would quietly undo that.
+        let catalogue = seed(
+            r#"
+[[game]]
+game_id = "grosse"
+name = "Große"
+[[game.executables]]
+name = "GROẞE.exe"
+"#,
+        );
+
+        let outcome = catalogue.match_process(&ProcessCandidate::new("große.exe"));
+        assert_eq!(matched_id(&outcome), "grosse");
     }
 
     #[test]
