@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // The window's whole privilege, imported rather than read off disk so that the
@@ -87,6 +87,74 @@ describe('the window following its notification-area menu', () => {
     await waitFor(() => {
       expect(result.current).toBe('Clipped did not exit.');
     });
+  });
+
+  it('shows what failed before the window existed to be told about it', async () => {
+    // A notification-area icon that could not be added is the one that matters:
+    // without a tray, closing this window quits Clipped rather than minimising,
+    // and quitting leaves the recorder running. Tauri's `setup` runs before
+    // React does, so it cannot be *sent* — nothing is subscribed yet — and it
+    // is asked for instead.
+    const notice = 'Clipped could not add its notification-area icon: no shell.';
+    stubRecorderLinkRuntime({ link: 'connecting' }, notice);
+    const { result } = renderHook(() => useTray(() => undefined));
+
+    await waitFor(() => {
+      expect(result.current).toBe(notice);
+    });
+  });
+
+  it('says nothing about a startup that went as it should', async () => {
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
+    const { result } = renderHook(() => useTray(() => undefined));
+
+    await waitFor(() => {
+      expect(runtime.invocations.some((sent) => sent.command === 'startup_notice')).toBe(true);
+    });
+    expect(result.current).toBeUndefined();
+  });
+
+  it('lets the tray say something newer than the startup did', async () => {
+    // Both are true and the status block holds one paragraph. The tray's is
+    // what the user did a second ago, so it is the one on screen.
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' }, 'The icon could not be added.');
+    const { result } = renderHook(() => useTray(() => undefined));
+
+    await waitFor(() => {
+      expect(result.current).toBe('The icon could not be added.');
+    });
+
+    runtime.emitTo('tray-notice', 'The recording could not be stopped.');
+    await waitFor(() => {
+      expect(result.current).toBe('The recording could not be stopped.');
+    });
+  });
+
+  it('does not overwrite something the tray said while it was still asking', async () => {
+    // The command is a round trip, so the tray can report a failed action
+    // before the answer to it arrives. The startup failure is the older of the
+    // two by definition — it happened before this window existed — so it must
+    // not land on top of what the user did a moment ago.
+    let answer: (said: string | null) => void = () => undefined;
+    const asking = new Promise<string | null>((resolve) => {
+      answer = resolve;
+    });
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' }, asking);
+    const { result } = renderHook(() => useTray(() => undefined));
+
+    await waitFor(() => {
+      expect(runtime.invocations.some((sent) => sent.args['event'] === 'tray-notice')).toBe(true);
+    });
+    runtime.emitTo('tray-notice', 'The recording could not be stopped.');
+    await waitFor(() => {
+      expect(result.current).toBe('The recording could not be stopped.');
+    });
+
+    await act(async () => {
+      answer('Clipped could not add its notification-area icon.');
+      await asking;
+    });
+    expect(result.current).toBe('The recording could not be stopped.');
   });
 
   it('asks the Tauri runtime for nothing outside the Clipped window', () => {

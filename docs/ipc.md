@@ -575,6 +575,24 @@ tray's Exit is the caller this shape was designed for — its menu item reads
 "Stop recording and exit" while something is being recorded, so the permission
 in the request is the same sentence the user read (`docs/desktop-ui.md`).
 
+#### Nothing new is started once one is accepted
+
+A recorder serves eight connections at once, so the status the decision above is
+made from is read while seven others may be sending commands. The recorder
+therefore closes itself to new recordings **before** it reads that status, and a
+`start_recording` arriving from then on is refused:
+
+```json
+{"type":"response","id":9,"outcome":{"error":{
+  "code":"shutting_down",
+  "message":"this recorder has been asked to exit and will not start a recording"}}}
+```
+
+Without that, a `start_recording` landing between the read and the reply would
+begin a recording the permission never covered, and the shutdown would end it
+having asked nobody. A shutdown that is **refused** opens it again at once, so a
+`start_recording` after one is served exactly as it was before.
+
 #### When the reply arrives, and what it promises
 
 **Before** the recorder winds up, because a reply written after the process
@@ -681,6 +699,7 @@ person reads, written to AGENTS.md section 28.
 | `target_not_found` | No window matched what was asked for. |
 | `recording_failed` | Capture, encoding or muxing refused. Whatever was written before the failure is still a finished file. |
 | `too_many_connections` | The recorder is serving as many connections as it will. |
+| `shutting_down` | The recorder has accepted a [`shutdown`](#shutdown) and will not start a recording. |
 | `internal` | The recorder is at fault and cannot say more usefully. |
 
 A code a client has never seen is kept verbatim and its message shown, and so is

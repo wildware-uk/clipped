@@ -134,6 +134,15 @@ pub enum ErrorCode {
     /// the user, so the cap is what stops a loop opening connections from
     /// costing the recorder a thread each.
     TooManyConnections,
+    /// `shutting_down` — the recorder has accepted a `shutdown` and will not
+    /// start anything new.
+    ///
+    /// It exists so that the permission a `shutdown` carries stays true: the
+    /// decision about whether exiting may end a recording is made by reading
+    /// the status, and without this a `start_recording` arriving between that
+    /// read and the reply would begin a recording the decision never covered
+    /// (`crate::server::accept_shutdown`, AGENTS.md section 17).
+    ShuttingDown,
     /// `internal` — the recorder is at fault and cannot say more usefully.
     Internal,
     /// A code this build has never heard of, kept verbatim.
@@ -160,6 +169,7 @@ impl ErrorCode {
             Self::TargetNotFound => "target_not_found",
             Self::RecordingFailed => "recording_failed",
             Self::TooManyConnections => "too_many_connections",
+            Self::ShuttingDown => "shutting_down",
             Self::Internal => "internal",
             Self::Other(code) => code,
         }
@@ -186,6 +196,7 @@ impl From<String> for ErrorCode {
             "target_not_found" => Self::TargetNotFound,
             "recording_failed" => Self::RecordingFailed,
             "too_many_connections" => Self::TooManyConnections,
+            "shutting_down" => Self::ShuttingDown,
             "internal" => Self::Internal,
             _ => Self::Other(code),
         }

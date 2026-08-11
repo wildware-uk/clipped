@@ -1233,6 +1233,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::TargetNotFound,
         ErrorCode::RecordingFailed,
         ErrorCode::TooManyConnections,
+        ErrorCode::ShuttingDown,
         ErrorCode::Internal,
     ];
     for code in &codes {
@@ -1248,6 +1249,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::TargetNotFound
             | ErrorCode::RecordingFailed
             | ErrorCode::TooManyConnections
+            | ErrorCode::ShuttingDown
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
         }

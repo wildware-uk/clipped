@@ -146,9 +146,29 @@ pub struct ShutdownRequest {
 /// What a [`ShutdownRequest`]'s clones share.
 #[derive(Debug, Default)]
 struct ShutdownState {
+    /// Set when the listener has been asked to stop, and never cleared.
     requested: AtomicBool,
+    /// Set the moment a shutdown starts being *decided*, and cleared again if
+    /// it is refused. See [`ShutdownRequest::begin`].
+    ///
+    /// Separate from `requested` because they answer different questions at
+    /// different moments: this one is true for the few microseconds a refusal
+    /// takes to be decided, and `requested` is the fact a caller logs.
+    deciding: AtomicBool,
     /// [`None`] until [`Server::serve`] attaches the listener it is serving.
     stopper: Mutex<Option<ListenerStopper>>,
+}
+
+/// The lock is read and written through a poisoned mutex deliberately.
+///
+/// A panic on some other connection thread must not be what decides that a
+/// shutdown is answered `shutting_down` and then never happens. The value is one
+/// cloneable handle, so there is no half-written state a poisoned lock could be
+/// hiding — and the alternative, silently doing nothing, is exactly the failure
+/// [`ShutdownRequest`] exists to prevent.
+fn through_poison<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl ShutdownRequest {
@@ -168,11 +188,36 @@ impl ShutdownRequest {
         self.inner.requested.load(Ordering::SeqCst)
     }
 
+    /// Closes the recorder to new recordings, before a shutdown is decided.
+    ///
+    /// The decision is "may exiting end a recording", and it is made by reading
+    /// the recorder's status. Between that read and the reply being written, a
+    /// `start_recording` on another connection could begin one the decision
+    /// never covered — and the recorder would then exit, ending a recording
+    /// nobody was asked about (AGENTS.md section 17).
+    ///
+    /// So the door is shut first and the status read afterwards. From here a
+    /// `start_recording` is refused with [`ErrorCode::ShuttingDown`], which is
+    /// what makes that status read the last word rather than a snapshot.
+    /// [`abandon`](Self::abandon) opens it again if the shutdown turns out to be
+    /// refused, so a recorder that said no is left exactly as it was.
+    fn begin(&self) {
+        self.inner.deciding.store(true, Ordering::SeqCst);
+    }
+
+    /// Opens the door again, for a shutdown that was refused.
+    fn abandon(&self) {
+        self.inner.deciding.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether this recorder is on its way out and will start nothing new.
+    fn is_shutting_down(&self) -> bool {
+        self.inner.deciding.load(Ordering::SeqCst)
+    }
+
     /// Points this at the listener whose accept loop is to be ended.
     fn attach(&self, stopper: ListenerStopper) {
-        if let Ok(mut held) = self.inner.stopper.lock() {
-            *held = Some(stopper);
-        }
+        *through_poison(&self.inner.stopper) = Some(stopper);
     }
 
     /// Ends the accept loop.
@@ -182,8 +227,12 @@ impl ShutdownRequest {
     /// can be done from elsewhere at all (`transport/windows.rs`).
     fn request(&self) {
         self.inner.requested.store(true, Ordering::SeqCst);
+        // Belt and braces: `accept_shutdown` has already done this, and a
+        // future caller of `request` that has not would otherwise leave the
+        // door open on a recorder that is exiting.
+        self.begin();
 
-        let stopper = self.inner.stopper.lock().ok().and_then(|held| held.clone());
+        let stopper = through_poison(&self.inner.stopper).clone();
 
         match stopper {
             Some(stopper) => stopper.stop(),
@@ -649,7 +698,7 @@ fn serve_commands<S: Read + Write, H: CommandHandler + ?Sized>(
             }
         };
 
-        let (outcome, after) = dispatch(handler, &request);
+        let (outcome, after) = dispatch(handler, shutdown, &request);
         let response = Response {
             id: request.id,
             outcome,
@@ -687,9 +736,25 @@ enum AfterReply {
 }
 
 /// Performs one request, or explains why not.
-fn dispatch<H: CommandHandler + ?Sized>(handler: &H, request: &Request) -> (Outcome, AfterReply) {
+fn dispatch<H: CommandHandler + ?Sized>(
+    handler: &H,
+    shutdown: &ShutdownRequest,
+    request: &Request,
+) -> (Outcome, AfterReply) {
     match Command::from_request(request) {
         Err(refusal) => (Outcome::Error(refusal), AfterReply::KeepServing),
+        // A recorder that has accepted a shutdown is winding up, and a recording
+        // started now would be one it stopped again a moment later — without
+        // anybody having been asked whether it might. Refused here rather than
+        // by the handler because the shutdown is this module's
+        // ([`ShutdownRequest::begin`]).
+        Ok(Command::StartRecording(_)) if shutdown.is_shutting_down() => (
+            Outcome::Error(ProtocolError::new(
+                ErrorCode::ShuttingDown,
+                "this recorder has been asked to exit and will not start a recording",
+            )),
+            AfterReply::KeepServing,
+        ),
         // Refused here, and never handed to a handler: there is no
         // implementation to reach, and a handler that could be asked is a
         // handler that could answer wrongly (AGENTS.md section 54).
@@ -703,7 +768,7 @@ fn dispatch<H: CommandHandler + ?Sized>(handler: &H, request: &Request) -> (Outc
         }
         // Also never handed to a handler, for the opposite reason: what a
         // shutdown ends is the accept loop, which belongs to this module.
-        Ok(Command::Shutdown(shutdown)) => accept_shutdown(handler, shutdown),
+        Ok(Command::Shutdown(request)) => accept_shutdown(handler, shutdown, request),
         Ok(command) => {
             let outcome = match handler.call(command) {
                 Ok(reply) => Outcome::Ok(reply),
@@ -722,27 +787,44 @@ fn dispatch<H: CommandHandler + ?Sized>(handler: &H, request: &Request) -> (Outc
 /// (AGENTS.md section 17, [`Shutdown::finalise_recording`]). When it may, the
 /// recording is named in the reply, because the file it leaves is a real file
 /// somebody should be told about.
+///
+/// # Why the door is shut before the status is read
+///
+/// The status is read on one connection thread while seven others may be
+/// serving commands. Reading it first and closing afterwards would leave a
+/// window — the read, the decision, and the write of the reply — in which a
+/// `start_recording` could begin a recording this decision never covered, and
+/// which the caller's own shutdown would then end. [`ShutdownRequest::begin`]
+/// closes that window; [`ShutdownRequest::abandon`] reopens it for a shutdown
+/// that turns out to be refused, so a `start_recording` after a *refused*
+/// shutdown is served exactly as before.
 fn accept_shutdown<H: CommandHandler + ?Sized>(
     handler: &H,
-    shutdown: Shutdown,
+    shutdown: &ShutdownRequest,
+    request: Shutdown,
 ) -> (Outcome, AfterReply) {
+    shutdown.begin();
+
     let recording = match handler.status() {
         RecorderStatus::Idle => None,
         RecorderStatus::Recording(active) => Some(active),
     };
 
-    match (&recording, shutdown.finalise_recording) {
-        (Some(active), false) => (
-            Outcome::Error(ProtocolError::new(
-                ErrorCode::AlreadyRecording,
-                format!(
-                    "`{}` is being recorded to {}; ask again with `finalise_recording` to \
+    match (&recording, request.finalise_recording) {
+        (Some(active), false) => {
+            shutdown.abandon();
+            (
+                Outcome::Error(ProtocolError::new(
+                    ErrorCode::AlreadyRecording,
+                    format!(
+                        "`{}` is being recorded to {}; ask again with `finalise_recording` to \
                          finish that file and exit",
-                    active.target, active.output
-                ),
-            )),
-            AfterReply::KeepServing,
-        ),
+                        active.target, active.output
+                    ),
+                )),
+                AfterReply::KeepServing,
+            )
+        }
         _ => (
             Outcome::Ok(Reply::ShuttingDown {
                 finalising: recording,
@@ -1099,7 +1181,11 @@ mod tests {
 
     /// Runs one control connection against a handler and a shutdown request of
     /// the caller's choosing.
-    fn run_against(script: &mut Scripted, handler: &Stub, shutdown: &ShutdownRequest) {
+    fn run_against<H: CommandHandler + ?Sized>(
+        script: &mut Scripted,
+        handler: &H,
+        shutdown: &ShutdownRequest,
+    ) {
         serve_connection(
             script,
             handler,
@@ -1230,6 +1316,169 @@ mod tests {
             other => panic!("expected a response, got {other:?}"),
         }
         assert!(shutdown.was_requested());
+    }
+
+    #[test]
+    fn the_door_is_shut_before_the_recording_the_decision_turns_on_is_read() {
+        // The ordering, which is the whole of the fix and is not visible from
+        // outside: shutting the door *after* the status has been read leaves
+        // exactly the window a `start_recording` could arrive in. So the
+        // handler answers `status` by recording what it found, which is the
+        // only moment the two can be compared.
+        #[derive(Debug)]
+        struct Watched {
+            shutdown: ShutdownRequest,
+            shut_when_asked: Mutex<Option<bool>>,
+        }
+
+        impl CommandHandler for Watched {
+            fn call(&self, _command: Command) -> Result<Reply, ProtocolError> {
+                Err(ProtocolError::new(ErrorCode::Internal, "not used"))
+            }
+
+            fn status(&self) -> RecorderStatus {
+                *through_poison(&self.shut_when_asked) = Some(self.shutdown.is_shutting_down());
+                RecorderStatus::Idle
+            }
+
+            fn features(&self) -> Vec<String> {
+                Vec::new()
+            }
+        }
+
+        let shutdown = ShutdownRequest::new();
+        let handler = Watched {
+            shutdown: shutdown.clone(),
+            shut_when_asked: Mutex::new(None),
+        };
+
+        let mut script = Scripted::new(&[
+            hello(PROTOCOL_VERSION, ConnectionRole::Control, Vec::new()),
+            shutdown_request(false),
+        ]);
+        run_against(&mut script, &handler, &shutdown);
+
+        assert_eq!(
+            *through_poison(&handler.shut_when_asked),
+            Some(true),
+            "the recorder has to stop accepting recordings before it reads whether one is \
+             running, or the answer is out of date before the reply is written"
+        );
+    }
+
+    #[test]
+    fn a_recording_cannot_be_started_on_another_connection_once_a_shutdown_is_accepted() {
+        // The permission a `shutdown` carries is decided by reading the status,
+        // and the reply is written afterwards. Without a door shut before that
+        // read, a `start_recording` on one of the other seven connections could
+        // begin a recording the decision never covered — which the caller's own
+        // shutdown would then end, having asked nobody (AGENTS.md section 17).
+        let shutdown = ShutdownRequest::new();
+
+        let mut exiting = Scripted::new(&[
+            hello(PROTOCOL_VERSION, ConnectionRole::Control, Vec::new()),
+            shutdown_request(false),
+        ]);
+        run_against(&mut exiting, &Stub::idle(), &shutdown);
+
+        let mut other = Scripted::new(&[
+            hello(PROTOCOL_VERSION, ConnectionRole::Control, Vec::new()),
+            ClientMessage::Request(Request {
+                id: 7,
+                command: "start_recording".to_owned(),
+                params: serde_json::json!({}),
+            }),
+        ]);
+        run_against(&mut other, &Stub::idle(), &shutdown);
+
+        match &other.replies()[1] {
+            ServerMessage::Response(response) => match &response.outcome {
+                Outcome::Error(error) => assert_eq!(
+                    error.code,
+                    ErrorCode::ShuttingDown,
+                    "a recorder on its way out must not start a recording: {}",
+                    error.message
+                ),
+                other => panic!("a recording started while exiting: {other:?}"),
+            },
+            other => panic!("expected a response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_shutdown_leaves_the_recorder_able_to_start_a_recording() {
+        // The other half of the door, and the reason it is opened again rather
+        // than latched: a `shutdown` that was refused changed nothing, so a
+        // `start_recording` afterwards is served exactly as it was before.
+        let shutdown = ShutdownRequest::new();
+
+        let mut refused = Scripted::new(&[
+            hello(PROTOCOL_VERSION, ConnectionRole::Control, Vec::new()),
+            shutdown_request(false),
+        ]);
+        run_against(&mut refused, &Stub::recording(), &shutdown);
+
+        let mut other = Scripted::new(&[
+            hello(PROTOCOL_VERSION, ConnectionRole::Control, Vec::new()),
+            ClientMessage::Request(Request {
+                id: 7,
+                command: "start_recording".to_owned(),
+                params: serde_json::json!({}),
+            }),
+        ]);
+        run_against(&mut other, &Stub::idle(), &shutdown);
+
+        match &other.replies()[1] {
+            ServerMessage::Response(response) => assert!(
+                !matches!(
+                    &response.outcome,
+                    Outcome::Error(error) if error.code == ErrorCode::ShuttingDown
+                ),
+                "the shutdown was refused, so nothing is shutting down: {:?}",
+                response.outcome
+            ),
+            other => panic!("expected a response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_poisoned_lock_does_not_swallow_an_accepted_shutdown() {
+        // The failure this replaced: `attach` and `request` both took the lock
+        // with `if let Ok(..)`, so a panic anywhere in this module left an
+        // accepted shutdown answered `shutting_down` with nothing ever stopping
+        // the listener — the exact "a control that did nothing" this path
+        // exists to avoid.
+        let shutdown = ShutdownRequest::new();
+        let poisoning = shutdown.clone();
+        let _ = thread::spawn(move || {
+            let _held = through_poison(&poisoning.inner.stopper);
+            panic!("poisoning the lock on purpose");
+        })
+        .join();
+        assert!(
+            shutdown.inner.stopper.is_poisoned(),
+            "this test is only meaningful against a poisoned lock"
+        );
+
+        let mut listener = crate::transport::Listener::bind(
+            &crate::transport::Endpoint::named(&format!(
+                "clipped-poison-test.{}",
+                std::process::id()
+            ))
+            .expect("the generated name is valid"),
+        )
+        .expect("nothing else has this name");
+        shutdown.attach(listener.stopper());
+
+        shutdown.request();
+        assert!(
+            shutdown.was_requested(),
+            "a shutdown that was accepted has to have been recorded"
+        );
+        assert!(
+            listener.accept().expect("accepting works").is_none(),
+            "the listener should have been stopped rather than left accepting"
+        );
     }
 
     #[test]

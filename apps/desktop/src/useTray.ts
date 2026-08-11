@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState } from 'react';
 
@@ -18,6 +19,18 @@ const NAVIGATE_EVENT = 'tray-navigate';
 
 /** The event a failed tray action arrives on. */
 const NOTICE_EVENT = 'tray-notice';
+
+/**
+ * The command that reports something that failed before this window existed.
+ *
+ * The tray is built during Tauri's `setup`, which runs before React does, so a
+ * failure there cannot be *sent* anywhere — there is nothing subscribed yet. It
+ * is kept on the Rust side instead and asked for once, here. The one that
+ * matters is a notification-area icon that could not be added: without it,
+ * closing this window quits Clipped rather than minimising, and quitting leaves
+ * the recorder running.
+ */
+const STARTUP_NOTICE_COMMAND = 'startup_notice';
 
 /**
  * Whether this document is inside the Tauri window rather than a browser tab.
@@ -42,9 +55,41 @@ function inTauriWindow(): boolean {
  * say. A message about a recording that could not be started does not stop being
  * true because a second passed, and there is nowhere else in the window it could
  * be read.
+ *
+ * The first notice may be older than this window: `startup_notice` is asked for
+ * once on mount, and carries anything that failed while Tauri was setting up —
+ * a tray icon that could not be added, most of all. Anything the tray says
+ * afterwards replaces it, because that is the newer thing to have happened.
  */
 export function useTray(onNavigate: (path: string) => void): string | undefined {
   const [notice, setNotice] = useState<string | undefined>(undefined);
+
+  // Its own effect, and deliberately not `onNavigate`'s: this asks a question
+  // once, and re-running it whenever a callback changed identity would put a
+  // dismissed-by-a-newer-notice startup failure back on screen.
+  useEffect(() => {
+    if (!inTauriWindow()) {
+      return;
+    }
+
+    let current = true;
+    invoke<string | null>(STARTUP_NOTICE_COMMAND)
+      .then((said) => {
+        if (current && said !== null) {
+          // Behind anything the tray has already said. This is the older event
+          // of the two however late the answer arrives.
+          setNotice((shown) => shown ?? said);
+        }
+      })
+      .catch(() => {
+        // There is nothing useful to say about not being able to ask whether
+        // there was anything to say.
+      });
+
+    return () => {
+      current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!inTauriWindow()) {

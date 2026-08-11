@@ -214,6 +214,41 @@ fn describe(link: &RecorderLinkState) -> (TrayMark, String, String) {
     }
 }
 
+/// What the window is told when Exit could not reach the recorder.
+///
+/// Exit is the only path that stops the recorder, so a shutdown that could not
+/// be delivered leaves a recorder running that nothing on screen accounts for.
+/// A release build has no console, so saying it to standard error says it to
+/// nobody; this is the sentence that goes to the window instead
+/// (AGENTS.md sections 17 and 45).
+///
+/// Two halves, and both are needed. What is at stake comes from the last state
+/// the link published — the only thing this window still knows about the
+/// recorder — and is deliberately different for "it was recording" and "there
+/// is no way to tell", because claiming the second is safe would be inventing a
+/// state nobody measured (AGENTS.md section 27). What to do about it names Task
+/// Manager, because with the endpoint unreachable that is genuinely the only
+/// thing left, and a message with no action in it is the failure section 45
+/// describes.
+pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str) -> String {
+    let at_stake = match link {
+        RecorderLinkState::Attached {
+            status: RecorderStatus::Recording(active),
+            ..
+        } => format!(
+            "It was last recording {} to {}, and that recording is still running.",
+            active.target, active.output
+        ),
+        _ => "Clipped cannot tell whether it is still recording.".to_owned(),
+    };
+
+    format!(
+        "Clipped has not exited, because {error}. {at_stake} Choose Exit again to close this \
+         window anyway — the recorder is a separate process and will go on running until it is \
+         stopped, which without Clipped means ending clipped-recorder.exe in Task Manager."
+    )
+}
+
 /// The Start/Stop Recording item, and what it does.
 ///
 /// Three ways it can be disabled, and each says which:
@@ -332,9 +367,20 @@ mod tests {
                 let model = tray_model(&link, foreground.as_ref());
                 for entry in [&model.save_replay, &model.add_bookmark, &model.record] {
                     if !entry.enabled {
+                        // The dash is not the point; what follows it is. A label
+                        // that merely *ends* in an em dash is as unexplained as
+                        // one without it, so both sides are held to being words.
+                        let (offer, reason) = entry.label.split_once('—').unwrap_or_else(|| {
+                            panic!("`{}` is disabled and does not say why", entry.label)
+                        });
                         assert!(
-                            entry.label.contains('—'),
-                            "`{}` is disabled and does not say why",
+                            !offer.trim().is_empty(),
+                            "`{}` says a reason and does not say what for",
+                            entry.label
+                        );
+                        assert!(
+                            !reason.trim().is_empty(),
+                            "`{}` is disabled and the reason after the dash is empty",
                             entry.label
                         );
                     }
@@ -421,6 +467,46 @@ mod tests {
             let model = tray_model(&link, Some(&game()));
             assert!(!model.record.enabled, "{link:?}");
             assert_eq!(model.record_action, RecordAction::Nothing, "{link:?}");
+        }
+    }
+
+    #[test]
+    fn an_exit_that_could_not_reach_the_recorder_names_the_recording_it_is_leaving_behind() {
+        // The failure this exists to prevent: the window goes, a recording goes
+        // on, and nothing anywhere says so. The sentence has to carry the file,
+        // because it is the one thing nothing else will ever mention.
+        let said = could_not_reach_the_recorder(&recording(), "the pipe was busy");
+
+        assert!(said.contains(r"D:\clips\session.mkv"), "{said}");
+        assert!(said.contains("process `cs2.exe`"), "{said}");
+        assert!(said.contains("still running"), "{said}");
+        assert!(said.contains("the pipe was busy"), "{said}");
+    }
+
+    #[test]
+    fn an_exit_that_could_not_reach_the_recorder_never_claims_it_was_not_recording() {
+        // Every state but "attached and recording" leaves this window unable to
+        // tell, and the one thing it may not do is say the reassuring half of
+        // that as though it knew (AGENTS.md section 27).
+        for link in every_link_state() {
+            let said = could_not_reach_the_recorder(&link, "the recorder went away");
+            let recording = matches!(
+                link,
+                RecorderLinkState::Attached {
+                    status: RecorderStatus::Recording(_),
+                    ..
+                }
+            );
+
+            assert_eq!(
+                said.contains("cannot tell whether it is still recording"),
+                !recording,
+                "{link:?} said `{said}`"
+            );
+            // And whatever it could tell, it always ends with something the
+            // user can actually do (AGENTS.md section 45).
+            assert!(said.contains("Exit again"), "{link:?} said `{said}`");
+            assert!(said.contains("Task Manager"), "{link:?} said `{said}`");
         }
     }
 

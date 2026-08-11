@@ -35,6 +35,7 @@
 //! worth checking rather than believing, and `docs/desktop-ui.md` records what
 //! restarting Explorer actually did.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clipped_ipc::supervisor::{wait_for_recorder_to_exit, RecorderCallError, ShutdownOutcome};
@@ -44,7 +45,9 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Emitter as _, Manager as _, Runtime};
 
 use crate::foreground;
-use crate::tray_model::{tray_model, MenuEntry, RecordAction, TrayModel};
+use crate::tray_model::{
+    could_not_reach_the_recorder, tray_model, MenuEntry, RecordAction, TrayModel,
+};
 
 /// The tray icon's identifier, so that the one built here can be found again.
 const TRAY_ID: &str = "clipped-tray";
@@ -125,11 +128,24 @@ impl Tray {
 
 /// Puts Clipped in the notification area.
 ///
+/// # A failure here changes what closing the window does
+///
+/// The tray is where the application lives when its window is closed, so
+/// "closing minimises to the tray" is only true when there *is* one. A build
+/// that could not add its icon and went on refusing to close its window would
+/// leave the user with no way back and no way out — no icon to restore from and
+/// no Exit to quit with — which is the opposite of what AGENTS.md section 45
+/// asks for.
+///
+/// So the tray is optional and [`installed`] is what says whether there is one.
+/// Without it the window closes the way any window does, the recorder is left
+/// running exactly as
+/// [ADR 0002](../../../docs/adr/0002-separate-recorder-process.md) requires, and
+/// [`crate::startup_notice`] tells the user both of those things.
+///
 /// # Errors
 ///
-/// Whatever Tauri said. A tray that could not be created is reported and is not
-/// fatal: the window still opens and still shows the recorder's state, which is
-/// a worse application than the one intended but a better one than none.
+/// Whatever Tauri said, for the caller to put in front of the user.
 pub(crate) fn install(app: &AppHandle, link: &RecorderLink) -> tauri::Result<()> {
     let model = tray_model(&link.state(), foreground::last_seen().as_ref());
     let menu = build_menu(app, &model)?;
@@ -173,6 +189,16 @@ pub(crate) fn install(app: &AppHandle, link: &RecorderLink) -> tauri::Result<()>
     }));
 
     Ok(())
+}
+
+/// Whether this application has a notification-area icon.
+///
+/// The one fact `main.rs` needs in order to decide what closing the window
+/// means, and it is read from the tray itself rather than from a flag beside it:
+/// [`install`] manages the [`Tray`] only when it built one, so there is no
+/// second answer to keep in step.
+pub(crate) fn installed(app: &AppHandle) -> bool {
+    app.try_state::<Arc<Tray>>().is_some()
 }
 
 /// Redraws the tray, if what it should show has changed.
@@ -223,22 +249,43 @@ fn draw(app: &AppHandle, tray: &Tray, model: TrayModel) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Every item the menu is built from, in order, with the identifier it carries.
+///
+/// The single list of what is in the menu. `build_menu` needs Tauri and a
+/// desktop; this does not, so it is what
+/// `every_identifier_the_menu_is_built_from_has_an_action` walks — an item added
+/// below and forgotten in [`action_for`] fails a test rather than reaching a
+/// user as a menu entry that visibly does nothing. Separators are not here
+/// because they carry no identifier and nothing can click one.
+fn menu_entries(model: &TrayModel) -> [(&'static str, &MenuEntry); 7] {
+    [
+        (ids::STATUS, &model.status),
+        (ids::SAVE_REPLAY, &model.save_replay),
+        (ids::ADD_BOOKMARK, &model.add_bookmark),
+        (ids::RECORD, &model.record),
+        (ids::LIBRARY, &model.library),
+        (ids::SETTINGS, &model.settings),
+        (ids::EXIT, &model.exit),
+    ]
+}
+
 /// The menu, in the order SPEC.md section 33 gives.
 fn build_menu<R: Runtime, M: tauri::Manager<R>>(
     app: &M,
     model: &TrayModel,
 ) -> tauri::Result<Menu<R>> {
-    let item = |id: &str, entry: &MenuEntry| {
+    let item = |(id, entry): (&str, &MenuEntry)| {
         MenuItem::with_id(app, id, &entry.label, entry.enabled, None::<&str>)
     };
 
-    let status = item(ids::STATUS, &model.status)?;
-    let save_replay = item(ids::SAVE_REPLAY, &model.save_replay)?;
-    let add_bookmark = item(ids::ADD_BOOKMARK, &model.add_bookmark)?;
-    let record = item(ids::RECORD, &model.record)?;
-    let library = item(ids::LIBRARY, &model.library)?;
-    let settings = item(ids::SETTINGS, &model.settings)?;
-    let exit = item(ids::EXIT, &model.exit)?;
+    let [status, save_replay, add_bookmark, record, library, settings, exit] = menu_entries(model);
+    let status = item(status)?;
+    let save_replay = item(save_replay)?;
+    let add_bookmark = item(add_bookmark)?;
+    let record = item(record)?;
+    let library = item(library)?;
+    let settings = item(settings)?;
+    let exit = item(exit)?;
 
     Menu::with_items(
         app,
@@ -257,6 +304,42 @@ fn build_menu<R: Runtime, M: tauri::Manager<R>>(
     )
 }
 
+/// What a menu identifier means.
+///
+/// Split out of [`on_menu_event`] so that the mapping can be tested without a
+/// desktop: what a click does is a rule, and a rule nobody can run is a rule
+/// nobody can change safely. What is *not* covered here is Tauri delivering the
+/// event at all, which needs a real tray and a real click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    /// Raise the window and send it to a screen.
+    Navigate(&'static str),
+    /// Start or stop a recording, whichever the model is offering.
+    Record,
+    /// Stop the recorder and then this process.
+    Exit,
+    /// A line of the menu that is not a control.
+    ///
+    /// The status line and the two unbuilt commands. All are disabled, so
+    /// Windows raises no event for them; naming them anyway is what tells an
+    /// item with no handler apart from an item with nothing to do.
+    Inert,
+    /// An identifier this build does not know.
+    Unknown,
+}
+
+/// What the item with this identifier does.
+fn action_for(id: &str) -> MenuAction {
+    match id {
+        ids::LIBRARY => MenuAction::Navigate("/library"),
+        ids::SETTINGS => MenuAction::Navigate("/settings"),
+        ids::RECORD => MenuAction::Record,
+        ids::EXIT => MenuAction::Exit,
+        ids::STATUS | ids::SAVE_REPLAY | ids::ADD_BOOKMARK => MenuAction::Inert,
+        _ => MenuAction::Unknown,
+    }
+}
+
 /// Somebody clicked something.
 ///
 /// Everything that talks to the recorder is handed to a thread, because this one
@@ -264,20 +347,26 @@ fn build_menu<R: Runtime, M: tauri::Manager<R>>(
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     let app = app.clone();
 
-    match event.id.as_ref() {
-        ids::LIBRARY => open_screen(&app, "/library"),
-        ids::SETTINGS => open_screen(&app, "/settings"),
-        ids::RECORD => {
+    match action_for(event.id.as_ref()) {
+        MenuAction::Navigate(path) => open_screen(&app, path),
+        MenuAction::Record => {
             std::thread::spawn(move || record(&app));
         }
-        ids::EXIT => {
+        MenuAction::Exit => {
             std::thread::spawn(move || exit(&app));
         }
-        // The status line, the two unbuilt commands and the separators. All are
-        // disabled, so Windows does not raise an event for them at all; this
-        // arm exists so that an item added without a handler is visible here
-        // rather than silently doing nothing.
-        other => eprintln!("the tray has no action for `{other}`"),
+        MenuAction::Inert => {}
+        // An item was added to the menu and not to `action_for`.
+        // `every_menu_identifier_has_an_action` is what stops that reaching a
+        // user, and this is what happens if it ever does: a menu item that
+        // silently did nothing would be indistinguishable from a click that
+        // missed, and a line to standard error is a line to nobody in a release
+        // build, which has no console (AGENTS.md section 45).
+        MenuAction::Unknown => report(
+            &app,
+            "Clipped does not know what that menu item does. This is a fault in Clipped rather \
+             than anything you did; please report it.",
+        ),
     }
 }
 
@@ -345,6 +434,11 @@ fn open_screen(app: &AppHandle, path: &str) {
     }
 }
 
+/// Whether Exit has already said that it could not reach the recorder.
+///
+/// The second click is the user answering it. See [`exit`].
+static UNREACHABLE_ALREADY_REPORTED: AtomicBool = AtomicBool::new(false);
+
 /// Stops the recorder and then this process.
 ///
 /// The order matters and is the whole of the third acceptance criterion on
@@ -356,6 +450,27 @@ fn open_screen(app: &AppHandle, path: &str) {
 /// being drawn and the item being clicked, the recorder refuses a shutdown that
 /// was not told it could end one — and the honest response is to say so and stay
 /// open, rather than to send the permission the user was never asked for.
+///
+/// # When the recorder cannot be reached at all
+///
+/// The dangerous case, and the reason this is not simply "close anyway". Exit is
+/// the only path that stops the recorder; a shutdown that could not be delivered
+/// therefore leaves a recorder running, quite possibly recording, with the one
+/// thing that could have said so about to disappear. Saying it to standard error
+/// says it to nobody — a release build has no console.
+///
+/// So the first Exit does not exit. It raises the window carrying
+/// [`could_not_reach_the_recorder`], which names what was being recorded and
+/// where the file is, and says that choosing Exit again will close the window
+/// regardless. The second one does exactly that.
+///
+/// Two clicks rather than one because both of the simple answers are wrong:
+/// closing silently is the recording-safety failure AGENTS.md section 17 puts
+/// above almost everything, and refusing for ever is a user trapped in an
+/// application that will not close (section 45). This way nothing is lost
+/// quietly and nothing is inescapable. It also clears itself in the ordinary
+/// case — a recorder that has genuinely gone is not *unreachable*, it is not
+/// listening, which is [`ShutdownOutcome::NothingRunning`] and exits first time.
 fn exit(app: &AppHandle) {
     let Some(link) = app.try_state::<RecorderLink>() else {
         app.exit(0);
@@ -373,10 +488,10 @@ fn exit(app: &AppHandle) {
             }
             if let Some(endpoint) = link.endpoint() {
                 if !wait_for_recorder_to_exit(endpoint, EXIT_WAIT) {
-                    eprintln!(
+                    tracing_line(&format!(
                         "the recorder had not finished within {EXIT_WAIT:?}; it is detached and \
                          goes on finishing its file after this window closes"
-                    );
+                    ));
                 }
             }
         }
@@ -385,12 +500,23 @@ fn exit(app: &AppHandle) {
             report(app, &format!("Clipped did not exit. {}", refusal.message));
             return;
         }
+        // This link never had a recorder to talk to: no endpoint could be named
+        // or no executable found, and it has started nothing. There is no
+        // recording anywhere to be left behind, so there is nothing to warn
+        // about and no reason to make the user click twice.
+        Err(RecorderCallError::NoRecorderConfigured) => {}
         Err(error) => {
-            // The recorder could not be reached to be stopped. Closing the
-            // window anyway is right — it owns no recording — but the user is
-            // told, because a recorder nobody can reach is one that will still
-            // be running after this window has gone.
-            eprintln!("the recorder could not be asked to exit: {error}");
+            if !UNREACHABLE_ALREADY_REPORTED.swap(true, Ordering::SeqCst) {
+                report(
+                    app,
+                    &could_not_reach_the_recorder(&link.state(), &error.to_string()),
+                );
+                return;
+            }
+            // Said once already, and the user has chosen Exit again.
+            tracing_line(&format!(
+                "closing anyway; the recorder could not be asked to exit: {error}"
+            ));
         }
     }
 
@@ -430,4 +556,57 @@ fn report(app: &AppHandle, message: &str) {
 /// state changes to say it happened.
 fn tracing_line(what: &str) {
     eprintln!("clipped: {what}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_identifier_the_menu_is_built_from_has_an_action() {
+        // The fallthrough arm, as a test rather than as a reading. Walked from
+        // the list `build_menu` itself walks, so this cannot go on agreeing with
+        // a menu that has changed.
+        let model = crate::tray_model::tray_model(&RecorderLinkState::Connecting, None);
+
+        for (id, entry) in menu_entries(&model) {
+            assert_ne!(
+                action_for(id),
+                MenuAction::Unknown,
+                "`{id}` (`{}`) is in the menu and nothing here knows what it does",
+                entry.label
+            );
+        }
+    }
+
+    #[test]
+    fn each_item_does_the_one_thing_its_label_offers() {
+        // Which is not obvious from the identifiers: Open Library and Settings
+        // differ only by the path they carry, and Start and Stop Recording are
+        // deliberately one identifier whose meaning is the model's.
+        assert_eq!(
+            action_for(ids::LIBRARY),
+            MenuAction::Navigate("/library"),
+            "Open Library has to reach the library and not some other screen"
+        );
+        assert_eq!(action_for(ids::SETTINGS), MenuAction::Navigate("/settings"));
+        assert_eq!(action_for(ids::RECORD), MenuAction::Record);
+        assert_eq!(action_for(ids::EXIT), MenuAction::Exit);
+    }
+
+    #[test]
+    fn the_lines_that_are_not_controls_are_named_rather_than_left_over() {
+        // All three are disabled, so Windows raises no event for them. Naming
+        // them anyway is what makes `Unknown` mean "somebody added an item and
+        // forgot" rather than "one of the lines that never does anything".
+        for id in [ids::STATUS, ids::SAVE_REPLAY, ids::ADD_BOOKMARK] {
+            assert_eq!(action_for(id), MenuAction::Inert, "{id}");
+        }
+    }
+
+    #[test]
+    fn an_identifier_the_menu_never_built_is_not_quietly_ignored() {
+        assert_eq!(action_for("no-such-item"), MenuAction::Unknown);
+        assert_eq!(action_for(""), MenuAction::Unknown);
+    }
 }

@@ -44,8 +44,23 @@ export interface StubbedRuntime {
  *
  * `answer` is what `recorder_link_state` resolves with — the snapshot the
  * window gets when it mounts.
+ *
+ * `startupNotice` is what `startup_notice` resolves with: something that failed
+ * before this window existed, which for a real build is a notification-area icon
+ * that could not be added. `null` is the ordinary answer and the default, and it
+ * is answered *deliberately* rather than falling through to the identifier every
+ * event command gets — a stub that handed back a number would let the interface
+ * put one on screen as a sentence and the test still pass.
+ *
+ * A **promise** is accepted there as well, so that a test can hold the answer
+ * back and let something else happen first. That is a real ordering — the
+ * command is a round trip and the tray can say something while it is in flight —
+ * and it is the only way to see which of the two ends up on screen.
  */
-export function stubRecorderLinkRuntime(answer: unknown): StubbedRuntime {
+export function stubRecorderLinkRuntime(
+  answer: unknown,
+  startupNotice: string | null | Promise<string | null> = null,
+): StubbedRuntime {
   const invocations: Invocation[] = [];
   const handlers: ((event: unknown) => void)[] = [];
   /** Which event name each registered handler asked for, by its identifier. */
@@ -61,6 +76,9 @@ export function stubRecorderLinkRuntime(answer: unknown): StubbedRuntime {
       invocations.push({ command, args });
       if (command === 'recorder_link_state') {
         return Promise.resolve(answer);
+      }
+      if (command === 'startup_notice') {
+        return Promise.resolve(startupNotice);
       }
       if (command === 'plugin:event|listen') {
         // The real wrapper registers its callback first and then sends this,

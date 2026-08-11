@@ -348,9 +348,9 @@ impl RecorderLink {
     ///
     /// `finalise_recording` is the caller's answer to "may this end a
     /// recording". `false` — the safe default — is refused with
-    /// [`ShutdownError::Refused`] carrying `already_recording` while something
-    /// is being recorded, so that a caller which has not put the question to the
-    /// user cannot answer it for them.
+    /// [`RecorderCallError::Refused`] carrying `already_recording` while
+    /// something is being recorded, so that a caller which has not put the
+    /// question to the user cannot answer it for them.
     ///
     /// **Nothing here waits for the recorder to be gone.** The reply says the
     /// shutdown was accepted; [`super::wait_for_recorder_to_exit`] is how a
@@ -371,11 +371,15 @@ impl RecorderLink {
     ///
     /// # Errors
     ///
-    /// [`ShutdownError::Refused`] if the recorder said no — most usefully
+    /// [`RecorderCallError::Refused`] if the recorder said no — most usefully
     /// `already_recording`, and `unknown_command` from a recorder built before
-    /// this command existed; [`ShutdownError::Unreachable`] if it could not be
-    /// reached; [`ShutdownError::NoRecorderConfigured`] for a link that never
-    /// had a recorder to talk to.
+    /// this command existed; [`RecorderCallError::Unreachable`] if it could not
+    /// be reached; [`RecorderCallError::Unexpected`] if it answered a different
+    /// command's reply; [`RecorderCallError::NoRecorderConfigured`] for a link
+    /// that never had a recorder to talk to.
+    ///
+    /// A recorder that is not listening at all is **not** an error: there is
+    /// nothing to stop, which is [`ShutdownOutcome::NothingRunning`].
     pub fn shut_down_recorder(
         &self,
         finalise_recording: bool,

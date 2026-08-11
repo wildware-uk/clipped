@@ -125,8 +125,14 @@ So each state is a different **shape**, legible in a greyscale screenshot:
 | --- | --- | --- |
 | Attached, nothing recording | an open square | `Clipped — not recording` |
 | Recording | a filled disc, in the accent | ``Clipped — recording process `cs2.exe` `` |
-| Connecting or reconnecting | four corner brackets — an outline that has not closed | `Clipped — looking for the recorder` |
+| Connecting | four corner brackets — an outline that has not closed | `Clipped — looking for the recorder` |
+| Reconnecting | the same four corner brackets | `Clipped — reconnecting to the recorder, attempt 2 of 4` |
 | No recorder | a struck-through square | `Clipped — no recorder. <reason>` |
+
+Five states and four marks: connecting and reconnecting are drawn the same,
+because they are the same thing to look at — nothing is attached and something
+is trying. The words are not the same, and that is the point of there being a
+tooltip: it is where "which attempt, out of how many" fits.
 
 Colour is carried as well and is the reinforcement rather than the signal. The
 tooltip says the same thing in words, and the menu's first line says it again,
@@ -219,7 +225,41 @@ That whole path exists because it did not:
 [issue #220](https://github.com/wildware-uk/clipped/issues/220) recorded that a
 recorder started detached — no console, its own process group — could not be sent
 Ctrl+C and had no command to ask it to exit, so the only way to end one was Task
-Manager.
+Manager. `apps/recorder/tests/shutdown_command.rs` drives a recorder started
+exactly that way, shows a `CTRL_C_EVENT` cannot reach it, and then ends it over
+the protocol.
+
+#### When Exit cannot reach the recorder
+
+The dangerous case, because Exit is the only thing that stops a recorder: a
+shutdown that could not be delivered leaves one running — quite possibly
+recording — with the one thing that could have said so about to disappear. A
+release build has no console, so saying it to standard error says it to nobody.
+
+So the first Exit **does not exit**. The window comes up with the recording
+named, the file named, and the sentence that choosing Exit again will close the
+window regardless. The second one does. Both of the simpler answers are wrong:
+closing silently is the recording-safety failure AGENTS.md section 17 puts above
+almost everything, and refusing for ever is a user trapped in an application
+that will not close (section 45). It also clears itself in the ordinary case — a
+recorder that has genuinely gone is not *unreachable*, it is not listening,
+which is "nothing was running" and exits first time.
+
+#### When there is no tray at all
+
+`tray::install` can fail, and the shell refusing an icon is not a reason to
+refuse to start. But everything above depends on there being a tray to minimise
+to and an Exit to quit with, so **without one the window closes normally**:
+`on_window_event` asks `tray::installed` before it prevents a close. A build
+that kept refusing would leave the application with no way back and nothing to
+quit from, which is the exact opposite of the useful action section 45 asks for.
+
+What that costs the user is told to them rather than discovered: the failure is
+kept on the Rust side and the window asks for it on mount, through the
+`startup_notice` command, because Tauri's `setup` runs before React does and an
+event sent then would be sent to nobody. The sentence says the icon is missing,
+that closing the window now quits, and that quitting leaves the recorder
+running.
 
 ### Reporting a failure
 
@@ -229,6 +269,20 @@ of its own to say so. The window is raised carrying the sentence, on the
 Clipped has that can hold one (AGENTS.md section 45). `tray-navigate` is the
 other direction of the same channel: Open Library and Settings name a path and
 the shell is what knows what to do with one.
+
+`startup_notice` is the third, and it is a command rather than an event because
+of *when* it happens: the tray is built during Tauri's `setup`, before React has
+run, so nothing is subscribed to be told. The Rust side keeps the sentence and
+the window asks for it once on mount. Anything the tray says afterwards replaces
+it, because that is the newer thing to have happened.
+
+**Nothing a user has to act on is reported through `eprintln!`.** A release build
+is `windows_subsystem = "windows"` and has no console, so a line written there is
+a line written to nobody. What is still written that way is what has no user
+surface to reach and nothing to be done about it either — a tray that could not
+be redrawn, a window that could not be raised — and it is there for a developer
+beside a debug build's console. Anything that changes what closing the window
+does, or leaves a recorder running, goes to the window.
 
 ### Explorer restarting
 

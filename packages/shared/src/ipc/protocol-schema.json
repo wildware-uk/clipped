@@ -73,6 +73,7 @@
         "target_not_found",
         "recording_failed",
         "too_many_connections",
+        "shutting_down",
         "internal"
       ],
       "tolerates_unrecognised": true

@@ -159,6 +159,7 @@ export const ERROR_CODES = [
   'target_not_found',
   'recording_failed',
   'too_many_connections',
+  'shutting_down',
   'internal',
 ] as const;
 
