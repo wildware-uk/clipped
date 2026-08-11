@@ -8,9 +8,10 @@
  * strip, the sidebar, the navigation and the recorder status, which are the
  * shell and not a component library.
  *
- * No colour, typeface, type size or distance appears in either file as a value.
- * `tokens.css` is the only place a literal is allowed, and
- * `stylesheet.test.ts` fails the suite if one appears anywhere else.
+ * No colour, typeface, type size, distance or leading appears in either file as
+ * a value. `tokens.css` is the only place a literal is allowed, and
+ * `stylesheet.test.ts` fails the suite if one appears anywhere else - for a
+ * number in any CSS length unit, in either case, rather than a sample of them.
  */
 
 /*
@@ -47,7 +48,7 @@ body {
   color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--text-lg);
-  line-height: 1.55;
+  line-height: var(--leading-body);
   /* Figures in a recorder are read in columns - durations, sizes, frame
      counts - so they are lined up by default rather than per table. */
   font-variant-numeric: tabular-nums;
@@ -61,7 +62,7 @@ h5,
 h6 {
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
-  line-height: 1.12;
+  line-height: var(--leading-heading);
   letter-spacing: var(--tracking-heading);
   margin: 0 0 var(--space-2);
 }
@@ -295,7 +296,7 @@ a {
 .clipped-status__detail {
   margin: var(--space-1) 0 0;
   font-size: var(--text-sm);
-  line-height: 1.4;
+  line-height: var(--leading-snug);
   color: var(--color-text-muted);
 }
 
@@ -307,7 +308,7 @@ a {
 }
 
 .clipped-unbuilt {
-  max-width: 62ch;
+  max-width: var(--measure);
   border-left: var(--marker-weight) solid var(--color-accent);
   padding: var(--space-1) 0 var(--space-1) var(--space-3);
 }

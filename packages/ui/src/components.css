@@ -8,10 +8,11 @@
  * table and the dialog. The header and the sidebar navigation the deck also
  * uses are the shell's own, in `styles.css`.
  *
- * Nothing below contains a colour, a typeface, a type size or a distance as a
- * value. `stylesheet.test.ts` fails the suite if one appears, and
+ * Nothing below contains a colour, a typeface, a type size, a distance or a
+ * leading as a value. `stylesheet.test.ts` fails the suite if one appears, and
  * `contrast.test.ts` measures every pairing of words and ground the classes
- * below draw.
+ * below draw - resolving both colours out of the rule that paints them, so that
+ * changing a rule changes what is measured.
  *
  * Four things are done differently from the reference pages, and all four are
  * because the reference value does not clear WCAG 2.1. They are marked at the
@@ -53,7 +54,7 @@
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
   font-size: var(--text-md);
-  line-height: 1.2;
+  line-height: var(--leading-tight);
   text-decoration: none;
   cursor: pointer;
 }
@@ -347,7 +348,7 @@ textarea.clipped-input {
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
   font-size: var(--text-xl);
-  line-height: 1.2;
+  line-height: var(--leading-tight);
 }
 
 .clipped-card__body {

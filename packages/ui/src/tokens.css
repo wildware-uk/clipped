@@ -5,8 +5,8 @@
  * light ground, zero corner radius, strong 2px rules - held here as tokens
  * rather than as values, so that a component never names a colour or a distance
  * directly. This file is the one place in the package where a literal colour, a
- * literal type size or a literal distance is allowed to appear;
- * `stylesheet.test.ts` fails the suite if one appears anywhere else.
+ * literal type size, a literal distance or a literal leading is allowed to
+ * appear; `stylesheet.test.ts` fails the suite if one appears anywhere else.
  *
  * Where the system lives, and how to consume what is below, is in
  * `docs/desktop-ui.md`.
@@ -140,6 +140,24 @@
   --tracking-tag: 0.02em;
   --tracking-caps: 0.1em;
   --tracking-brand: 0.16em;
+
+  /*
+   * Leading. Unitless, so that a line box scales with whatever size the element
+   * is set at rather than being pinned to the size it inherited. Four steps
+   * because the interface has four jobs for one: a heading, a single-line
+   * control label, a dense secondary line, and running prose.
+   */
+  --leading-heading: 1.12;
+  --leading-tight: 1.2;
+  --leading-snug: 1.4;
+  --leading-body: 1.55;
+
+  /*
+   * The width of a column of prose, in characters rather than pixels: the
+   * measure is a property of the text, so it should follow the type size and
+   * the Windows text-size setting rather than a fixed rail.
+   */
+  --measure: 62ch;
 
   /*
    * A disabled control, at the system's 45%. WCAG 2.1 exempts an inactive
