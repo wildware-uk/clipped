@@ -27,6 +27,56 @@
 //! paging a game's memory to disk (AGENTS.md section 16). One sealed segment is
 //! always kept, so a save is never impossible.
 //!
+//! # The ceiling binds the segment being written too
+//!
+//! Evicting sealed segments cannot bound a buffer on its own, because the
+//! segment currently being written is not one of them. An encoder whose
+//! keyframe interval is longer than the buffer's window produces a segment that
+//! never seals: one keyframe followed by five minutes of predicted pictures is a
+//! single segment, and a ceiling enforced only against the sealed queue lets it
+//! grow to a gigabyte inside a 107 MiB configuration. No encoder in this
+//! workspace is configured that way today — `KeyframeInterval::DEFAULT` is two
+//! seconds — but the keyframe interval belongs to `clipped-encoder` and not
+//! here, so "it cannot happen" would be a property of another crate's settings
+//! rather than of this design.
+//!
+//! So the ceiling is checked **before** each packet is copied in, against what
+//! the append would cost (`OpenSegment::resident_bytes_after`), and when
+//! evicting sealed segments cannot free enough for it the buffer:
+//!
+//! 1. **Seals the open segment where it stands.** A segment is cut at its end,
+//!    not at its front, so what is sealed still begins on a keyframe and is
+//!    still decodable on its own. Nothing already buffered is thrown away, and a
+//!    save during what follows gets real video.
+//! 2. **Discards packets until the encoder's next keyframe**, counting them
+//!    ([`ReplayStats::packets_discarded_over_ceiling`]) and returning
+//!    [`PushOutcome::DiscardedOverCeiling`] for each. There is nowhere else for
+//!    them to go: a segment that does not begin on a keyframe cannot be decoded,
+//!    so admitting them would mean holding pictures no save could use.
+//! 3. **Drops everything held from before the gap** when that keyframe arrives.
+//!    Packets were lost in between, and `lease_last` resolves "the last thirty
+//!    seconds" against the newest picture in the buffer — so material from
+//!    either side of a gap would be selected together and written into one clip
+//!    that silently jumps (AGENTS.md section 22). Material from before a gap
+//!    cannot serve the request this buffer exists for, so it goes rather than
+//!    misleading a save.
+//!
+//! The alternatives were weighed and rejected. *Sealing early and carrying on
+//! into a segment that does not begin on a keyframe* keeps the window full, but
+//! such a segment can only be decoded behind the keyframe segment it continues:
+//! a thirty-second clip would have to drag in the five minutes back to that
+//! keyframe, so it does not deliver the feature it costs the crate's central
+//! invariant. *Refusing the packet and leaving the segment open* bounds nothing,
+//! since the open segment is what is over. *Dropping the open segment outright*
+//! bounds memory equally well but throws away decodable video that sealing keeps
+//! for free.
+//!
+//! None of this makes such a configuration work — a buffer cannot cut a
+//! thirty-second clip out of a stream with a keyframe every five minutes. What
+//! it does is keep the memory where the documentation says it is, keep every
+//! byte handed to a save decodable, and put the loss in the statistics where
+//! somebody can see it.
+//!
 //! The ceiling governs what the buffer *owns*, and deliberately not what a save
 //! is holding open. Counting a lease against it would mean a save of ten
 //! seconds evicting the buffer's history to pay for itself — the buffer would
@@ -94,6 +144,15 @@ pub enum PushOutcome {
     Appended,
     /// The packet was a keyframe and began a new segment.
     OpenedSegment(SegmentId),
+    /// The packet was discarded because the buffer is at its memory ceiling and
+    /// the segment being written had to be sealed before a keyframe.
+    ///
+    /// Every packet up to the encoder's next keyframe is discarded this way, and
+    /// what the buffer held from before the gap goes when that keyframe arrives.
+    /// The module documentation says why, and what it means about the encoder's
+    /// keyframe interval. Reaching this at all is a misconfiguration rather than
+    /// an operating condition, and it is reported once at `warn`.
+    DiscardedOverCeiling,
 }
 
 /// A rolling window of encoded segments.
@@ -211,6 +270,14 @@ struct Inner {
     peak_bytes: u64,
     counters: Counters,
     ceiling_reported: bool,
+    /// How many packets have been dropped since the segment being written was
+    /// sealed early to stay under the ceiling, or [`None`] when that has not
+    /// happened and the buffer is simply waiting for its first keyframe.
+    ///
+    /// A non-zero count means there is a gap between what is held and what the
+    /// next keyframe will begin, which is what makes the older material
+    /// unusable (see the module documentation).
+    ceiling_gap: Option<u64>,
 }
 
 /// Totals for the life of a buffer.
@@ -221,6 +288,8 @@ struct Counters {
     segments_opened: u64,
     segments_evicted_for_window: u64,
     segments_evicted_over_ceiling: u64,
+    segments_sealed_at_the_ceiling: u64,
+    packets_discarded_over_ceiling: u64,
     leases_taken: u64,
 }
 
@@ -229,8 +298,7 @@ impl Inner {
         let keyframe = packet.is_keyframe();
 
         if self.open.is_none() && !keyframe {
-            self.counters.packets_discarded_before_first_keyframe += 1;
-            return PushOutcome::AwaitingKeyframe;
+            return self.discard_awaiting_keyframe();
         }
 
         // The open segment will cover from its own keyframe up to this one, so
@@ -246,6 +314,15 @@ impl Inner {
             self.seal();
         }
 
+        // Room is made *before* the bytes are copied in, which is the whole of
+        // "the ceiling binds the segment being written too". It can seal that
+        // segment, and then a packet that is not a keyframe has nowhere
+        // decodable to go.
+        self.make_room(config, packet.data().len());
+        if self.open.is_none() && !keyframe {
+            return self.discard_awaiting_keyframe();
+        }
+
         self.counters.packets_buffered += 1;
         let outcome = match &mut self.open {
             Some(open) => {
@@ -253,6 +330,7 @@ impl Inner {
                 PushOutcome::Appended
             }
             None => {
+                self.resume_after_any_gap();
                 let id = self.ids.next();
                 let reserve =
                     usize::try_from(config.expected_segment_bytes()).unwrap_or(usize::MAX);
@@ -283,6 +361,122 @@ impl Inner {
         self.sealed.push_back(segment);
     }
 
+    /// Accounts for a packet that cannot be buffered because no segment is
+    /// open.
+    ///
+    /// Two different things look the same from here and must not be reported as
+    /// one: an encoder that has not yet produced its first keyframe, which is
+    /// ordinary and lossless, and a buffer that sealed the segment it was
+    /// writing to stay under its ceiling, which is losing video.
+    fn discard_awaiting_keyframe(&mut self) -> PushOutcome {
+        match &mut self.ceiling_gap {
+            Some(lost) => {
+                *lost += 1;
+                self.counters.packets_discarded_over_ceiling += 1;
+                PushOutcome::DiscardedOverCeiling
+            }
+            None => {
+                self.counters.packets_discarded_before_first_keyframe += 1;
+                PushOutcome::AwaitingKeyframe
+            }
+        }
+    }
+
+    /// Makes room for `incoming` bytes in the segment being written, sealing it
+    /// early if nothing else can.
+    ///
+    /// The cost of the append is asked for rather than assumed, because a
+    /// `Vec` that has to grow costs more than the packet going into it, and a
+    /// ceiling checked after the memory has been committed is not a ceiling.
+    fn make_room(&mut self, config: &ReplayConfig, incoming: usize) {
+        let Some(cost) = self
+            .open
+            .as_ref()
+            .map(|open| open.resident_bytes_after(incoming) as u64)
+        else {
+            // No segment is open, so this packet is a keyframe about to start
+            // one. Its reservation is smaller than any permitted ceiling
+            // (`ReplayConfig::with_memory_ceiling` refuses a ceiling below the
+            // window, which is longer than a segment), and `evict` brings the
+            // sealed queue back under it after the segment opens.
+            return;
+        };
+
+        // One sealed segment is kept, as everywhere else the ceiling is
+        // enforced: cutting the segment being written short costs the next few
+        // frames, and it is the lesser loss of the two.
+        let ceiling = config.memory_ceiling();
+        while self.sealed_bytes + cost > ceiling && self.sealed.len() >= 2 {
+            self.drop_front();
+            self.counters.segments_evicted_over_ceiling += 1;
+            self.report_ceiling(config, ceiling);
+        }
+
+        if self.sealed_bytes + cost > ceiling {
+            self.seal_at_the_ceiling(config);
+        }
+    }
+
+    /// Cuts the segment being written short, because the ceiling leaves no room
+    /// for another packet in it.
+    ///
+    /// What is sealed still begins on a keyframe, so it stays decodable and
+    /// leasable; what follows is discarded until the encoder produces the next
+    /// one. The module documentation covers the whole sequence and why the
+    /// alternatives are worse.
+    fn seal_at_the_ceiling(&mut self, config: &ReplayConfig) {
+        self.seal();
+        self.ceiling_gap = Some(0);
+        self.counters.segments_sealed_at_the_ceiling += 1;
+
+        tracing::warn!(
+            ceiling_bytes = config.memory_ceiling(),
+            held_bytes = self.owned_bytes(),
+            segment_seconds = config.segment_duration().as_secs_f64(),
+            "the replay buffer reached its memory ceiling inside a single segment and cut it \
+             short; video is being dropped until the encoder's next keyframe, because the \
+             encoder is producing keyframes far less often than this buffer can hold"
+        );
+    }
+
+    /// Lets go of everything from before a gap, when video resumes after one.
+    ///
+    /// Only what was lost matters: a segment sealed at the ceiling and followed
+    /// immediately by a keyframe leaves no gap at all, and nothing is dropped.
+    fn resume_after_any_gap(&mut self) {
+        let Some(lost) = self.ceiling_gap.take() else {
+            return;
+        };
+        if lost == 0 {
+            return;
+        }
+
+        // `lease_last` measures back from the newest picture, so leaving this
+        // material in place would let a save select across the gap and write a
+        // clip that jumps without saying so (AGENTS.md section 22).
+        while !self.sealed.is_empty() {
+            self.drop_front();
+            self.counters.segments_evicted_over_ceiling += 1;
+        }
+    }
+
+    /// Says once, at `warn`, that the ceiling is costing the buffer history.
+    fn report_ceiling(&mut self, config: &ReplayConfig, ceiling: u64) {
+        if self.ceiling_reported {
+            return;
+        }
+
+        self.ceiling_reported = true;
+        tracing::warn!(
+            ceiling_bytes = ceiling,
+            held_bytes = self.owned_bytes(),
+            window_seconds = config.window().as_secs_f64(),
+            "the replay buffer reached its memory ceiling and is keeping less than the window it \
+             was configured for, because the encoder is producing more than the bitrate the \
+             buffer was sized from"
+        );
+    }
+
     /// Drops segments the window no longer needs, then any the ceiling forbids.
     fn evict(&mut self, config: &ReplayConfig) {
         self.release_finished_leases();
@@ -308,18 +502,7 @@ impl Inner {
         while self.owned_bytes() > ceiling && self.sealed.len() >= 2 {
             self.drop_front();
             self.counters.segments_evicted_over_ceiling += 1;
-
-            if !self.ceiling_reported {
-                self.ceiling_reported = true;
-                tracing::warn!(
-                    ceiling_bytes = ceiling,
-                    held_bytes = self.owned_bytes(),
-                    window_seconds = config.window().as_secs_f64(),
-                    "the replay buffer reached its memory ceiling and is keeping less than the \
-                     window it was configured for, because the encoder is producing more than \
-                     the bitrate the buffer was sized from"
-                );
-            }
+            self.report_ceiling(config, ceiling);
         }
     }
 
@@ -471,6 +654,8 @@ impl Inner {
             segments_opened: self.counters.segments_opened,
             segments_evicted_for_window: self.counters.segments_evicted_for_window,
             segments_evicted_over_ceiling: self.counters.segments_evicted_over_ceiling,
+            segments_sealed_at_the_ceiling: self.counters.segments_sealed_at_the_ceiling,
+            packets_discarded_over_ceiling: self.counters.packets_discarded_over_ceiling,
             leases_taken: self.counters.leases_taken,
         }
     }
@@ -497,6 +682,8 @@ pub struct ReplayStats {
     segments_opened: u64,
     segments_evicted_for_window: u64,
     segments_evicted_over_ceiling: u64,
+    segments_sealed_at_the_ceiling: u64,
+    packets_discarded_over_ceiling: u64,
     leases_taken: u64,
 }
 
@@ -576,9 +763,35 @@ impl ReplayStats {
 
     /// Segments dropped because the memory ceiling was reached, which is the
     /// buffer keeping less history than it was configured for.
+    ///
+    /// Includes the segments dropped on the far side of a gap left by
+    /// [`packets_discarded_over_ceiling`](Self::packets_discarded_over_ceiling),
+    /// since the ceiling is what caused the gap.
     #[must_use]
     pub const fn segments_evicted_over_ceiling(&self) -> u64 {
         self.segments_evicted_over_ceiling
+    }
+
+    /// Times the segment being written was cut short because the ceiling left
+    /// no room for another packet in it.
+    ///
+    /// Zero for every encoder in this workspace. A non-zero count means the
+    /// encoder's keyframe interval is too long for this buffer to hold a whole
+    /// segment of, so the buffer cannot serve a clip of the window it was
+    /// configured for; `crate::buffer` describes what it does instead.
+    #[must_use]
+    pub const fn segments_sealed_at_the_ceiling(&self) -> u64 {
+        self.segments_sealed_at_the_ceiling
+    }
+
+    /// Packets dropped while waiting for a keyframe to resume on after a
+    /// segment was cut short at the ceiling.
+    ///
+    /// This is video the buffer did not keep, as distinct from video it evicted
+    /// after keeping.
+    #[must_use]
+    pub const fn packets_discarded_over_ceiling(&self) -> u64 {
+        self.packets_discarded_over_ceiling
     }
 
     /// Leases taken since the buffer was created.
@@ -786,6 +999,181 @@ mod tests {
             "the window should have been shortened, and covers {}",
             held.length().as_secs_f64()
         );
+    }
+
+    /// The 1080p60 rate `clipped-session` gives a recording, so that the
+    /// ceiling under test is the one a real configuration produces.
+    fn rate_1080p60() -> BitRate {
+        BitRate::bits_per_second(18_662_400).expect("a real rate")
+    }
+
+    #[test]
+    fn the_segment_being_written_is_held_to_the_ceiling_like_every_other() {
+        // The case the ceiling used to be blind to: an encoder whose keyframe
+        // interval is longer than the buffer's whole window. One keyframe and
+        // five minutes of predicted pictures produce a single segment that no
+        // amount of evicting *sealed* segments can shrink, and a buffer that
+        // only weighed the sealed ones grew to 1,196,228,696 bytes against a
+        // 111,974,400 byte ceiling — ten times over, in the subsystem whose
+        // entire purpose is bounded memory.
+        let config = ReplayConfig::new(Duration::from_secs(30), rate_1080p60())
+            .expect("thirty seconds is in range");
+        let ceiling = config.memory_ceiling();
+        let buffer = ReplayBuffer::new(config);
+
+        // 60 fps of 1080p60-sized packets for five minutes, keyframe first and
+        // never again.
+        for frame in 0..18_000u64 {
+            let at = Duration::from_micros(frame * 1_000_000 / 60);
+            push(&buffer, &packet(at, 38_880, frame == 0));
+        }
+
+        let stats = buffer.stats();
+        assert!(
+            stats.bytes_held() <= ceiling,
+            "the buffer held {} against a ceiling of {ceiling}",
+            stats.bytes_held()
+        );
+        assert!(
+            stats.peak_bytes_held() <= ceiling,
+            "the buffer peaked at {} against a ceiling of {ceiling}",
+            stats.peak_bytes_held()
+        );
+        assert!(
+            stats.packets_discarded_over_ceiling() > 0,
+            "the loss should be counted rather than silent: {stats:?}"
+        );
+        assert_eq!(stats.segments_sealed_at_the_ceiling(), 1);
+    }
+
+    /// Feeds frames `from` to `until` of 1080p60-sized packets at 60 fps, with
+    /// a keyframe wherever `keyframe` says so.
+    fn feed_1080p60(buffer: &ReplayBuffer, from: u64, until: u64, keyframe: impl Fn(u64) -> bool) {
+        for frame in from..until {
+            let at = Duration::from_micros(frame * 1_000_000 / 60);
+            // 18,662,400 bit/s at 60 fps is exactly this many bytes a frame.
+            push(buffer, &packet(at, 38_880, keyframe(frame)));
+        }
+    }
+
+    #[test]
+    fn a_segment_cut_short_at_the_ceiling_is_still_a_segment_a_save_can_use() {
+        // Sealing the open segment where it stands, rather than dropping it, is
+        // what makes this true: a segment is cut at its *end*, so what is kept
+        // still begins on a keyframe and is still decodable on its own. A
+        // recording that stops during the gap still has a clip in it.
+        let config = ReplayConfig::new(Duration::from_secs(30), rate_1080p60())
+            .expect("thirty seconds is in range");
+        let buffer = ReplayBuffer::new(config);
+
+        feed_1080p60(&buffer, 0, 18_000, |frame| frame == 0);
+
+        let lease = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect("the segment cut short is still held");
+        assert!(
+            lease
+                .packets()
+                .next()
+                .expect("a lease holds packets")
+                .is_keyframe(),
+            "what the ceiling left behind does not begin on a keyframe, so nothing can decode it"
+        );
+        assert!(lease.is_complete(), "{lease:?}");
+    }
+
+    #[test]
+    fn video_from_before_a_gap_is_never_leased_alongside_video_from_after_it() {
+        // The reason the older material goes when video resumes. `lease_last`
+        // measures back from the newest picture, so a buffer holding both sides
+        // of a gap would select across it and write one clip that jumps from
+        // the first minute to the third without saying so (AGENTS.md section
+        // 22).
+        //
+        // Quarter-second segments, which is a caller asking for finer
+        // granularity than the encoder will give it — allowed, and documented
+        // as changing nothing on its own. It matters here because it leaves the
+        // ceiling with room to spare once the segment has been cut short, which
+        // is what makes this test about the buffer letting go of the old
+        // material *deliberately* rather than about the ceiling evicting it
+        // anyway as the next segment fills. That precondition is asserted
+        // below rather than assumed, so a change to the growth policy or the
+        // ceiling arithmetic that quietly restored the masking would fail here
+        // instead of leaving a test that cannot bite.
+        let config = ReplayConfig::new(Duration::from_secs(30), rate_1080p60())
+            .expect("thirty seconds is in range")
+            .with_segment_duration(Duration::from_millis(250))
+            .expect("a quarter of a second fits in thirty");
+        let buffer = ReplayBuffer::new(config);
+
+        // One keyframe and no more, until the segment has been cut short and
+        // video is being dropped.
+        let resumed = 3_000;
+        feed_1080p60(&buffer, 0, resumed, |frame| frame == 0);
+
+        let before = buffer.stats();
+        assert_eq!(before.segments_sealed_at_the_ceiling(), 1, "{before:?}");
+        assert!(before.packets_discarded_over_ceiling() > 0, "{before:?}");
+        assert!(
+            before.bytes_held() + config.expected_segment_bytes() < config.memory_ceiling(),
+            "the ceiling has no room for another segment beside what was cut short, so it would \
+             evict the older material on its own and this test could pass without the buffer \
+             ever letting go of it: {before:?}"
+        );
+
+        // The keyframe video resumes on, and two frames after it. Stopping
+        // there is the point: further on the ceiling does remove the older
+        // material by itself.
+        feed_1080p60(&buffer, resumed, resumed + 3, |frame| frame == resumed);
+
+        let resumed_at = Duration::from_secs(50);
+        let held = buffer.held().expect("the resumed video is held");
+        assert!(
+            held.start() >= resumed_at,
+            "the buffer still offers material from before the gap: it holds {held}"
+        );
+
+        let lease = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect("thirty seconds of resumed video are held");
+        let times: Vec<Duration> = lease
+            .packets()
+            .map(|packet| packet.presentation_time())
+            .collect();
+        for pair in times.windows(2) {
+            assert!(
+                pair[1].saturating_sub(pair[0]) <= Duration::from_millis(17),
+                "a save would write a clip that jumps from {:?} to {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(
+            times.first().is_some_and(|first| *first >= resumed_at),
+            "the clip reaches back over the gap"
+        );
+    }
+
+    #[test]
+    fn the_buffer_returns_to_its_configured_window_after_a_gap() {
+        // A gap costs the history that was on the far side of it, and nothing
+        // else: the buffer is not left crippled by a spell of misconfiguration.
+        let config = ReplayConfig::new(Duration::from_secs(30), rate_1080p60())
+            .expect("thirty seconds is in range");
+        let buffer = ReplayBuffer::new(config);
+
+        let resumed = 9_000;
+        feed_1080p60(&buffer, 0, 15_000, |frame| {
+            frame == 0 || (frame >= resumed && (frame - resumed) % 120 == 0)
+        });
+
+        let held = buffer.held().expect("the resumed video is held");
+        assert!(
+            held.length() >= Duration::from_secs(30) && held.length() < Duration::from_secs(32),
+            "the buffer holds {} after recovering from a gap",
+            held.length().as_secs_f64()
+        );
+        assert_eq!(buffer.stats().segments_sealed_at_the_ceiling(), 1);
     }
 
     #[test]

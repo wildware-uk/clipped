@@ -11,10 +11,23 @@
 //! advance (SPEC.md section 16).
 //!
 //! [`ReplayConfig::expected_bytes`] is that number and
-//! [`ReplayConfig::memory_ceiling`] is the limit derived from it. The buffer
-//! never exceeds the ceiling: it evicts oldest-first to stay under it, which
-//! shortens the window rather than growing the process, and says so
-//! ([`ReplayStats::segments_evicted_over_ceiling`](crate::ReplayStats::segments_evicted_over_ceiling)).
+//! [`ReplayConfig::memory_ceiling`] is the limit derived from it. **What the
+//! buffer holds never exceeds the ceiling.** Two rules keep that true, and both
+//! shorten the window rather than growing the process:
+//!
+//! - Sealed segments are evicted oldest-first, which is reported as
+//!   [`ReplayStats::segments_evicted_over_ceiling`](crate::ReplayStats::segments_evicted_over_ceiling).
+//! - The segment *being written* is sealed where it stands when evicting sealed
+//!   segments cannot free enough room for the next packet, and video is dropped
+//!   until the encoder's next keyframe:
+//!   [`ReplayStats::segments_sealed_at_the_ceiling`](crate::ReplayStats::segments_sealed_at_the_ceiling)
+//!   and
+//!   [`ReplayStats::packets_discarded_over_ceiling`](crate::ReplayStats::packets_discarded_over_ceiling).
+//!   That only happens to an encoder whose keyframe interval is longer than the
+//!   buffer can hold a segment of, which nothing in this workspace configures;
+//!   `crate::buffer` describes it in full, because the keyframe interval is not
+//!   this crate's to promise.
+//!
 //! Documented behaviour under pressure beats an allocation that fails at the
 //! worst possible moment (AGENTS.md section 16).
 //!
@@ -205,8 +218,10 @@ impl ReplayConfig {
 
     /// What one segment is expected to hold, in bytes.
     ///
-    /// Reserved when a segment opens, so that filling it is one allocation
-    /// rather than a run of them on the capture thread.
+    /// Reserved when a segment opens and the step it grows by afterwards, so
+    /// that filling a segment the encoder produced at the configured bitrate is
+    /// one allocation on the capture thread, and one more per segment's worth of
+    /// overshoot beyond that (`crate::segment`).
     #[must_use]
     pub fn expected_segment_bytes(&self) -> u64 {
         bytes_for(self.bitrate, self.segment)

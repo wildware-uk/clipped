@@ -270,6 +270,14 @@ mod windows_only {
             "  evicted (ceiling) {}",
             stats.segments_evicted_over_ceiling()
         );
+        println!(
+            "  cut short        {}",
+            stats.segments_sealed_at_the_ceiling()
+        );
+        println!(
+            "  discarded (ceiling) {}",
+            stats.packets_discarded_over_ceiling()
+        );
         println!();
         println!("what the process holds");
         println!("  working set before {}", megabytes(baseline.working_set));

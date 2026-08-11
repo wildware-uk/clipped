@@ -195,12 +195,31 @@ impl Segment {
     }
 }
 
+/// How many packets the index grows by at a time.
+///
+/// Two seconds at 60 fps is 120 packets, so a segment of the default length
+/// costs one growth beyond the initial reservation. See [`OpenSegment`] for why
+/// the step is fixed rather than doubling.
+const PACKET_INDEX_STEP: usize = 64;
+
 /// The segment currently being written.
 ///
 /// Separate from [`Segment`] rather than a mutable one because the distinction
 /// is load-bearing: only a sealed segment may be shared, and the type system is
 /// what says so. An open segment is owned by the buffer alone, so appending to
 /// it cannot race with a save reading it.
+///
+/// # Growth
+///
+/// Both vectors grow in **fixed steps** rather than by `Vec`'s doubling, and
+/// the step is a whole segment's worth of bytes. That is not a micro-optimism:
+/// `crate::buffer` enforces the memory ceiling against
+/// [`resident_bytes`](Self::resident_bytes), which counts the allocation and not
+/// just the payload, and a capacity that doubled could carry a segment from just
+/// under the ceiling to well over it inside a single push. A fixed step bounds
+/// what one append can cost, which is what lets the buffer ask
+/// [`resident_bytes_after`](Self::resident_bytes_after) what the next packet
+/// will cost and refuse it before the memory is committed.
 #[derive(Debug)]
 pub(crate) struct OpenSegment {
     id: SegmentId,
@@ -208,29 +227,81 @@ pub(crate) struct OpenSegment {
     packets: Vec<BufferedPacket>,
     start: Duration,
     last_presentation: Duration,
+    /// How many bytes to add when the byte buffer is full.
+    growth: usize,
 }
 
 impl OpenSegment {
     /// Opens a segment beginning with `keyframe`.
     ///
     /// `reserve` is what one segment is expected to hold at the configured
-    /// bitrate. Reserving it up front turns the sixty or so pushes that fill a
-    /// segment into one allocation rather than a run of doubling reallocations
-    /// on the thread that is also capturing (AGENTS.md section 18).
+    /// bitrate, and is both the initial allocation and the step it grows by.
+    ///
+    /// What that buys is worth stating precisely, because the measurements in
+    /// `docs/replay-buffer.md` do not support the stronger claim: NVENC
+    /// achieved 24.03 Mbit/s against a configured 18.66, so **every** segment
+    /// in those runs outgrew its reservation. It is one allocation for a
+    /// segment the encoder produces at the bitrate it was configured for, and
+    /// one more for each further segment's worth of overshoot — two, in those
+    /// runs — rather than the run of doubling reallocations a `Vec` filled a
+    /// packet at a time would perform on the thread that is also capturing
+    /// (AGENTS.md section 18).
     pub(crate) fn open(id: SegmentId, keyframe: &EncodedPacket<'_>, reserve: usize) -> Self {
         let mut segment = Self {
             id,
             bytes: Vec::with_capacity(reserve.max(keyframe.data().len())),
-            packets: Vec::with_capacity(64),
+            packets: Vec::with_capacity(PACKET_INDEX_STEP),
             start: keyframe.presentation_time(),
             last_presentation: keyframe.presentation_time(),
+            growth: reserve.max(1),
         };
         segment.append(keyframe);
         segment
     }
 
+    /// The capacities [`append`](Self::append) would grow to for a packet of
+    /// `bytes`.
+    ///
+    /// One function, used by `append` and by
+    /// [`resident_bytes_after`](Self::resident_bytes_after), so that the growth
+    /// policy and the buffer's ceiling arithmetic cannot drift apart.
+    fn capacities_after(&self, bytes: usize) -> (usize, usize) {
+        let byte_capacity = if self.bytes.len() + bytes > self.bytes.capacity() {
+            self.bytes.len() + bytes + self.growth
+        } else {
+            self.bytes.capacity()
+        };
+        let index_capacity = if self.packets.len() == self.packets.capacity() {
+            self.packets.capacity() + PACKET_INDEX_STEP
+        } else {
+            self.packets.capacity()
+        };
+
+        (byte_capacity, index_capacity)
+    }
+
+    /// What this segment would occupy after appending a packet of `bytes`.
+    ///
+    /// The buffer asks before it copies, because a ceiling checked after the
+    /// memory has been committed is not a ceiling (`crate::buffer`).
+    pub(crate) fn resident_bytes_after(&self, bytes: usize) -> usize {
+        let (byte_capacity, index_capacity) = self.capacities_after(bytes);
+        byte_capacity + index_capacity * size_of::<BufferedPacket>() + size_of::<Segment>()
+    }
+
     /// Adds one packet to the end.
     pub(crate) fn append(&mut self, packet: &EncodedPacket<'_>) {
+        let (byte_capacity, index_capacity) = self.capacities_after(packet.data().len());
+        // `reserve_exact` rather than `reserve`: the latter is the doubling
+        // this type exists to avoid.
+        if byte_capacity > self.bytes.capacity() {
+            self.bytes.reserve_exact(byte_capacity - self.bytes.len());
+        }
+        if index_capacity > self.packets.capacity() {
+            self.packets
+                .reserve_exact(index_capacity - self.packets.len());
+        }
+
         let offset = self.bytes.len();
         self.bytes.extend_from_slice(packet.data());
         self.packets.push(BufferedPacket {
@@ -261,8 +332,8 @@ impl OpenSegment {
         self.packets.len()
     }
 
-    /// How much memory it occupies, including the spare capacity reserved for
-    /// the packets still to come.
+    /// How much memory it occupies now, including the spare capacity reserved
+    /// for the packets still to come.
     pub(crate) fn resident_bytes(&self) -> usize {
         self.bytes.capacity()
             + self.packets.capacity() * size_of::<BufferedPacket>()
@@ -411,6 +482,51 @@ mod tests {
             segment.resident_bytes() < 4096,
             "a sealed segment of 16 bytes still occupies {}",
             segment.resident_bytes()
+        );
+    }
+
+    #[test]
+    fn a_segment_costs_exactly_what_it_said_the_next_packet_would_cost() {
+        // The buffer refuses a packet before copying it in, using this
+        // prediction (`crate::buffer`). A prediction that came in under what
+        // the append really cost would be a ceiling that is quietly exceeded,
+        // so it is checked against the outcome at every step — including the
+        // ones that reallocate.
+        let mut open = OpenSegment::open(SegmentId(0), &packet(&[0; 8], 0, true), 64);
+
+        for index in 1..200u64 {
+            let data = vec![0u8; 40];
+            let predicted = open.resident_bytes_after(data.len());
+            open.append(&packet(&data, index * 16, false));
+
+            assert_eq!(
+                open.resident_bytes(),
+                predicted,
+                "appending packet {index} cost more than the buffer was told it would"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_segment_grows_in_fixed_steps_rather_than_doubling() {
+        // A segment that outgrows its reservation must not double its way past
+        // the memory ceiling between two of the buffer's checks. A thousand
+        // times the reservation is fed in: grown in fixed steps the allocation
+        // ends up just over the payload, and a doubling `Vec` would be holding
+        // very nearly twice it.
+        let reserve = 1024;
+        let mut open = OpenSegment::open(SegmentId(0), &packet(&[0; 1024], 0, true), reserve);
+
+        for index in 1..=1000u64 {
+            open.append(&packet(&[0; 1024], index, false));
+        }
+
+        let payload = 1024 * 1001;
+        assert!(
+            open.resident_bytes() < payload + payload / 4,
+            "a segment holding {payload} bytes of video occupies {}, which is the doubling this \
+             type exists to avoid",
+            open.resident_bytes()
         );
     }
 
