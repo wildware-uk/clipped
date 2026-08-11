@@ -92,12 +92,17 @@ under `crates/` may refer to UI concerns at all. `clipped-session`, the top
 library layer, documents this in its own crate docs, but nothing fails if a
 crate ignores it — a reviewer has to notice.
 
-The IPC protocol between the two is designed in
-[issue #49](https://github.com/wildware-uk/clipped/issues/49) and supervision of
-the recorder by the UI in
-[issue #106](https://github.com/wildware-uk/clipped/issues/106), both in M5.
-Nothing of it exists yet. Until then the recorder is driven from its own command
-line.
+The IPC protocol between the two is a Windows named pipe carrying versioned JSON
+messages: [ipc.md](ipc.md) specifies it and
+[ADR 0005](adr/0005-named-pipe-control-protocol.md) records why the transport is
+a pipe rather than a loopback socket. `clipped-recorder serve` speaks it against
+real recording sessions. The desktop application does not drive it yet, because
+the TypeScript view of the messages is
+[issue #209](https://github.com/wildware-uk/clipped/issues/209); deciding that no
+recorder is running and starting one is
+[issue #106](https://github.com/wildware-uk/clipped/issues/106), also in M5. The
+command line stays the way capture is driven without a UI, which is a reason to
+keep it good rather than scaffolding to be removed.
 
 ### Module split
 
@@ -216,17 +221,20 @@ cargo build --workspace
 cargo run -p clipped-recorder
 ```
 
-With no arguments that prints the help and exits 2. It has three subcommands.
+With no arguments that prints the help and exits 2. It has four subcommands.
 `list-windows` lists the windows that could be captured. `capabilities` reports
 the graphics adapters and encoders it found, which is detection rather than
 encoding ([encoder-capabilities.md](encoder-capabilities.md)). `record` captures
 a window, encodes it and produces a playable MKV, and Ctrl+C stops it leaving a
-finished file:
+finished file. `serve` is the shape the recorder runs in beside a UI: it listens
+on the named pipe and takes its instructions over the protocol in
+[ipc.md](ipc.md) instead of from arguments:
 
 ```text
 clipped-recorder capabilities
 clipped-recorder list-windows
 clipped-recorder record --window <window>
+clipped-recorder serve
 ```
 
 The desktop application is an npm workspace at the repository root and is
@@ -332,12 +340,13 @@ contributor working in it needs.
 | [audio-routing.md](audio-routing.md) | Per-source capture, application-to-track routing, drift correction, the compatibility mix | M2 |
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
+| [ipc.md](ipc.md) | The recorder control protocol: transport, framing, the handshake, the compatibility policy, the commands and events, and the security a local endpoint does and does not promise | M5 |
 | [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
 
 All but [capture-pipeline.md](capture-pipeline.md),
 [encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md),
-[av-sync.md](av-sync.md) and [desktop-ui.md](desktop-ui.md) are stubs today,
-stating what they will cover and which
+[av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md) and [ipc.md](ipc.md)
+are stubs today, stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
 policy exist, so the interface, the ownership and threading rules, the timestamp
@@ -351,7 +360,10 @@ has not been exercised because nothing yet produces the packets for it.
 drift measured between the two capture paths that exist — video and system audio
 — over a thirty-minute run; it names what it deliberately leaves to M2, which is
 correcting that drift rather than measuring it. `desktop-ui.md` covers the shell
-that exists and is explicit that no feature screen behind it does. The rest
+that exists and is explicit that no feature screen behind it does. `ipc.md` is a
+specification rather than a description: it is the schema both ends are written
+against, and it says which of the commands it defines this build refuses and
+where each is being built. The rest
 stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 
@@ -394,6 +406,8 @@ that reopening it is a deliberate act.
 | [0001](adr/0001-mkv-archival-container.md) | MKV is the archival recording container |
 | [0002](adr/0002-separate-recorder-process.md) | The recorder runs as an independent process from the desktop UI |
 | [0003](adr/0003-process-specific-audio-capture.md) | Process-specific audio capture is the basis for track separation |
+| [0004](adr/0004-ffmpeg-dependency-strategy.md) | FFmpeg is a pinned LGPL build, linked dynamically through a sys binding |
+| [0005](adr/0005-named-pipe-control-protocol.md) | A named pipe carries the control protocol between the UI and the recorder |
 
 [adr/0000-template.md](adr/0000-template.md) is the template. `adr/README.md`
 describes when to write one and how they are numbered.

@@ -67,3 +67,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0002](0002-separate-recorder-process.md) | The recorder runs as an independent process from the desktop UI | Accepted |
 | [0003](0003-process-specific-audio-capture.md) | Process-specific audio capture is the basis for track separation | Accepted |
 | [0004](0004-ffmpeg-dependency-strategy.md) | FFmpeg is a pinned LGPL build, linked dynamically through a sys binding | Accepted |
+| [0005](0005-named-pipe-control-protocol.md) | A named pipe carries the control protocol between the UI and the recorder | Accepted |
