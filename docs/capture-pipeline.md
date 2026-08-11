@@ -525,6 +525,7 @@ apart and the grants and refusals are interleaved among them:
 | no (borderless) | 300 | 300 | 0 | 0 |
 | no (borderless) | 298 | 298 | 0 | 0 |
 | no (borderless) | 290 | 290 | 0 | 0 |
+| no (borderless) | 273 | 273 | 0 | 0 |
 
 That is every run taken, not a selection. Every frame that arrived decoded as
 the pattern in every one of them, the subject survived every run, and the
@@ -533,28 +534,33 @@ the test asserts it rather than reporting it. (The 301 is not a typo: a capture
 started a frame before the source's five seconds began, so one more counter
 arrived than the arithmetic allows for.)
 
-The two low rows — 229 granted and 290 refused — are the two runs taken on a
-session that had been idle for about ten minutes, and in the 229 the *subject*
+The low rows — 229 granted, 290 and 273 refused — are the runs taken on sessions
+that had been idle for eight to ten minutes, and in the 229 the *subject*
 presented 278 frames rather than its usual 320-odd. A machine nobody has touched
-winds its whole display pipeline down, so both halves of the table lose ground
-there. That is why the test now prints the session's idle time beside its frame
-count, and why neither number should be quoted without it.
+winds its whole display pipeline down, so both halves of the table lose ten to
+twenty points there. That is why the test now prints the session's idle time
+beside its frame count, why neither number should be quoted without it, and why
+both of the test's frame floors sit below the worst measurement for their case
+rather than near the typical one.
 
 **The gap between the two halves of that table is real and is not the readback.**
-An earlier revision of this page said the shortfall was the test copying every
+Compare like with like — the session state moves both cases, so take the runs on
+an active session: granted delivers 266 to 279, refused delivers 298 to 301. An
+earlier revision of this page said the shortfall was the test copying every
 14 MiB frame into system memory and decoding it. It is not: the refused runs do
 exactly the same copying and decoding, at the same size and rate, on the same
-machine minutes apart, and lose almost nothing. Nor is it the caller falling
+machine minutes apart, and lose one frame in a hundred where the granted runs
+lose ten. Nor is it the caller falling
 behind — the backend's own derived frames-missed figure
-([Dropped frames](#dropped-frames)) is **0** in all four runs taken since the
-test started reporting it, the granted 268 and 266 as well as the refused 301
-and 290. That says the compositor never composed the missing frames rather than
-that this test was too slow to collect them. Whatever costs them is
+([Dropped frames](#dropped-frames)) is **0** in all five runs taken since the
+test started reporting it, the granted 268 and 266 as well as the refused 301,
+290 and 273. That says the compositor never composed the missing frames rather
+than that this test was too slow to collect them. Whatever costs them is
 specific to capturing a window that owns its display. That is a finding about
 the case issue #12 asks about, so it is
 [issue #192](https://github.com/wildware-uk/clipped/issues/192) rather than a
 sentence explaining it away — and it is why the test's floor for a granted run
-is 70% of the source's frames rather than the 90% the refused case holds.
+is 70% of the source's frames rather than the 80% the refused case holds.
 
 #### (1) What decides whether the display is granted
 
@@ -582,13 +588,20 @@ binary, one afternoon:
 | Injecting process alive; no fresh event for that run | on | yes | 272 |
 | Injecting process exited 5 s before the run | on | **no** | 300 |
 | Nothing had synthesised input; session idle 584 s | on | **no** | 290 |
+| Nothing had synthesised input; session idle 487 s | on | **no** | 273 |
+| Injecting process alive; its event 6 s earlier | on | yes | 266 |
+| Same live injector, 13 s in, no fresh event | on | yes | 268 |
 
-Read the last five rows together: an input event five seconds old is refused if
-the process that made it has gone, and an input event twenty minutes old is
-granted if that process is still there. The rows in the middle are the same
-`SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)` sweep, which held
-the displays on well past the 15-minute idle timeout: the session being idle for
-twenty minutes did not refuse anything.
+The split is exact: every row with a live injecting process was granted and
+every row without one was refused, and nothing else in the table predicts the
+answer. An input event five seconds old is refused if the process that made it
+has gone; one twenty minutes old is granted if that process is still there. The
+five rows counting up to 1250 s are a single
+`SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)` sweep that held
+the displays on well past the 15-minute idle timeout, so a session idle for
+twenty minutes refused nothing. The last two rows are the pair quoted in
+[pull request #182](https://github.com/wildware-uk/clipped/pull/182) as this
+page's evidence, taken with the procedure in `tests/capture/README.md`.
 
 Three things this rules out, each of which has been believed on this project at
 some point:
@@ -597,8 +610,8 @@ some point:
   parent is `WmiPrvSE` and which is no relation of the injecting process, was
   granted the display while that process was alive. `cargo test` is granted or
   refused on the same rule as everything else.
-- **Powered-off displays.** Four of the `no` rows were taken with both displays
-  awake and the compositor at full rate — 290 to 300 of 300 frames, no timeouts
+- **Powered-off displays.** Five of the `no` rows were taken with both displays
+  awake and the compositor at full rate — 273 to 300 of 300 frames, no timeouts
   in any of them. A powered-off display is a real and separate problem (below),
   but it is not what refuses the transition.
 - **Idle time.** Grants were measured at every idle time from 30 seconds to 21

@@ -83,8 +83,8 @@ Displays powered on or off did not move it either; the full table is under
 [docs/capture-pipeline.md](../../docs/capture-pipeline.md).
 
 **So running the test on its own does not produce a grant, however awake the
-machine is.** Every run measured with no such process alive was refused, four of
-them on displays that were awake with the compositor at full rate and 298 to 300
+machine is.** Every run measured with no such process alive was refused, five of
+them on displays that were awake with the compositor at full rate and 273 to 300
 of 300 frames delivered. Whether a *person* moving a real mouse would satisfy
 Windows was not measured — there is no live process behind a real mouse either,
 so on the rule above it should not, but nobody has sat at the machine and

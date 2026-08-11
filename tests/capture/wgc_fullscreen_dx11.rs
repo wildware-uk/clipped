@@ -16,7 +16,7 @@
 //! of the three hundred a 60 fps subject could present in five seconds —
 //! measurably fewer than the *same* run delivers when Windows refuses the
 //! transition and the subject is a borderless window covering the same display,
-//! which returns 290 to 301 of 300. That gap is a finding in its own right and
+//! which returns 273 to 301 of 300. That gap is a finding in its own right and
 //! is not yet explained; `docs/capture-pipeline.md` has the table and
 //! [issue #192](https://github.com/wildware-uk/clipped/issues/192) owns it.
 //!
@@ -398,11 +398,11 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
 /// minutes of each other:
 ///
 /// - **Refused** — a borderless window covering the display — delivered 301,
-///   300, 300 and 298 of 300 on an active session and 290 on one that had been
-///   idle for ten minutes, so the floor is 90%. That is also the case a machine
-///   without the state described in `tests/capture/README.md` gets, so it is
-///   the run that happens most often, and it can afford to be the stricter of
-///   the two.
+///   300, 300 and 298 of 300 on an active session, and 290 and 273 on sessions
+///   that had been idle for eight to ten minutes. So the floor is 80%. That is
+///   also the case a machine without the state described in
+///   `tests/capture/README.md` gets, so it is the run that happens most often,
+///   and it can afford to be the stricter of the two.
 /// - **Granted** — the window holding the display — delivered 266, 268, 270,
 ///   272, 272, 274, 274 and 279 of 300 on an active session, and 229 once on
 ///   one idle for ten minutes. So 90% is not defensible here however much one
@@ -413,14 +413,17 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
 ///   the gap between the two cases gets explained and this floor tightened.
 ///
 /// Both floors sit below the worst figure measured for their case rather than
-/// near the typical one, because the alternative is a test that fails for
-/// reasons nobody can act on — and a floor that is only ever hit by a machine
-/// nobody has touched teaches contributors to re-run rather than to look.
+/// near the typical one, and deliberately: an idle machine takes ten to twenty
+/// points off *both* cases, so a floor set near the typical figure would fail
+/// for a reason nobody can act on and would teach contributors to re-run rather
+/// than to look. The first draft of this function put the refused floor at 90%
+/// and the very next refused run delivered 273, which is how that number was
+/// found to be wrong.
 fn frame_floor(granted: bool) -> u64 {
     if granted {
         POSSIBLE_FRAMES * 7 / 10
     } else {
-        POSSIBLE_FRAMES * 9 / 10
+        POSSIBLE_FRAMES * 8 / 10
     }
 }
 
