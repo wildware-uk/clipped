@@ -25,8 +25,8 @@ use clipped_capture::PixelFormat;
 use clipped_encoder::{
     detect_cached, measured_codecs, recommend, AmfEncoder, BitRate, CapabilityCache,
     CapabilityReport, Codec, EncodeError, EncoderConfig, EncoderKind, FrameRate, GraphicsDevice,
-    KeyframeInterval, NvencEncoder, QuickSyncEncoder, RateControl, Resolution, SoftwareEncoder,
-    SurfaceFormat, SystemProbe, VideoEncoder, WindowsProbe,
+    KeyframeInterval, NvencEncoder, Probing, QuickSyncEncoder, RateControl, Resolution,
+    SoftwareEncoder, SurfaceFormat, SystemProbe, VideoEncoder, WindowsProbe,
 };
 
 use crate::error::SessionError;
@@ -80,7 +80,16 @@ pub(crate) fn open(
     let resolution = Resolution::new(size.0, size.1);
 
     let probe = WindowsProbe::new();
-    let detection = detect_cached(&probe as &dyn SystemProbe, &capability_cache())?;
+    // `WithoutSessions`: opening a recording is exactly the moment an extra
+    // encoder session must not be opened on the user's behalf (see
+    // `apps/recorder/src/capabilities.rs` and `crates/encoder/src/probe.rs`,
+    // `Probing`). The published limits are enough to rank candidates; the
+    // numeric limits `--refresh` measures are not consulted here.
+    let detection = detect_cached(
+        &probe as &dyn SystemProbe,
+        &capability_cache(),
+        Probing::WithoutSessions,
+    )?;
 
     let mut attempts = Vec::new();
     for (kind, codec) in candidates(settings, detection.report()) {
