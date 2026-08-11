@@ -20,6 +20,45 @@ serde_json.workspace = true
 # and this crate is layer 1, so this follows the dependency direction.
 clipped-logging.workspace = true
 
+# The software fallback encodes with `libopenh264` inside the pinned LGPL
+# FFmpeg build (src/software, docs/encoder-pipeline.md). It cannot be libx264:
+# that is GPL, it is not in the build Clipped links against, and linking it
+# would relicense every binary this project distributes
+# (docs/adr/0004-ffmpeg-dependency-strategy.md).
+#
+# ADR 0004 records `crates/muxer` as the only crate naming this binding, on the
+# reasoning that the safe wrappers over FFmpeg belong in one place. That does
+# not reach here: `clipped-muxer` is layer 2 and this crate is layer 1, so the
+# encoder cannot use the muxer's wrappers without inverting the dependency
+# direction the workspace asserts (README, "Dependency direction"). The ADR's
+# own consequences name `libopenh264` in this build as the answer for the
+# software fallback, so the second consumer was foreseen even though that one
+# sentence was not updated for it; issue #155 tracks correcting the record.
+#
+# Windows only, because the pin, the fetch script and the DLL handling are
+# (ADR 0004, "This is a Windows decision"). Everything else in this crate still
+# compiles and tests anywhere.
+#
+# WHAT THIS COSTS THE SHIPPED BINARY. `rusty_ffmpeg` links the FFmpeg import
+# libraries, so this line is not only a build-time fact about this crate: every
+# executable that depends on it now imports `avcodec-62.dll`, `avutil-60.dll`
+# and `swscale-9.dll`, which pull in `swresample-6.dll`. Windows resolves
+# imports before `main` runs, so `clipped-recorder` will not start at all
+# without those four beside it or on PATH — not `record`, but `--help`,
+# `capabilities` and `list-windows` too, each exiting 0xC0000135
+# (STATUS_DLL_NOT_FOUND) from `cmd` with no message of any kind. Before this
+# crate named the binding, only `clipped-muxer`'s dependents were in that
+# position.
+#
+# Distributing the libraries was already required (ADR 0004, and #123 for the
+# LGPL obligations); what is new is that they are required for every subcommand
+# rather than only for recording, and that a build tree needs them next to the
+# encoder's own test binaries. `crates/muxer/build.rs` is what puts them in the
+# target directory today, which is why building only this crate is not enough:
+# #158 moves that copy to the workspace and covers both halves.
+[target.'cfg(windows)'.dependencies]
+rusty_ffmpeg.workspace = true
+
 # Adapter enumeration and encoder detection are Windows API calls, and only the
 # `windows/` submodule makes them. Everything above that submodule — the
 # vocabulary, the ranking, the cache and the report — is platform-neutral and
@@ -27,6 +66,15 @@ clipped-logging.workspace = true
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
+    # Direct3D 11, for the software encoder and for it alone: a CPU encoder
+    # cannot read a texture that is on the GPU, so `src/software/readback.rs`
+    # copies each frame into a staging texture and maps it. `ID3D11Device`,
+    # `ID3D11DeviceContext::CopyResource`/`Map`, and the staging texture
+    # description it fills in.
+    "Win32_Graphics_Direct3D11",
+    # `DXGI_FORMAT_B8G8R8A8_UNORM`, which is both what captured frames arrive
+    # in and what the staging texture is created as.
+    "Win32_Graphics_Dxgi_Common",
     # `IDXGIFactory1::EnumAdapters1`, `DXGI_ADAPTER_DESC1` and
     # `IDXGIAdapter1::CheckInterfaceSupport`, which is where the driver version
     # the cache is keyed on comes from.
@@ -44,31 +92,30 @@ features = [
     "Win32_System_LibraryLoader",
 ]
 
-# Direct3D 11 is a *test* dependency, not a build one. The NVENC backend never
-# calls a Direct3D function: it is handed a device and a texture as opaque
-# handles and passes them to NVENC, which is what keeps the encoder free of
-# graphics-API knowledge it does not need (docs/encoder-pipeline.md). What needs
-# Direct3D is the test harness, which has to create a device on the NVIDIA
-# adapter and upload real pictures into real textures before there is anything
-# to encode.
+# Creating a device is a test concern, and only a test concern. The backends are
+# handed a device and a texture as opaque handles: NVENC never calls a Direct3D
+# function at all, and the software encoder calls only the two it needs to get a
+# picture into system memory (above). What needs the rest of Direct3D is the
+# test harness, which has to create a device and upload real pictures into real
+# textures before there is anything to encode.
 #
-# Declaring it here rather than widening the dependency above means the shipped
-# recorder does not compile a line of Direct3D on account of this crate.
+# Declaring these here rather than widening the dependency above means the
+# shipped recorder does not compile a line of device creation on account of this
+# crate.
 [target.'cfg(windows)'.dev-dependencies.windows]
 workspace = true
 features = [
-    # `D3D11CreateDevice`, `ID3D11Texture2D` and the texture description the
-    # harness fills in.
+    # `D3D11CreateDevice` and the texture description the harness fills in.
     "Win32_Graphics_Direct3D11",
-    # `D3D_DRIVER_TYPE_UNKNOWN` and the feature level, which
-    # `D3D11CreateDevice` takes.
+    # `D3D_DRIVER_TYPE_UNKNOWN`, `D3D_DRIVER_TYPE_WARP` and the feature level,
+    # which `D3D11CreateDevice` takes. WARP is what lets the software encoder's
+    # tests run on a machine with no usable GPU, which is every hosted CI
+    # runner.
     "Win32_Graphics_Direct3D",
     # `CreateDXGIFactory1` and adapter enumeration, for finding the NVIDIA
     # adapter to create the device on — on a machine with two GPUs, encoding on
     # the wrong one is a cross-adapter copy per frame.
     "Win32_Graphics_Dxgi",
-    # `DXGI_FORMAT_B8G8R8A8_UNORM`, the format captured frames arrive in.
-    "Win32_Graphics_Dxgi_Common",
 ]
 
 [lints]

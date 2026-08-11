@@ -59,9 +59,11 @@ impl fmt::Display for Codec {
 /// section 9).
 ///
 /// This names a *family*, not an implementation. A variant existing here does
-/// not mean this build can encode with it — nothing can yet, which
-/// [`backend_issue`](Self::backend_issue) says in the only way that stays true
-/// as the backends land.
+/// not mean this build can encode with it:
+/// [`is_implemented`](Self::is_implemented) is what says so, and
+/// [`backend_issue`](Self::backend_issue) names the issue that did the work or
+/// still has to. Both are here rather than in the report that prints them, so
+/// that the sentence a user reads follows the code as the backends land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncoderKind {
@@ -103,15 +105,39 @@ impl EncoderKind {
         !matches!(self, Self::Software)
     }
 
+    /// Whether this build has a backend for this encoder.
+    ///
+    /// Detection reports every family in [`ALL`](Self::ALL) whether or not
+    /// Clipped can encode with it, so something has to separate "your GPU can
+    /// do this" from "Clipped can do this", and it belongs here, beside the
+    /// backends, rather than in the copy that describes them: a sentence
+    /// written out by hand in the capability report is a sentence that goes
+    /// stale the day a backend lands, which is how the report came to claim no
+    /// encoder was implemented for two of them
+    /// ([#167](https://github.com/wildware-uk/clipped/issues/167)).
+    ///
+    /// NVENC is implemented, in [`NvencEncoder`](crate::NvencEncoder); so is
+    /// AMF, in [`AmfEncoder`](crate::AmfEncoder); and so is the software
+    /// fallback, in [`SoftwareEncoder`](crate::SoftwareEncoder)
+    /// (`docs/encoder-pipeline.md`). Quick Sync is not, so a machine with only
+    /// an Intel GPU encodes on the CPU. This says nothing about *recording*:
+    /// nothing yet connects any backend to a capture or a container, so no
+    /// build records anything.
+    #[must_use]
+    pub const fn is_implemented(self) -> bool {
+        match self {
+            Self::Nvenc | Self::Amf | Self::Software => true,
+            Self::QuickSync => false,
+        }
+    }
+
     /// The issue that implements this encoder.
     ///
-    /// NVENC is implemented, in
-    /// [`NvencEncoder`](crate::NvencEncoder) (`docs/encoder-pipeline.md`); the
-    /// other three are not, and nothing yet connects any of them to a capture
-    /// or a container, so no build records anything. The report prints this so
-    /// that "your GPU can do AV1, and Clipped cannot yet" is one sentence with
-    /// a link in it, rather than a silence the reader has to interpret
-    /// (AGENTS.md section 27).
+    /// For a family [`is_implemented`](Self::is_implemented) rejects, this is
+    /// where the work is tracked; for the other three it is where it was done.
+    /// The report prints the first kind so that "your GPU can do AV1, and
+    /// Clipped cannot yet" is one sentence with a link in it, rather than a
+    /// silence the reader has to interpret (AGENTS.md section 27).
     #[must_use]
     pub const fn backend_issue(self) -> u32 {
         match self {
@@ -292,6 +318,29 @@ mod tests {
                 EncoderKind::Software,
             ]
         );
+    }
+
+    /// An encoder that claims a backend has to have one that compiles.
+    ///
+    /// `is_implemented` is a hand-written match, and this is what keeps it
+    /// honest in the one direction a test can reach: naming the backend types
+    /// as implementations of [`VideoEncoder`](crate::backend::VideoEncoder)
+    /// means a backend removed or renamed fails to build here rather than
+    /// leaving the capability report telling a user this build can encode with
+    /// something it cannot. The other direction — that Quick Sync has no
+    /// backend — is the absence of a type, which nothing can assert.
+    #[cfg(windows)]
+    #[test]
+    fn an_encoder_that_claims_a_backend_has_one() {
+        const fn implements_the_trait<E: crate::backend::VideoEncoder>() {}
+        implements_the_trait::<crate::windows::NvencEncoder>();
+        implements_the_trait::<crate::windows::AmfEncoder>();
+        implements_the_trait::<crate::software::SoftwareEncoder>();
+
+        assert!(EncoderKind::Nvenc.is_implemented());
+        assert!(EncoderKind::Amf.is_implemented());
+        assert!(EncoderKind::Software.is_implemented());
+        assert!(!EncoderKind::QuickSync.is_implemented());
     }
 
     #[test]

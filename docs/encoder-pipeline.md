@@ -1,35 +1,38 @@
 # Encoder pipeline
 
-**Status: the interface exists, and two backends do.** `crates/encoder` defines
-the video encoder trait, the vocabulary a stream is described in, and two
-implementations of it: an NVENC backend, since
-[issue #15](https://github.com/wildware-uk/clipped/issues/15), for H.264, HEVC
-and AV1; and an AMF backend, since
-[issue #16](https://github.com/wildware-uk/clipped/issues/16), for H.264 and
-HEVC. A Windows build on NVIDIA or AMD hardware can turn captured GPU textures
-into coded packets today.
+**Status: the interface exists, and three backends do.** `crates/encoder`
+defines the video encoder trait, the vocabulary a stream is described in, and
+three implementations of it:
 
-What is missing is everything around it. Quick Sync
-([#17](https://github.com/wildware-uk/clipped/issues/17)) and the software
-fallback ([#18](https://github.com/wildware-uk/clipped/issues/18)) are not
-written, so a machine with only an Intel GPU can be told what it could encode
-(see [encoder-capabilities.md](encoder-capabilities.md)) and cannot encode
-anything. `clipped-muxer` does not mux yet
-([#21](https://github.com/wildware-uk/clipped/issues/21)), and no session wires
-capture to encoding ([#19](https://github.com/wildware-uk/clipped/issues/19),
+- **NVENC**, since [issue #15](https://github.com/wildware-uk/clipped/issues/15),
+  for H.264, HEVC and AV1 on NVIDIA hardware.
+- **AMF**, since [issue #16](https://github.com/wildware-uk/clipped/issues/16),
+  for H.264 and HEVC on AMD hardware.
+- **The software fallback**, since
+  [issue #18](https://github.com/wildware-uk/clipped/issues/18), for H.264 on the
+  CPU — what a machine with no usable encoding hardware records with, and never
+  what a machine with one does.
+
+What is still missing is everything around them. Quick Sync
+([#17](https://github.com/wildware-uk/clipped/issues/17)) is not written, so an
+Intel GPU is detected and reported (see
+[encoder-capabilities.md](encoder-capabilities.md)) and its encoder is not used:
+such a machine falls back to the CPU, which works and costs it frames. And no
+session wires capture to encoding
+([#19](https://github.com/wildware-uk/clipped/issues/19),
 [#20](https://github.com/wildware-uk/clipped/issues/20)), so `recorder record`
-still reports that the capture engine is not implemented. Packets go into a
-`Vec` in a test rather than into a file a user can play.
+still reports that the capture engine is not implemented, and packets go into a
+`Vec` in a test rather than through `clipped-muxer` into a file a user can play.
 
 This document describes the interface, the rules a backend has to obey, and the
-two backends that obey them. Where it describes something that does not exist it
-says so, because a document that quietly describes intentions as facts is worse
-than a short one (AGENTS.md section 7).
+three backends that obey them. Where it describes something that does not exist
+it says so, because a document that quietly describes intentions as facts is
+worse than a short one (AGENTS.md section 7).
 
 ## What it does
 
 Takes a GPU texture that a capture backend owns, and produces coded packets with
-timestamps, without the picture ever entering system memory.
+timestamps. On the hardware path the picture never enters system memory:
 
 ```text
 clipped-capture                 clipped-encoder                 clipped-muxer
@@ -37,6 +40,10 @@ clipped-capture                 clipped-encoder                 clipped-muxer
 ID3D11Texture2D  ──submit──→  register / map / encode  ──→  EncodedPacket  ──→  file
    (14 MB, on the GPU)          (nothing is copied)          (~80 kB, in RAM)
 ```
+
+On the software path it has to, because a CPU encoder cannot read video memory,
+and that copy is the largest single reason the fallback is a fallback. It is
+described and measured under [the software fallback](#the-software-fallback).
 
 ## Why this shape
 
@@ -46,6 +53,10 @@ synchronisation in the middle of a game's frame. It would not fail; it would
 just cost the user frames per second, silently. So the interface carries handles
 rather than pixels, and the NVENC backend registers the capture backend's own
 texture with the encoder (AGENTS.md section 18).
+
+The software backend is the exception that shows why: it has to make exactly
+that copy, because a CPU encoder cannot read video memory, and the measurements
+below put a number on what it costs.
 
 **A leaked encoder session is worse than a crash.** Consumer NVIDIA cards cap
 how many encoding sessions may exist at once, across every application on the
@@ -79,6 +90,7 @@ vendors' options.
 | `EncodeError` | A failure, which always names the encoder, the codec and the resolution. |
 | `NvencEncoder` | The NVENC implementation. Windows only. |
 | `AmfEncoder` | The AMF implementation. Windows only. |
+| `SoftwareEncoder` | The CPU implementation, `libopenh264` through libavcodec. Windows only. |
 
 ### Lifecycle
 
@@ -154,6 +166,12 @@ That thread is normally the capture thread, because a frame texture may not
 outlive the capture that produced it. Packets are what cross to another thread:
 they are bytes, and a muxer or a replay buffer can take as long as it likes with
 a copy of them.
+
+The software backend adds one requirement to that, because it is the only one
+that calls Direct3D: it copies each frame through the graphics device's
+*immediate context*, which has no thread affinity but is not internally
+synchronised. So it belongs on the thread that drives that device — the capture
+thread — or the caller has to serialise the two. Nothing here can check it.
 
 ## The NVENC backend
 
@@ -677,16 +695,293 @@ nothing". The lever covers a missing FFmpeg too, because what `ffprobe` reports
 *is* the acceptance criterion; the one skip it leaves alone is a codec the card
 cannot encode, which is a fact about the silicon rather than about the checkout.
 
+## The software fallback
+
+`SoftwareEncoder`, in `crates/encoder/src/software`. It produces H.264 on the
+CPU and exists for one situation: a machine where no hardware encoder is
+available. `recommend` ranks it behind every hardware encoder that is (see
+`crates/encoder/src/recommendation.rs`), so it is never chosen ahead of one, and
+it is always available, which is what makes "Automatic" a setting that always
+has an answer.
+
+### Which encoder, and the licence
+
+**`libopenh264`** — Cisco's H.264 encoder, **BSD-2-Clause** — inside the pinned
+LGPL FFmpeg build, reached through libavcodec.
+
+**Not x264, and this is the load-bearing part.** x264 is the software H.264
+encoder everyone reaches for, and it is GPL: linking it would require every
+binary Clipped distributes to be GPL as well. That is a decision about what this
+project is, not a choice of encoder, and
+[ADR 0004](adr/0004-ffmpeg-dependency-strategy.md) took it in the other
+direction — the pinned build is configured `--disable-libx264 --disable-libx265`,
+and `crates/muxer/tests/ffmpeg_linkage.rs` asserts that `libopenh264` is present
+so that a pin which dropped it fails a test rather than this backend. Issue #18
+said "x264 or equivalent"; the answer is "equivalent".
+
+What that costs: `libopenh264` compresses less well than x264 at the same bit
+rate, has no B-frames, and offers a smaller set of rate control modes. For a
+fallback nobody should be using unless their machine has no encoder in it, none
+of that is worth relicensing the project for.
+
+**Patent licensing is a separate question** and is untouched by any of this:
+distributing something that encodes H.264 has patent-pool implications whoever
+wrote the encoder. ADR 0004 says so, and it is out of scope here.
+
+No new dependency was added: `rusty_ffmpeg` is the binding already pinned in
+`[workspace.dependencies]`, and `crates/encoder` now names it too. ADR 0004
+records `crates/muxer` as the only crate that does, which is no longer true —
+the muxer's wrappers are out of reach from a layer below it, and
+[#155](https://github.com/wildware-uk/clipped/issues/155) tracks correcting the
+record.
+
+### What it costs, and where
+
+A hardware encoder reads the capture backend's texture where it already lives. A
+CPU encoder cannot, so every frame makes a round trip that the hardware path
+never makes:
+
+```text
+ID3D11Texture2D (BGRA, video memory)
+        │  CopyResource + Map          readback.rs   14 MB per frame at 1440p,
+  BGRA bytes (system memory)                         and the CPU waits for the GPU
+        │  swscale                     convert.rs    reads 14 MB, writes 5.5 MB
+  YUV 4:2:0 planes
+        │  libopenh264                 avcodec.rs    the CPU cost proper
+  coded packets
+```
+
+Each stage keeps its own clock, and closing the session logs all three, so a
+support log from a machine where recording made the game stutter says which
+stage the time went into rather than only that it was slow.
+
+| | |
+| --- | --- |
+| Hardware | Ryzen 9 9950X3D (16 cores), GeForce RTX 4090, Windows 11 build 26200 |
+| Workload | A scrolling chequerboard with a moving bright band, uploaded into a fresh BGRA texture per frame |
+| Rate control | 20 Mbit/s constant, balanced preset (CABAC, High profile), four slices |
+| Build | `--release`, `crates/encoder/src/software/tests.rs` with `TEST_SIZE` and `TEST_FRAMES` raised for the 1440p runs |
+
+**2560x1440, 300 frames**, four consecutive runs:
+
+| Run | Readback | Colour conversion | `libopenh264` | Submit to packet | Sustained |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1.62 ms | 3.89 ms | 12.91 ms | 18.43 ms | 54 fps |
+| 2 | 1.58 ms | 3.98 ms | 14.37 ms | 19.94 ms | 50 fps |
+| 3 | 1.53 ms | 3.65 ms | 11.86 ms | 17.05 ms | 59 fps |
+| 4 | 1.65 ms | 3.81 ms | 12.65 ms | 18.11 ms | 55 fps |
+
+**1280x720, 90 frames**, three consecutive runs: 4.09 ms, 3.96 ms and 3.96 ms
+per frame — about 250 frames a second — of which readback 0.6 ms, colour
+conversion 0.95 ms and `libopenh264` 2.4 ms.
+
+Read those numbers as a ceiling, not as a promise:
+
+- **1440p60 is marginal on this machine, with nothing else running.** 17 to 20 ms
+  a frame against a 16.7 ms budget means a 16-core CPU and a 4090 doing the
+  readback cannot quite keep up with 60 frames a second — and the machines this
+  backend exists for have neither. The comparison is on the same page: NVENC
+  encodes the same picture size in a mean of 4.23 ms while using about a quarter
+  of one piece of fixed-function silicon.
+- **The wall-clock figures understate the CPU cost.** They are time on the
+  submitting thread, and `libopenh264` is encoding on up to four threads
+  underneath. Total processor time was not measured separately.
+- **The readback wait is not stable.** Over the runs above it sat at 1.5-1.7 ms,
+  but earlier runs of the same test on the same machine measured it at
+  5.3-5.9 ms a frame, which took the total to 21-22 ms and the rate to 46 fps.
+  The copy itself is 3 µs to queue; what varies is how long `Map` waits for the
+  GPU to retire it, which depends on what else the GPU is doing and on its power
+  state. On a machine that is actually running a game, expect the higher figure.
+- **The colour conversion is not free and cannot be avoided here.** It is
+  roughly a fifth of the frame, and it is work the hardware path does inside the
+  encoder for nothing.
+
+[#156](https://github.com/wildware-uk/clipped/issues/156) is the readback
+pipelining that would hide the wait, and why it needs an interface change rather
+than a bigger pool.
+
+### What is configured
+
+| Setting | What the backend does |
+| --- | --- |
+| Threads | At most four, and never more than half the machine's. `libopenh264` parallelises by cutting the picture into slices, which costs compression efficiency and takes cores from the game. A recorder that takes every core in order to record well has made the game unplayable. |
+| Rate control | `RateControl::Bitrate` becomes `libopenh264`'s bitrate mode with that average, and its peak becomes `rc_max_rate`. |
+| Quality target | `libopenh264` has no constant-quality mode, so a `QualityTarget` becomes a bit rate: 0.09 bits per pixel per frame at the default level, doubling every six levels better and halving every six worse, bounded by the configured ceiling. That is a documented mapping rather than a knob the encoder has. |
+| Frame skipping | Off. Dropping frames to hold a bit rate is the wrong trade for a recorder: a missing frame is a visible stutter, an overshoot is a slightly larger file. `libopenh264` warns that it cannot hold the rate exactly without it, and that is the intended answer. |
+| Preset | `Speed` is CAVLC and constrained baseline; `Balanced` and `Quality` are CABAC and High. Those are the only quality-for-speed knobs FFmpeg exposes on this encoder. |
+| Keyframes | The interval becomes the GOP length. See below — it is a bound, not a spacing. |
+| Colour | The primaries, transfer function, matrix and range go into the stream's VUI as ITU-T H.273 code points, and the same values configure the conversion. |
+| B-frames | None; `libopenh264` has none. Every packet's decode timestamp equals its presentation timestamp. |
+
+### Keyframes are a bound, not a spacing
+
+`libopenh264` inserts an IDR of its own whenever its scene-change detector
+fires, and FFmpeg exposes no option to turn that off. Measured on the moving
+test pattern with a one-second interval configured at 60 fps, keyframes arrived
+at frames 0, 17, 34, 51, 68 and 85; on a still picture they arrived at 0 and 60,
+exactly as configured.
+
+So what this backend guarantees is that no more than the configured interval of
+recording passes between cut points, plus whatever extra ones the encoder
+decided to add. That is the property the replay buffer needs (SPEC.md section 7).
+Both halves are tested: the exact spacing on a still picture, the bound on a
+moving one.
+
+A frame that asks to be a keyframe becomes one, whatever the interval says.
+
+### Parameter sets are put back in front of every keyframe
+
+The session is opened with libavcodec's global-header flag, which is what puts
+the sequence and picture parameter sets in `extradata` where a container wants
+them — and available before a single frame has been encoded, as the trait
+requires. `libopenh264` then leaves them out of the coded pictures, so
+`next_packet` puts them back in front of any keyframe that does not already
+carry them.
+
+That is not a precaution. Removing it was measured: `ffmpeg` cannot decode the
+resulting elementary stream at all, and a clip cut from the middle of a
+recording would begin at a keyframe no decoder could start on.
+
+It is not free, and it is not the "few hundred bytes" the parameter sets
+themselves are. Putting them in front means copying the *whole coded keyframe*
+into a buffer of the session's, because the packet's buffer belongs to
+libavcodec and is exactly the size of what it coded. Measured by printing the
+length of each keyframe buffer from `h264_output_is_a_decodable_stream`, which
+encodes the 1280x720 test pattern at 60 fps and 20 Mbit/s CBR: the parameter
+sets are 31 bytes, and the six keyframes in its 90 frames copied 50 340,
+71 251, 66 935, 71 481, 66 584 and 71 271 bytes. So the cost is tens of
+kilobytes per keyframe, once every second or two, and it scales with the
+keyframe rather than with the parameter sets: a 1440p keyframe is larger again.
+
+That is still cheap beside the 14 MB readback every frame makes, which is why it
+is done this way rather than with a scatter-gather packet. It is not, however,
+the rounding error "a few hundred bytes" would suggest, and a reader sizing a
+hot path from that number would be out by two to three orders of magnitude.
+
+### Timestamps
+
+The codec's time base is one nanosecond, so the presentation time a frame went
+in with is exactly the one that comes out. A capture timestamp is neither a
+whole number of frames nor a whole number of microseconds — a sixtieth of a
+second is 16 666 666.67 ns — and at any coarser base the encoder would quietly
+round the capture clock. What a container stores is the muxer's decision.
+
+### Colour
+
+The BGRA bytes are converted to 4:2:0 by `swscale`, from the same pinned build,
+with the matrix and the range the configuration asks for; the same values are
+written into the stream. A test encodes red, green and blue, decodes them with
+FFmpeg and asserts they come back — the end-to-end check that the description in
+the stream agrees with the conversion that produced the samples, which is the
+failure that ruins a recording invisibly.
+
+It has the same limit as the hardware path's version of that test: because the
+tag and the conversion are derived from the same `ColourSpace`, they move
+together, so the test proves they agree rather than proving which matrix was
+chosen. What it does catch, measured by breaking it, is a conversion table that
+does not match the tag: swapping BT.709's coefficients for BT.601's decodes pure
+red as `[255, 23, 0]` and fails.
+
+HDR is not supported. A 10-bit surface is refused by name, with the format that
+would work.
+
+### Verification
+
+What the tests in `crates/encoder/src/software` check (AGENTS.md sections 22
+and 53):
+
+- **The stream is real.** 90 frames are encoded, the bitstream is parsed
+  in-process for a sequence parameter set, a picture parameter set and an IDR,
+  and `ffprobe` is asked what it sees: `codec_name=h264`, `profile=High`,
+  1280x720, `yuv420p`, `color_space=bt709`, `color_range=tv`,
+  `nb_read_frames=90`.
+- **It is the picture that went in.** The submitted pattern's bright band moves
+  a fixed distance every frame; the stream is decoded back to pixels and the
+  band has to be found moving by that distance in every consecutive pair. A
+  recorder that produced 90 copies of one frame would pass "it decodes" and
+  fails this.
+- **Colour survives**, as above.
+- **A texture can be reused the moment `submit` returns.** One surface is
+  overwritten immediately after each `submit`, the way a frame pool recycles
+  one, and the decoded pictures still have to be the colours that were
+  submitted.
+- **Keyframes**, as above, and a forced one arrives where it was asked for.
+- **Bad input is refused, not encoded.** An odd picture size, a codec this
+  backend does not produce, a 10-bit surface, a null device, a timestamp that
+  goes backwards, a frame whose declared size is wrong, a frame whose *texture*
+  is the wrong size, a frame whose texture is the wrong *shape* — a mip chain, a
+  texture array or a multisampled surface — and use after shutdown each produce
+  an error naming what was wrong. The texture checks matter more than they look:
+  `CopyResource` copies whole resources and returns `void`, so without them a
+  mismatch is silently nothing at all and the encoder codes whatever the staging
+  texture held last. The shape cases are tested after a real frame has been
+  encoded, so that the staging texture holds a picture and a silent copy would
+  genuinely produce a stale one.
+- **Nothing leaks.** Sixteen sessions are opened, used and dropped without
+  `shut_down`, which is the path an unwind takes.
+
+Unlike the NVENC tests, these need no encoding hardware: they create a Direct3D
+device on the graphics hardware and fall back to WARP, the software rasteriser
+that ships with Windows, so the encoder a user with no GPU will be recording
+with is covered on every CI run. What they cannot fall back on is FFmpeg — a
+missing `ffprobe` or `ffmpeg` *executable* is a skip that says so, and
+`CLIPPED_REQUIRE_ENCODER=1` turns it into a failure. A missing FFmpeg *library*
+is not a skip and cannot be: it is linked rather than loaded, so the test
+process never starts, which is the subject of the next section.
+
+### What linking FFmpeg here costs, and where it is paid
+
+`crates/encoder` names `rusty_ffmpeg`, which links the FFmpeg import libraries.
+That is not only a fact about this crate's own tests: **every executable that
+depends on `clipped-encoder` now imports `avcodec-62.dll`, `avutil-60.dll` and
+`swscale-9.dll`**, which pull in `swresample-6.dll`. Windows resolves imports
+before `main` runs, so the process does not start without those four beside it
+or on `PATH`. Measured on this branch, with a copy of `clipped-recorder.exe`
+alone in an empty directory. Run from `cmd`, `clipped-recorder.exe --help`
+prints nothing at all and exits `0xC0000135` — `STATUS_DLL_NOT_FOUND`. A shell
+that diagnoses the loader failure for you, such as Git Bash, says which library
+is missing:
+
+```text
+clipped-recorder.exe: error while loading shared libraries: swscale-9.dll: cannot open shared object file: No such file or directory
+```
+
+That is `--help`, not `record`: `capabilities` and `list-windows` fail the same
+way, before any argument is parsed. Adding the four libraries makes `--help`
+exit 0 again. Before this crate named the binding, only `clipped-muxer`'s
+dependents were in that position, and `clipped-recorder` is not one of them —
+which is why nobody would find this by running the recorder from a target
+directory.
+
+Shipping the FFmpeg libraries alongside Clipped was already required
+([ADR 0004](adr/0004-ffmpeg-dependency-strategy.md), and
+[#123](https://github.com/wildware-uk/clipped/issues/123) for the LGPL
+obligations). What is new is that they are needed for every subcommand rather
+than only for recording, so packaging cannot treat them as an encoder-only
+payload.
+
+In a build tree the same thing bites contributors. `crates/muxer/build.rs` is
+what copies those libraries beside the binaries in the target directory, and it
+runs when `clipped-muxer` is built; `clipped-encoder` is not a dependent of the
+muxer, so `cargo test -p clipped-encoder` on a checkout where the muxer has
+never been built fails at process start in exactly the way above. `cargo test
+--workspace` — what CI runs — is unaffected, and building the workspace once
+fixes it. [#158](https://github.com/wildware-uk/clipped/issues/158) is the
+proper fix: the copy belongs to the workspace rather than to one crate.
+
 ## Not written yet
 
-- Quick Sync ([#17](https://github.com/wildware-uk/clipped/issues/17)) and the
-  software fallback ([#18](https://github.com/wildware-uk/clipped/issues/18)).
+- Quick Sync ([#17](https://github.com/wildware-uk/clipped/issues/17)). A
+  machine with an Intel GPU and no NVIDIA or AMD card encodes on the CPU today.
 - AV1 on AMF ([#165](https://github.com/wildware-uk/clipped/issues/165)); see
   [The AMF backend](#the-amf-backend) for why.
-- Anything that writes a packet to a container
-  ([#21](https://github.com/wildware-uk/clipped/issues/21)) or connects capture
-  to encoding ([#19](https://github.com/wildware-uk/clipped/issues/19),
-  [#20](https://github.com/wildware-uk/clipped/issues/20)).
+- Software HEVC or AV1. The pinned build carries `libsvtav1`, and
+  [#157](https://github.com/wildware-uk/clipped/issues/157) is what it would
+  take — a capability-report change with an encoder attached.
+- Anything that connects capture to encoding to a container. `clipped-muxer`
+  writes Matroska since
+  [#21](https://github.com/wildware-uk/clipped/issues/21), and nothing yet
+  drives the three together, so `recorder record` still exits 3.
 - Reconfiguring a running session when the captured target changes size. Today
   a frame of a different size is refused, and the caller has to open a new
   encoder.

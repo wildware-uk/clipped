@@ -13,11 +13,13 @@
 //! **Encoding** turns captured GPU frames into coded packets. The interface is
 //! [`VideoEncoder`], and two backends implement it on Windows: NVENC
 //! ([#15](https://github.com/wildware-uk/clipped/issues/15)), through
-//! [`NvencEncoder`], for H.264, HEVC and AV1; and AMF
+//! [`NvencEncoder`], for H.264, HEVC and AV1; AMF
 //! ([#16](https://github.com/wildware-uk/clipped/issues/16)), through
-//! [`AmfEncoder`], for H.264 and HEVC. Quick Sync
-//! ([#17](https://github.com/wildware-uk/clipped/issues/17)) and the software
-//! fallback ([#18](https://github.com/wildware-uk/clipped/issues/18)) are not
+//! [`AmfEncoder`], for H.264 and HEVC; and the software fallback
+//! ([#18](https://github.com/wildware-uk/clipped/issues/18)), through
+//! [`SoftwareEncoder`], which encodes H.264 on the CPU for a machine with no
+//! usable encoding hardware. Quick Sync
+//! ([#17](https://github.com/wildware-uk/clipped/issues/17)) is not
 //! implemented, so a machine with only an Intel GPU can still be told what it
 //! could do and cannot yet be recorded from.
 //!
@@ -32,7 +34,8 @@
 //! - Ranking encoders for "Automatic": [`recommend`].
 //! - Remembering the answer between runs: [`CapabilityCache`].
 //! - Describing a stream to be produced: [`EncoderConfig`].
-//! - Producing it: [`VideoEncoder`], [`NvencEncoder`], [`AmfEncoder`].
+//! - Producing it: [`VideoEncoder`], [`NvencEncoder`], [`AmfEncoder`],
+//!   [`SoftwareEncoder`].
 //!
 //! # Not responsible for
 //!
@@ -100,6 +103,9 @@ mod recommendation;
 mod reference;
 
 #[cfg(windows)]
+mod software;
+
+#[cfg(windows)]
 mod windows;
 
 pub use adapter::{Adapter, AdapterId, AdapterKind, DriverVersion};
@@ -127,5 +133,7 @@ pub use probe::{
 };
 pub use recommendation::{measured_codecs, recommend, ChoiceReason, Recommendation};
 
+#[cfg(windows)]
+pub use software::SoftwareEncoder;
 #[cfg(windows)]
 pub use windows::{AmfEncoder, NvencEncoder, WindowsProbe};
