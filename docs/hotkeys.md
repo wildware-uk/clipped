@@ -112,7 +112,8 @@ line and will appear in a configuration file.
 | Toggle microphone | `toggle_microphone` | — | As above |
 | Open overlay | `open_overlay` | — | Nothing: the overlay is M5, [#53](https://github.com/wildware-uk/clipped/issues/53) |
 
-The two defaults are the two SPEC.md names (sections 16 and 25). The other five
+The two defaults are the two SPEC.md names: `Ctrl`+`F10` in section 7 ("Manual /
+Replay Buffer") and `Ctrl`+`F9` in section 25 ("Manual Bookmarks"). The other five
 start unbound on purpose: binding all seven would take five more combinations
 away from every other application on the machine before the user has asked for
 any of them.
@@ -211,10 +212,12 @@ is a syscall a capture loop must not be behind (AGENTS.md section 20).
   order, because two saves at once would be two writers for one buffer.
 - **Nothing is shared but the queues**, and the press side only ever `try_send`s
   to one. There is no lock anywhere on the press path.
-- **Four presses of one action may be queued.** The fifth while its handler is
-  still busy is reported as dropped rather than waited for: somebody hammering
-  the save key wants one clip and a responsive machine, not eight clips. The
-  drop is counted, logged and delivered to the caller.
+- **Four presses of one action may be waiting.** A handler that is busy has
+  already taken its own press off the queue, so a stuck handler absorbs five —
+  the one it is running and four behind it — and the sixth is the first reported
+  as dropped rather than waited for: somebody hammering the save key wants one
+  clip and a responsive machine, not eight clips. The drop is counted, logged
+  and delivered to the caller.
 - **Stopping waits** for the handler that is running, deliberately: a replay
   being written when the user quits should finish being written (AGENTS.md
   section 17). That wait is on the thread that calls `stop`, never on a capture
@@ -260,16 +263,21 @@ useless as evidence. **Set it whenever a result is being recorded.** A
 combination that registered, a keystroke Windows accepted, and then no press is
 never a skip: that is the defect these tests exist to catch.
 
-CI does not set it yet, because whether a GitHub-hosted runner registers a
-hotkey or accepts injected input has not been observed —
+CI does not set it yet, though a GitHub-hosted runner has now been observed
+doing both. The four tests that are not `#[ignore]`d — including the one that
+injects a keystroke with `SendInput` — ran and passed on `windows-latest` with
+no `SKIPPED (hotkeys)` line anywhere in the job log. So the runner registers
+combinations and accepts synthetic input, and setting `CLIPPED_REQUIRE_HOTKEYS`
+in CI is a decision about how much a hosted runner's input session should be
+trusted to stay that way, not an unknown —
 [issue #235](https://github.com/wildware-uk/clipped/issues/235).
 
 ### Reading a fullscreen run
 
 ```text
-[subject] ready hwnd=0x0000000000c2083c client=2560x1440 fps=60 presentation=fullscreen-exclusive exclusive=yes monitor=\\.\DISPLAY1 tone=off
-[info] mode=exclusive exclusive=yes subject-has-foreground=yes hotkey=Ctrl+Alt+Shift+F15
-[result] mode=exclusive exclusive=yes delivered=yes latency=53.3µs handler=53.3µs
+[subject] ready hwnd=0x0000000000900936 client=2560x1440 fps=60 presentation=fullscreen-exclusive exclusive=yes monitor=\\.\DISPLAY1 tone=off
+[info] mode=exclusive exclusive=yes subject-has-foreground=yes hotkey=Ctrl+Alt+Shift+F23
+[result] mode=exclusive exclusive=yes delivered=yes latency=50.6µs dispatch=28.7µs
 ```
 
 `exclusive=yes` is the field that decides whether the run means anything for the
@@ -278,3 +286,19 @@ subject was a borderless window covering the display, which is a real case in
 its own right — it is what a game in "fullscreen (windowed)" mode is — but says
 nothing about the other one. `subject-has-foreground=yes` is asserted: a press
 that reached Clipped while nothing was in front of it would prove nothing.
+
+`latency` and `dispatch` are two different measurements, and neither is a
+benchmark — they are sanity checks on an unloaded machine, taken once per run.
+
+- **`latency`** is the test calling `SendInput` to the message loop taking the
+  press off its queue. Most of it is Windows: the input stack, the desktop, and
+  the scheduler getting round to the hotkey thread. Clipped can make this worse
+  and cannot make it much better.
+- **`dispatch`** is that same message-loop timestamp to the handler's first
+  instruction on the handler's own thread — a map lookup, an atomic increment, a
+  `try_send` and a thread wake-up. This is the part the crate is responsible
+  for, and it is the number to watch if the dispatch model ever changes.
+
+They are taken from different clocks in different threads by construction, so
+they cannot be the same number by accident. Neither is asserted; what the test
+asserts is that the handler ran at all, within `DELIVERY`.
