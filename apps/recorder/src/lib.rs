@@ -14,8 +14,9 @@
 //!
 //! # What the recorder can do today
 //!
-//! Record a window to a Matroska file, list what can be captured, and report
-//! what this machine can encode. `record` resolves its target, captures it,
+//! Record a window to a Matroska file, list what can be captured, report what
+//! this machine can encode, and serve the desktop application over the IPC
+//! protocol (`docs/ipc.md`). `record` resolves its target, captures it,
 //! encodes the frames and writes them, and stops cleanly on Ctrl+C leaving a
 //! finished file
 //! ([issue #126](https://github.com/wildware-uk/clipped/issues/126)).
@@ -34,6 +35,7 @@
 //! | [`record`] | The `record` subcommand |
 //! | [`list_windows`] | The `list-windows` subcommand |
 //! | [`capabilities`] | The `capabilities` subcommand |
+//! | [`serve`] | The `serve` subcommand, and the recorder behind the IPC protocol |
 //! | [`shutdown`] | Ctrl+C, and the finalisation seam a recording ends through |
 
 pub mod capabilities;
@@ -42,6 +44,7 @@ pub mod config;
 pub mod list_windows;
 pub mod options;
 pub mod record;
+pub mod serve;
 pub mod shutdown;
 
 use std::error::Error;
@@ -81,6 +84,8 @@ pub enum RunError {
     ListWindows(list_windows::ListWindowsError),
     /// `capabilities` failed.
     Capabilities(capabilities::CapabilitiesError),
+    /// `serve` failed.
+    Serve(serve::ServeError),
 }
 
 impl RunError {
@@ -113,6 +118,11 @@ impl RunError {
             // the machine could not be asked. A machine with no encoder at all
             // is a successful run that says so.
             Self::Capabilities(_) => EXIT_FAILURE,
+            // Including "a recorder is already listening there", which is a
+            // second recorder correctly declining to compete with the first
+            // rather than a command line to fix: the endpoint is not something
+            // the user chose, and `--endpoint` would be the wrong advice.
+            Self::Serve(_) => EXIT_FAILURE,
         }
     }
 
@@ -135,6 +145,7 @@ impl fmt::Display for RunError {
             Self::Record(error) => write!(formatter, "{error}"),
             Self::ListWindows(error) => write!(formatter, "{error}"),
             Self::Capabilities(error) => write!(formatter, "{error}"),
+            Self::Serve(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -145,6 +156,7 @@ impl Error for RunError {
             Self::Record(error) => Some(error),
             Self::ListWindows(error) => Some(error),
             Self::Capabilities(error) => Some(error),
+            Self::Serve(error) => Some(error),
         }
     }
 }
@@ -167,6 +179,12 @@ impl From<capabilities::CapabilitiesError> for RunError {
     }
 }
 
+impl From<serve::ServeError> for RunError {
+    fn from(error: serve::ServeError) -> Self {
+        Self::Serve(error)
+    }
+}
+
 /// Runs the subcommand the command line selected.
 ///
 /// A new subcommand is a variant on [`Command`] and an arm here.
@@ -180,6 +198,7 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::Record(args) => record::run(args).map_err(RunError::from),
         Command::ListWindows(args) => list_windows::run(args).map_err(RunError::from),
         Command::Capabilities(args) => capabilities::run(args).map_err(RunError::from),
+        Command::Serve(args) => serve::run(args).map_err(RunError::from),
     }
 }
 

@@ -1,0 +1,197 @@
+//! What the recorder is doing, and what a finished recording turned out to be.
+//!
+//! These are the payloads of `get_status` and of the `status` event stream, and
+//! they are deliberately a *copy* of the recorder's state rather than a view of
+//! it. Everything the desktop application displays crossed a process boundary
+//! and can be stale by the time it is drawn ([ADR
+//! 0002](../../../docs/adr/0002-separate-recorder-process.md)), so nothing here
+//! is derived on the UI side from something that might have moved on.
+//!
+//! # Why the figures are the ones they are
+//!
+//! [`RecordingSummary`] carries `clipped-session`'s own counters, kept separate
+//! rather than added together. A frame skipped to hold the requested rate is
+//! the recorder doing what it was asked; a frame dropped because the disk fell
+//! behind is the recorder failing. One "frames dropped" number would mean
+//! nothing, and a UI cannot re-separate what the protocol has already mixed
+//! (AGENTS.md section 19).
+
+use serde::{Deserialize, Serialize};
+
+/// What the recorder is doing right now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RecorderStatus {
+    /// Nothing is being recorded.
+    Idle,
+    /// A recording is in progress.
+    Recording(ActiveRecording),
+}
+
+impl RecorderStatus {
+    /// Whether a recording is in progress.
+    #[must_use]
+    pub const fn is_recording(&self) -> bool {
+        matches!(self, Self::Recording(_))
+    }
+}
+
+/// The recording that is running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveRecording {
+    /// Identifies this recording for the length of the recorder's life.
+    ///
+    /// `stop_recording` names it, so that a stop meant for a recording that has
+    /// already ended cannot stop the next one — which is a real race when the
+    /// window closed at the same moment the user pressed the button.
+    pub recording_id: String,
+    /// The file being written.
+    pub output: String,
+    /// What is being recorded, as the user asked for it: `process cs2.exe`.
+    ///
+    /// Not the window title. A title is user content and the most reliable way
+    /// to put somebody's document name into a log or a screenshot of a bug
+    /// report (AGENTS.md section 13); the selector is what they typed.
+    pub target: String,
+    /// Milliseconds the recording has been running, as the recorder measures
+    /// it.
+    ///
+    /// Elapsed time rather than a wall-clock start, so that a UI showing a
+    /// duration does not have to agree with the recorder about the time of day
+    /// or the time zone.
+    pub elapsed_ms: u64,
+}
+
+/// What a finished recording turned out to be.
+///
+/// The reply to `stop_recording`. Every field is measured; none is estimated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordingSummary {
+    /// The file that was written, and which is playable whatever ended the
+    /// recording.
+    pub output: String,
+    /// How long the recording covers.
+    pub duration_ms: u64,
+    /// Why it ended.
+    pub end_reason: EndReason,
+    /// Frames that reached the file.
+    pub frames_encoded: u64,
+    /// Frames skipped to hold the requested frame rate. Expected, not a fault.
+    pub frames_skipped_for_rate: u64,
+    /// Frames dropped because the writer could not keep up. A fault, and the
+    /// one figure here that means something went wrong.
+    pub frames_dropped_writer_behind: u64,
+    /// The frame rate actually sustained, where the recording was long enough
+    /// to measure one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sustained_framerate: Option<f64>,
+    /// The encoder that produced the file, as `nvenc`, `amf`, `quicksync` or
+    /// `software`.
+    pub encoder: String,
+    /// The codec in the file, as `h264`, `hevc` or `av1`.
+    pub codec: String,
+    /// The encoded picture size.
+    pub width: u32,
+    /// The encoded picture size.
+    pub height: u32,
+}
+
+/// Why a recording ended.
+///
+/// Mirrors `clipped_session::EndReason`. It is restated here rather than
+/// re-exported because this crate is the protocol and must not depend on the
+/// recording engine — the wire format is a contract with the desktop
+/// application, and it should not change because an internal enumeration was
+/// renamed (AGENTS.md sections 43 and 44).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum EndReason {
+    /// `stopped` — something asked it to stop.
+    Stopped,
+    /// `target_lost` — the recorded window closed.
+    TargetLost,
+    /// `target_resized` — the recorded window changed size, which one file
+    /// cannot follow.
+    TargetResized,
+    /// A reason this build has never heard of, kept verbatim.
+    Other(String),
+}
+
+impl EndReason {
+    /// The wire string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::TargetLost => "target_lost",
+            Self::TargetResized => "target_resized",
+            Self::Other(reason) => reason,
+        }
+    }
+}
+
+impl From<String> for EndReason {
+    fn from(reason: String) -> Self {
+        match reason.as_str() {
+            "stopped" => Self::Stopped,
+            "target_lost" => Self::TargetLost,
+            "target_resized" => Self::TargetResized,
+            _ => Self::Other(reason),
+        }
+    }
+}
+
+impl From<EndReason> for String {
+    fn from(reason: EndReason) -> Self {
+        match reason {
+            EndReason::Other(reason) => reason,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_idle_recorder_serialises_to_a_state_and_nothing_else() {
+        let json = serde_json::to_string(&RecorderStatus::Idle).expect("it serialises");
+        assert_eq!(json, r#"{"state":"idle"}"#);
+    }
+
+    #[test]
+    fn an_active_recording_round_trips() {
+        let status = RecorderStatus::Recording(ActiveRecording {
+            recording_id: "r-1".to_owned(),
+            output: r"D:\clips\session.mkv".to_owned(),
+            target: "process cs2.exe".to_owned(),
+            elapsed_ms: 4_200,
+        });
+
+        let json = serde_json::to_string(&status).expect("it serialises");
+        let back: RecorderStatus = serde_json::from_str(&json).expect("and deserialises");
+        assert_eq!(back, status);
+        assert!(back.is_recording());
+    }
+
+    #[test]
+    fn an_unknown_end_reason_keeps_its_name() {
+        let reason: EndReason =
+            serde_json::from_str("\"display_disconnected\"").expect("it still parses");
+        assert_eq!(reason, EndReason::Other("display_disconnected".to_owned()));
+    }
+
+    #[test]
+    fn a_field_added_after_this_build_was_compiled_is_ignored_rather_than_fatal() {
+        // The additive half of the compatibility policy in docs/ipc.md: a newer
+        // recorder may add a field to a status payload, and an older UI has to
+        // keep working with the fields it does understand.
+        let status: RecorderStatus = serde_json::from_str(
+            r#"{"state":"recording","recording_id":"r-1","output":"a.mkv","target":"t",
+                "elapsed_ms":1,"gpu_temperature_c":71}"#,
+        )
+        .expect("an unknown field must not break a known message");
+        assert!(status.is_recording());
+    }
+}

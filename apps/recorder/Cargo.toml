@@ -23,6 +23,11 @@ path = "src/main.rs"
 
 [dependencies]
 clipped-encoder.workspace = true
+# The protocol the desktop application drives this process through, and the
+# named pipe it arrives on (docs/ipc.md, ADR 0002). The messages, the framing
+# and the handshake live there so that both ends of the connection use one
+# implementation of them; what lives here is the recorder behind it.
+clipped-ipc.workspace = true
 clipped-logging.workspace = true
 clipped-session.workspace = true
 # Window and monitor enumeration for `list-windows`, and the target selection
@@ -77,6 +82,11 @@ windows-sys = { version = "0.61", features = [
 # plausible and the timestamps increase (AGENTS.md section 22, docs/testing.md).
 [dev-dependencies]
 clipped-media-validation.workspace = true
+# `tests/ipc_protocol.rs` sends parameters that `clipped_ipc::Command` cannot
+# express - an unknown command's, and a malformed one's - which is how the
+# rejection paths are exercised against a real recorder rather than a mock of
+# one. Taken from the workspace for the reason every other crate takes it there.
+serde_json.workspace = true
 
 [lints]
 workspace = true

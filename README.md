@@ -124,7 +124,7 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-media-validation` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-media-validation` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
@@ -136,6 +136,14 @@ Layers 5 and 6 are the controlled test applications in `test-apps/`, which
 capture tests point at instead of an installed game
 ([docs/testing.md](docs/testing.md)). They are at the top of the stack because
 nothing in the product may depend on one.
+
+`clipped-ipc` sits at layer 0 for a reason worth stating: it is the protocol
+the desktop application drives the recorder through
+([docs/ipc.md](docs/ipc.md)), so both ends of the connection have to be able to
+use it. It therefore depends on no other crate in this workspace, and it holds
+no application logic — the recorder plugs its own subsystems into it, and a
+client that only wants to send commands does not link the recording engine to
+do so.
 
 `clipped-media-validation` (`tests/media`) is a test-only package too, but it
 sits at the *bottom* rather than the top, and deliberately: it is what every
@@ -182,8 +190,9 @@ is not responsible for, and where it sits in this stack.
 | [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
+| [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |
 
-The five `docs/` entries are written under issues #3, #6, #8, #5 and #23 and are
+The `docs/` entries are written under issues #3, #6, #8, #5, #23 and #49 and are
 listed here so those tickets do not each have to edit this table.
 
 ## Contributing

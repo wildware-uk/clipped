@@ -29,11 +29,18 @@ const LAYERS: &[&[&str]] = &[
     // Layering alone would let any crate name it under `[dependencies]`, so
     // `test_only_packages_are_never_linked_into_the_product` is what holds it
     // to a `[dev-dependencies]` entry.
+    // `clipped-ipc` belongs here for the same reason `clipped-events` does: it
+    // is shared vocabulary. It is the protocol boundary between the recorder
+    // and the desktop application (docs/ipc.md), so it must be usable from
+    // both ends, and it deliberately depends on no other crate in this
+    // workspace - a protocol crate that reached into the recording engine
+    // could not be linked by a client.
     &[
         "clipped-windows",
         "clipped-events",
         "clipped-storage",
         "clipped-logging",
+        "clipped-ipc",
         "clipped-media-validation",
     ],
     // Subsystems built directly on a platform or persistence layer.

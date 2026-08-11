@@ -136,11 +136,8 @@ pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
     // — silently, and at the wrong size.
     enable_dpi_awareness();
 
-    let windows = enumerate_windows()?;
-    let window = resolve(&windows, &selector(&config.target))?;
-    log_target(window);
-
-    let settings = settings_for(&config, window);
+    let window = resolve_window(&config.target)?;
+    let settings = settings_for(&config, &window);
 
     let signal = ShutdownSignal::new();
     // The handler first, then the flag — in that order, deliberately. A
@@ -176,9 +173,29 @@ pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
     Ok(())
 }
 
+/// Enumerates the desktop and finds the one window the target names.
+///
+/// Shared with [`crate::serve`], so a recording started over IPC points at the
+/// same window `record --window <TITLE>` would, resolved by the same rules and
+/// reporting the same candidates for an ambiguous one (AGENTS.md section 55).
+///
+/// # Errors
+///
+/// [`RecordError::Enumeration`] if the desktop could not be described, and
+/// [`RecordError::Resolution`] if the target named no window or more than one.
+pub(crate) fn resolve_window(target: &CaptureTarget) -> Result<WindowInfo, RecordError> {
+    let windows = enumerate_windows()?;
+    let window = resolve(&windows, &selector(target))?;
+    log_target(window);
+    Ok(window.clone())
+}
+
 /// Turns off the compatibility scaling Windows applies to a DPI-unaware
 /// process, or says why the sizes that follow cannot be trusted.
-fn enable_dpi_awareness() {
+///
+/// A property of the process, set once and never unset, so `serve` calls it
+/// before it accepts anything rather than per recording.
+pub(crate) fn enable_dpi_awareness() {
     match clipped_windows::enable_per_monitor_dpi_awareness() {
         Ok(DpiAwareness::Set) => {}
         Ok(DpiAwareness::AlreadySet) => {
@@ -213,7 +230,11 @@ fn selector(target: &CaptureTarget) -> TargetSelector {
 
 /// Builds the session's settings from a validated command line and the window
 /// it resolved to.
-fn settings_for(config: &RecordingConfig, window: &WindowInfo) -> RecordingSettings {
+///
+/// Shared with [`crate::serve`] for the reason [`resolve_window`] is: a
+/// recording asked for over IPC and one asked for on the command line must
+/// reach the session as the same settings.
+pub(crate) fn settings_for(config: &RecordingConfig, window: &WindowInfo) -> RecordingSettings {
     let size = window.geometry().client_size();
     let target =
         CaptureTargetSettings::window(window.handle().as_u64(), size.width(), size.height())

@@ -1,0 +1,52 @@
+[package]
+name = "clipped-ipc"
+description = "The protocol and local transport the desktop application drives the recorder through"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The message definitions are `serde` types, and JSON is the wire format
+# (docs/ipc.md, "Why JSON"). Both are pinned in the root manifest because more
+# than one crate persists or transmits structured data and two copies of serde
+# in one binary means two derive macros. Dual MIT/Apache-2.0.
+serde.workspace = true
+serde_json.workspace = true
+# The logging facade. A refused handshake, a malformed frame and a client that
+# vanished are all things a bug report needs to show, and they are invisible to
+# the user by definition (docs/logging.md). MIT.
+tracing.workspace = true
+
+# The transport. A named pipe is a Windows object, so every call that creates
+# one, secures one or waits on one is behind `src/transport/windows.rs` and
+# nothing above it names a Windows type (AGENTS.md section 5).
+#
+# - Win32_Foundation             HANDLE, the error codes, LocalFree
+# - Win32_Security               SECURITY_ATTRIBUTES, TOKEN_USER, the token query
+# - Win32_Security_Authorization SDDL: the security descriptor the pipe is
+#                                created with, and the user SID string in it
+# - Win32_Storage_FileSystem     the file flags CreateNamedPipeW takes, and
+#                                FILE_FLAG_FIRST_PIPE_INSTANCE
+# - Win32_System_Pipes           CreateNamedPipeW, ConnectNamedPipe, Disconnect
+# - Win32_System_IO              CancelIoEx, which is how a blocked connection
+#                                thread is released at shutdown
+# - Win32_System_Threading       OpenProcessToken, GetCurrentProcess
+# - Win32_System_RemoteDesktop   ProcessIdToSessionId, which is what keeps two
+#                                signed-in users' recorders off one pipe name
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_RemoteDesktop",
+] }
+
+[lints]
+workspace = true
