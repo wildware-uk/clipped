@@ -239,29 +239,54 @@ fn configure(connection: &Connection) -> Result<(), StorageError> {
 /// Puts the database into write-ahead logging mode, which is what lets the
 /// desktop application read while the recorder writes.
 ///
-/// A database that refuses — the mode cannot be set over some network shares —
-/// is a warning rather than a failure. The library still works; readers block
-/// during writes, which for a metadata index is slow rather than broken, and
-/// refusing to open would cost the user their library over a filesystem
-/// property (AGENTS.md section 16).
+/// A database that will not take the mode is a warning rather than a failure,
+/// in **both** of the ways it can refuse: SQLite may answer with a mode other
+/// than `wal`, and the statement may fail outright. Write-ahead logging needs
+/// shared memory the two connections can both map, and a filesystem that cannot
+/// provide it — a network share is the usual one — is met either way depending
+/// on which layer notices. Refusing to open would cost the user their library
+/// over a property of where they keep it (AGENTS.md section 16). Readers then
+/// block during writes, which for a metadata index is slow rather than broken.
+///
+/// `synchronous` follows the mode it actually got, which is why the two live in
+/// one function. `NORMAL` is only safe from corruption *in write-ahead logging
+/// mode*; in a rollback journal it trades the file's integrity for the same
+/// speed, which is not a trade to make silently on a database somebody's
+/// library is indexed in.
 fn enable_write_ahead_logging(connection: &Connection, path: &Path) -> Result<(), StorageError> {
-    let mode: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        warn!(
-            database = %path.display(),
-            mode = %mode,
-            "the database could not be put into write-ahead logging mode, so readers will \
-             wait for writes; this usually means it is on a network share"
-        );
-    }
+    let enabled = match connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
+        row.get::<_, String>(0)
+    }) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") => true,
+        Ok(mode) => {
+            warn!(
+                database = %path.display(),
+                mode = %mode,
+                "the database could not be put into write-ahead logging mode, so readers will \
+                 wait for writes; this usually means it is on a network share"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                database = %path.display(),
+                %error,
+                "the database refused write-ahead logging mode, so readers will wait for \
+                 writes; this usually means it is on a network share"
+            );
+            false
+        }
+    };
 
-    // NORMAL is the setting write-ahead logging exists for: a commit does not
-    // wait for the disk to acknowledge it, and a power failure can lose the
-    // most recent transactions but cannot corrupt the file. Losing the last few
-    // metadata writes costs a re-index from the sidecars beside the recordings;
-    // FULL would cost a disk flush on every commit made while a game is
-    // running.
-    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    if enabled {
+        // NORMAL is the setting write-ahead logging exists for: a commit does
+        // not wait for the disk to acknowledge it, and a power failure can lose
+        // the most recent transactions but cannot corrupt the file. Losing the
+        // last few metadata writes costs a re-index from the sidecars beside
+        // the recordings; FULL would cost a disk flush on every commit made
+        // while a game is running.
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+    }
     Ok(())
 }
 
@@ -596,6 +621,78 @@ mod tests {
         assert!(
             orphan.is_err(),
             "a session referred to a game that is not there"
+        );
+    }
+
+    #[test]
+    fn a_database_that_refuses_write_ahead_logging_is_still_opened() {
+        // The documented tolerance, exercised. SQLite refuses a journal mode
+        // change from inside a transaction with an *error* rather than an
+        // answer, which is the shape a filesystem that cannot map the shared
+        // memory the mode needs produces too, and the one an ordinary open
+        // cannot reach. If this propagated, a user on a network share would
+        // lose their library to a pragma.
+        let directory = scratch_directory("wal-refused");
+        let path = directory.join("library.db");
+        let mut connection = Connection::open(&path).expect("a database can be created");
+        let transaction = connection.transaction().expect("a transaction can begin");
+        assert!(
+            transaction
+                .query_row("PRAGMA journal_mode = WAL", [], |row| row
+                    .get::<_, String>(0))
+                .is_err(),
+            "this test's premise is gone: SQLite accepted the mode change inside a transaction"
+        );
+
+        enable_write_ahead_logging(&transaction, &path)
+            .expect("a database that refuses write-ahead logging is a warning, not a failure");
+    }
+
+    #[test]
+    fn durability_is_only_relaxed_where_write_ahead_logging_makes_it_safe() {
+        // `synchronous = NORMAL` cannot corrupt a WAL-mode database and can
+        // corrupt one in a rollback journal, so the setting has to follow the
+        // mode that was actually granted rather than the one that was asked
+        // for.
+        const FULL: i64 = 2;
+        const NORMAL: i64 = 1;
+
+        let directory = scratch_directory("wal-durability");
+        let path = directory.join("library.db");
+        let database = Database::open(&path).expect("a database");
+        let granted: i64 = database
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("the pragma can be read");
+        assert_eq!(
+            granted, NORMAL,
+            "a WAL database is paying for a disk flush on every commit"
+        );
+
+        // An in-memory database answers `PRAGMA journal_mode = WAL` with
+        // `memory` instead of failing — the other way a database refuses, and
+        // the same answer a filesystem without shared memory gives.
+        let refusing = Connection::open_in_memory().expect("SQLite opens a database in memory");
+        let before: i64 = refusing
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("the pragma can be read");
+        assert_eq!(before, FULL, "this test's premise is gone");
+
+        enable_write_ahead_logging(&refusing, Path::new(":memory:")).expect("it is tolerated");
+
+        let mode: String = refusing
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("the journal mode can be read");
+        assert!(
+            !mode.eq_ignore_ascii_case("wal"),
+            "this test's premise is gone: the database took write-ahead logging"
+        );
+        let after: i64 = refusing
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("the pragma can be read");
+        assert_eq!(
+            after, FULL,
+            "durability was relaxed on a database that is not in write-ahead logging mode"
         );
     }
 

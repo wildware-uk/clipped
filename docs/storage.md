@@ -92,11 +92,23 @@ outright when the `-shm` file is not already there — which is exactly the stat
 the desktop application meets if it opens the library before the recorder has.
 `query_only` gives the guarantee the flag was wanted for without that failure.
 
-`synchronous` is `NORMAL` rather than `FULL`. A commit does not wait for the
-disk to acknowledge it; a power cut can lose the most recent transactions but
-cannot corrupt the file. Losing the last few metadata writes costs a re-index
-from the sidecars. `FULL` would cost a disk flush on every commit made while a
-game is running, which is the thing the next section exists to avoid.
+A database that will not take the mode is a warning and not a failure, both when
+SQLite answers with a different mode and when the statement fails outright — a
+filesystem that cannot map the shared memory WAL needs, usually a network share,
+is met either way. Readers then wait for writes, which for a metadata index is
+slow rather than broken, and refusing to open would cost somebody their library
+over where they chose to keep it.
+
+`synchronous` is `NORMAL` rather than `FULL`, **but only when the mode was
+actually granted**. A commit then does not wait for the disk to acknowledge it;
+a power cut can lose the most recent transactions but cannot corrupt the file,
+and losing the last few metadata writes costs a re-index from the sidecars.
+`FULL` would cost a disk flush on every commit made while a game is running,
+which is the thing the next section exists to avoid. In a rollback journal
+`NORMAL` buys the same speed by risking the file itself, so a database that fell
+back keeps `FULL` — the speed is worth having and the corruption is not.
+`durability_is_only_relaxed_where_write_ahead_logging_makes_it_safe` holds both
+halves of that.
 
 ### Nothing on a recording path waits for the database
 
