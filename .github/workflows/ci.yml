@@ -430,3 +430,12 @@ jobs:
 
       - name: Lint the desktop crate
         run: cargo clippy --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings
+
+      # The rules the tray is built from live in this crate — what the menu
+      # offers, what is disabled and why, and what the icon looks like for each
+      # state (issue #50). `cargo clippy --all-targets` compiles those tests and
+      # never runs them, and a test that is only compiled has stopped being a
+      # test. Nothing here needs a display: the tray's model is a pure function
+      # and the icon is bytes.
+      - name: Test the desktop crate
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml

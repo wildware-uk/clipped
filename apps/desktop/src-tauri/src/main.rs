@@ -16,12 +16,26 @@
 //!    listening and starts one — detached, so it outlives this process — if none
 //!    is. Everything about that decision, including the restart policy, lives in
 //!    `clipped_ipc::supervisor` and `docs/adr/0006-recorder-lifetime-and-supervision.md`.
-//! 3. **Opens the window**, which reads the link's state through the
+//! 3. **Puts Clipped in the notification area** and follows the link's state
+//!    with it. The tray is the first part of this interface that *acts* on the
+//!    recorder rather than only watching it (SPEC.md section 33, issue #50);
+//!    [`tray`] and [`tray_model`] are where that lives.
+//! 4. **Opens the window**, which reads the link's state through the
 //!    `recorder_link_state` command and follows it through the
 //!    `recorder-link` event.
 //!
-//! Nothing here stops the recorder, on any path, including quitting. That is the
-//! decision, not an omission.
+//! # Closing, and quitting
+//!
+//! They are different things now, which is what SPEC.md section 33 asks for.
+//! Closing the window hides it: the recorder is a separate process and goes on
+//! recording, and the tray is where the application still is. Quitting is the
+//! tray's Exit, and it is the **only** path that stops the recorder — over the
+//! protocol, so that a recording is finished and its file closed rather than
+//! abandoned ([issue #220](https://github.com/wildware-uk/clipped/issues/220),
+//! AGENTS.md section 17).
+//!
+//! Nothing else here stops the recorder, on any path, including the window
+//! crashing. That is still the decision it always was.
 //!
 //! # Why this crate links `clipped-ipc` and nothing else
 //!
@@ -37,11 +51,18 @@
 // backtrace are read from during development.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod foreground;
+mod tray;
+mod tray_icon;
+mod tray_model;
+
 use std::path::PathBuf;
 
 use clipped_ipc::supervisor::{claim_instance, InstanceClaim};
-use clipped_ipc::{Endpoint, PeerIdentity, RecorderLink, RecorderLinkState, SupervisorSettings};
-use tauri::Emitter as _;
+use clipped_ipc::{
+    Endpoint, PeerIdentity, RecorderLink, RecorderLinkEvent, RecorderLinkState, SupervisorSettings,
+};
+use tauri::{Emitter as _, Manager as _, WindowEvent};
 
 /// The single-instance name this application claims, before the session
 /// namespace is applied.
@@ -111,12 +132,33 @@ fn main() {
         .invoke_handler(tauri::generate_handler![recorder_link_state])
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // On the main thread, and before the tray: an out-of-context window
+            // event hook delivers through the hooking thread's message queue,
+            // which for a Tauri application is this one. Doing it first means
+            // the tray's first menu already knows what to offer to record.
+            foreground::follow_the_foreground_window();
+
+            if let Err(error) = tray::install(&handle, &app.state::<RecorderLink>()) {
+                // Not fatal. A window that shows the recorder's state is still
+                // worth having, and saying what is missing beats exiting
+                // (AGENTS.md section 16).
+                eprintln!("Clipped could not add its notification-area icon: {error}");
+            }
+
             // A thread of its own because the link's channel blocks, and the
             // one thing that may never block is the thread running the window.
             std::thread::Builder::new()
                 .name("clipped-recorder-link-events".to_owned())
                 .spawn(move || {
                     while let Ok(event) = events.recv() {
+                        // The tray first, because it is on screen whether or
+                        // not the window is, and it is drawn from the state
+                        // rather than from the event.
+                        if let RecorderLinkEvent::State(state) = &event {
+                            tray::refresh(&handle, state);
+                        }
+
                         if let Err(error) = handle.emit(LINK_EVENT, &event) {
                             // The window has gone; the recorder has not, and
                             // this thread has nothing left to do.
@@ -126,6 +168,18 @@ fn main() {
                     }
                 })?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the window minimises to the tray (SPEC.md section
+                // 33). Quitting is the tray's Exit, and it is deliberately the
+                // only thing that stops the recorder: a window closed by
+                // accident must never end a recording.
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    eprintln!("the Clipped window could not be hidden: {error}");
+                }
+            }
         })
         .run(tauri::generate_context!())
         // There is no interface to report this in: the failure is that the

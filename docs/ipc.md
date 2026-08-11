@@ -20,11 +20,15 @@ they are listed, with the issue that builds each, in
 messages exist in TypeScript as well, checked against the Rust on every build —
 see [The TypeScript types](#the-typescript-types).
 
-The desktop application opens the pipe for one purpose: it attaches to a
-recorder or starts one, subscribes to its status, and shows what it is told
-([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). Nothing in the
-*interface* sends a command yet — no request crosses the webview boundary —
-which is [issue #217](https://github.com/wildware-uk/clipped/issues/217).
+The desktop application attaches to a recorder or starts one, subscribes to its
+status, and shows what it is told
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). It also **drives**
+it now: the notification-area menu starts and stops recordings and asks the
+recorder to exit ([issue #50](https://github.com/wildware-uk/clipped/issues/50),
+`docs/desktop-ui.md`). Those commands are sent from the Tauri host in Rust —
+nothing crosses the webview boundary as a request yet, which is
+[issue #217](https://github.com/wildware-uk/clipped/issues/217) and is a
+different thing.
 
 Related: SPEC.md section 5, AGENTS.md sections 5, 27, 43 and 44,
 [privacy.md](privacy.md), [ADR 0002](adr/0002-separate-recorder-process.md),
@@ -326,7 +330,12 @@ says what a build can express; a feature says what it can do, and the two are
 not the same — two recorders speaking protocol 1 can differ in what was compiled
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
-that. Today: `recording`, `status_events`.
+that. Today: `recording`, `status_events`, `shutdown`.
+
+`shutdown` is announced by the *server* rather than by the recording engine
+behind it, because it is the accept loop a shutdown ends and the accept loop
+belongs to `clipped-ipc` (`crates/ipc/src/server.rs`). The other two are the
+application's own.
 
 ## Compatibility policy
 
@@ -447,6 +456,7 @@ when a command's parameters are all optional.
 | `get_status` | none | `status` | yes |
 | `start_recording` | the `record` options, below | `recording_started` | yes |
 | `stop_recording` | `recording_id` (optional) | `recording_stopped` | yes |
+| `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 | `save_replay` | not yet defined | — | no — M3, [#37](https://github.com/wildware-uk/clipped/issues/37) |
 | `add_bookmark` | not yet defined | — | no — M8, [#64](https://github.com/wildware-uk/clipped/issues/64) |
 | `take_screenshot` | not yet defined | — | no — M8, [#67](https://github.com/wildware-uk/clipped/issues/67) |
@@ -513,6 +523,73 @@ already mixed (AGENTS.md section 19).
 `encoder` and `codec` use the same tokens `--encoder` and `--codec` accept, so a
 support request saying `encoder=nvenc` means the same thing whichever produced
 it.
+
+### `shutdown`
+
+Asks the recorder to stop listening, finish anything it is recording, and exit.
+It is the answer to
+[issue #220](https://github.com/wildware-uk/clipped/issues/220): a recorder
+started by the desktop application is detached, with its own process group and no
+console, so it cannot be sent `CTRL_C_EVENT`, and before this command the only
+way to end one was Task Manager.
+
+```json
+{"type":"request","id":8,"command":"shutdown","params":{"finalise_recording":false}}
+```
+
+```json
+{"type":"response","id":8,"outcome":{"ok":{"reply":"shutting_down"}}}
+```
+
+**It runs the shutdown the recorder already had rather than a second one.** The
+command stops the listener, which is exactly what Ctrl+C does; everything after
+that — stopping the recording, waiting for its file to be finalised, closing the
+event subscriptions, exiting — is the recorder's existing path
+(`apps/recorder/src/serve.rs`). There is no second ordering to get wrong.
+
+#### What happens if a recording is running
+
+The endpoint is reachable by anything running as this user, and "exit" must not
+become a way for any of it to end somebody's recording (AGENTS.md section 17).
+So the recorder refuses by default and performs it only when asked in as many
+words:
+
+```json
+{"type":"response","id":8,"outcome":{"error":{
+  "code":"already_recording",
+  "message":"`process `cs2.exe`` is being recorded to D:\\clips\\session.mkv; ask again with `finalise_recording` to finish that file and exit"}}}
+```
+
+`finalise_recording: true` — which a request that omits the field does **not**
+mean — stops the recording, finishes its file and exits, and the reply names the
+file so the client can tell the user where it is:
+
+```json
+{"type":"response","id":8,"outcome":{"ok":{"reply":"shutting_down",
+  "finalising":{"recording_id":"r-1","output":"D:\\clips\\session.mkv",
+                "target":"process `cs2.exe`","elapsed_ms":4200}}}}
+```
+
+Either way no footage is lost: the file is closed properly, not abandoned. The
+tray's Exit is the caller this shape was designed for — its menu item reads
+"Stop recording and exit" while something is being recorded, so the permission
+in the request is the same sentence the user read (`docs/desktop-ui.md`).
+
+#### When the reply arrives, and what it promises
+
+**Before** the recorder winds up, because a reply written after the process
+ended would never be written at all. It says the shutdown was accepted and the
+endpoint is closing. The proof that it *finished* is the endpoint going away,
+which is the last thing the recorder does;
+`clipped_ipc::supervisor::wait_for_recorder_to_exit` is the wait for it, and it
+has to allow for finalising a file.
+
+#### An older recorder
+
+`shutdown` is a new command name, so a recorder built before it refuses it with
+`unknown_command` naming the command — which is version skew a client can report,
+rather than a request that was ignored. A client that would rather not ask at all
+checks `shutdown` in [`welcome.features`](#the-handshake) first.
 
 ## Commands this build cannot perform
 
@@ -599,7 +676,7 @@ person reads, written to AGENTS.md section 28.
 | `unknown_command` | No command by that name in this build. |
 | `invalid_parameters` | The command exists; the parameters do not describe something that could be done. |
 | `not_implemented` | The command exists and its subsystem is not in this build. Carries the milestone and issue. |
-| `already_recording` | A recording is running, and this recorder runs one at a time. |
+| `already_recording` | A recording is running. For `start_recording`, because this recorder runs one at a time; for `shutdown`, because the request did not say it could finish one. |
 | `not_recording` | There is nothing to stop, or the named recording is not the one running. |
 | `target_not_found` | No window matched what was asked for. |
 | `recording_failed` | Capture, encoding or muxing refused. Whatever was written before the failure is still a finished file. |
@@ -651,7 +728,10 @@ one is a separate problem with a separate answer, a session-local named mutex
 
 **The recorder is shutting down.** Ctrl+C stops the listener first, then stops
 any recording and waits for its file to be finished, then exits. Connection
-threads own nothing that needs finalising and go with the process.
+threads own nothing that needs finalising and go with the process. The
+[`shutdown`](#shutdown) command takes exactly that path — it is what stops the
+listener — so there is one shutdown rather than two, and a client that sent it
+sees the reply first and then the endpoint go.
 
 **A client that connects and then stalls.** Reads on a connection block with no
 timeout, so a peer that announces a frame and never sends it holds that
@@ -837,15 +917,10 @@ npm test --workspace @clipped/desktop -- ipc/conformance
 - **Preview frames, waveforms and thumbnails.** High-bandwidth data does not go
   through a JSON control channel; it gets its own transport decision when
   something needs it.
-- **Asking the recorder to exit.** There is no `shutdown` command, and a
-  recorder started detached has no console to receive Ctrl+C, so today the only
-  way to end one is to kill it. That is a gap rather than a design property and
-  it is [issue #220](https://github.com/wildware-uk/clipped/issues/220).
-  Supervision itself is no longer missing: `clipped_ipc::supervisor` starts a
-  recorder, watches it and decides whether to replace it
-  ([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). It is in this
-  crate rather than beside it because it is expressed entirely in endpoints,
-  clients and events, and both ends of the boundary need it.
+- **Killing the recorder.** Nothing here terminates a process. Asking one to
+  exit is [`shutdown`](#shutdown), which goes over the protocol precisely so
+  that the recording is finished rather than abandoned; there is deliberately
+  no command that ends a recorder without finishing what it is writing.
 - **Authentication.** There is none, and there should be none: the operating
   system's access control is the authentication, and a token would be a second,
   weaker copy of it. That reasoning holds only while the transport is a named

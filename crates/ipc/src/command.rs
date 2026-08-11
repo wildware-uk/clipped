@@ -29,6 +29,13 @@
 //! for does not exist; inventing a shape now would be a public API designed
 //! against a guess, and one the milestone that builds it would have to break
 //! (AGENTS.md section 43).
+//!
+//! # The command with no handler behind it
+//!
+//! [`Command::Shutdown`] is the one command a [`CommandHandler`](crate::CommandHandler)
+//! never sees, and for the opposite reason to [`UnbuiltCommand`]: not because
+//! nothing can perform it, but because the thing that performs it is the accept
+//! loop rather than the application. `crates/ipc/src/server.rs` answers it.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +54,14 @@ pub enum Command {
     StartRecording(StartRecording),
     /// Stop the recording that is running.
     StopRecording(StopRecording),
+    /// Stop serving, finish anything still being recorded, and exit.
+    ///
+    /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
+    /// it is answered by [`crate::server`], which owns the accept loop and is
+    /// therefore the only thing that can end it. See
+    /// [`ShutdownRequest`](crate::server::ShutdownRequest) for the contract that
+    /// makes "and exit" true rather than aspirational.
+    Shutdown(Shutdown),
     /// A command whose subsystem this build does not contain.
     ///
     /// It is parsed — so that the refusal names the command rather than
@@ -64,6 +79,7 @@ impl Command {
             Self::GetStatus => "get_status",
             Self::StartRecording(_) => "start_recording",
             Self::StopRecording(_) => "stop_recording",
+            Self::Shutdown(_) => "shutdown",
             Self::Unbuilt(command) => command.name(),
         }
     }
@@ -82,6 +98,7 @@ impl Command {
             "get_status" => Ok(Self::GetStatus),
             "start_recording" => Ok(Self::StartRecording(parse_params(request)?)),
             "stop_recording" => Ok(Self::StopRecording(parse_params(request)?)),
+            "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => match UnbuiltCommand::from_name(name) {
                 Some(command) => Ok(Self::Unbuilt(command)),
                 None => Err(ProtocolError::new(
@@ -106,6 +123,7 @@ impl Command {
             Self::Ping | Self::GetStatus => Ok(serde_json::Value::Null),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
+            Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
             Self::Unbuilt(_) => Ok(serde_json::Value::Null),
         }
         .map_err(|error| {
@@ -294,6 +312,35 @@ pub struct StopRecording {
     pub recording_id: Option<String>,
 }
 
+/// How far a shutdown may go.
+///
+/// The parameter exists because the two answers to "the user asked to exit and a
+/// recording is running" are both wrong as a default. Exiting regardless would
+/// let anything running as this user end somebody's recording by sending four
+/// words down a pipe; refusing outright would leave a recorder that can never be
+/// stopped while it is recording, which is
+/// [issue #220](https://github.com/wildware-uk/clipped/issues/220) again in a
+/// smaller shape.
+///
+/// So the recorder refuses by default and performs it when asked in as many
+/// words. A caller that has not thought about the recording cannot end one by
+/// accident, and one that has — a tray menu whose item reads "Stop recording and
+/// exit" — says so in the request. Either way the file is finished and playable:
+/// the recording is stopped through the recorder's ordinary shutdown path, not
+/// abandoned (AGENTS.md section 17).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shutdown {
+    /// Whether a recording in progress may be stopped and its file finished
+    /// first.
+    ///
+    /// `false` — the default, and what a request that omits it means — refuses
+    /// the shutdown with [`ErrorCode::AlreadyRecording`] while something is
+    /// being recorded, naming the recording so the caller can put the question
+    /// to the user.
+    pub finalise_recording: bool,
+}
+
 /// What a command produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
@@ -316,6 +363,26 @@ pub enum Reply {
     RecordingStopped {
         /// What it turned out to be.
         summary: RecordingSummary,
+    },
+    /// The recorder has stopped listening and is winding up.
+    ///
+    /// Sent **before** the recorder exits, because a reply written after the
+    /// process ended would never arrive. What it promises is that the shutdown
+    /// was accepted and the endpoint is closing; the observable proof that it
+    /// finished is the endpoint going away, which
+    /// [`supervisor::wait_for_recorder_to_exit`](crate::supervisor::wait_for_recorder_to_exit)
+    /// waits for.
+    ShuttingDown {
+        /// The recording that will be stopped and finished before the recorder
+        /// exits, if there was one.
+        ///
+        /// Absent when nothing was being recorded. Present only for a shutdown
+        /// that asked for [`Shutdown::finalise_recording`], because one that did
+        /// not is refused rather than answered while a recording is running —
+        /// so this names a file the caller can tell the user about rather than a
+        /// file it has just silently ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finalising: Option<crate::status::ActiveRecording>,
     },
 }
 
@@ -421,6 +488,56 @@ mod tests {
 
         let back: Request = serde_json::from_str(&json).expect("and deserialises");
         assert_eq!(Command::from_request(&back).expect("it parses"), start);
+    }
+
+    #[test]
+    fn a_shutdown_that_says_nothing_is_the_one_that_will_not_end_a_recording() {
+        // The default is the whole of the safety property: a caller that has
+        // not thought about the recording cannot end one, because saying
+        // nothing means "no". A `#[serde(default)]` that flipped to `true`
+        // would turn every bare `{"command":"shutdown"}` on this machine into a
+        // way to stop somebody's recording.
+        for params in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"invented_later": true}),
+        ] {
+            assert_eq!(
+                Command::from_request(&request("shutdown", params.clone())).expect("it parses"),
+                Command::Shutdown(Shutdown {
+                    finalise_recording: false
+                }),
+                "a shutdown carrying {params} must not be allowed to finalise a recording"
+            );
+        }
+
+        assert_eq!(
+            Command::from_request(&request(
+                "shutdown",
+                serde_json::json!({"finalise_recording": true})
+            ))
+            .expect("it parses"),
+            Command::Shutdown(Shutdown {
+                finalise_recording: true
+            }),
+        );
+    }
+
+    #[test]
+    fn a_shutdown_round_trips_through_the_request_it_is_carried_in() {
+        let shutdown = Command::Shutdown(Shutdown {
+            finalise_recording: true,
+        });
+        let request = shutdown.to_request(3).expect("it can be represented");
+        assert_eq!(request.command, "shutdown");
+
+        let json = serde_json::to_string(&request).expect("it serialises");
+        let back: Request = serde_json::from_str(&json).expect("and deserialises");
+        assert_eq!(
+            Command::from_request(&back).expect("it parses"),
+            shutdown,
+            "the parameter has to survive the wire, or every shutdown becomes the refusing one"
+        );
     }
 
     #[test]

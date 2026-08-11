@@ -40,6 +40,7 @@
  */
 
 import type {
+  ActiveRecording,
   ClientMessage,
   ErrorDetail,
   Hello,
@@ -292,11 +293,32 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'recording_stopped':
       return { reply: 'recording_stopped', summary: readSummary(reply['summary']) };
+    case 'shutting_down': {
+      const finalising = reply['finalising'];
+      return {
+        reply: 'shutting_down',
+        // Absent means nothing was being recorded, which is an answer rather
+        // than a gap; a present one names a file the user should be told about.
+        ...(finalising === undefined || finalising === null
+          ? {}
+          : { finalising: readActiveRecording(finalising) }),
+      };
+    }
     default:
       // No catch-all, deliberately: a reply this build cannot read is a command
       // whose outcome it does not know, and reporting that is the honest answer.
       return unreadable(`\`${tag}\` is not a reply this build knows`);
   }
+}
+
+function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
+  const recording = object(value, 'a recording');
+  return {
+    recording_id: stringField(recording, 'recording_id', 'a recording'),
+    output: stringField(recording, 'output', 'a recording'),
+    target: stringField(recording, 'target', 'a recording'),
+    elapsed_ms: numberField(recording, 'elapsed_ms', 'a recording'),
+  };
 }
 
 function readStatus(value: JsonValue | undefined): RecorderStatus {
@@ -306,13 +328,7 @@ function readStatus(value: JsonValue | undefined): RecorderStatus {
     case 'idle':
       return { state: 'idle' };
     case 'recording':
-      return {
-        state: 'recording',
-        recording_id: stringField(status, 'recording_id', 'a recording'),
-        output: stringField(status, 'output', 'a recording'),
-        target: stringField(status, 'target', 'a recording'),
-        elapsed_ms: numberField(status, 'elapsed_ms', 'a recording'),
-      };
+      return { state: 'recording', ...readActiveRecording(status) };
     default:
       // The one unknown value that must not be tolerated. Showing "idle" for a
       // recorder in a state this build has never heard of would be a lie; not

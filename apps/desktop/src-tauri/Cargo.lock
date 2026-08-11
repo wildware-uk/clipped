@@ -328,6 +328,7 @@ dependencies = [
  "clipped-ipc",
  "tauri",
  "tauri-build",
+ "windows 0.62.2",
 ]
 
 [[package]]

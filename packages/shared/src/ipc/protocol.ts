@@ -106,7 +106,7 @@ export type KnownEventStream = (typeof EVENT_STREAMS)[number];
 export type EventStream = Extensible<KnownEventStream>;
 
 /** The capabilities a recorder can advertise in its welcome. */
-export const FEATURES = ['recording', 'status_events'] as const;
+export const FEATURES = ['recording', 'status_events', 'shutdown'] as const;
 
 /** A capability this build knows how to make use of. */
 export type KnownFeature = (typeof FEATURES)[number];
@@ -127,6 +127,7 @@ export const COMMANDS = [
   'get_status',
   'start_recording',
   'stop_recording',
+  'shutdown',
   'save_replay',
   'add_bookmark',
   'take_screenshot',
@@ -192,7 +193,13 @@ export type RecorderState = (typeof RECORDER_STATES)[number];
 export const OUTCOMES = ['ok', 'error'] as const;
 
 /** The replies this build knows. */
-export const REPLIES = ['pong', 'status', 'recording_started', 'recording_stopped'] as const;
+export const REPLIES = [
+  'pong',
+  'status',
+  'recording_started',
+  'recording_stopped',
+  'shutting_down',
+] as const;
 
 /** The name of a reply. Closed: a reply nobody can read is a failed command. */
 export type ReplyName = (typeof REPLIES)[number];
@@ -292,6 +299,21 @@ export type StartRecordingParams = {
   readonly system_audio?: string;
 };
 
+/**
+ * How far a shutdown may go. A type alias for the reason above.
+ *
+ * `finalise_recording` left out means `false`, and `false` is refused with
+ * `already_recording` while something is being recorded. That default is the
+ * safety property, not a convenience: anything running as this user can reach
+ * the recorder's pipe, and a bare `shutdown` must not be able to end somebody's
+ * recording. An interface sends `true` only after the user has been told that is
+ * what will happen.
+ */
+export type ShutdownParams = {
+  /** Whether a recording in progress may be stopped and its file finished first. */
+  readonly finalise_recording?: boolean;
+};
+
 /** Which recording to stop. A type alias for the reason above. */
 export type StopRecordingParams = {
   /**
@@ -369,12 +391,32 @@ export interface RecordingStoppedReply {
 }
 
 /**
+ * The recorder has stopped listening and is winding up.
+ *
+ * Sent before it exits, because a reply written afterwards would never arrive.
+ * The endpoint going away is the proof that it finished.
+ */
+export interface ShuttingDownReply {
+  /** The tag. */
+  readonly reply: 'shutting_down';
+  /**
+   * The recording that will be stopped and finished before the recorder exits.
+   *
+   * Absent when nothing was being recorded. Present only for a shutdown that
+   * asked to finalise one, so this names a file worth telling the user about
+   * rather than one that has just been ended behind their back.
+   */
+  readonly finalising?: ActiveRecording;
+}
+
+/**
  * What a command produced.
  *
  * No unrecognised variant: a reply the interface cannot read is a command whose
  * outcome it does not know, which it must report rather than absorb.
  */
-export type Reply = PongReply | StatusReply | RecordingStartedReply | RecordingStoppedReply;
+export type Reply =
+  PongReply | StatusReply | RecordingStartedReply | RecordingStoppedReply | ShuttingDownReply;
 
 /** Nothing is being recorded. */
 export interface IdleStatus {
@@ -382,10 +424,15 @@ export interface IdleStatus {
   readonly state: 'idle';
 }
 
-/** A recording is in progress. */
-export interface RecordingStatus {
-  /** The tag. */
-  readonly state: 'recording';
+/**
+ * A recording that is running, without the tag that says a status carries it.
+ *
+ * The same four fields appear inside a `recording` status and inside a
+ * `shutting_down` reply, so they are one interface rather than two: two copies
+ * would be two things to keep in step with the Rust, and the conformance check
+ * compares each against the same `active_recording` structure.
+ */
+export interface ActiveRecording {
   /** Identifies this recording for the length of the recorder's life. */
   readonly recording_id: string;
   /** The file being written. */
@@ -399,6 +446,12 @@ export interface RecordingStatus {
   readonly target: string;
   /** Milliseconds the recording has been running, as the recorder measures it. */
   readonly elapsed_ms: number;
+}
+
+/** A recording is in progress. */
+export interface RecordingStatus extends ActiveRecording {
+  /** The tag. */
+  readonly state: 'recording';
 }
 
 /**

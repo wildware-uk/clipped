@@ -44,10 +44,11 @@ block in the sidebar shows what the link reports and nothing else — one wordin
 for each of the link's four states, and one for "this is not the Clipped window",
 which is what `npm run dev:web` and the tests see.
 
-There are still no transport controls. A Start Recording button with nothing
-behind it is exactly what AGENTS.md section 27 forbids, and the screens that
-would hold one are not built. A "Try again" control for a link that has given up
-is [issue #221](https://github.com/wildware-uk/clipped/issues/221).
+**The controls are in the notification area, not in the window** — see
+[The tray](#the-tray). No screen has a Start Recording button, because no screen
+is built, and a button with nothing behind it is exactly what AGENTS.md section
+27 forbids. A "Try again" control for a link that has given up is
+[issue #221](https://github.com/wildware-uk/clipped/issues/221).
 
 ## What the shell is
 
@@ -83,6 +84,167 @@ saying so and naming the issue that builds it — #60 for Home and Library, #107
 for Games, #83 for Editor, #51 for Settings, #94 for Trash, #101 for
 Diagnostics. Building one replaces its placeholder route with the real screen.
 
+## The tray
+
+SPEC.md section 33: an icon in the notification area, a menu with the current
+status and six items, and closing the window minimises to it. This is the first
+part of Clipped's interface that *does* anything — until it, the window could
+only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
+
+```text
+  Recording process `cs2.exe`          the status, not a control
+  ─────────────────────────────
+  Save Replay — needs the replay buffer (#37)      disabled
+  Add Bookmark — needs bookmarks (#64)            disabled
+  Stop Recording
+  ─────────────────────────────
+  Open Library
+  Settings
+  ─────────────────────────────
+  Stop recording and exit
+```
+
+Left-clicking the icon raises the window; right-clicking opens the menu.
+
+### Where the parts are
+
+| File | What it decides |
+| --- | --- |
+| `src-tauri/src/tray_model.rs` | What the tray should show and what each item does. Pure — no Tauri, no Windows, no I/O — and therefore the part with tests. |
+| `src-tauri/src/tray.rs` | The menu, the redraws, and turning a click into a command on the recorder. |
+| `src-tauri/src/tray_icon.rs` | The four marks, drawn in code. |
+| `src-tauri/src/foreground.rs` | Which application the user was last in, which is what Start Recording records. |
+
+### Four marks, and why they are shapes
+
+AGENTS.md section 46 asks that state is never colour alone, and a tray icon is
+the hardest place in the application to honour that: sixteen pixels, no label.
+So each state is a different **shape**, legible in a greyscale screenshot:
+
+| State | Mark | Tooltip |
+| --- | --- | --- |
+| Attached, nothing recording | an open square | `Clipped — not recording` |
+| Recording | a filled disc, in the accent | ``Clipped — recording process `cs2.exe` `` |
+| Connecting or reconnecting | four corner brackets — an outline that has not closed | `Clipped — looking for the recorder` |
+| No recorder | a struck-through square | `Clipped — no recorder. <reason>` |
+
+Colour is carried as well and is the reinforcement rather than the signal. The
+tooltip says the same thing in words, and the menu's first line says it again,
+so the state reaches a screen reader too.
+
+The marks are drawn as a light fill inside a dark outline, because Windows draws
+the notification area dark by default and light on some machines and an icon is
+not given a choice. `every_mark_reads_on_a_light_ground_and_on_a_dark_one`
+measures every drawn colour against both grounds and holds the best of them to
+WCAG 1.4.11's 3:1, rather than asserting that an outline exists:
+
+| Drawn colour | On a dark taskbar (`#202020`) | On a light one (`#f3f3f3`) |
+| --- | --- | --- |
+| the fill, `#f3f2f2` | 14.58:1 | 1.01:1 |
+| the outline, `#111111` | 1.16:1 | 17.02:1 |
+| the accent, `#ec3013` | 3.88:1 | 3.79:1 |
+
+Which is why the outline is not decoration: the fill alone would be invisible on
+a light taskbar and nothing else in the application would notice. The recording
+disc is the one mark whose fill carries both grounds by itself.
+
+**There is no "buffering" mark**, which SPEC.md section 33's own list implies.
+The recorder cannot report one: `RecorderStatus` is `idle` or `recording`, the
+replay buffer exists as a crate and nothing in `serve` runs it, and a tray that
+showed buffering would be showing something nobody measured (AGENTS.md section
+27). It arrives with the buffer, in
+[issue #37](https://github.com/wildware-uk/clipped/issues/37).
+
+### Nothing offered that would do nothing
+
+Every item is either something this build performs or is disabled **with the
+reason in its own label**. A notification-area menu has no tooltip and no help
+text, so the label is the only place a reason can go, and "greyed out with no
+explanation" is the failure AGENTS.md section 27 names.
+
+- **Save Replay** and **Add Bookmark** are commands the protocol defines and the
+  recorder refuses. Their labels are built from `UnbuiltCommand`'s own subsystem
+  and tracking issue — the same two facts the recorder puts in the
+  `not_implemented` refusal — so the day one is built, the menu stops claiming
+  it has not.
+- **Open Library** and **Settings** raise the window and send it to that screen.
+  Neither screen is written, and each says so and names the issue that builds it;
+  that is a thing that happens, not a control that does nothing.
+- **Start Recording** names what it would record — `Start Recording — cs2.exe` —
+  and is disabled, saying which, when there is no recorder or nothing has been in
+  front of the window to record.
+- **Stop Recording** replaces it while something is being recorded.
+
+`no_enabled_item_has_nothing_behind_it` asserts the property rather than the
+five cases: across every link state and with and without a foreground window, an
+item a user can click has something to do, and one that has not is disabled.
+
+### What Start Recording records
+
+The window the user was last in, by process identifier. A tray has no picker, so
+the honest answer is "the application you were in when you opened this menu",
+and finding that out is `foreground.rs`: an `EVENT_SYSTEM_FOREGROUND` window
+event hook, which costs nothing until a foreground window changes — the same
+non-polling choice `clipped-game-detection` made for process starts (issue #41),
+for the same reason, because this process runs beside a game.
+
+Two things are deliberately not remembered: this process's own windows, and the
+shell's own surfaces by window class — the taskbar, the notification overflow,
+Start, Search and the desktop. Opening the tray menu raises the taskbar, so
+without that exclusion the answer would be `explorer.exe` every time. A File
+Explorer *window* is `CabinetWClass` and is remembered like anything else,
+because somebody may want to record one.
+
+The recorder is then asked for a `pid`, and resolves the window itself. One set
+of rules about what a recordable window is, in the recorder (AGENTS.md section
+55).
+
+### Closing, and exiting
+
+They are different things.
+
+**Closing the window hides it.** The recorder is a separate process and goes on
+recording; the tray is where the application still is.
+
+**Exit is the only path that stops the recorder**, and it goes over the protocol
+rather than at the process, so that a recording is *finished* rather than
+abandoned. The protocol refuses a bare `shutdown` while something is being
+recorded ([ipc.md](ipc.md#shutdown)) and the menu item reads **"Stop recording
+and exit"** in that state — so the permission the request carries is the same
+sentence the user read. Then the window waits for the recorder to be gone, up to
+twenty seconds, because a window that vanished the instant Exit was clicked
+would leave a recorder finalising a file with nothing on screen to say so.
+
+That whole path exists because it did not:
+[issue #220](https://github.com/wildware-uk/clipped/issues/220) recorded that a
+recorder started detached — no console, its own process group — could not be sent
+Ctrl+C and had no command to ask it to exit, so the only way to end one was Task
+Manager.
+
+### Reporting a failure
+
+A tray menu closes the instant it is clicked, so an action that fails has nowhere
+of its own to say so. The window is raised carrying the sentence, on the
+`tray-notice` event, and the sidebar's status block shows it — the only surface
+Clipped has that can hold one (AGENTS.md section 45). `tray-navigate` is the
+other direction of the same channel: Open Library and Settings name a path and
+the shell is what knows what to do with one.
+
+### Explorer restarting
+
+When Explorer restarts it broadcasts `TaskbarCreated`, and an application that
+does not re-add its icon loses it silently for the rest of the session. **Tauri
+handles this**, through the `tray-icon` crate: it registers the message with
+`RegisterWindowMessageA`, lets it through UIPI with `ChangeWindowMessageFilterEx`
+so an elevated application can still receive it, and re-adds the icon in its
+window procedure.
+
+That was checked rather than believed. With the application running,
+`taskkill /f /im explorer.exe` followed by `start explorer.exe`: Clipped's icon
+was in the notification area before, with its tooltip reading
+`Clipped — not recording`, and was still there afterwards reading the same thing.
+Several other applications' icons did not come back in the same interval.
+
 ## Decisions
 
 ### Tauri 2, React 19, Vite 7
@@ -110,11 +272,14 @@ promise CONTRIBUTING.md makes about a clean clone, and would put several hundred
 crates and a WebView2 dependency in front of every `cargo test --workspace`.
 
 The cost is that `cargo fmt --all`, `cargo clippy --workspace`, `cargo build
---workspace` and `cargo deny` do not reach it, and every one of those is paid
-back explicitly rather than dropped:
+--workspace`, `cargo test --workspace` and `cargo deny` do not reach it, and
+every one of those is paid back explicitly rather than dropped:
 
-- the Desktop UI job runs `cargo fmt --check` and `cargo clippy -- -D warnings`
-  against the crate, after the frontend build has produced `dist`;
+- the Desktop UI job runs `cargo fmt --check`, `cargo clippy -- -D warnings` and
+  `cargo test` against the crate, after the frontend build has produced `dist`.
+  The test step arrived with the tray: `tray_model.rs` and `tray_icon.rs` hold
+  the rules about what the menu offers and what the icon looks like, and a test
+  that is compiled and never run is one that has stopped being a test;
 - the Dependencies job runs `cargo deny` against it with `--manifest-path` and
   `--config deny.toml`, so both lockfiles are held to one policy. It needs
   neither Node nor `dist`, because `cargo metadata` runs no build scripts, which
@@ -470,3 +635,17 @@ The Rust side of that call is out of reach here — Tauri decides whether to
 answer it in the process that owns the window — and so is WebView2. Keyboard
 behaviour in the real window is checked by hand, by driving it with Tab,
 Shift+Tab and Enter and watching the window title follow the screen.
+
+The tray's own rules are tested on the Rust side, with `cargo test
+--manifest-path apps/desktop/src-tauri/Cargo.toml`, and the CI job runs it. What
+is covered there is what can be: `tray_model.rs` is a pure function of the link's
+state and the last foreground window, so every menu item's label, its enabled
+state and what it would do are checked across every state the link has, and
+`tray_icon.rs`'s marks are compared as silhouettes and measured for contrast.
+
+What is **not** covered there is the tray itself — building a real notification-
+area icon needs a desktop session and a message loop, and driving its menu needs
+a pointer. That half is verified by hand and recorded on the issue: the icon
+appearing, its tooltip following a real recording, surviving an Explorer restart,
+and the four things the menu items do driven through the same `RecorderLink`
+calls the handlers make.

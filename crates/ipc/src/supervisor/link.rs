@@ -16,10 +16,18 @@
 //!
 //! # Stopping
 //!
+//! Two different things, and keeping them apart is the whole design.
+//!
 //! [`RecorderLink::stop`] stops the *watching*. It does not stop the recorder,
 //! which is the entire point of the arrangement: a window that closes must
 //! leave a recording running
 //! ([ADR 0002](../../../docs/adr/0002-separate-recorder-process.md)).
+//!
+//! [`RecorderLink::shut_down_recorder`] stops the *recorder*, on purpose, over
+//! the protocol, and finishes any recording first
+//! ([issue #220](https://github.com/wildware-uk/clipped/issues/220)). It is what
+//! a tray menu's Exit calls, and it is deliberately the only thing here that can
+//! end a recording.
 //!
 //! It also does not join the watching thread. Reads on this transport have no
 //! deadline (`docs/ipc.md`, "A client that connects and then stalls"), so a
@@ -36,7 +44,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::{ensure_recorder, Attachment, SupervisorError, SupervisorSettings};
-use crate::client::EventClient;
+use crate::client::{Client, ClientError, EventClient};
+use crate::command::{Command, Reply, Shutdown};
 use crate::error::ProtocolError;
 use crate::message::{Event, EventStream};
 use crate::status::{ActiveRecording, RecorderStatus};
@@ -47,6 +56,15 @@ use crate::status::{ActiveRecording, RecorderStatus};
 /// covers the moment between one connection being accepted and the next
 /// instance being created, not a recorder that is starting.
 const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a command is given to reach a recorder.
+///
+/// The same reasoning as [`SUBSCRIBE_TIMEOUT`]: this is the wait for a
+/// *connection* to a recorder believed to be there, not for one that is starting
+/// and not for the command itself, which has no deadline. How long a recorder
+/// takes to finish a file after a shutdown is a separate wait again, and is
+/// [`super::wait_for_recorder_to_exit`].
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Where the link with the recorder stands.
 ///
@@ -135,6 +153,91 @@ pub enum RecorderLinkEvent {
     },
 }
 
+/// What asking the recorder to exit produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ShutdownOutcome {
+    /// The recorder accepted and is winding up.
+    ShuttingDown {
+        /// The recording it will finish before it exits, if there was one.
+        ///
+        /// The file is a real file at a real path, and naming it is the whole of
+        /// what a UI can usefully say about it (the same reasoning as
+        /// [`RecorderLinkEvent::RecordingInterrupted`], and the opposite
+        /// situation: this one was asked for).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finalising: Option<ActiveRecording>,
+    },
+    /// There was no recorder listening, so there was nothing to stop.
+    ///
+    /// Not an error: "exit" with nothing running has already happened. It is
+    /// reported rather than smoothed into success so that a caller can tell
+    /// "stopped it" from "there was nothing there", which are different things
+    /// to say to a user.
+    NothingRunning,
+}
+
+/// Why a command sent through the link did not produce a reply.
+///
+/// One type for every command a link sends rather than one per command: the
+/// things that can go wrong — the recorder said no, the recorder could not be
+/// reached, there was never a recorder — do not depend on which command it was.
+#[derive(Debug)]
+pub enum RecorderCallError {
+    /// The recorder refused, and this is the refusal to render.
+    ///
+    /// For a shutdown,
+    /// [`ErrorCode::AlreadyRecording`](crate::ErrorCode::AlreadyRecording) is
+    /// the interesting one and is not a failure: it means a recording is
+    /// running and the request did not say it could be finished, which is the
+    /// recorder protecting it. Ask again with
+    /// [`Shutdown::finalise_recording`] once the user has said so.
+    ///
+    /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) is the
+    /// other one to expect: a recorder built before a command existed, still
+    /// running from before an update.
+    Refused(ProtocolError),
+    /// The recorder could not be reached, or went away part way through.
+    Unreachable(ClientError),
+    /// The recorder answered a different command's reply.
+    ///
+    /// A bug on one side or the other, and worth telling from a refusal, which
+    /// is the recorder working correctly.
+    Unexpected(String),
+    /// This link never had a recorder to talk to.
+    ///
+    /// [`RecorderLink::started_unavailable`] produces such a link: it was made
+    /// for a window that could not name an endpoint or an executable at all.
+    NoRecorderConfigured,
+}
+
+impl std::fmt::Display for RecorderCallError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => write!(formatter, "{error}"),
+            Self::Unreachable(error) => {
+                write!(formatter, "the recorder could not be reached: {error}")
+            }
+            Self::Unexpected(what) => {
+                write!(formatter, "the recorder answered with {what} instead")
+            }
+            Self::NoRecorderConfigured => {
+                formatter.write_str("this window never had a recorder to talk to")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RecorderCallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Refused(error) => Some(error),
+            Self::Unreachable(error) => Some(error),
+            Self::Unexpected(_) | Self::NoRecorderConfigured => None,
+        }
+    }
+}
+
 /// A supervised attachment to the recorder.
 ///
 /// Created by [`start`](Self::start), which returns at once; the work happens on
@@ -142,6 +245,10 @@ pub enum RecorderLinkEvent {
 #[derive(Debug)]
 pub struct RecorderLink {
     shared: Arc<Shared>,
+    /// What the watching thread was given, kept so that
+    /// [`shut_down_recorder`](Self::shut_down_recorder) can open a connection of
+    /// its own. [`None`] for a link that never had a recorder to watch.
+    settings: Option<Arc<SupervisorSettings>>,
 }
 
 impl RecorderLink {
@@ -155,14 +262,22 @@ impl RecorderLink {
     pub fn start(settings: SupervisorSettings) -> (Self, Receiver<RecorderLinkEvent>) {
         let (sender, receiver) = mpsc::channel();
         let shared = Arc::new(Shared::new());
+        let settings = Arc::new(settings);
 
         let watching = Arc::clone(&shared);
+        let watched = Arc::clone(&settings);
         thread::Builder::new()
             .name("clipped-recorder-link".to_owned())
-            .spawn(move || supervise(&settings, &watching, &sender))
+            .spawn(move || supervise(&watched, &watching, &sender))
             .expect("a thread can be started to watch the recorder");
 
-        (Self { shared }, receiver)
+        (
+            Self {
+                shared,
+                settings: Some(settings),
+            },
+            receiver,
+        )
     }
 
     /// A link that watches nothing, because there was nothing to watch.
@@ -183,7 +298,13 @@ impl RecorderLink {
         // stored so that a window which listens before it asks still hears.
         let _ = sender.send(RecorderLinkEvent::State(state));
 
-        (Self { shared }, receiver)
+        (
+            Self {
+                shared,
+                settings: None,
+            },
+            receiver,
+        )
     }
 
     /// Where the link stands right now.
@@ -206,6 +327,131 @@ impl RecorderLink {
     /// See the module documentation for why the watching thread is not joined.
     pub fn stop(&self) {
         self.shared.request_stop();
+    }
+
+    /// Where the recorder listens, for a caller that has to wait for it to go.
+    ///
+    /// [`None`] for a link that never had one
+    /// ([`started_unavailable`](Self::started_unavailable)).
+    #[must_use]
+    pub fn endpoint(&self) -> Option<&crate::transport::Endpoint> {
+        self.settings.as_ref().map(|settings| &settings.endpoint)
+    }
+
+    /// Asks the recorder to finish what it is doing and exit.
+    ///
+    /// This is the action behind a tray menu's Exit, and the answer to
+    /// [issue #220](https://github.com/wildware-uk/clipped/issues/220). It sends
+    /// `shutdown` on a control connection of its own; the recorder stops
+    /// listening, stops any recording and waits for its file to be finalised,
+    /// and then exits (`docs/ipc.md`).
+    ///
+    /// `finalise_recording` is the caller's answer to "may this end a
+    /// recording". `false` — the safe default — is refused with
+    /// [`ShutdownError::Refused`] carrying `already_recording` while something
+    /// is being recorded, so that a caller which has not put the question to the
+    /// user cannot answer it for them.
+    ///
+    /// **Nothing here waits for the recorder to be gone.** The reply says the
+    /// shutdown was accepted; [`super::wait_for_recorder_to_exit`] is how a
+    /// caller finds out that it finished, and the two are separate because the
+    /// wait is as long as finalising a file and a caller may want to say so.
+    ///
+    /// # Watching stops with it
+    ///
+    /// A shutdown that is accepted also calls [`stop`](Self::stop), because a
+    /// link that kept watching would see the recorder go, decide it had crashed
+    /// and start a replacement — undoing the thing that was just asked for. The
+    /// order is deliberately reply-then-stop rather than the reverse: a refused
+    /// shutdown leaves the link watching exactly as it was. The gap between the
+    /// two is microseconds, against the recorder's own sequence of closing its
+    /// listener, finalising a file and only then ending its event subscriptions,
+    /// followed by this link's own backoff before any replacement — so there is
+    /// no window in which a replacement could be started.
+    ///
+    /// # Errors
+    ///
+    /// [`ShutdownError::Refused`] if the recorder said no — most usefully
+    /// `already_recording`, and `unknown_command` from a recorder built before
+    /// this command existed; [`ShutdownError::Unreachable`] if it could not be
+    /// reached; [`ShutdownError::NoRecorderConfigured`] for a link that never
+    /// had a recorder to talk to.
+    pub fn shut_down_recorder(
+        &self,
+        finalise_recording: bool,
+    ) -> Result<ShutdownOutcome, RecorderCallError> {
+        let outcome = match self.call(&Command::Shutdown(Shutdown { finalise_recording })) {
+            Ok(Reply::ShuttingDown { finalising }) => ShutdownOutcome::ShuttingDown { finalising },
+            Ok(other) => return Err(RecorderCallError::Unexpected(format!("`{other:?}`"))),
+            // Nothing is listening. There is no recorder to stop, which is the
+            // state the caller was asking for rather than a failure.
+            Err(RecorderCallError::Unreachable(ClientError::Transport(
+                crate::transport::TransportError::NotListening { .. },
+            ))) => {
+                self.stop();
+                return Ok(ShutdownOutcome::NothingRunning);
+            }
+            Err(error) => return Err(error),
+        };
+
+        tracing::info!(
+            finalising = matches!(
+                &outcome,
+                ShutdownOutcome::ShuttingDown {
+                    finalising: Some(_)
+                }
+            ),
+            "the recorder accepted a shutdown"
+        );
+
+        // Before this returns, so that the watching thread cannot notice the
+        // recorder going and start a replacement.
+        self.stop();
+        self.shared.set_state(RecorderLinkState::Unavailable {
+            reason: "The recorder was asked to exit.".to_owned(),
+        });
+
+        Ok(outcome)
+    }
+
+    /// Sends one command to the recorder and waits for its reply.
+    ///
+    /// A control connection of its own, opened and closed around the one
+    /// command. The link's own connection carries events and is read by a thread
+    /// blocked on it, and a control connection is request-then-response in
+    /// strict alternation (`docs/ipc.md`) — so sharing one would mean
+    /// interrupting a blocking read. Opening a pipe costs one `CreateFile`, and
+    /// the recorder serves eight connections.
+    ///
+    /// **Blocks** until the recorder answers, which for `stop_recording` is
+    /// until the file has been finalised. Never call it on a thread that is
+    /// drawing a window.
+    ///
+    /// # Errors
+    ///
+    /// [`RecorderCallError::Refused`] carries the recorder's own refusal, which
+    /// is what a UI renders; [`RecorderCallError::Unreachable`] means there was
+    /// no recorder to ask or it went away;
+    /// [`RecorderCallError::NoRecorderConfigured`] means this link never had
+    /// one.
+    pub fn call(&self, command: &Command) -> Result<Reply, RecorderCallError> {
+        let Some(settings) = self.settings.as_ref() else {
+            return Err(RecorderCallError::NoRecorderConfigured);
+        };
+
+        let mut client = Client::connect(
+            &settings.endpoint,
+            &settings.client.name,
+            &settings.client.version,
+            CONNECT_TIMEOUT,
+        )
+        .map_err(RecorderCallError::Unreachable)?;
+
+        match client.call(command) {
+            Ok(reply) => Ok(reply),
+            Err(ClientError::Refused(refusal)) => Err(RecorderCallError::Refused(refusal)),
+            Err(error) => Err(RecorderCallError::Unreachable(error)),
+        }
     }
 }
 

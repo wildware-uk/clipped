@@ -37,6 +37,7 @@
         "get_status",
         "start_recording",
         "stop_recording",
+        "shutdown",
         "save_replay",
         "add_bookmark",
         "take_screenshot",
@@ -101,7 +102,8 @@
     "feature": {
       "values": [
         "recording",
-        "status_events"
+        "status_events",
+        "shutdown"
       ],
       "tolerates_unrecognised": true
     },
@@ -124,7 +126,8 @@
         "pong",
         "status",
         "recording_started",
-        "recording_stopped"
+        "recording_stopped",
+        "shutting_down"
       ],
       "tolerates_unrecognised": false
     },
@@ -139,6 +142,15 @@
     }
   },
   "structures": {
+    "active_recording": {
+      "required": [
+        "elapsed_ms",
+        "output",
+        "recording_id",
+        "target"
+      ],
+      "optional": []
+    },
     "error_detail.not_implemented": {
       "required": [
         "detail",
@@ -264,6 +276,14 @@
       ],
       "optional": []
     },
+    "reply.shutting_down": {
+      "required": [
+        "reply"
+      ],
+      "optional": [
+        "finalising"
+      ]
+    },
     "reply.status": {
       "required": [
         "reply",
@@ -286,6 +306,12 @@
         "outcome"
       ],
       "optional": []
+    },
+    "shutdown": {
+      "required": [],
+      "optional": [
+        "finalise_recording"
+      ]
     },
     "start_recording": {
       "required": [],
@@ -344,6 +370,12 @@
       "name": "stop_recording",
       "params": "stop_recording",
       "reply": "reply.recording_stopped",
+      "available_in_this_build": true
+    },
+    {
+      "name": "shutdown",
+      "params": "shutdown",
+      "reply": "reply.shutting_down",
       "available_in_this_build": true
     },
     {
@@ -445,12 +477,41 @@
       "discriminant": "request.start_recording"
     },
     {
+      "name": "asking the recorder to exit",
+      "direction": "client",
+      "frame": {
+        "command": "shutdown",
+        "id": 8,
+        "params": {
+          "finalise_recording": false
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.shutdown"
+    },
+    {
+      "name": "asking the recorder to finish a recording and exit",
+      "direction": "client",
+      "frame": {
+        "command": "shutdown",
+        "id": 8,
+        "params": {
+          "finalise_recording": true
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.shutdown"
+    },
+    {
       "name": "a control connection accepted",
       "direction": "server",
       "frame": {
         "features": [
           "recording",
-          "status_events"
+          "status_events",
+          "shutdown"
         ],
         "protocol_version": 1,
         "recorder": {
@@ -611,6 +672,58 @@
       },
       "parses": true,
       "discriminant": "response.ok.recording_stopped.stopped"
+    },
+    {
+      "name": "a shutdown accepted, with nothing being recorded",
+      "direction": "server",
+      "frame": {
+        "id": 8,
+        "outcome": {
+          "ok": {
+            "reply": "shutting_down"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.shutting_down"
+    },
+    {
+      "name": "a shutdown accepted, naming the recording it will finish",
+      "direction": "server",
+      "frame": {
+        "id": 8,
+        "outcome": {
+          "ok": {
+            "finalising": {
+              "elapsed_ms": 4200,
+              "output": "D:\\clips\\session.mkv",
+              "recording_id": "r-1",
+              "target": "process `cs2.exe`"
+            },
+            "reply": "shutting_down"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.shutting_down.finalising"
+    },
+    {
+      "name": "a shutdown refused because a recording is running",
+      "direction": "server",
+      "frame": {
+        "id": 8,
+        "outcome": {
+          "error": {
+            "code": "already_recording",
+            "message": "`process `cs2.exe`` is being recorded to D:\\clips\\session.mkv; ask again with `finalise_recording` to finish that file and exit"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.already_recording"
     },
     {
       "name": "a command this build cannot perform",

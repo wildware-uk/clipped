@@ -34,6 +34,7 @@ import { describe, expect, it } from 'vitest';
 import { LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES } from './frame';
 import { parseClientMessage, parseServerMessage } from './parse';
 import type {
+  ActiveRecording,
   ClientMessage,
   CommandName,
   ConnectionRole,
@@ -67,6 +68,8 @@ import type {
   ServerMessage,
   StartRecordingParams,
   StatusChangedEvent,
+  ShutdownParams,
+  ShuttingDownReply,
   StatusReply,
   StopRecordingParams,
   UnsupportedProtocolVersionDetail,
@@ -242,6 +245,13 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     system_audio: 'optional',
   }),
   stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
+  shutdown: fields<ShutdownParams>({ finalise_recording: 'optional' }),
+  active_recording: fields<ActiveRecording>({
+    recording_id: 'required',
+    output: 'required',
+    target: 'required',
+    elapsed_ms: 'required',
+  }),
   recording_summary: fields<RecordingSummary>({
     output: 'required',
     duration_ms: 'required',
@@ -267,6 +277,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.recording_stopped': fields<RecordingStoppedReply>({
     reply: 'required',
     summary: 'required',
+  }),
+  'reply.shutting_down': fields<ShuttingDownReply>({
+    reply: 'required',
+    finalising: 'optional',
   }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
   'recorder_status.recording': fields<RecordingStatus>({
@@ -327,6 +341,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     reply: 'reply.recording_stopped',
     available_in_this_build: true,
   },
+  {
+    name: 'shutdown',
+    params: 'shutdown',
+    reply: 'reply.shutting_down',
+    available_in_this_build: true,
+  },
   { name: 'save_replay', params: null, reply: null, available_in_this_build: false },
   { name: 'add_bookmark', params: null, reply: null, available_in_this_build: false },
   { name: 'take_screenshot', params: null, reply: null, available_in_this_build: false },
@@ -357,6 +377,11 @@ function replyDiscriminant(reply: Reply): string {
       return 'recording_started';
     case 'recording_stopped':
       return `recording_stopped.${reply.summary.end_reason}`;
+    case 'shutting_down':
+      // Whether a recording is being finished is the whole of what this reply
+      // says, so it is part of the path: dropping the field would otherwise
+      // reach the same discriminant either way.
+      return reply.finalising === undefined ? 'shutting_down' : 'shutting_down.finalising';
   }
 }
 

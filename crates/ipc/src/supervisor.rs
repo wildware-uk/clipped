@@ -28,7 +28,7 @@
 //! Three properties are worth stating because each is a decision rather than an
 //! implementation detail.
 //!
-//! **The recorder is started detached and is never stopped from here.** It is
+//! **The recorder is started detached and is never stopped by accident.** It is
 //! spawned with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` and with its
 //! standard streams pointed at nothing, so closing, quitting or killing the
 //! process that started it does not reach it. [`RecorderLink::stop`] stops
@@ -36,6 +36,13 @@
 //! section 17 as it applies here: a UI failure must not destroy an active
 //! recording, and the surest way to guarantee that is for the UI to own no part
 //! of the recorder's lifetime after the moment it starts it.
+//!
+//! Stopping it **on purpose** is a different thing and used to be impossible
+//! ([issue #220](https://github.com/wildware-uk/clipped/issues/220)): a process
+//! with no console cannot be sent Ctrl+C, so the only way to end a recorder
+//! started here was Task Manager. [`RecorderLink::shut_down_recorder`] is the
+//! way, and it goes over the protocol rather than at the process — which is
+//! what makes "finish the recording first" possible at all.
 //!
 //! **One recorder per endpoint is enforced by the endpoint**, not by anything
 //! here. `FILE_FLAG_FIRST_PIPE_INSTANCE` means the second `serve` on a name
@@ -83,7 +90,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub use instance::{claim_instance, InstanceClaim, InstanceError, SingleInstance};
-pub use link::{RecorderLink, RecorderLinkEvent, RecorderLinkState};
+pub use link::{
+    RecorderCallError, RecorderLink, RecorderLinkEvent, RecorderLinkState, ShutdownOutcome,
+};
 
 use crate::client::{Client, ClientError};
 use crate::error::ProtocolError;
@@ -428,6 +437,45 @@ fn probe(settings: &SupervisorSettings) -> Result<Option<u32>, SupervisorError> 
             endpoint: settings.endpoint.path(),
             source: Box::new(source),
         }),
+    }
+}
+
+/// Waits for the endpoint to stop answering, and says whether it did.
+///
+/// This is the only proof available that a recorder asked to exit has finished.
+/// The reply to `shutdown` is written *before* the recorder winds up — it has to
+/// be, or it could not be written at all — so it says the shutdown was accepted
+/// and nothing more. The endpoint disappearing is the recorder's last act: the
+/// listener is closed, then any recording is stopped and its file finalised,
+/// then the process ends and the operating system releases the pipe.
+///
+/// The wait therefore has to allow for finalising a file, which is why the
+/// caller chooses the timeout rather than this function. `false` means the
+/// recorder is still there after `timeout` — worth reporting, and not worth
+/// killing anything over: a recorder still closing a container is doing the one
+/// thing that must not be interrupted (AGENTS.md section 17).
+///
+/// It polls, because a process that is not this one's child cannot be waited
+/// on and the pipe carries no closing event. Every 25 ms, off any path that
+/// matters, for as long as somebody is watching a progress message.
+#[must_use]
+pub fn wait_for_recorder_to_exit(endpoint: &Endpoint, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match crate::transport::connect(endpoint, Duration::ZERO) {
+            // Nothing is listening: the recorder has gone.
+            Err(TransportError::NotListening { .. }) => return true,
+            // Anything else — a connection that opened, or a failure that is
+            // not an absence — means something is still there to answer.
+            Ok(connection) => drop(connection),
+            Err(_) => {}
+        }
+
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(STARTUP_POLL);
     }
 }
 
