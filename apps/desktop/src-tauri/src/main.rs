@@ -76,9 +76,16 @@ fn main() {
             std::mem::forget(claim);
         }
         Ok(InstanceClaim::AlreadyRunning) => {
+            // A release build has no console, so this line is for a developer
+            // rather than for a user: to somebody double-clicking the icon, a
+            // second launch appears to do nothing at all. Raising the window
+            // that is already open needs a channel to the instance holding the
+            // name, and is
+            // [issue #225](https://github.com/wildware-uk/clipped/issues/225).
+            // What matters here is only that this launch starts no recorder.
             eprintln!(
                 "Clipped is already running in this session. Bringing that window to the front \
-                 is issue #50; for now, find it in the taskbar."
+                 is issue #225; for now, find it in the taskbar."
             );
             return;
         }

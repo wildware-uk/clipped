@@ -27,10 +27,11 @@
 //!
 //! It does not bring the existing window to the front. A second launch finds the
 //! name taken, says so and exits; making the first window appear needs a channel
-//! to it and a window to raise, and belongs with the tray icon
-//! ([issue #50](https://github.com/wildware-uk/clipped/issues/50)) rather than
-//! here. What matters for a supervisor is only that the second launch starts no
-//! competing recorder, and exiting achieves that completely.
+//! to the instance holding the name and a window to raise, and is
+//! [issue #225](https://github.com/wildware-uk/clipped/issues/225) rather than
+//! anything this module could do. What matters for a supervisor is only that the
+//! second launch starts no competing recorder, and exiting achieves that
+//! completely.
 
 use std::fmt;
 
