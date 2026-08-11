@@ -31,8 +31,9 @@ impl Bindings {
         Self::default()
     }
 
-    /// The defaults from SPEC.md sections 16 and 25: save replay on `Ctrl+F10`
-    /// and bookmark on `Ctrl+F9`.
+    /// The defaults from SPEC.md sections 7 and 25: save replay on `Ctrl+F10`
+    /// (section 7, "Manual / Replay Buffer") and bookmark on `Ctrl+F9`
+    /// (section 25, "Manual Bookmarks").
     ///
     /// The other five actions start unbound. Binding all seven by default would
     /// mean taking five more combinations away from every other application on
@@ -156,7 +157,8 @@ mod tests {
             .unwrap_or_else(|_| panic!("{text} is a hotkey"))
     }
 
-    /// SPEC.md sections 16 and 25 name these two exactly.
+    /// SPEC.md sections 7 and 25 name these two exactly: `Ctrl + F10` under
+    /// "Manual / Replay Buffer" and `Ctrl + F9` under "Manual Bookmarks".
     #[test]
     fn the_defaults_are_the_ones_the_specification_names() {
         let defaults = Bindings::defaults();
