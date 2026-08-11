@@ -28,7 +28,7 @@ From the repository root, after `npm install`:
 ```powershell
 npm run dev       # the application: Vite plus the Tauri window
 npm run dev:web   # the interface alone, in a browser, for fast iteration
-npm run build     # type-checked production bundle into apps/desktop/dist
+npm run build     # the production bundle into apps/desktop/dist
 npm run build:app # the installable Windows application
 npm run lint      # eslint, prettier and tsc
 npm test          # the shell's behaviour, in jsdom
@@ -36,8 +36,13 @@ npm test          # the shell's behaviour, in jsdom
 
 `npm run dev` compiles the Rust side, so the first run takes several minutes and
 needs the same toolchain as the recorder plus the WebView2 runtime, which
-Windows 11 ships. `npm run dev:web` needs neither and is the faster loop while
-working on the interface itself.
+Windows 11 ships and `scripts/check-prerequisites.ps1` reports on.
+`npm run dev:web` needs neither and is the faster loop while working on the
+interface itself.
+
+`npm run build` is `vite build` and nothing else. esbuild strips the types
+rather than checking them, so a build succeeding says nothing about whether the
+types hold — `npm run lint` is what runs `tsc`, and it is the one CI gates on.
 
 ## Layout
 

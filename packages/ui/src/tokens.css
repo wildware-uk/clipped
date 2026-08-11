@@ -23,10 +23,11 @@
   --color-divider: color-mix(in srgb, #201e1d 40%, transparent);
 
   /*
-   * Secondary text. The design system draws this at 55% of the ink, which on
-   * the light ground measures about 3.4:1 - short of the 4.5:1 that AGENTS.md
-   * section 46 asks of body text. 70% measures about 5.3:1 on `--color-bg` and
-   * on `--color-neutral-200`, which is where the shell uses it.
+   * Secondary text. The design system draws this at 55% of the ink, which
+   * measures 3.65:1 on `--color-bg` and 3.54:1 on `--color-neutral-200` - short
+   * of the 4.5:1 that AGENTS.md section 46 asks of body text. 70% measures
+   * 5.81:1 and 5.55:1 on the same two grounds, which are the only two the shell
+   * draws it on. `contrast.test.ts` measures both.
    */
   --color-text-muted: color-mix(in srgb, #201e1d 70%, transparent);
 
