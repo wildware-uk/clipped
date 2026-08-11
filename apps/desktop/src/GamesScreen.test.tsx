@@ -12,7 +12,7 @@ import type { RecorderLinkState } from './useRecorderLink';
 /**
  * The Games screen's contract, as tests (issue #107).
  *
- * The two properties worth guarding here are the two that would rot silently.
+ * The properties worth guarding here are the ones that would rot silently.
  *
  * The first is that the screen shows the recorder's real state rather than a
  * sentence somebody typed. A screen whose wording is a constant looks identical
@@ -21,11 +21,19 @@ import type { RecorderLinkState } from './useRecorderLink';
  * application and moves the link underneath it rather than rendering
  * `describeGameDetection`'s output next to itself.
  *
- * The second is that the screen offers nothing that does nothing. The deck
- * draws an Add Game button and a table of games; neither can be honoured in
- * this build (AGENTS.md section 27), so neither is drawn, and the assertions
- * are about the absence rather than about the presence of an explanation for
- * it.
+ * The second is that no wording claims more than the link can establish. The
+ * link sees the recorder this window has and nothing else, so a state that said
+ * games were going undetected would be a claim about the machine that nothing
+ * here measured.
+ *
+ * The third is that the screen offers nothing that does nothing, and does offer
+ * the one thing that works. The deck draws an Add Game button and a table of
+ * games; neither can be honoured in this build (AGENTS.md section 27), so
+ * neither is drawn, and the assertions are about the absence rather than about
+ * the presence of an explanation for it. What is drawn instead — the command
+ * that records a game today, and the four things this screen owes with the
+ * issue against each — is asserted by substance rather than by shape, because a
+ * review showed both could be emptied without a case noticing.
  */
 
 /** Mounts the application the way `main.tsx` does, StrictMode and all. */
@@ -47,42 +55,46 @@ function detectionPanel(): HTMLElement {
   return screen.getByRole('region', { name: 'Game detection' });
 }
 
-describe('what the Games screen says about detection', () => {
-  /*
-   * Every state the link has, and what each one means for game detection. The
-   * five are listed rather than generated: the failure this guards against is
-   * two states collapsing into one wording, and a table built from the states
-   * themselves could not see that happen.
-   */
-  const STATES: readonly (readonly [string, RecorderLinkState | null, string, RegExp])[] = [
-    ['outside the Clipped window', null, 'Not known', /not the Clipped window.*no recorder to ask/],
-    ['while the link is being made', { link: 'connecting' }, 'Not known yet', /Looking for/],
-    [
-      'while the link is being remade',
-      {
-        link: 'reconnecting',
-        attempt: 2,
-        attempts_allowed: 4,
-        delay_ms: 500,
-        reason: 'The pipe closed.',
-      },
-      'Not known',
-      /The pipe closed\. Attempt 2 of 4\./,
-    ],
-    [
-      'when there is no recorder',
-      { link: 'unavailable', reason: 'clipped-recorder.exe is not beside this application.' },
-      'Not known',
-      /not attached to a recorder.*not beside this application/,
-    ],
-    [
-      'when a recorder is attached',
-      { link: 'attached', recorder_process_id: 7, status: { state: 'idle' } },
-      'This recorder is not detecting games',
-      /clipped-recorder serve.*clipped-recorder watch/,
-    ],
-  ];
+/*
+ * Every state the link has, and what each one means for game detection. The
+ * five are listed rather than generated: the failure this guards against is
+ * two states collapsing into one wording, and a table built from the states
+ * themselves could not see that happen.
+ *
+ * At module scope because the rendering cases below need the same five: what
+ * the screen offers somebody to do is the same in all of them, and a case that
+ * only checked one would not notice the sentence moving into a branch.
+ */
+const STATES: readonly (readonly [string, RecorderLinkState | null, string, RegExp])[] = [
+  ['outside the Clipped window', null, 'Not known', /not the Clipped window.*no recorder to ask/],
+  ['while the link is being made', { link: 'connecting' }, 'Not known yet', /Looking for/],
+  [
+    'while the link is being remade',
+    {
+      link: 'reconnecting',
+      attempt: 2,
+      attempts_allowed: 4,
+      delay_ms: 500,
+      reason: 'The pipe closed.',
+    },
+    'Not known',
+    /The pipe closed\. Attempt 2 of 4\./,
+  ],
+  [
+    'when there is no recorder',
+    { link: 'unavailable', reason: 'clipped-recorder.exe is not beside this application.' },
+    'Not known',
+    /not attached to a recorder.*not beside this application/,
+  ],
+  [
+    'when a recorder is attached',
+    { link: 'attached', recorder_process_id: 7, status: { state: 'idle' } },
+    'This recorder is not detecting games',
+    /clipped-recorder serve.*clipped-recorder watch/,
+  ],
+];
 
+describe('what the Games screen says about detection', () => {
   it.each(STATES)('is described %s', (_case, link, state, detail) => {
     const described = describeGameDetection(link);
 
@@ -209,6 +221,36 @@ describe('the Games screen', () => {
     });
   });
 
+  /*
+   * A screen that only says what is missing leaves somebody with nothing to do
+   * (AGENTS.md section 45). Automatic recording is built and running today, so
+   * the panel names the command that does it and the issue that would bring it
+   * into this window.
+   *
+   * Checked in every link state, because it is true in every link state and the
+   * failure worth catching is the sentence sliding into one branch of
+   * `describeGameDetection` — where it would be missing precisely when the
+   * window cannot reach a recorder, which is when the reader most needs it.
+   *
+   * The match is on the middle of the sentence rather than on
+   * `WHAT_WORKS_TODAY` itself. Importing the constant and asserting the screen
+   * renders it is a tautology that survives the constant being emptied; this
+   * asserts the two things the sentence is for — a command that can be run now,
+   * and where to follow the work that removes the need to. "records a game as
+   * it launches" is also absent from every state detail, so this cannot be
+   * satisfied by the attached rendering's mention of the same command.
+   */
+  it.each(STATES)('offers the one thing somebody can do today, %s', (_case, link) => {
+    render(<GamesScreen link={link} />);
+
+    const offer = within(detectionPanel()).getByText(
+      /clipped-recorder watch records a game as it launches/,
+    );
+    expect(offer).toBeVisible();
+    expect(offer).toHaveTextContent(/from a terminal/);
+    expect(offer).toHaveTextContent(/issue #241/i);
+  });
+
   it('announces a change of state rather than only drawing it', async () => {
     const user = userEvent.setup();
     stubRecorderLinkRuntime({ link: 'connecting' });
@@ -267,11 +309,30 @@ describe('the Games screen', () => {
   });
 
   /*
-   * Every row has to name the work that supplies it, for the same reason the
-   * unbuilt screens name the issue that builds them: "coming soon" is
-   * indistinguishable from an application that is broken.
+   * What SPEC.md sections 6 and 17 ask this screen for, and the issue that
+   * supplies each — written out here rather than mapped from the screen's own
+   * `MISSING` array.
+   *
+   * That distinction is the whole test. A case that walked the rendered rows
+   * and asserted "two cells, and the second names some issue" is satisfied by a
+   * table holding one invented row, which is what a review demonstrated by
+   * replacing all four with `{ shows: 'x', needs: 'Issue #1' }` and watching the
+   * suite stay green. The claim being made is not "the rows have the right
+   * shape", it is "these four things are the four this screen owes and each is
+   * pinned to the work that lands it", and only a list kept independently of the
+   * implementation can say that.
+   *
+   * Adding a fifth row is a new promise to the reader, so it belongs here too;
+   * the count is asserted for that reason rather than for tidiness.
    */
-  it('names an issue against every thing it cannot show', async () => {
+  const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
+    ['the catalogue of games', /every game Clipped knows/i, [245]],
+    ['registering, renaming, excluding and disabling', /adding an unknown executable/i, [45, 245]],
+    ['counts and storage per game', /sessions, clips, favourites and storage/i, [55]],
+    ['what is being recorded right now', /which game is being recorded now/i, [241]],
+  ];
+
+  it('names each thing it owes, and the issue that lands it', async () => {
     const user = userEvent.setup();
     stubRecorderLinkRuntime({
       link: 'attached',
@@ -282,12 +343,20 @@ describe('the Games screen', () => {
     await openGames(user);
 
     const rows = within(screen.getByRole('table')).getAllByRole('row').slice(1);
-    expect(rows.length).toBeGreaterThan(0);
+    expect(rows).toHaveLength(MUST_BE_NAMED.length);
 
-    for (const row of rows) {
-      const cells = within(row).getAllByRole('cell');
-      expect(cells).toHaveLength(2);
-      expect(cells[1]?.textContent).toMatch(/#\d+/);
+    for (const [subject, shows, issues] of MUST_BE_NAMED) {
+      const matching = rows.filter((row) =>
+        shows.test(within(row).getAllByRole('cell')[0]?.textContent ?? ''),
+      );
+      expect(matching, `one row for ${subject}`).toHaveLength(1);
+
+      const needs = within(matching[0] as HTMLElement).getAllByRole('cell')[1]?.textContent ?? '';
+      for (const issue of issues) {
+        expect(needs, `${subject} is waiting on #${String(issue)}`).toMatch(
+          new RegExp(`#${String(issue)}\\b`),
+        );
+      }
     }
   });
 
