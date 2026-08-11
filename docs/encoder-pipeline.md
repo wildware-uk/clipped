@@ -313,6 +313,15 @@ the mapped input buffer" — and releasing it there is what lets `submit` promis
 that nothing derived from the texture outlives the call. The coded bitstream
 stays locked afterwards, which is what `next_packet` hands over and unlocks.
 
+The release is a guard's `Drop`, not a line at the end of `submit`.
+`Registration` borrows the session and unmaps and unregisters when it goes out
+of scope, so every way out of the call gets the texture back — the happy path,
+each error path, the mapping that succeeded registration but failed itself, and
+a panic unwinding through the middle. Releasing by hand made the guarantee true
+only for as long as nobody put something fallible between the register and the
+release, which is not what `Session::drop` claims when it says nothing derived
+from a caller's texture can be outstanding (issue #149).
+
 Two settings exist to keep that promise true rather than usually true. B-frames
 are off, and lookahead is switched off whatever the preset returned, because the
 header is explicit that with lookahead "input frames must remain available to the
@@ -321,6 +330,15 @@ submission that carries it. If it ever answers `NV_ENC_ERR_NEED_MORE_INPUT`
 anyway, `submit` flushes that picture out, releases the texture and reports the
 failure, rather than quietly holding a registration on a surface the caller has
 been told it may reuse.
+
+Flushing ends the stream, and a session that has been sent
+`NV_ENC_PIC_FLAG_EOS` refuses every later frame with "the stream has been
+finished and cannot take more frames" — whether the end-of-stream came from
+`finish` or from that flush. Without it a caller that treated the
+deferred-picture error as transient and retried would be submitting to an
+encoder that had already finished; measured on driver 610.74, NVENC accepts
+those frames rather than refusing them, so nothing below this layer would have
+complained.
 
 Registering per frame rather than caching a registration per texture is the
 simple, obviously correct version: a cache keyed on a texture pointer is only

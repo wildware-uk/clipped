@@ -29,6 +29,7 @@
 use core::ffi::c_void;
 use core::time::Duration;
 use std::io::Write as _;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -52,7 +53,7 @@ use crate::error::{EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice, SourceFrame, SourceTexture, SurfaceKind};
 use crate::packet::PictureKind;
 
-use super::{classify, picture_kind, sys, NvencEncoder};
+use super::{classify, picture_kind, settings, sys, NvencEncoder};
 
 /// The picture size the hardware tests encode at. Large enough to be a real
 /// encode rather than a toy one, and small enough that three codecs' worth of
@@ -355,6 +356,130 @@ fn a_session_can_be_shut_down_twice_and_used_no_further() {
     assert!(
         matches!(error.kind(), EncodeErrorKind::NotRunning),
         "{error}"
+    );
+}
+
+#[test]
+fn a_panic_while_nvenc_holds_the_texture_still_gives_it_back() {
+    // `Session::drop` states that nothing derived from a caller's texture can
+    // be outstanding by the time a session is destroyed. Releasing by hand at
+    // the end of `submit` made that true only for as long as nothing in
+    // between could unwind — the calls there are FFI plus `String` formatting,
+    // so a panic was close to unreachable, but "close to" is not what the
+    // comment says (issue #149).
+    //
+    // So this runs the unwind the comment has to survive: a panic raised while
+    // NVENC holds a registration on a texture this encoder does not own.
+    //
+    // What it observes is the guard: `registrations` counts live
+    // `Registration`s, each of which unmaps and unregisters in its `Drop`, so a
+    // count of zero after the unwind is the release having happened rather than
+    // a driver-side query. Delete the `Drop` impl and this fails on the count;
+    // the encode afterwards is there because a count can only say the guard
+    // ran, not that what it did left a usable session.
+    let Some(gpu) = TestGpu::open() else {
+        return;
+    };
+
+    let mut encoder = gpu
+        .open_encoder(config_for(Codec::H264, TEST_SIZE))
+        .expect("NVENC encodes H.264");
+    let texture = gpu.pattern_texture(0);
+    let format = settings::buffer_format(SurfaceFormat::Bgra8Unorm)
+        .expect("BGRA is what this backend binds");
+
+    let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let session = encoder.session.as_ref().expect("the session is open");
+        let registration = session
+            .register_and_map(&source_frame(&texture, 0), format, TEST_SIZE)
+            .expect("the texture registers and maps");
+        assert!(
+            !registration.registered.is_null() && !registration.mapped.is_null(),
+            "NVENC reported success without handing back a registration, so the panic below \
+             would prove nothing"
+        );
+        assert_eq!(
+            session.registrations.get(),
+            1,
+            "the registration should be live here, or this test unwinds through nothing"
+        );
+
+        panic!("a deliberate panic while NVENC holds the caller's texture");
+    }));
+    assert!(unwound.is_err(), "the payload was supposed to panic");
+
+    let session = encoder.session.as_ref().expect("the session is still open");
+    assert_eq!(
+        session.registrations.get(),
+        0,
+        "a registration outlived the unwind, so `Session::drop` would destroy a session that \
+         still holds the caller's texture"
+    );
+
+    encoder
+        .submit(&source_frame(&texture, 1))
+        .expect("the session still encodes after the unwind");
+    drain(&mut encoder);
+}
+
+#[test]
+fn a_session_that_has_reached_the_end_of_its_stream_refuses_further_frames() {
+    // Two levels, because there are two ways to reach the end of a stream and
+    // only one of them goes through `NvencEncoder::finish`. The other is
+    // `Session::deferred_picture`, which flushes the encoder to get a borrowed
+    // texture back and reports the failure — and used to leave the session
+    // taking frames afterwards, so a caller that retried would have been
+    // submitting to an encoder that had already ended (issue #149).
+    //
+    // The deferred path itself cannot be reached here: it needs NVENC to buffer
+    // a picture, which this backend's configuration forbids — B-frames and
+    // lookahead are both off. What is exercised instead is the refusal it now
+    // relies on, at the session level where that path leaves the flag, reached
+    // through the other caller of `end_of_stream`.
+    let Some(gpu) = TestGpu::open() else {
+        return;
+    };
+
+    let mut encoder = gpu
+        .open_encoder(config_for(Codec::H264, TEST_SIZE))
+        .expect("NVENC encodes H.264");
+    let texture = gpu.pattern_texture(0);
+    let format = settings::buffer_format(SurfaceFormat::Bgra8Unorm)
+        .expect("BGRA is what this backend binds");
+
+    encoder
+        .submit(&source_frame(&texture, 0))
+        .expect("the frame is submitted");
+    drain(&mut encoder);
+    encoder.finish().expect("the stream can be finished");
+    drain(&mut encoder);
+
+    let error = encoder
+        .submit(&source_frame(&texture, 1))
+        .expect_err("a finished stream takes no more frames");
+    assert!(
+        matches!(error.kind(), EncodeErrorKind::Configuration { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("has been finished"),
+        "the message does not say why the frame was refused: {error}"
+    );
+
+    // Straight at the session, which is what a retry after `deferred_picture`
+    // would reach: `NvencEncoder::finished` is not in the way there, because
+    // that path never set it.
+    let session = encoder.session.as_mut().expect("the session is still open");
+    let error = session
+        .submit(&source_frame(&texture, 2), format, TEST_SIZE)
+        .expect_err("a session past its end of stream takes no more frames");
+    assert!(
+        matches!(error.kind(), EncodeErrorKind::Configuration { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("has been finished"),
+        "the message does not say why the frame was refused: {error}"
     );
 }
 
