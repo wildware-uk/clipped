@@ -71,7 +71,8 @@ use crate::hotkey::Hotkey;
 /// one it is running plus four waiting — and the sixth is the first that can be
 /// dropped. `presses_past_the_queue_are_reported_rather_than_waited_for` sends
 /// seven and asserts at least two are dropped rather than exactly two, because
-/// a worker that has not yet reached its first `recv` leaves only four room.
+/// a worker that has not yet reached its first `recv` leaves room for only
+/// four.
 pub const PRESSES_PER_ACTION: usize = 4;
 
 /// How many press events may be waiting for the caller to read them.
