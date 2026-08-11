@@ -17,6 +17,10 @@
 //! - The wire format: messages, framing, error vocabulary, versioning.
 //! - The transport: a per-user named pipe, and the rules for naming it.
 //! - The mechanics of serving connections and of being a client.
+//! - A machine-readable description of all of that, in [`schema`], which the
+//!   desktop application's TypeScript mirror of these messages is checked
+//!   against. The types here are the authority for both ends, and that module
+//!   is how the other end finds out when they change.
 //!
 //! # Not responsible for
 //!
@@ -83,6 +87,7 @@ pub mod command;
 pub mod error;
 pub mod frame;
 pub mod message;
+pub mod schema;
 pub mod server;
 pub mod status;
 pub mod transport;
@@ -92,7 +97,7 @@ pub use command::{
     Command, Reply, StartRecording, StopRecording, UnbuiltCommand, UNBUILT_COMMANDS,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
-pub use frame::{FrameError, MAX_FRAME_BYTES};
+pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,

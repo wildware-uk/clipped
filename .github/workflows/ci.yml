@@ -379,8 +379,33 @@ jobs:
 
       # eslint, prettier and tsc. The three are one script so that a contributor
       # and this job cannot disagree about what "lint" means.
+      #
+      # `tsc` is also half of the protocol check below: the descriptors in
+      # conformance.test.ts are mapped types over the interfaces they describe,
+      # so a field added to the TypeScript and left out of its descriptor fails
+      # here rather than there.
       - name: Lint
         run: npm run lint
+
+      # packages/shared/src/ipc mirrors the recorder control protocol by hand
+      # (docs/ipc.md, "The TypeScript types"). This is what stops it drifting:
+      # it holds those types against packages/shared/src/ipc/protocol-schema.json,
+      # which crates/ipc derives from the Rust types themselves - field names and
+      # optionality from serde, and the verdict on every sample frame from the
+      # real deserialiser.
+      #
+      # It runs inside `npm test` as well. It is named separately here so that
+      # "the interface and the recorder disagree about the protocol" is legible
+      # as that in the checks list, rather than as one failing assertion inside
+      # "Test".
+      #
+      # The other half runs in the `rust` job as part of `cargo test`:
+      # `the_committed_schema_is_the_one_this_build_produces` insists the
+      # committed schema is still what the Rust types produce. Neither half is
+      # enough on its own - this one would happily agree with a schema nobody
+      # had regenerated.
+      - name: Check the TypeScript protocol types against the Rust ones
+        run: npm test --workspace @clipped/desktop -- ipc/conformance
 
       - name: Test
         run: npm test

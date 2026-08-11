@@ -40,7 +40,11 @@ use serde::Serialize;
 pub const MAX_FRAME_BYTES: u32 = 1024 * 1024;
 
 /// The length prefix, in bytes.
-const LENGTH_PREFIX_BYTES: usize = 4;
+///
+/// Public because it is part of the wire format rather than an implementation
+/// detail: the TypeScript side of the protocol has to write the same four
+/// little-endian bytes, and `crate::schema` is what tells it so.
+pub const LENGTH_PREFIX_BYTES: usize = 4;
 
 /// Why a frame could not be read or written.
 #[derive(Debug)]
