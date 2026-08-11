@@ -29,6 +29,22 @@ our behalf, and shelling out to something that does.
   - Documented in `docs/privacy.md`:
   - Off by default, opted in via:
 
+## Third-party source
+
+<!--
+Tick exactly one. This covers source committed into the tree - generated FFI
+bindings, a copied header, a transcribed constant - and NOT crates Cargo
+resolves, which `cargo deny` already checks. See CONTRIBUTING.md, "Dependencies
+and vendored source are two different things".
+-->
+
+- [ ] This change commits no third-party source.
+- [ ] This change commits third-party source:
+  - Licence:
+  - Upstream project, and the tag or commit it came from:
+  - Notices carried in the file itself:
+  - Recorded in `THIRD-PARTY-NOTICES.md`:
+
 ## Documentation
 
 - [ ] Docs updated, or not needed because:

@@ -141,3 +141,10 @@ features = [
 
 [lints]
 workspace = true
+
+[build-dependencies]
+# This crate links FFmpeg for the software encoder fallback, so it needs the
+# runtime DLLs beside its own test executables. It is not a dependent of
+# clipped-muxer, which is why it cannot rely on the muxer having run
+# (issue #158).
+clipped-ffmpeg-runtime.workspace = true

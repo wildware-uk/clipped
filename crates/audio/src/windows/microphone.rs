@@ -347,7 +347,7 @@ mod tests {
 
     use super::*;
     use crate::buffer::SampleOrigin;
-    use crate::windows::endpoint_capture::testing::{logged, skipped, Contiguity};
+    use crate::windows::endpoint_capture::testing::{logged, skipped, suppressed, Contiguity};
     use crate::windows::notifications::EndpointChange;
     use crate::windows::SystemAudioCapture;
 
@@ -364,6 +364,9 @@ mod tests {
     /// second or so. None of them keeps a sample: they count frames, compare
     /// timestamps, and check that buffers reported as silence are zero.
     fn open() -> Option<MicrophoneCapture> {
+        if suppressed() {
+            return None;
+        }
         match MicrophoneCapture::open(&MicrophoneSelection::SystemDefault) {
             Ok(capture) => Some(capture),
             Err(AudioError::NoMicrophone) => {
@@ -408,6 +411,10 @@ mod tests {
 
     #[test]
     fn every_microphone_is_listed_once_and_at_most_one_is_the_default() {
+        if suppressed() {
+            return;
+        }
+
         let microphones = microphones().expect("Windows can list its input devices");
         if microphones.is_empty() {
             skipped("this machine has no microphone");
@@ -665,6 +672,10 @@ mod tests {
         // would pass this test on a machine with one microphone and lose
         // somebody's chosen device on a machine with several. The default is
         // the fallback, since a machine may genuinely have only one.
+        if suppressed() {
+            return;
+        }
+
         let devices = microphones().expect("Windows can list its input devices");
         let Some((chosen, mut capture)) = devices
             .iter()

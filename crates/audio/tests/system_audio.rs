@@ -93,13 +93,40 @@ const SWEEP_STEP: f32 = 1.0;
 /// skip into a failure. Not set in the pull-request CI job.
 const REQUIRE_AUDIO: &str = "CLIPPED_REQUIRE_AUDIO";
 
+/// The environment variable that asks the tests which make a noise not to.
+const SKIP_AUDIO: &str = "CLIPPED_SKIP_AUDIO";
+
+/// Whether an environment variable is set to anything but the empty string.
+fn is_set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+/// Whether the caller should skip because the machine has been asked for quiet.
+///
+/// Consulted *before* a device is opened or a tone is rendered, which is the
+/// difference between this and [`skipped`]: by the time a test has discovered
+/// it cannot run, it has already made whatever noise it was going to make.
+fn suppressed() -> bool {
+    if !is_set(SKIP_AUDIO) {
+        return false;
+    }
+    assert!(
+        !is_set(REQUIRE_AUDIO),
+        "{SKIP_AUDIO} and {REQUIRE_AUDIO} are both set. One says these tests \
+         must not run and the other says they must not be skipped; there is no \
+         behaviour that satisfies both, so neither is being guessed at."
+    );
+    skipped(&format!("{SKIP_AUDIO} is set"));
+    true
+}
+
 /// Reports that the test could not run here.
 ///
 /// Written through `std::io::stderr()` rather than with `eprintln!` because
 /// libtest captures the macros, and a skip nobody can see is how a test quietly
 /// stops testing anything.
 fn skipped(reason: &str) {
-    if std::env::var_os(REQUIRE_AUDIO).is_some_and(|value| !value.is_empty()) {
+    if is_set(REQUIRE_AUDIO) {
         panic!("{REQUIRE_AUDIO} is set, so this must not be skipped: {reason}");
     }
     let _ = writeln!(std::io::stderr(), "SKIPPED (audio): {reason}");
@@ -107,6 +134,10 @@ fn skipped(reason: &str) {
 
 #[test]
 fn a_generated_tone_is_captured_at_the_frequency_it_was_played() {
+    if suppressed() {
+        return;
+    }
+
     let mut capture = match SystemAudioCapture::open() {
         Ok(capture) => capture,
         Err(error) => {
@@ -188,6 +219,10 @@ fn a_generated_tone_is_captured_at_the_frequency_it_was_played() {
 
 #[test]
 fn synthesised_silence_contains_no_samples_at_all() {
+    if suppressed() {
+        return;
+    }
+
     // The other half of "silence is silence": what this crate invents to cover
     // a period the endpoint said nothing about has to be actual zeroes, not a
     // repeat of the last thing it heard and not uninitialised memory.
@@ -254,6 +289,10 @@ fn synthesised_silence_contains_no_samples_at_all() {
 
 #[test]
 fn every_endpoint_buffer_carries_the_position_the_device_gave_it() {
+    if suppressed() {
+        return;
+    }
+
     // The measurement A/V synchronisation is built on
     // (`docs/av-sync.md`, issue #22). A buffer's `timestamp` counts samples and
     // a buffer's `device_timestamp` is where the endpoint said those samples
