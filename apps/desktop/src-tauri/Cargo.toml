@@ -103,7 +103,22 @@ clipped-ipc = { path = "../../../crates/ipc", version = "0.1.0" }
 # compiles one copy of it. Dual MIT/Apache-2.0.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# The Windows toast a notification is (issue #110). Tauri's own crate, and the
+# one `tauri-plugin-notification` is built on — used directly rather than
+# through the plugin for two reasons, both of which the plugin's `show()` makes
+# unavoidable: it is `let _ = notification.show()`, so a toast that could not be
+# delivered is discarded silently, and it offers neither a button nor an
+# activation handler on Windows. A notification with nothing to do about it is
+# the message AGENTS.md section 45 exists to prevent, and one that fails in
+# silence is section 15. Dual MIT/Apache-2.0.
+tauri-winrt-notification = "0.8"
+# The notification settings file: which categories the user wants. `serde` comes
+# with Tauri either way; naming both here is what deny.toml's `wildcards =
+# "deny"` asks of a dependency this crate actually uses. Dual MIT/Apache-2.0.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

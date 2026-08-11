@@ -539,10 +539,13 @@ pub(crate) fn show_window(app: &AppHandle) {
 /// Shows the window and tells it something the user has to read.
 ///
 /// A tray menu has nowhere to report a failure: the menu is gone by the time the
-/// command comes back, and a notification-area balloon is not something this
-/// application has. So the window comes up carrying the sentence, which is the
-/// only surface Clipped has that can hold one (AGENTS.md section 45).
-fn report(app: &AppHandle, message: &str) {
+/// command comes back. So the window comes up carrying the sentence, which is
+/// the surface Clipped has that can hold one (AGENTS.md section 45).
+///
+/// [`crate::notifications`] uses it too, for the same reason and in two places:
+/// when a toast could not be shown at all, and when a notification's action
+/// resolves to "open Clipped" because there was nothing more specific to offer.
+pub(crate) fn report(app: &AppHandle, message: &str) {
     show_window(app);
     if let Err(error) = app.emit(NOTICE_EVENT, message) {
         eprintln!("{message} (and the window could not be told: {error})");
