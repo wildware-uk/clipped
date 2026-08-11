@@ -40,8 +40,9 @@
 //!
 //! # What is dropped, and why that is the right answer
 //!
-//! A queue holds [`PRESSES_PER_ACTION`] presses. Beyond that a press is
-//! *reported* as [`PressOutcome::Dropped`] rather than queued or waited for.
+//! A queue holds [`PRESSES_PER_ACTION`] presses *waiting* behind the one the
+//! handler is already running. Beyond that a press is *reported* as
+//! [`PressOutcome::Dropped`] rather than queued or waited for.
 //! Somebody hammering the save key eight times wants one clip and a responsive
 //! machine, not eight clips and a hotkey thread stuck in `send`. The drop is
 //! counted, logged and delivered to the caller — it is never silent
@@ -62,8 +63,15 @@ use crate::hotkey::Hotkey;
 ///
 /// Four is a person leaning on a key for a moment while the handler is busy,
 /// not a buffer: the point of a bound is that the memory and the backlog behind
-/// a stuck handler are both finite, and that the fifth press is reported rather
-/// than absorbed.
+/// a stuck handler are both finite, and that a press past the bound is reported
+/// rather than absorbed.
+///
+/// This bounds the *waiting*, not the total. A busy handler has already taken
+/// its own press off the queue, so one stuck handler absorbs five presses — the
+/// one it is running plus four waiting — and the sixth is the first that can be
+/// dropped. `presses_past_the_queue_are_reported_rather_than_waited_for` sends
+/// seven and asserts at least two are dropped rather than exactly two, because
+/// a worker that has not yet reached its first `recv` leaves only four room.
 pub const PRESSES_PER_ACTION: usize = 4;
 
 /// How many press events may be waiting for the caller to read them.
@@ -673,6 +681,66 @@ mod tests {
                 .any(|event| matches!(event.outcome(), PressOutcome::Dropped { .. })),
             "a dropped press must reach the caller, not only the log",
         );
+    }
+
+    /// Exactly where the bound falls, which
+    /// `presses_past_the_queue_are_reported_rather_than_waited_for` cannot say:
+    /// it races the worker to its first `recv`, so it can only assert "at least
+    /// two". Waiting until the handler has demonstrably started removes the
+    /// race, and then the count is exact — one press being run plus
+    /// [`PRESSES_PER_ACTION`] waiting, and the next one dropped.
+    ///
+    /// This is the number `docs/hotkeys.md` states, held to the code rather
+    /// than to a reading of it.
+    #[test]
+    fn a_stuck_handler_absorbs_one_press_plus_a_full_queue_before_one_is_dropped() {
+        let (entered, starts) = mpsc::channel();
+        let (release, blocked) = mpsc::channel::<()>();
+        let (dispatcher, events) =
+            Dispatcher::start(Handlers::new().on(HotkeyAction::SaveReplay, move |_| {
+                entered.send(()).expect("the test is listening");
+                // Blocks until the test drops `release`, at which point this
+                // and every later press return immediately.
+                let _ = blocked.recv();
+            }));
+
+        assert_eq!(
+            dispatcher.press(press(HotkeyAction::SaveReplay)),
+            PressOutcome::Dispatched,
+        );
+        starts
+            .recv_timeout(PROMPTLY)
+            .expect("the handler starts on its own thread");
+
+        // The handler is now inside the closure and cannot take anything else
+        // off the queue, so these fill it and none of them may be refused.
+        for waiting in 1..=PRESSES_PER_ACTION {
+            assert_eq!(
+                dispatcher.press(press(HotkeyAction::SaveReplay)),
+                PressOutcome::Dispatched,
+                "press {waiting} of {PRESSES_PER_ACTION} behind a busy handler should \
+                 have been queued, not dropped",
+            );
+        }
+
+        assert_eq!(
+            dispatcher.press(press(HotkeyAction::SaveReplay)),
+            PressOutcome::Dropped {
+                waiting: PRESSES_PER_ACTION,
+            },
+            "the queue was full and the handler busy, so this press had nowhere to go",
+        );
+        assert!(
+            drain(&events).iter().any(|event| matches!(
+                event.outcome(),
+                PressOutcome::Dropped {
+                    waiting: PRESSES_PER_ACTION,
+                },
+            )),
+            "the drop and how many were waiting must both reach the caller",
+        );
+
+        drop(release);
     }
 
     /// A panicking handler is a defect in the handler. What must not happen is
