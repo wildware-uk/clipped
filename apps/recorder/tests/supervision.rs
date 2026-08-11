@@ -27,9 +27,19 @@
 //! and are `#[ignore]`d, exactly like `tests/record_end_to_end.rs`.
 //!
 //! ```text
-//! cargo test -p clipped-recorder --test supervision
-//! cargo test -p clipped-recorder --test supervision -- --ignored --nocapture --test-threads=1
+//! cargo build -p clipped-recorder --examples
+//! cargo test  -p clipped-recorder --test supervision
+//! cargo test  -p clipped-recorder --test supervision -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! **The build line is not optional.** Selecting one test target narrows what
+//! cargo builds to that target, and an example is not that target: a `cargo
+//! test --test supervision` after an edit to `crates/ipc` runs a freshly built
+//! test against a fixture compiled from yesterday's code, and passes. For a
+//! suite about supervision, testing the wrong supervisor without being told is
+//! the worst thing it could do — so `support::example_binary` refuses an
+//! example older than anything it was built from, and names this command.
+//! `cargo test --workspace`, which is what CI runs, builds examples itself.
 //!
 //! The tests that run everywhere cover each criterion's process behaviour — the
 //! recorder survives its supervisor, the second launch starts nothing, the loss
@@ -70,6 +80,19 @@ const PATIENCE: Duration = Duration::from_secs(10);
 /// on a loaded machine is a failure nobody can tell from a real one
 /// (AGENTS.md section 25).
 const LINE_PATIENCE: Duration = Duration::from_secs(30);
+
+/// How long `end_and_assert_no_recorder_survives` watches for a stray.
+///
+/// Comfortably longer than the longest restart delay these tests configure
+/// (`RestartPolicy`'s default first delay of one second), so a replacement that
+/// a supervisor started on its way out has time to finish starting and be seen.
+const STRAY_WINDOW: Duration = Duration::from_secs(2);
+
+/// How long one probe of the endpoint waits for an answer.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// How long between probes.
+const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// This test binary's name for itself in a handshake.
 const CLIENT_NAME: &str = "clipped-supervision-test";
@@ -212,6 +235,69 @@ impl SupervisorFixture {
         support::wait_for_exit(&mut self.child, "the supervisor fixture")
     }
 
+    /// Ends the supervisor and every recorder it started, in that order.
+    ///
+    /// Idempotent, because [`Drop`] calls it too: a test that ends its fixture
+    /// explicitly and one that panics half way through both leave the same
+    /// nothing behind.
+    fn end(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+
+        for recorder in self.recorders.drain(..) {
+            terminate(recorder);
+        }
+    }
+
+    /// Ends the fixture and fails if a recorder is still serving `endpoint_name`.
+    ///
+    /// The check `Drop` cannot make. A recorder this suite leaves behind is
+    /// detached, is nobody's child, and — until
+    /// [issue #220](https://github.com/wildware-uk/clipped/issues/220) — cannot
+    /// be stopped by anything Clipped ships: the person running the tests has to
+    /// find it in Task Manager. Nothing about that is visible in a test run that
+    /// reports `ok`, which is what makes it worth an assertion rather than a
+    /// destructor.
+    ///
+    /// It probes the endpoint rather than counting processes because the
+    /// dangerous stray is precisely the one whose identifier no test ever
+    /// learned — a replacement the supervisor started on its way out. Whatever
+    /// holds the pipe answers, and the probe asks it who it is.
+    ///
+    /// The window is longer than any restart delay these tests configure, so a
+    /// replacement that is still being started has time to appear rather than
+    /// being missed by a check that looked once and too early.
+    fn end_and_assert_no_recorder_survives(&mut self, endpoint_name: &str) {
+        self.end();
+
+        let endpoint = Endpoint::named(endpoint_name).expect("the generated name is valid");
+        let deadline = Instant::now() + STRAY_WINDOW;
+        while Instant::now() < deadline {
+            let Ok(stray) = Client::connect(&endpoint, CLIENT_NAME, "0.0.0", PROBE_TIMEOUT) else {
+                thread::sleep(PROBE_INTERVAL);
+                continue;
+            };
+
+            let process_id = stray.recorder_process_id().ok();
+            drop(stray);
+            // Ended before failing: a test that reports a leak and then leaks
+            // it anyway has made the machine worse, not better.
+            if let Some(process_id) = process_id {
+                terminate(process_id);
+            }
+            panic!(
+                "a recorder (process {process_id:?}) was still serving {endpoint_name} after the \
+                 test that started it had ended everything it knew about. A detached recorder is \
+                 nobody's child and nothing Clipped ships can stop one (issue #220), so every \
+                 recorder a test starts has to be recorded with `owns_recorder` and ended before \
+                 its supervisor's replacement logic can start another.\n{}",
+                self.transcript()
+            );
+        }
+    }
+
     /// Ends the fixture the way a crash would: no notification, no destructors.
     fn kill(&mut self) {
         self.child.kill().expect("the fixture can be terminated");
@@ -237,14 +323,7 @@ impl Drop for SupervisorFixture {
     ///
     /// The supervisor goes first, for the reason `recorders` gives.
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-
-        for recorder in &self.recorders {
-            terminate(*recorder);
-        }
+        self.end();
     }
 }
 
@@ -343,6 +422,12 @@ fn a_recorder_outlives_the_process_that_started_it() {
         is_running(recorder),
         "the recorder should still be running after its supervisor was killed"
     );
+
+    // This test deliberately leaves a recorder that nothing owns, which is the
+    // property under test and also exactly the stray of issue #220. Ending it
+    // and proving it is gone is not tidiness — the alternative is a recorder
+    // serving a pipe on the contributor's machine until they reboot.
+    supervisor.end_and_assert_no_recorder_survives(&name);
 }
 
 #[test]
@@ -374,6 +459,13 @@ fn a_second_launch_attaches_to_the_running_recorder_rather_than_starting_another
         recorder,
         "both supervisors should be talking to the same recorder"
     );
+
+    // Two supervisors watching one recorder is the arrangement most likely to
+    // leave a stray: whichever is ended last is still watching when the
+    // recorder goes, and would start a replacement nothing then ends. The
+    // second one is ended first because it is the one holding no recorder.
+    second.end();
+    first.end_and_assert_no_recorder_survives(&name);
 }
 
 #[test]
@@ -435,6 +527,8 @@ fn a_second_launch_holding_the_same_instance_name_starts_no_recorder_at_all() {
             .expect("the pipe names its server"),
         recorder
     );
+
+    first.end_and_assert_no_recorder_survives(&name);
 }
 
 #[test]
@@ -482,6 +576,12 @@ fn a_recorder_that_is_killed_is_reported_and_replaced_rather_than_silently_missi
         is_running(replacement),
         "the replacement should be a recorder that is actually running"
     );
+
+    // The test that most easily leaks one: it has already caused the supervisor
+    // to start a recorder nobody asked for, and the same thing happens again if
+    // the replacement is terminated while the supervisor still watches. A third
+    // recorder would be nobody's child and no assertion here would notice it.
+    supervisor.end_and_assert_no_recorder_survives(&name);
 }
 
 #[test]
@@ -757,6 +857,20 @@ fn killing_the_recorder_leaves_a_playable_file_and_the_supervisor_names_it() {
         .validate()
         .stream_count(1)
         .video_stream_count(1)
+        .video(
+            // "Playable" is the criterion, and every other assertion here is
+            // about the *container*: a file whose ninety-two packets all failed
+            // to decode has one video stream, monotonic timestamps and no empty
+            // packet list. Only a decoder can tell that apart from a recording,
+            // and `Media::open` has already run one (`ffprobe -count_frames`).
+            //
+            // A lower bound rather than a count, because the exact number
+            // depends on where the kill landed relative to the last flushed
+            // packet — which is the thing this test cannot control and does not
+            // need to. What it needs is the difference between "the container
+            // parses" and "the pictures are there".
+            clipped_media_validation::VideoStream::default().decoded_frames_at_least(1),
+        )
         .monotonic_timestamps()
         .assert_valid();
     assert!(
