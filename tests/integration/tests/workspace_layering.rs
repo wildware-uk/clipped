@@ -29,12 +29,19 @@ const LAYERS: &[&[&str]] = &[
     // Layering alone would let any crate name it under `[dependencies]`, so
     // `test_only_packages_are_never_linked_into_the_product` is what holds it
     // to a `[dev-dependencies]` entry.
+    //
+    // `clipped-ffmpeg-runtime` is here for a similar reason: it is named only
+    // by `[build-dependencies]`, from the build scripts of the crates that link
+    // FFmpeg, and it depends on nothing at all. It is not part of the product —
+    // no binary links it — so it sits at the bottom where any build script can
+    // reach it.
     &[
         "clipped-windows",
         "clipped-events",
         "clipped-storage",
         "clipped-logging",
         "clipped-media-validation",
+        "clipped-ffmpeg-runtime",
     ],
     // Subsystems built directly on a platform or persistence layer.
     &[
