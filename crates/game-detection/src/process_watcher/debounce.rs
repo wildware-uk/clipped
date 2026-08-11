@@ -450,6 +450,16 @@ mod tests {
             exits(&events).is_empty(),
             "and neither is its exit: {events:#?}"
         );
+        // Identifiers are allocated in order, so the first one is the launch the
+        // *launcher* opened. Without this the test passes even when the parent
+        // chain is ignored entirely: the game would then have opened a second
+        // launch of its own and the launcher's would have been dropped empty,
+        // which looks identical from the assertions above.
+        assert_eq!(
+            groups[0].id,
+            LaunchId::first(),
+            "the game kept the launch its launcher opened"
+        );
     }
 
     #[test]
@@ -475,6 +485,15 @@ mod tests {
             groups[0].newest().pid,
             301,
             "the surviving copy is what was launched"
+        );
+        // "One launch" means the same launch, not merely one that survived. If
+        // the second copy had opened its own, the first would have been dropped
+        // empty and every assertion above would still hold — which is exactly
+        // what the parent chain being ignored looks like from here.
+        assert_eq!(
+            groups[0].id,
+            LaunchId::first(),
+            "the second copy joined the launch the first opened"
         );
     }
 
@@ -767,6 +786,23 @@ mod tests {
             debouncer.next_deadline(),
             Some(start + Duration::from_millis(1_400)),
             "the settle period on the exit is now the earliest deadline"
+        );
+
+        // Two things outstanding at once, which is the only arrangement that
+        // can tell "earliest" from "latest" at all: the exit settles at 1_400ms
+        // and this launch collects until 2_200ms. With one outstanding item the
+        // earliest and the latest are the same instant, so everything above
+        // holds just as well for a function that returned the *last* deadline —
+        // and a watcher that slept until the last one would report an exit
+        // eight hundred milliseconds late.
+        debouncer.observe(
+            started(1_601, 100, "other.exe"),
+            start + Duration::from_millis(1_200),
+        );
+        assert_eq!(
+            debouncer.next_deadline(),
+            Some(start + Duration::from_millis(1_400)),
+            "the settling exit is due before the launch still collecting"
         );
     }
 
