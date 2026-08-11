@@ -108,6 +108,14 @@ agreement is asserted by unit tests that need no GPU and run in CI.
   including the warm-up frames DXGI needs before an exclusive fullscreen
   transition: they come from the same counter and are counted in the same total,
   so no counter is ever drawn twice and none goes unreported.
+- **It is silent unless `--tone` is passed.** With it, the application also plays
+  a 30 ms 997 Hz tone at about −28 dBFS at the moment it presents a named frame,
+  and announces both moments — where the endpoint's own clock puts the tone, and
+  the counter reading immediately after the frame went to the compositor. That is
+  what gives a capture an event whose sound and picture were simultaneous at the
+  source, and therefore an *absolute* A/V offset rather than a relative one
+  ([av-sync.md](av-sync.md)). The `ready` line names the frames that carry a
+  tone, so a test knows which ones to decode before the run starts.
 
 ### Running it by hand
 
@@ -123,6 +131,10 @@ cargo run -p clipped-video-pattern --bin video-pattern -- \
 # Started by a script with no standard input to give: without --ignore-stdin the
 # application sees end-of-input immediately and stops.
 cargo run -p clipped-video-pattern --bin video-pattern -- --ignore-stdin
+
+# With sound: a quiet 997 Hz tone at the moment a named frame is presented,
+# every five seconds. Silent without this.
+cargo run -p clipped-video-pattern --bin video-pattern -- --tone --seconds 20
 ```
 
 `--help` lists every option. A release build is not needed — a debug build
@@ -133,9 +145,27 @@ concluding anything about capture.
 ### The protocol a test drives it through
 
 ```text
-ready hwnd=0x00000000003b0c62 client=2560x1440 fps=60 presentation=borderless exclusive=no monitor=\\.\DISPLAY1
+ready hwnd=0x00000000003b0c62 client=2560x1440 fps=60 presentation=borderless exclusive=no monitor=\\.\DISPLAY1 tone=off
 stopped frames=300 reason=deadline
 ```
+
+`tone` is `off` when the run was not asked for one, `no` when it was and this
+machine cannot play one, and `yes` followed by `tone-hz`, `tone-ms`,
+`tone-first` and `tone-every` when it can — after which one `tone` line is
+printed per tone as the frame it belongs to is presented:
+
+```text
+tone index=0 frame=60 onset=61420657101866 present=61420657564400 skew=462534
+```
+
+`onset` is where the endpoint's own clock put the tone and `present` the counter
+reading just after the frame went to the compositor, both in nanoseconds on the
+performance counter. A tone with no moment says which of the two reasons it has:
+`onset=none` is one the render thread refused to place and did not play, and
+`onset=pending` is one it had not reported by the time the frame was presented —
+probably played, but with nothing to measure it from. They are separate states
+because one is a missing sound and the other is a missing report, and a driver
+that counted them together would report a scheduling hiccup as an unplayed tone.
 
 The `ready` line comes after the window exists, the swap chain is presenting
 and — for a fullscreen run — the display has been asked for. Capturing before
@@ -186,7 +216,7 @@ applications:
 | --- | --- |
 | `wgc_video_pattern.rs` | That a borderless window and an ordinary bordered window are both captured frame for frame: dropped, duplicated, out-of-order and torn frames are counted *and* asserted on, and the checker that does it is itself tested without a GPU |
 | `wgc_fullscreen_dx11.rs` | That an application covering a whole display is captured, that every frame that arrives is the pattern, and that the display is the shape it was afterwards — and, when Windows refused the exclusive transition, that the run says so and fails under `CLIPPED_REQUIRE_CAPTURE` rather than passing as if it had proved something |
-| `av_sync.rs` | That video and system audio captured at the same time stay within a documented tolerance of each other, and by how much per minute they drift ([av-sync.md](av-sync.md)) |
+| `av_sync.rs` | Two runs: that video and system audio captured at the same time stay within a documented tolerance of each other and by how much per minute they drift, and — against a subject playing a tone at the moment it presents a named frame — what the *absolute* A/V offset of a capture is ([av-sync.md](av-sync.md)) |
 | `readback.rs` | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it |
 
 ### How a test drives an application
@@ -245,9 +275,14 @@ cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --te
 by default, and takes `CLIPPED_AV_SYNC_SECONDS` for the long runs the drift
 figures in [av-sync.md](av-sync.md) come from. Set `CLIPPED_REQUIRE_AUDIO` when
 the numbers are being recorded, so that a machine which delivers no endpoint
-packets fails rather than printing `SKIPPED (av-sync): …` and passing. It makes
-no sound: it holds a render stream open so the endpoint's clock keeps running,
-and every buffer it hands the audio engine is marked silent.
+packets fails rather than printing `SKIPPED (av-sync): …` and passing.
+
+Its two tests differ over sound. The drift one makes none: it holds a render
+stream open so the endpoint's clock keeps running, and every buffer it hands the
+audio engine is marked silent. The absolute one does make a sound, because a
+measurement of where a recording puts a sound needs one — the subject is started
+with `--tone` and plays a 30 ms tone at about −28 dBFS every five seconds.
+[av-sync.md](av-sync.md) has both, and which command runs which.
 
 `--nocapture` is worth typing: each test prints its frame accounting, which is
 the evidence AGENTS.md section 53 asks to be recorded on the issue. A run on
@@ -480,14 +515,16 @@ the run green.
 
 ### What it cannot do yet
 
-- **Measure an A/V offset against the source.** `synchronised_within` compares
-  the tracks against *each other* — where they start, and where they end after
-  any drift — which is a container-level check. Measuring the real offset means
-  reading the frame counter `video-pattern` draws into each frame and comparing
-  it with a tone onset, and that needs an audio generator to record alongside
-  it: the applications for that are [issue
-  #136](https://github.com/wildware-uk/clipped/issues/136), and the measurement
-  itself is [issue #151](https://github.com/wildware-uk/clipped/issues/151).
+- **Measure an A/V offset against the source, from a file.** `synchronised_within`
+  compares the tracks against *each other* — where they start, and where they end
+  after any drift — which is a container-level check. The real offset is measured
+  in `tests/capture/av_sync.rs` instead, by reading the frame counter
+  `video-pattern` draws into each frame and comparing it with the onset of the
+  tone that application now plays at the moment it presents that frame
+  ([av-sync.md](av-sync.md)); it uses this harness's `AudioContent::magnitude_at`
+  for the tone analysis and everything else in it is capture timestamps rather
+  than a file. Doing the same thing to a produced recording is
+  [issue #151](https://github.com/wildware-uk/clipped/issues/151).
 - **Replace the tone analysis in `crates/audio/tests/system_audio.rs`.** That
   test has its own Goertzel filter, written before this harness existed and
   measuring interleaved capture buffers rather than a decoded file. It is the

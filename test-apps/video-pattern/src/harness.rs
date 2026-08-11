@@ -69,6 +69,120 @@ pub struct TestApp {
     presentation: String,
     exclusive: bool,
     monitor: String,
+    tone: Tone,
+    /// A `stopped` line that arrived while [`TestApp::tones`] was draining.
+    ///
+    /// [`TestApp::stop`] reads the last line the application printed, and a
+    /// test that drains the output during the run would otherwise take that
+    /// line out of the channel and leave the stop reporting that the
+    /// application never said how it went.
+    stopped_early: Option<String>,
+}
+
+/// What a run said about its sound.
+///
+/// Three states rather than two, because "this run was not asked for a tone"
+/// and "this run was asked for one and this machine cannot play it" are
+/// different things to a test: the first is every capture test in this
+/// workspace, and the second is a reason to skip a measurement rather than to
+/// wait for a sound that is never coming.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tone {
+    /// The run was not asked for a tone, and is silent.
+    Off,
+    /// The run was asked for a tone and the machine could not play one. The
+    /// application says why on standard error.
+    Unavailable,
+    /// The run is playing tones on this plan.
+    Playing(TonePlan),
+}
+
+/// Which frames of a run carry a tone.
+///
+/// Arithmetic rather than a list, so that a test knows every frame that will
+/// carry one before the run starts — which is what lets it decode those frames
+/// out of a capture instead of decoding all of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TonePlan {
+    /// The tone's frequency in hertz.
+    pub frequency: f32,
+    /// How long each tone lasts.
+    pub length: Duration,
+    /// The counter of the frame the first tone belongs to.
+    pub first_frame: u32,
+    /// Frames from one tone's frame to the next.
+    pub frame_interval: u32,
+}
+
+impl TonePlan {
+    /// How many frames it is from `counter` to the next frame carrying a tone,
+    /// counting the frame itself as zero.
+    ///
+    /// [`None`] once there are no more, which cannot happen: the plan repeats
+    /// for as long as the run does.
+    #[must_use]
+    pub fn frames_until(&self, counter: u32) -> Option<u32> {
+        if self.frame_interval == 0 {
+            return None;
+        }
+        match self.first_frame.checked_sub(counter) {
+            Some(until) => Some(until),
+            None => Some(
+                (self.frame_interval - (counter - self.first_frame) % self.frame_interval)
+                    % self.frame_interval,
+            ),
+        }
+    }
+}
+
+/// One tone the application announced as it presented the frame it belongs to.
+///
+/// Both moments are nanoseconds on the Windows performance counter, which is
+/// the clock a capture backend stamps frames with and WASAPI reports positions
+/// on (`docs/av-sync.md`), so they can be compared with a recording's timestamps
+/// directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToneEvent {
+    /// Which tone of the run this is, counting from zero.
+    pub index: u32,
+    /// The counter of the frame it belongs to.
+    pub frame: u32,
+    /// Where the endpoint's own clock puts the tone's half-amplitude point, or
+    /// why there is no such moment.
+    pub onset: Onset,
+    /// The counter reading immediately after the frame was handed to the
+    /// compositor.
+    ///
+    /// How far this is from [`Onset::At`] is how far apart the two halves of
+    /// the event were **at the source**, which a measurement of a recording has
+    /// to subtract before calling what is left the recorder's: nothing makes a
+    /// thread present a frame at exactly the moment an endpoint plays a sample.
+    pub present_nanos: u64,
+}
+
+/// What the application knew about a tone's sound as it presented the frame.
+///
+/// Three states rather than an [`Option`], because the two ways of having no
+/// moment are different faults and counting them together hides one of them: a
+/// tone that was never played is a hole in the subject's sound, and a tone
+/// whose placement had not been reported yet is a late report of a sound that
+/// probably *was* played. A run whose tones are all [`Onset::Unreported`] has a
+/// reporting problem; a run whose tones are all [`Onset::NotPlaced`] has an
+/// audio one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Onset {
+    /// The endpoint's clock puts the half-amplitude point here, in nanoseconds
+    /// on the performance counter.
+    At(u64),
+    /// The render thread could not put the tone at the moment it was asked for
+    /// — the moment had already been queued past — so it did not play it. A
+    /// tone that was not played is reported as one rather than played late
+    /// (AGENTS.md section 54).
+    NotPlaced,
+    /// The render thread had not said what it did with the tone by the time the
+    /// frame was presented. The sound may well have been made; what is missing
+    /// is the report of where it was put, so nothing can be measured from it.
+    Unreported,
 }
 
 impl TestApp {
@@ -150,6 +264,8 @@ impl TestApp {
             presentation: fields.presentation,
             exclusive: fields.exclusive,
             monitor: fields.monitor,
+            tone: fields.tone,
+            stopped_early: None,
         })
     }
 
@@ -185,6 +301,42 @@ impl TestApp {
     #[must_use]
     pub fn monitor(&self) -> &str {
         &self.monitor
+    }
+
+    /// What the run said about its sound, from the `ready` line.
+    #[must_use]
+    pub const fn tone(&self) -> Tone {
+        self.tone
+    }
+
+    /// Takes every tone the application has announced since this was last
+    /// called.
+    ///
+    /// Drained rather than waited on: the application announces a tone as it
+    /// presents the frame the tone belongs to, so a test that wants to decode
+    /// that frame has to be capturing at the time rather than reading the
+    /// output afterwards.
+    ///
+    /// # Errors
+    ///
+    /// [`HarnessError`] if the pipe failed or if a `tone` line is not one this
+    /// version understands. Lines that are neither a tone nor the `stopped`
+    /// summary are ignored, because standard output is a protocol this test
+    /// harness is allowed not to have caught up with.
+    pub fn tones(&mut self) -> Result<Vec<ToneEvent>, HarnessError> {
+        let mut tones = Vec::new();
+        while let Ok(line) = self.lines.try_recv() {
+            let line = line.map_err(|source| HarnessError::Stop {
+                detail: format!("could not read the test application's output: {source}"),
+            })?;
+            let line = line.trim_end();
+            if line.starts_with("stopped ") {
+                self.stopped_early = Some(line.to_owned());
+            } else if line.starts_with("tone ") {
+                tones.push(parse_tone(line)?);
+            }
+        }
+        Ok(tones)
     }
 
     /// Asks the application to stop, and waits up to `timeout` for it to go.
@@ -257,7 +409,7 @@ impl TestApp {
     /// fails the test rather than hanging it.
     fn final_summary(&self, timeout: Duration) -> Result<Stopped, HarnessError> {
         let deadline = Instant::now() + timeout;
-        let mut last = None;
+        let mut last = self.stopped_early.clone();
         loop {
             match self
                 .lines
@@ -321,6 +473,7 @@ struct Ready {
     presentation: String,
     exclusive: bool,
     monitor: String,
+    tone: Tone,
 }
 
 /// Parses `ready hwnd=0x… client=1280x720 …`.
@@ -374,12 +527,85 @@ fn parse_ready(line: &str) -> Result<Ready, HarnessError> {
             .map_err(|_| protocol(format!("the client height does not parse: {height}")))?,
     );
 
+    let tone = match fields.get("tone").copied() {
+        Some("yes") => {
+            let number = |name: &str| -> Result<u32, HarnessError> {
+                let value = field(name)?;
+                value
+                    .parse()
+                    .map_err(|_| protocol(format!("`{name}` does not parse: {value}")))
+            };
+            let frequency = field("tone-hz")?;
+            Tone::Playing(TonePlan {
+                frequency: frequency
+                    .parse()
+                    .map_err(|_| protocol(format!("`tone-hz` does not parse: {frequency}")))?,
+                length: Duration::from_millis(u64::from(number("tone-ms")?)),
+                first_frame: number("tone-first")?,
+                frame_interval: number("tone-every")?,
+            })
+        }
+        Some("no") => Tone::Unavailable,
+        // An application old enough not to have the field at all is a silent
+        // one, which is what `off` says.
+        Some("off") | None => Tone::Off,
+        Some(other) => return Err(protocol(format!("`tone={other}` is not a state"))),
+    };
+
     Ok(Ready {
         window,
         client,
         presentation: field("presentation")?,
         exclusive: field("exclusive")? == "yes",
         monitor: field("monitor").unwrap_or_default(),
+        tone,
+    })
+}
+
+/// Parses `tone index=0 frame=60 onset=61420657101866 present=61420657564400 skew=462534`.
+///
+/// `onset` is `none` for a tone the render thread refused to place and
+/// `pending` for one it had not reported by the time the frame was presented
+/// ([`Onset`]).
+///
+/// `skew` is not read: it is `present − onset`, printed so that a person reading
+/// the output does not have to subtract two eleven-digit numbers, and a test
+/// that took the application's arithmetic on trust would be checking one number
+/// against itself.
+fn parse_tone(line: &str) -> Result<ToneEvent, HarnessError> {
+    let fields: HashMap<&str, &str> = line
+        .split_whitespace()
+        .filter_map(|field| field.split_once('='))
+        .collect();
+    let protocol = |detail: String| HarnessError::Protocol {
+        line: line.to_owned(),
+        detail,
+    };
+
+    let number = |name: &str| -> Result<u64, HarnessError> {
+        let value = fields
+            .get(name)
+            .ok_or_else(|| protocol(format!("no `{name}` field")))?;
+        value
+            .parse()
+            .map_err(|_| protocol(format!("`{name}` does not parse: {value}")))
+    };
+
+    let onset = fields
+        .get("onset")
+        .ok_or_else(|| protocol("no `onset` field".to_owned()))?;
+
+    Ok(ToneEvent {
+        index: u32::try_from(number("index")?)
+            .map_err(|_| protocol("the tone index is not a `u32`".to_owned()))?,
+        frame: u32::try_from(number("frame")?)
+            .map_err(|_| protocol("the frame counter is not a `u32`".to_owned()))?,
+        onset: match *onset {
+            "none" => Onset::NotPlaced,
+            "pending" => Onset::Unreported,
+            _ => Onset::At(number("onset")?),
+        },
+        present_nanos: number("present")?,
     })
 }
 
@@ -551,6 +777,112 @@ mod tests {
         assert_eq!(ready.presentation, "borderless");
         assert!(!ready.exclusive);
         assert_eq!(ready.monitor, "\\\\.\\DISPLAY1");
+    }
+
+    #[test]
+    fn a_run_that_says_nothing_about_sound_is_read_as_a_silent_one() {
+        // The line every other capture test's application prints. It has to
+        // keep parsing, and it has to mean silence rather than an unknown.
+        let ready = parse_ready(
+            "ready hwnd=0x1 client=1280x720 fps=30 presentation=borderless exclusive=no \
+             monitor=\\\\.\\DISPLAY1",
+        )
+        .expect("a `ready` line without the tone fields is still a `ready` line");
+        assert_eq!(ready.tone, Tone::Off);
+
+        let refused = parse_ready(
+            "ready hwnd=0x1 client=1280x720 fps=30 presentation=borderless exclusive=no \
+             monitor=\\\\.\\DISPLAY1 tone=no",
+        )
+        .expect("this is the line the application prints when it cannot play a tone");
+        assert_eq!(
+            refused.tone,
+            Tone::Unavailable,
+            "a machine that cannot play the tone has to be distinguishable from one that \
+             was never asked to, or a measurement waits for a sound that is not coming"
+        );
+    }
+
+    #[test]
+    fn a_sounded_run_announces_which_frames_carry_a_tone() {
+        let ready = parse_ready(
+            "ready hwnd=0x1 client=1280x720 fps=30 presentation=borderless exclusive=no \
+             monitor=\\\\.\\DISPLAY1 tone=yes tone-hz=997 tone-ms=30 tone-first=60 \
+             tone-every=150",
+        )
+        .expect("this is the line a --tone run prints");
+
+        let Tone::Playing(plan) = ready.tone else {
+            panic!(
+                "a run announcing tone=yes is playing tones, and read as {:?}",
+                ready.tone
+            );
+        };
+        assert!((plan.frequency - 997.0).abs() < f32::EPSILON);
+        assert_eq!(plan.length, Duration::from_millis(30));
+
+        // The arithmetic the capture test uses to decide which frames to
+        // decode: it follows the counter and has to know, from any frame, how
+        // far the next tone is.
+        assert_eq!(plan.frames_until(0), Some(60));
+        assert_eq!(plan.frames_until(60), Some(0));
+        assert_eq!(plan.frames_until(61), Some(149));
+        assert_eq!(plan.frames_until(209), Some(1));
+    }
+
+    #[test]
+    fn a_tone_line_carries_both_moments_of_the_event() {
+        // The pair the whole absolute measurement rests on: where the endpoint
+        // put the sound, and where the application handed over the picture.
+        let tone = parse_tone(
+            "tone index=2 frame=360 onset=61430657118666 \
+                               present=61430657907400 skew=788734",
+        )
+        .expect("this is the line the application prints per tone");
+
+        assert_eq!(tone.index, 2);
+        assert_eq!(tone.frame, 360);
+        assert_eq!(tone.onset, Onset::At(61_430_657_118_666));
+        assert_eq!(tone.present_nanos, 61_430_657_907_400);
+        let Onset::At(onset) = tone.onset else {
+            panic!("this line announced a moment, and read as {:?}", tone.onset);
+        };
+        assert_eq!(
+            tone.present_nanos as i64 - onset as i64,
+            788_734,
+            "the two moments have to be read exactly, because a measurement subtracts one \
+             from the other; the line's own `skew` field is ignored rather than trusted"
+        );
+    }
+
+    #[test]
+    fn a_tone_that_was_not_played_is_read_as_one_that_was_not_played() {
+        // The case that must never be read as "played at zero": a tone the
+        // application could not place at the moment it wanted.
+        let tone = parse_tone("tone index=0 frame=60 onset=none present=61420657564400 skew=none")
+            .expect("this is the line the application prints for a tone it did not play");
+        assert_eq!(tone.onset, Onset::NotPlaced);
+
+        // And the other way of having no moment, which is a different fault:
+        // the sound was probably made and the report of where it went had not
+        // arrived when the frame was presented.
+        let pending =
+            parse_tone("tone index=0 frame=60 onset=pending present=61420657564400 skew=none")
+                .expect("this is the line the application prints for an unreported tone");
+        assert_eq!(pending.onset, Onset::Unreported);
+
+        for line in [
+            "tone frame=60 onset=1 present=2",
+            "tone index=0 onset=1 present=2",
+            "tone index=0 frame=60 present=2",
+            "tone index=0 frame=60 onset=1",
+            "tone index=0 frame=60 onset=soon present=2",
+        ] {
+            assert!(
+                parse_tone(line).is_err(),
+                "`{line}` should not have been accepted"
+            );
+        }
     }
 
     #[test]

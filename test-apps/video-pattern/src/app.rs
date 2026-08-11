@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! ready hwnd=0x00000000000a06f2 client=1280x720 fps=30 presentation=borderless \
-//!     exclusive=no monitor=\\.\DISPLAY1
+//!     exclusive=no monitor=\\.\DISPLAY1 tone=off
 //! stopped frames=901 reason=deadline
 //! ```
 //!
@@ -17,6 +17,30 @@
 //! pixel size of the pattern it is about to look for. Nothing else is printed to
 //! standard output; warnings and diagnostics go to standard error, so a driver
 //! parsing the protocol cannot be derailed by one.
+//!
+//! A `--tone` run says so in the `ready` line and then prints one line per tone
+//! as it presents the frame that tone belongs to:
+//!
+//! ```text
+//! ready hwnd=0x… client=1280x720 fps=30 presentation=borderless exclusive=no \
+//!     monitor=\\.\DISPLAY1 tone=yes tone-hz=997 tone-ms=30 tone-first=60 tone-every=150
+//! tone index=0 frame=60 onset=31415926535 present=31415928111 skew=1576
+//! ```
+//!
+//! `onset` is where the endpoint's own clock puts the tone's half-amplitude
+//! point and `present` is the performance counter immediately after the frame
+//! was handed to the compositor — both in nanoseconds on the same counter a
+//! capture backend stamps frames with. `skew` is `present − onset`: how far
+//! apart the two halves of the event were **at the source**, which is what a
+//! measurement of the recording has to subtract before it can call what is left
+//! the recorder's. It is not assumed to be zero, because a scheduler does not
+//! promise that.
+//!
+//! A tone with no moment says which of the two reasons it has: `onset=none` is
+//! one the render thread refused to place and did not play, and `onset=pending`
+//! is one it had not reported by the time the frame went to the compositor —
+//! probably played, but with nothing to measure it from. They are counted
+//! separately because one is a missing sound and the other is a missing report.
 //!
 //! # Stopping, and never being left behind
 //!
@@ -55,9 +79,35 @@ use windows::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, C
 
 use crate::pattern::{self, PatternError};
 use crate::render::{handle_value, PatternWindow, Placement};
+use crate::tone::{Emitted, ToneOutput};
 
 /// Set by the console control handler; read by the run loop.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// How many seconds after the run starts the first tone sounds.
+///
+/// Long enough for whatever is recording to have found the window and settled,
+/// short enough that a thirty-second run still gets several tones.
+const TONE_LEAD_SECONDS: u32 = 2;
+
+/// How many frames before the one it belongs to a tone is asked for.
+///
+/// It has to be more than the render thread keeps queued in front of the
+/// endpoint — sixty milliseconds — or the moment asked for would already have
+/// been played past and the tone would be reported missed. Six frames is two
+/// hundred milliseconds at 30 fps, which clears that comfortably while keeping
+/// the prediction of when the frame will be presented short enough to be worth
+/// making: the error in it is only whatever the loop's pacing does over six
+/// frames, and it is measured and announced rather than assumed away.
+const REQUEST_LEAD_FRAMES: u32 = 6;
+
+/// How many seconds between one tone and the next.
+///
+/// Five seconds is far enough apart that a detector looking for one cannot
+/// confuse it with its neighbour at any offset worth measuring, and close enough
+/// together that a ninety-second run yields seventeen independent readings
+/// rather than one.
+const TONE_INTERVAL_SECONDS: u32 = 5;
 
 /// How the window is put on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +193,13 @@ pub struct Options {
     /// that has no standard input to give — the run then ends at its deadline,
     /// at Ctrl-C, or when the window is closed.
     pub stop_on_stdin_end: bool,
+    /// Whether to play a short tone at the moment a named frame is presented.
+    ///
+    /// False by default, and deliberately so: this application is started by
+    /// tests that have nothing to do with sound, and a test suite that makes a
+    /// noise nobody asked for is one somebody turns off. See [`crate::tone`]
+    /// for what the tone is and what its announced moment means.
+    pub tone: bool,
 }
 
 impl Default for Options {
@@ -156,6 +213,7 @@ impl Default for Options {
             // and small enough to leave a second monitor usable behind it.
             size: (1280, 720),
             stop_on_stdin_end: true,
+            tone: false,
         }
     }
 }
@@ -234,9 +292,21 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
 
     let stop = install_stop_signals(options.stop_on_stdin_end);
 
+    // Opened before the `ready` line, because that line has to say whether this
+    // run will actually make a sound: a driver measuring an offset against a
+    // tone needs to know there will not be one rather than wait for it.
+    let sound = options.tone.then(ToneOutput::start).and_then(|started| {
+        started
+            .inspect_err(|reason| eprintln!("[warn] this run will be silent: {reason}"))
+            .ok()
+    });
+
+    let interval = Duration::from_secs(1) / options.fps.max(1);
+    let mut tones = Tones::planned(sound.is_some(), options.fps, window.presented());
+
     let (width, height) = window.size();
     announce(&format!(
-        "ready hwnd=0x{:016x} client={}x{} fps={} presentation={} exclusive={} monitor={}",
+        "ready hwnd=0x{:016x} client={}x{} fps={} presentation={} exclusive={} monitor={} {}",
         handle_value(window.handle()),
         width,
         height,
@@ -244,9 +314,9 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
         options.presentation,
         if window.is_exclusive() { "yes" } else { "no" },
         monitor,
+        tones.announcement(options.tone),
     ));
 
-    let interval = Duration::from_secs(1) / options.fps.max(1);
     let started = Instant::now();
     let mut next_present = Instant::now();
 
@@ -273,6 +343,10 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
         // is what keeps `Summary::frames` the count of every frame presented
         // and the last counter drawn plus one.
         window.present_next()?;
+        // Immediately after the present, because this is the video half of the
+        // event a tone is the audio half of, and every microsecond between the
+        // two readings is an error in the source moment being announced.
+        tones.presented(sound.as_ref(), window.presented(), interval);
 
         // Paced against a fixed schedule rather than by sleeping for an
         // interval after each frame, so that the time spent drawing does not
@@ -302,6 +376,123 @@ pub(crate) fn run(options: Options) -> Result<Summary, AppError> {
         reason,
         exclusive,
     })
+}
+
+/// Which frames carry a tone, and the announcements that go with them.
+///
+/// The plan is arithmetic on the frame counter rather than a list of moments,
+/// so that a driver reading the `ready` line knows every frame a tone belongs
+/// to in advance and can decode exactly those frames out of its capture. A
+/// silent run has no plan and this does nothing.
+#[derive(Debug)]
+struct Tones {
+    /// The counter of the frame the first tone belongs to, or [`None`] when
+    /// this run is silent.
+    first_frame: Option<u32>,
+    /// Frames from one tone's frame to the next.
+    every_frames: u32,
+    /// What the render thread reported about the tones it placed, accumulated
+    /// because a tone is reported when it is *placed* — one queue length before
+    /// it sounds — rather than when it is heard.
+    emitted: Vec<Emitted>,
+}
+
+impl Tones {
+    /// Decides which frames carry a tone, given the frame the run loop is about
+    /// to present.
+    fn planned(sounding: bool, fps: u32, base_frame: u32) -> Self {
+        let per_second = fps.max(1);
+        let every_frames = (TONE_INTERVAL_SECONDS * per_second).max(1);
+        let lead_frames = TONE_LEAD_SECONDS * per_second;
+
+        Self {
+            first_frame: sounding.then(|| base_frame.saturating_add(lead_frames)),
+            every_frames,
+            emitted: Vec::new(),
+        }
+    }
+
+    /// The `ready` line's tone fields.
+    ///
+    /// Three states rather than two, because "this run was not asked for a
+    /// tone" and "this run was asked for one and this machine cannot play it"
+    /// are different things to a driver: the first is what every other test
+    /// gets, and the second is a reason to skip a measurement rather than to
+    /// wait for a sound that is never coming (AGENTS.md section 16).
+    fn announcement(&self, requested: bool) -> String {
+        match self.first_frame {
+            Some(first) => format!(
+                "tone=yes tone-hz={} tone-ms={} tone-first={first} tone-every={}",
+                crate::tone::FREQUENCY,
+                crate::tone::LENGTH.as_millis(),
+                self.every_frames,
+            ),
+            None if requested => "tone=no".to_owned(),
+            None => "tone=off".to_owned(),
+        }
+    }
+
+    /// Deals with the frame just presented: asks for a tone that is coming, and
+    /// announces one that has just sounded.
+    ///
+    /// `presented` is the window's count of frames presented, so the frame that
+    /// has just gone to the compositor carries the counter one below it.
+    ///
+    /// The request happens [`REQUEST_LEAD_FRAMES`] before the frame it is for,
+    /// against the moment that frame is *about to* be presented rather than
+    /// against a schedule laid down at the start of the run. That is the whole
+    /// difference between a tone that stays with its frame and one that drifts
+    /// away from it: this loop paces itself against a fixed schedule and gives
+    /// up on it whenever it falls behind — a busy compositor, a debug build, a
+    /// machine somebody is using — and a tone anchored at the start would still
+    /// be following the schedule the frames had abandoned.
+    fn presented(&mut self, sound: Option<&ToneOutput>, presented: u32, interval: Duration) {
+        let (Some(sound), Some(first), Some(frame)) =
+            (sound, self.first_frame, presented.checked_sub(1))
+        else {
+            return;
+        };
+        let interval_nanos = u64::try_from(interval.as_nanos()).unwrap_or(u64::MAX);
+
+        // The frame this one is REQUEST_LEAD_FRAMES in front of, if that frame
+        // carries a tone.
+        let coming = frame.saturating_add(REQUEST_LEAD_FRAMES);
+        if coming >= first && (coming - first) % self.every_frames == 0 {
+            sound.request(
+                crate::tone::now_nanos()
+                    + u64::from(REQUEST_LEAD_FRAMES).saturating_mul(interval_nanos),
+            );
+        }
+
+        if frame < first || (frame - first) % self.every_frames != 0 {
+            return;
+        }
+        let present_nanos = crate::tone::now_nanos();
+
+        let index = (frame - first) / self.every_frames;
+        self.emitted.extend(sound.emitted());
+        let placed = self.emitted.iter().find(|tone| tone.index == index);
+
+        // Three outcomes rather than two, because "the render thread refused to
+        // place this tone" and "the render thread has not said yet" are
+        // different things to whoever is counting: the first is a sound that
+        // was never made, and the second is a sound that probably was. Both are
+        // said out loud rather than left out, because a driver counting tones
+        // would otherwise be waiting for a line that is not coming.
+        match placed.map(|tone| tone.midpoint_nanos) {
+            Some(Some(onset)) => announce(&format!(
+                "tone index={index} frame={frame} onset={onset} present={present_nanos} \
+                 skew={}",
+                present_nanos as i64 - onset as i64,
+            )),
+            Some(None) => announce(&format!(
+                "tone index={index} frame={frame} onset=none present={present_nanos} skew=none"
+            )),
+            None => announce(&format!(
+                "tone index={index} frame={frame} onset=pending present={present_nanos} skew=none"
+            )),
+        }
+    }
 }
 
 /// Prints one line of the protocol, flushed.
@@ -533,10 +724,52 @@ mod tests {
     }
 
     #[test]
+    fn a_silent_run_announces_that_it_is_silent_and_plans_no_tones() {
+        // The default every other capture test gets. A plan here would be a
+        // sound on somebody's machine from a test that never asked for one.
+        let tones = Tones::planned(false, 30, 0);
+        assert_eq!(tones.first_frame, None);
+        assert_eq!(tones.announcement(false), "tone=off");
+        assert_eq!(
+            tones.announcement(true),
+            "tone=no",
+            "a run that asked for a tone and cannot play one has to say which of the two \
+             it is, or a driver waits for a sound that is never coming"
+        );
+    }
+
+    #[test]
+    fn the_tone_plan_is_arithmetic_a_driver_can_reproduce() {
+        // The `ready` line is the whole protocol for this: a driver reads the
+        // first frame and the interval and knows every frame that carries a
+        // tone, so it can decode exactly those out of a capture rather than
+        // decoding all of them.
+        let tones = Tones::planned(true, 30, 0);
+        assert_eq!(
+            tones.announcement(true),
+            "tone=yes tone-hz=997 tone-ms=30 tone-first=60 tone-every=150",
+            "at 30 fps the first tone is the frame two seconds in and there is one every \
+             five seconds after it"
+        );
+
+        // A run that has already presented warm-up frames counts from where it
+        // is, not from zero, or the first tone would be announced for a frame
+        // that has already gone.
+        let after_warm_up = Tones::planned(true, 60, 10);
+        assert_eq!(after_warm_up.first_frame, Some(10 + 2 * 60));
+        assert_eq!(after_warm_up.every_frames, 5 * 60);
+    }
+
+    #[test]
     fn the_default_run_is_the_one_a_capture_test_wants() {
         let options = Options::default();
         assert_eq!(options.presentation, Presentation::Borderless);
         assert_eq!(options.monitor, MonitorChoice::Auto);
+        assert!(
+            !options.tone,
+            "the application is silent unless a run asks for a tone: a test suite that \
+             makes a noise nobody asked for is one somebody turns off"
+        );
         assert!(options.size.0 >= pattern::MIN_WIDTH);
         assert!(options.size.1 >= pattern::MIN_HEIGHT);
         assert!(

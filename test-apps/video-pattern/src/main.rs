@@ -53,6 +53,16 @@ struct Arguments {
     /// is not sitting on top of whoever is at the keyboard.
     #[arg(long, value_enum, default_value_t = Monitor::Auto)]
     monitor: Monitor,
+
+    /// Play a short, quiet tone at the moment a named frame is presented.
+    ///
+    /// Off by default: the application is silent unless this is passed. With
+    /// it, the `ready` line names the frames that carry a tone and each one is
+    /// announced with the moment the endpoint's clock puts it at, so that a
+    /// recording of this application contains an event whose sound and picture
+    /// were simultaneous at the source.
+    #[arg(long)]
+    tone: bool,
 }
 
 /// The presentations this binary offers.
@@ -107,6 +117,7 @@ fn main() -> ExitCode {
         },
         size: arguments.size,
         stop_on_stdin_end: !arguments.ignore_stdin,
+        tone: arguments.tone,
     };
 
     match clipped_video_pattern::run(options) {
