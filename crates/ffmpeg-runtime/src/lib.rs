@@ -43,6 +43,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Copies the pinned FFmpeg runtime libraries beside the binaries this build
 /// produces.
@@ -165,6 +166,13 @@ fn binary_directories() -> Vec<PathBuf> {
     ]
 }
 
+/// Distinguishes one build script's temporary files from another's.
+///
+/// The process id alone is not enough: `cargo` runs several build scripts in
+/// one process only when they are the same crate, but a counter costs nothing
+/// and removes the question.
+static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Copies `source` to `destination` unless an identical copy is already there.
 ///
 /// Rewriting ~70 MB of libraries on every incremental build would be a
@@ -172,47 +180,83 @@ fn binary_directories() -> Vec<PathBuf> {
 /// test executable has mapped fails on Windows. Size and modification time are
 /// enough to tell "already copied" from "the pin moved".
 ///
+/// # Why it copies via a temporary file
+///
+/// More than one crate links FFmpeg, so more than one build script calls
+/// [`place_runtime_libraries`], and `cargo clippy --workspace --all-targets`
+/// runs those build scripts in parallel. Two of them copying the same DLL to
+/// the same destination at the same time is a plain race, and on Windows the
+/// loser's `fs::copy` fails with `ERROR_SHARING_VIOLATION` rather than waiting
+/// ([issue #212](https://github.com/wildware-uk/clipped/issues/212)).
+///
+/// Writing to a unique temporary name in the destination's own directory and
+/// renaming over the target fixes both halves of that. The rename is atomic on
+/// the same volume, so a concurrent reader sees either the old library or the
+/// new one and never a half-written file — which is what makes the "already
+/// there and the same size" check below sound, where before it could match a
+/// copy still in progress.
+///
+/// A retry loop was the other option and is explicitly not what this does: it
+/// would hide a genuinely locked file behind a delay and still fail in the end.
+///
 /// # Panics
 ///
-/// When the copy fails and the destination is not already a byte-length match
-/// for the source. A `cargo:warning` would not do: a build script does not
-/// re-run on a successful build, so a failure demoted to a warning is
-/// permanent, and the next thing anybody sees is `STATUS_DLL_NOT_FOUND` from a
-/// binary that will not start. The one benign failure — another build holding
-/// the destination open, having already written the same bytes there — is cheap
-/// to recognise, so it is recognised rather than used to excuse every other
-/// failure (AGENTS.md section 15).
+/// When the library cannot be placed and the destination does not already hold
+/// a copy the same size as the source. A `cargo:warning` would not do: a build
+/// script does not re-run on a successful build, so a failure demoted to a
+/// warning is permanent, and the next thing anybody sees is
+/// `STATUS_DLL_NOT_FOUND` from a binary that will not start. The one benign
+/// failure — another build having already put the same library there, and
+/// something holding it open — is cheap to recognise, so it is recognised
+/// rather than used to excuse every other failure (AGENTS.md section 15).
 fn copy_if_stale(source: &Path, destination: &Path) {
     let source_metadata = source
         .metadata()
         .unwrap_or_else(|error| panic!("could not read {}: {error}", source.display()));
 
-    if let Ok(existing) = destination.metadata() {
-        if existing.len() == source_metadata.len()
-            && existing.modified().ok() == source_metadata.modified().ok()
-        {
-            return;
-        }
+    if is_already_there(destination, &source_metadata) {
+        return;
     }
 
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).unwrap_or_else(|error| {
-            panic!("could not create {}: {error}", parent.display());
+    let Some(parent) = destination.parent() else {
+        panic!("{} has no directory to be placed in", destination.display());
+    };
+    fs::create_dir_all(parent).unwrap_or_else(|error| {
+        panic!("could not create {}: {error}", parent.display());
+    });
+
+    // Unique per process and per call, so two build scripts racing over the
+    // same library are writing to two different files and neither can see a
+    // partial copy of the other's.
+    let temporary = parent.join(format!(
+        "{}.{}.{}.tmp",
+        destination
+            .file_name()
+            .expect("a destination with a parent has a file name")
+            .to_string_lossy(),
+        std::process::id(),
+        TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed),
+    ));
+
+    let placed = fs::copy(source, &temporary)
+        .and_then(|_| fs::rename(&temporary, destination))
+        .inspect_err(|_| {
+            // Nothing else will ever look at this file, and leaving one behind
+            // per failed build would slowly fill the target directory.
+            let _ = fs::remove_file(&temporary);
         });
-    }
 
-    let Err(error) = fs::copy(source, destination) else {
+    let Err(error) = placed else {
         return;
     };
 
-    let already_there = destination
-        .metadata()
-        .is_ok_and(|existing| existing.len() == source_metadata.len());
-    if already_there {
+    // The rename lost a race, or the destination is held open by something
+    // running from the target directory. Either way, what matters is whether a
+    // usable library is there now — and after this change it cannot be a
+    // half-written one.
+    if is_same_size(destination, &source_metadata) {
         println!(
-            "cargo:warning=could not replace {} with {} ({error}), but the file \
-             already there is the same size, so it is almost certainly the same \
-             library held open by a concurrent build.",
+            "cargo:warning=could not replace {} with {} ({error}), but the file              already there is the same size, so it is the same library, placed              by a concurrent build or held open by something running from the              target directory.",
             destination.display(),
             source.display(),
         );
@@ -220,10 +264,231 @@ fn copy_if_stale(source: &Path, destination: &Path) {
     }
 
     panic!(
-        "could not copy the FFmpeg runtime library {} to {}: {error}. Without \
-         it, binaries built here will not start. Close anything running from \
-         the target directory and build again.",
+        "could not place the FFmpeg runtime library {} at {}: {error}. Without          it, binaries built here will not start. Either something is running          from the target directory and holding the file open — close it and          build again — or the copy could not be completed at all, in which case          check there is free space on the volume and that {} is readable.",
         source.display(),
         destination.display(),
+        source.display(),
     );
+}
+
+/// Whether `destination` is already the library `source_metadata` describes.
+///
+/// Size and modification time together: `fs::copy` and `fs::rename` both carry
+/// the source's timestamps over on Windows, so an untouched copy matches on
+/// both and a moved pin matches on neither.
+fn is_already_there(destination: &Path, source_metadata: &fs::Metadata) -> bool {
+    destination.metadata().is_ok_and(|existing| {
+        existing.len() == source_metadata.len()
+            && existing.modified().ok() == source_metadata.modified().ok()
+    })
+}
+
+/// Whether `destination` holds a file the same size as the source.
+///
+/// Weaker than [`is_already_there`] on purpose: it is asked only after a
+/// placement has failed, to tell "somebody else already put the right library
+/// here" from "there is nothing usable here".
+fn is_same_size(destination: &Path, source_metadata: &fs::Metadata) -> bool {
+    destination
+        .metadata()
+        .is_ok_and(|existing| existing.len() == source_metadata.len())
+}
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    use super::*;
+
+    /// A file of `size` bytes, in a directory that is removed with it.
+    struct Fixture {
+        directory: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let directory = env::temp_dir().join(format!(
+                "clipped-ffmpeg-runtime-{name}-{}-{}",
+                std::process::id(),
+                TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir_all(&directory).expect("a temporary directory can be created");
+            Self { directory }
+        }
+
+        fn write(&self, name: &str, size: usize) -> PathBuf {
+            let path = self.directory.join(name);
+            let mut file = fs::File::create(&path).expect("the fixture file can be created");
+            file.write_all(&vec![0x5a; size])
+                .expect("the fixture file can be written");
+            path
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.directory.join(name)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn a_library_is_placed_where_it_was_asked_for() {
+        let fixture = Fixture::new("places");
+        let source = fixture.write("avcodec-62.dll", 4096);
+        let destination = fixture.path("deps/avcodec-62.dll");
+
+        copy_if_stale(&source, &destination);
+
+        assert_eq!(
+            fs::read(&destination).expect("the library was placed"),
+            fs::read(&source).expect("the source is readable"),
+            "the placed library must be the source, byte for byte"
+        );
+    }
+
+    #[test]
+    fn a_library_being_placed_is_never_visible_half_written() {
+        // The regression #212 is about, tested at the property that actually
+        // distinguishes the fix.
+        //
+        // The old implementation copied straight into the destination, so while
+        // a copy was running the destination held a partial file. That is what
+        // made concurrent build scripts fail: the loser's `fs::copy` hit a
+        // sharing violation, and the "is the right library already there?"
+        // check it fell back on compared against a length that was still
+        // growing, so it panicked and failed the build.
+        //
+        // Writing to a unique temporary name and renaming over the destination
+        // means the destination is only ever the old library or the new one. A
+        // reader watching it while a placement runs is the direct test of that,
+        // and it fails against the old implementation.
+        //
+        // Two sizes, alternating, because a placement that finds the library
+        // already there does nothing — a single repeated source would exercise
+        // the fast path rather than the copy.
+        const SMALL: usize = 3 * 1024 * 1024;
+        const LARGE: usize = 9 * 1024 * 1024;
+        const ROUNDS: usize = 6;
+
+        let fixture = Fixture::new("atomic");
+        let small = Arc::new(fixture.write("small.dll", SMALL));
+        let large = Arc::new(fixture.write("large.dll", LARGE));
+        let destination = Arc::new(fixture.path("deps/avformat-62.dll"));
+
+        let watching = Arc::new(AtomicBool::new(true));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+
+        let watcher = {
+            let destination = Arc::clone(&destination);
+            let watching = Arc::clone(&watching);
+            let observed = Arc::clone(&observed);
+            thread::spawn(move || {
+                while watching.load(Ordering::Relaxed) {
+                    if let Ok(metadata) = destination.metadata() {
+                        let length = metadata.len();
+                        let mut observed = observed.lock().expect("the log is not poisoned");
+                        if observed.last() != Some(&length) {
+                            observed.push(length);
+                        }
+                    }
+                }
+            })
+        };
+
+        for round in 0..ROUNDS {
+            let source = if round % 2 == 0 { &small } else { &large };
+            copy_if_stale(source, &destination);
+        }
+
+        watching.store(false, Ordering::Relaxed);
+        watcher.join().expect("the watching thread does not panic");
+
+        let observed = observed.lock().expect("the log is not poisoned").clone();
+        let partial: Vec<u64> = observed
+            .iter()
+            .copied()
+            .filter(|length| *length != SMALL as u64 && *length != LARGE as u64)
+            .collect();
+
+        assert!(
+            partial.is_empty(),
+            "the destination was seen at {partial:?} bytes, which is neither              {SMALL} nor {LARGE}: a reader can observe a half-written library,              so a concurrent build script can too"
+        );
+        assert!(
+            observed.len() > 1,
+            "the watcher never saw the library change, so this test proved              nothing; observed {observed:?}"
+        );
+    }
+
+    #[test]
+    fn a_library_that_is_already_there_is_not_copied_again() {
+        let fixture = Fixture::new("skips");
+        let source = fixture.write("avutil-60.dll", 2048);
+        let destination = fixture.path("deps/avutil-60.dll");
+
+        copy_if_stale(&source, &destination);
+        let placed = destination
+            .metadata()
+            .expect("the library was placed")
+            .modified()
+            .expect("a modification time");
+
+        copy_if_stale(&source, &destination);
+
+        assert_eq!(
+            destination
+                .metadata()
+                .expect("the library is still there")
+                .modified()
+                .expect("a modification time"),
+            placed,
+            "an unchanged library must not be rewritten: ~136 MB per build is a \
+             real tax on the edit-compile loop"
+        );
+    }
+
+    #[test]
+    fn a_moved_pin_replaces_the_library_that_was_there() {
+        let fixture = Fixture::new("replaces");
+        let destination = fixture.path("deps/avfilter-11.dll");
+
+        let old = fixture.write("old.dll", 1024);
+        copy_if_stale(&old, &destination);
+
+        let new = fixture.write("new.dll", 3072);
+        copy_if_stale(&new, &destination);
+
+        assert_eq!(
+            fs::read(&destination).expect("the library is there").len(),
+            3072,
+            "a library of a different size is a moved pin and must be replaced"
+        );
+    }
+
+    #[test]
+    fn no_temporary_files_are_left_behind() {
+        let fixture = Fixture::new("tidy");
+        let source = fixture.write("swscale-9.dll", 4096);
+        let destination = fixture.path("deps/swscale-9.dll");
+
+        copy_if_stale(&source, &destination);
+
+        let leftovers: Vec<_> = fs::read_dir(fixture.path("deps"))
+            .expect("the destination directory exists")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+
+        assert!(
+            leftovers.is_empty(),
+            "temporary files must not accumulate in the target directory: {leftovers:?}"
+        );
+    }
 }
