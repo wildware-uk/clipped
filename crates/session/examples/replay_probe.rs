@@ -177,6 +177,14 @@ mod windows_only {
             "  discarded pre-key  {}",
             stats.packets_discarded_before_first_keyframe()
         );
+        println!(
+            "  cut short          {}",
+            stats.segments_sealed_at_the_ceiling()
+        );
+        println!(
+            "  discarded (ceiling) {}",
+            stats.packets_discarded_over_ceiling()
+        );
 
         // The hotkey press, after the fact.
         let lease = buffer.lease_last(Duration::from_secs(args.save_seconds))?;

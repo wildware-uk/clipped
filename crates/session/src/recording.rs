@@ -280,6 +280,8 @@ fn record_frames(
                 .map_or(0.0, |covered| covered.length().as_secs_f64()),
             segments_evicted_for_window = stats.segments_evicted_for_window(),
             segments_evicted_over_ceiling = stats.segments_evicted_over_ceiling(),
+            segments_sealed_at_the_ceiling = stats.segments_sealed_at_the_ceiling(),
+            packets_discarded_over_ceiling = stats.packets_discarded_over_ceiling(),
             "replay buffer at the end of the recording"
         );
     }
@@ -407,11 +409,16 @@ fn offer(
 /// Moves every packet the encoder has ready into the writer's queue and, when
 /// there is one, into the replay buffer, and reports how many that was.
 ///
-/// The replay buffer is fed second and its result is not a `Result`: it copies
-/// bytes into memory it already owns and has no failure to report. A buffer
-/// that has reached its ceiling drops its own oldest segments and says so in
-/// its statistics rather than refusing the packet, because a replay buffer must
-/// never be able to end a recording (AGENTS.md section 17).
+/// **The muxer first, the buffer second.** The file is the recording and the
+/// buffer is a copy of it, so a packet is never held back from the file for the
+/// buffer's sake.
+///
+/// The replay buffer's result is not a `Result`: it copies bytes into memory it
+/// already owns and has no failure to report. A buffer that has reached its
+/// ceiling drops its own oldest segments — or, for an encoder whose keyframes
+/// are further apart than it can hold, the video it cannot buffer — and says so
+/// in its statistics rather than refusing the packet, because a replay buffer
+/// must never be able to end a recording (AGENTS.md section 17).
 fn drain(encoder: &mut dyn VideoEncoder, sinks: &PacketSinks<'_>) -> Result<usize, SessionError> {
     let mut moved = 0;
     while let Some(packet) = encoder.next_packet()? {
@@ -649,9 +656,15 @@ fn session_id() -> SessionId {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::path::PathBuf;
 
     use clipped_capture::{CaptureTarget, FrameSize, PixelFormat};
+    use clipped_encoder::{
+        BitRate, EncodeError, EncodedPacket, EncoderConfig, EncoderKind, FrameRate, PictureKind,
+        RateControl,
+    };
     use clipped_muxer::{MuxError, TrackId};
+    use clipped_replay::ReplayConfig;
 
     use super::*;
 
@@ -865,5 +878,311 @@ mod tests {
         // the last packet before the first and break the file.
         assert_eq!(nanos_of(Duration::from_secs(1)), 1_000_000_000);
         assert_eq!(nanos_of(Duration::MAX), i64::MAX);
+    }
+
+    // ---- the replay tap ----------------------------------------------------
+    //
+    // `drain` is the only production wiring this crate adds between an encoder
+    // and a replay buffer, and it is four lines that a refactor could silently
+    // drop. Nothing below needs a GPU or a desktop session: the encoder is
+    // scripted and the writer is a real `MkvWriter` over a temporary file, so
+    // the packets are the ones the file actually received.
+
+    /// A real H.264 sequence and picture parameter set, in the Annex B form
+    /// every Windows hardware encoder emits.
+    ///
+    /// Matroska will not declare an H.264 track without one. Taken from
+    /// `crates/muxer/tests/mkv_writing.rs`, which read it back out of a file
+    /// the pinned `libopenh264` build produced for a 640x360 picture.
+    const H264_PARAMETER_SETS: &[u8] = &[
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x1e, 0x8c, 0x68, 0x0a, 0x02, 0xff, 0x96, 0x01,
+        0xe1, 0x10, 0x8d, 0x40, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80,
+    ];
+
+    /// The picture those parameter sets describe.
+    const TEST_SIZE: (u32, u32) = (640, 360);
+
+    /// One packet an encoder is scripted to produce.
+    #[derive(Debug, Clone)]
+    struct ScriptedPacket {
+        data: Vec<u8>,
+        presentation: Duration,
+        decode: Duration,
+        keyframe: bool,
+    }
+
+    /// An encoder that produces a fixed list of packets and touches no
+    /// hardware.
+    ///
+    /// A real encoder would need a GPU and a Direct3D device, and what is under
+    /// test here is not encoding: it is where the packets an encoder produced
+    /// end up. Scripting them is also what makes "the buffer got *this* packet"
+    /// checkable, since every packet's bytes identify it.
+    #[derive(Debug)]
+    struct ScriptedEncoder {
+        config: EncoderConfig,
+        ready: VecDeque<ScriptedPacket>,
+        /// The packet `next_packet` last handed out, which owns the bytes it
+        /// borrowed — the same lifetime a real encoder's output buffer has.
+        current: Option<ScriptedPacket>,
+    }
+
+    impl ScriptedEncoder {
+        fn new(packets: impl IntoIterator<Item = ScriptedPacket>) -> Self {
+            Self {
+                config: EncoderConfig::new(
+                    Codec::H264,
+                    Resolution::new(TEST_SIZE.0, TEST_SIZE.1),
+                    FrameRate::whole(60),
+                    RateControl::constant(BitRate::megabits_per_second(18)),
+                ),
+                ready: packets.into_iter().collect(),
+                current: None,
+            }
+        }
+    }
+
+    impl VideoEncoder for ScriptedEncoder {
+        fn encoder(&self) -> EncoderKind {
+            EncoderKind::Software
+        }
+
+        fn configuration(&self) -> &EncoderConfig {
+            &self.config
+        }
+
+        fn parameter_sets(&self) -> &[u8] {
+            H264_PARAMETER_SETS
+        }
+
+        fn submit(&mut self, _frame: &SourceFrame<'_>) -> Result<(), EncodeError> {
+            Ok(())
+        }
+
+        fn next_packet(&mut self) -> Result<Option<EncodedPacket<'_>>, EncodeError> {
+            self.current = self.ready.pop_front();
+            Ok(self.current.as_ref().map(|packet| {
+                EncodedPacket::new(
+                    &packet.data,
+                    packet.presentation,
+                    packet.decode,
+                    if packet.keyframe {
+                        PictureKind::Keyframe
+                    } else {
+                        PictureKind::Predicted
+                    },
+                )
+            }))
+        }
+
+        fn finish(&mut self) -> Result<(), EncodeError> {
+            Ok(())
+        }
+
+        fn shut_down(&mut self) {}
+    }
+
+    /// A second of 60 fps packets whose bytes identify the frame they came
+    /// from, a keyframe every half second.
+    fn scripted_second() -> Vec<ScriptedPacket> {
+        (0..60u64)
+            .map(|frame| {
+                let at = Duration::from_micros(frame * 1_000_000 / 60);
+                ScriptedPacket {
+                    // Long enough that two frames cannot collide, and the frame
+                    // number is in the bytes so a packet that went to the wrong
+                    // place is identifiable rather than merely miscounted.
+                    data: frame.to_le_bytes().repeat(8),
+                    presentation: at,
+                    decode: at,
+                    keyframe: frame % 30 == 0,
+                }
+            })
+            .collect()
+    }
+
+    /// A path under the system temporary directory, removed when dropped.
+    #[derive(Debug)]
+    struct TemporaryRecording(PathBuf);
+
+    impl TemporaryRecording {
+        fn new(purpose: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "clipped-session-{purpose}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&directory).expect("a temporary directory can be created");
+            Self(directory.join("recording.mkv"))
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryRecording {
+        fn drop(&mut self) {
+            if let Some(directory) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(directory);
+            }
+        }
+    }
+
+    /// A real Matroska writer over a temporary file.
+    fn writer_for(recording: &TemporaryRecording) -> MkvWriter {
+        let track = VideoTrack::new(VideoCodec::H264, TEST_SIZE.0, TEST_SIZE.1)
+            .with_codec_private(H264_PARAMETER_SETS.to_vec());
+        MkvWriter::create(recording.path(), &RecordingLayout::new(track))
+            .expect("a recording can be created in the temporary directory")
+    }
+
+    /// A thirty-second buffer at the rate a 1080p60 recording is given.
+    fn replay_buffer() -> ReplayBuffer {
+        ReplayBuffer::new(
+            ReplayConfig::new(
+                Duration::from_secs(30),
+                BitRate::bits_per_second(18_662_400).expect("a real rate"),
+            )
+            .expect("thirty seconds is in range"),
+        )
+    }
+
+    #[test]
+    fn every_packet_the_file_receives_is_also_copied_into_the_replay_buffer() {
+        // The tap, end to end: one encoder, two consumers. If the copy into the
+        // buffer is dropped the buffer holds nothing; if the wrong packet is
+        // pushed the bytes below do not match the frame they claim to be.
+        let recording = TemporaryRecording::new("replay-tap");
+        let muxing = MuxingThread::start(writer_for(&recording));
+        let buffer = replay_buffer();
+        let sinks = PacketSinks {
+            muxing: &muxing,
+            replay: Some(&buffer),
+        };
+        let scripted = scripted_second();
+        let mut encoder = ScriptedEncoder::new(scripted.clone());
+
+        let moved = drain(&mut encoder, &sinks).expect("every packet is accepted");
+        let summary = muxing.finish().expect("the recording can be finalised");
+
+        assert_eq!(moved, scripted.len());
+        assert_eq!(
+            summary.packets,
+            scripted.len() as u64,
+            "the file did not receive every packet the encoder produced"
+        );
+
+        let stats = buffer.stats();
+        assert_eq!(
+            stats.packets_buffered(),
+            scripted.len() as u64,
+            "the replay buffer was not fed what the file was: {stats:?}"
+        );
+        assert_eq!(stats.packets_discarded_before_first_keyframe(), 0);
+
+        // Not merely the count. Every packet the buffer holds must be the
+        // packet the encoder produced for that instant, byte for byte.
+        let lease = buffer
+            .lease_last(Duration::from_secs(30))
+            .expect("a second of video is held");
+        let held: Vec<(Vec<u8>, Duration, bool)> = lease
+            .packets()
+            .map(|packet| {
+                (
+                    packet.data().to_vec(),
+                    packet.presentation_time(),
+                    packet.is_keyframe(),
+                )
+            })
+            .collect();
+        let expected: Vec<(Vec<u8>, Duration, bool)> = scripted
+            .iter()
+            .map(|packet| (packet.data.clone(), packet.presentation, packet.keyframe))
+            .collect();
+
+        assert_eq!(held, expected);
+    }
+
+    #[test]
+    fn a_recording_with_no_replay_buffer_still_writes_every_packet() {
+        // The other half of the option: attaching a buffer is what a caller
+        // chooses, and a recording without one must be untouched by any of it.
+        let recording = TemporaryRecording::new("no-replay");
+        let muxing = MuxingThread::start(writer_for(&recording));
+        let sinks = PacketSinks {
+            muxing: &muxing,
+            replay: None,
+        };
+        let mut encoder = ScriptedEncoder::new(scripted_second());
+
+        let moved = drain(&mut encoder, &sinks).expect("every packet is accepted");
+        let summary = muxing.finish().expect("the recording can be finalised");
+
+        assert_eq!(moved, 60);
+        assert_eq!(summary.packets, 60);
+    }
+
+    #[test]
+    fn a_packet_the_file_refused_is_not_left_in_the_replay_buffer() {
+        // Why the muxer is written first and the buffer second. The file is the
+        // recording; the buffer is a copy of it. A `drain` that fed the buffer
+        // first would leave it holding video that never reached the file and
+        // then report the failure, which is a buffer describing a recording
+        // that does not exist.
+        let recording = TemporaryRecording::new("refused-packet");
+        let muxing = MuxingThread::start(writer_for(&recording));
+
+        // An empty packet is what the writer refuses (`MuxError::EmptyPacket`),
+        // and the writer thread stops at its first failure — so after this the
+        // queue is closed and every later write is refused.
+        muxing
+            .write(&[], 0, 0, true)
+            .expect("the queue accepts it; the writer is what refuses it");
+        wait_until_the_writer_stops(&muxing);
+
+        let buffer = replay_buffer();
+        let sinks = PacketSinks {
+            muxing: &muxing,
+            replay: Some(&buffer),
+        };
+        let mut encoder = ScriptedEncoder::new(scripted_second());
+
+        let error = drain(&mut encoder, &sinks).expect_err("the writer has stopped");
+
+        assert!(matches!(error, SessionError::WriterLost), "{error}");
+        assert_eq!(
+            buffer.stats().packets_buffered(),
+            0,
+            "a packet the file refused was copied into the replay buffer anyway"
+        );
+
+        assert!(matches!(
+            muxing.finish(),
+            Err(SessionError::Mux(MuxError::EmptyPacket { .. }))
+        ));
+    }
+
+    /// Waits for the writer thread to notice a failed write and stop.
+    ///
+    /// Bounded twice over, deliberately. The deadline is what stops a writer
+    /// that never stops from hanging the suite instead of failing it, and the
+    /// interval is chosen so that the probes cannot fill the queue before the
+    /// deadline arrives — a `send` into a full queue blocks, and a blocking
+    /// wait inside a bounded loop is not a bounded loop.
+    fn wait_until_the_writer_stops(muxing: &MuxingThread) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+
+        while Instant::now() < deadline {
+            // Never written: the writer stops at its first failure, which has
+            // already happened, so these only ever queue or be refused.
+            if muxing.write(b"probe", 0, 0, true).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        panic!("the writer thread did not stop after refusing a packet");
     }
 }
