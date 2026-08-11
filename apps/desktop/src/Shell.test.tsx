@@ -1,6 +1,7 @@
 import { SCREENS } from '@clipped/shared';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { App } from './App';
@@ -13,6 +14,24 @@ import { App } from './App';
  * does not have, and that the chrome is operable from the keyboard alone. The
  * third - that a clean clone builds - is CI's job.
  */
+
+/**
+ * Mounts what `main.tsx` mounts, `<StrictMode>` and all.
+ *
+ * Rendering `<App />` bare would be a different application to the one anybody
+ * runs. StrictMode double-invokes effects on mount while preserving refs, which
+ * is a real difference rather than a testing artefact - it is what `npm run
+ * dev` and `npm run dev:web` do - and it defeated the guard that stops focus
+ * being moved into `<main>` on first paint. That defect passed a bare `<App />`
+ * and fails this, which is why the tree is built here rather than assumed.
+ */
+function renderApp(): void {
+  render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}
 
 /** Every focusable element, in the order Tab visits them. */
 async function tabThrough(user: UserEvent, steps: number): Promise<readonly Element[]> {
@@ -40,7 +59,7 @@ describe('the application shell', () => {
   });
 
   it('lists every screen in the sidebar, in order', () => {
-    render(<App />);
+    renderApp();
 
     const links = [
       ...within(screen.getByRole('navigation', { name: 'Screens' })).getAllByRole('link'),
@@ -52,7 +71,7 @@ describe('the application shell', () => {
 
   it('says which issue builds each screen instead of drawing an empty one', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     for (const entry of SCREENS) {
       await user.click(screen.getByRole('link', { name: entry.label }));
@@ -64,7 +83,7 @@ describe('the application shell', () => {
   });
 
   it('offers no recorder controls while the recorder cannot be reached', () => {
-    render(<App />);
+    renderApp();
 
     const status = screen.getByRole('region', { name: 'Recorder status' });
     expect(within(status).getByText('Not connected')).toBeVisible();
@@ -80,7 +99,7 @@ describe('the application shell', () => {
 
   it('reaches the skip link and then every screen with Tab alone', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     const visited = await tabThrough(user, SCREENS.length + 2);
 
@@ -92,7 +111,7 @@ describe('the application shell', () => {
 
   it('navigates with Enter and marks the screen that is open', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     await user.tab();
     await user.tab();
@@ -108,7 +127,7 @@ describe('the application shell', () => {
 
   it('moves focus to the screen after navigating, so the change is announced', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     expect(screen.getByRole('main')).not.toHaveFocus();
 
@@ -119,7 +138,7 @@ describe('the application shell', () => {
 
   it('moves focus to the screen when the skip link is used', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     await user.tab();
     await user.keyboard('{Enter}');
@@ -129,7 +148,7 @@ describe('the application shell', () => {
 
   it('names the open screen in the window title', async () => {
     const user = userEvent.setup();
-    render(<App />);
+    renderApp();
 
     expect(document.title).toBe('Clipped — Home');
 
@@ -140,7 +159,7 @@ describe('the application shell', () => {
 
   it('names the address it could not resolve rather than showing a blank screen', () => {
     window.location.hash = '#/nowhere';
-    render(<App />);
+    renderApp();
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Screen not found');
     expect(screen.getByText('/nowhere')).toBeVisible();

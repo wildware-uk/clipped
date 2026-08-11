@@ -27,16 +27,29 @@ export interface AppShellProps {
  */
 export function AppShell({ nav, status, screenKey, children }: AppShellProps): ReactNode {
   const main = useRef<HTMLElement>(null);
-  const firstScreen = useRef(true);
+
+  /*
+   * Which screen this effect has already moved focus for, so that it moves it
+   * when the screen changes and at no other time. Focus on the first screen
+   * belongs where the window put it when it opened; stealing it would land the
+   * user inside `<main>`, behind the skip button and the whole sidebar, before
+   * they had navigated anywhere.
+   *
+   * A boolean "have I run before?" flag is not enough, because `main.tsx`
+   * mounts the application inside `<StrictMode>`: React double-invokes effects
+   * on mount and preserves refs across the two runs, so the first run would
+   * clear the flag and the second would take it as a navigation. Holding the
+   * screen key instead makes the effect idempotent - a second run for the same
+   * screen finds nothing to do, whether it comes from StrictMode or from
+   * anywhere else - which is the property the guard needed all along.
+   */
+  const focusedScreen = useRef(screenKey);
 
   useEffect(() => {
-    // Not on the first screen: focus belongs where the window put it when it
-    // opened, and stealing it would skip the sidebar before anybody has
-    // navigated anywhere.
-    if (firstScreen.current) {
-      firstScreen.current = false;
+    if (focusedScreen.current === screenKey) {
       return;
     }
+    focusedScreen.current = screenKey;
     main.current?.focus();
   }, [screenKey]);
 
