@@ -178,6 +178,15 @@ The tests are Vitest and Testing Library, beside the components in
 drives it — `user.tab()`, `user.keyboard('{Enter}')` — so a regression in the
 keyboard path fails a test rather than waiting for a manual audit.
 
+`vitest` and `jsdom` are declared in the *root* `package.json`, beside ESLint,
+Prettier and TypeScript, rather than in the packages whose tests use them. That
+is not tidiness: npm hoists a dependency to the root when only one workspace
+asks for it and nests it when it feels like it, and Vitest resolves `jsdom`
+relative to its own install location. When the two land at different levels the
+run fails with `Cannot find package 'jsdom'` — which is what CI reported the
+first time this landed. Declaring both at the root puts them at the same level
+by construction.
+
 There is deliberately no test that mounts the Tauri window: what that would
 exercise is Tauri, not Clipped. The one module that talks to the window manager
 is small and is verified by running the application.

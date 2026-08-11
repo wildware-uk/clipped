@@ -26,9 +26,7 @@
     "@testing-library/user-event": "^14.6.3",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.4",
-    "jsdom": "^29.1.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "vitest": "^4.1.10"
+    "react-dom": "^19.2.8"
   }
 }

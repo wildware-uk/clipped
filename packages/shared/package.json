@@ -11,8 +11,5 @@
   "scripts": {
     "typecheck": "tsc --project tsconfig.json",
     "test": "vitest run"
-  },
-  "devDependencies": {
-    "vitest": "^4.1.10"
   }
 }

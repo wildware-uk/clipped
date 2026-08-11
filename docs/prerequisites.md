@@ -307,7 +307,7 @@ The same pin is read in two more places, so that nobody has to remember it:
   and contributors read the pin from the same file.
 
 One dependency is held back by this pin: `jsdom`, which the component tests run
-in, requires Node 22.22.2 or newer from version 30 onwards, so `packages/ui`
+in, requires Node 22.22.2 or newer from version 30 onwards, so the workspace
 stays on `jsdom` 29. Moving the pin forward and moving `jsdom` with it is one
 change, not two.
 
