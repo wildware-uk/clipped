@@ -1,0 +1,45 @@
+/* Styles for the parts of the window that are the application's own rather
+ * than the shared component library's. Everything reads from the design
+ * system's tokens, which `@clipped/ui/styles.css` defines.
+ */
+
+/* The window is a fixed frame, not a scrolling document: the content region
+   inside the shell is what scrolls. */
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+.recorder-status-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.recorder-status-mark {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border: 1px solid var(--color-text);
+}
+
+.recorder-status-detail {
+  margin: var(--space-2) 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+}
+
+/* `overflow-wrap` rather than `word-break: break-all`: a command is read as a
+   word, and breaking it mid-token to save a line makes it unreadable. This
+   wraps at the space and only splits a token that genuinely cannot fit. */
+.recorder-status-detail code {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}

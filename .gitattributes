@@ -9,3 +9,6 @@
 *.wav binary
 *.png binary
 *.ico binary
+
+# The vendored Archivo webfont (packages/ui/src/fonts).
+*.woff2 binary

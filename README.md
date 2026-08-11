@@ -20,6 +20,11 @@ yet — the recording engine is milestone M1 — but
 encoders it found on your machine
 ([docs/encoder-capabilities.md](docs/encoder-capabilities.md)).
 
+`npm install && npm run dev` opens the desktop application. It is the shell and
+nothing more: the window, the navigation and the theming exist, every screen
+behind them is still unbuilt and says so, and it has no way to reach the
+recorder yet ([docs/desktop-ui.md](docs/desktop-ui.md)).
+
 Installation instructions and screenshots are pending a shippable build.
 
 ## Supported platforms
@@ -46,6 +51,8 @@ You need:
   C++" workload.
 - LLVM, for the `libclang.dll` that generates the FFmpeg bindings at build time
   (`winget install LLVM.LLVM`).
+- Node, at the version in `.nvmrc`, for the desktop application. Only that part
+  of the build needs it; the recorder does not.
 
 [docs/prerequisites.md](docs/prerequisites.md) has the full list, including the
 versions the project is tested against.
@@ -56,6 +63,8 @@ cd clipped
 powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
 cargo build --workspace
 cargo test --workspace
+npm install
+npm run dev
 ```
 
 The one step beyond the toolchain is that FFmpeg build. Clipped links against a
@@ -88,17 +97,32 @@ The workspace lints `missing_docs`, `missing_debug_implementations`,
 `unreachable_pub` and `clippy::undocumented_unsafe_blocks` are enabled in
 `Cargo.toml`, so anything public needs a doc comment.
 
-The desktop application is not buildable yet: `apps/desktop` and `packages/`
-are placeholders until milestone M5, and there is no npm workspace to install.
+The desktop application is an npm workspace rooted at the repository root, with
+its own four checks:
+
+```text
+npm install
+npm run lint
+npm run typecheck
+npm run test
+npm run format:check
+```
+
+`npm run dev` opens the window; `npm run build:app` produces the executable and
+`npm run bundle` wraps it in an installer.
+[docs/desktop-ui.md](docs/desktop-ui.md) covers how it is put together, and why
+its Rust crate is not a member of the Cargo workspace.
 
 ## Repository layout
 
 ```text
 apps/
     recorder/       The recording process, which runs independently of the UI
-    desktop/        The Tauri desktop application (placeholder until M5)
+    desktop/        The Tauri desktop application, and its Rust shell
 crates/            The Rust libraries the recorder is assembled from
-packages/          TypeScript packages consumed by the desktop application
+packages/
+    ui/             React components and the design-system stylesheet
+    shared/         TypeScript types both of the above need
 tests/             Capture, audio, integration and performance suites
 docs/              Architecture, subsystem documentation and ADRs
 ```
@@ -158,10 +182,11 @@ crate takes it in the change that gives it something to log, and most of
 
 Two rules matter most:
 
-- **Nothing depends on the user interface.** `apps/desktop` and `packages/` are
-  deliberately not Cargo packages, so the desktop application cannot be linked
-  into the recorder even by accident. The UI is a client of the recorder over
-  IPC, and closing or crashing it must not interrupt a recording.
+- **Nothing depends on the user interface.** The desktop application's one
+  Cargo package, `apps/desktop/src-tauri`, is outside this workspace and
+  depends on no crate in it, so the UI cannot be linked into the recorder even
+  by accident. The UI is a client of the recorder over IPC, and closing or
+  crashing it must not interrupt a recording.
 - **Platform code stays at the bottom.** Windows APIs are reached through
   `clipped-windows` or through a `windows/` submodule of the crate that owns
   the behaviour, never scattered through unrelated modules.

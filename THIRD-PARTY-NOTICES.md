@@ -13,6 +13,47 @@ so no FFmpeg code is redistributed here — see
 Notices for the files a *release build* ships alongside Clipped belong with the
 packaging work, which does not exist yet.
 
+## Archivo (typeface)
+
+**Where:** `packages/ui/src/fonts/archivo-latin.woff2`,
+`packages/ui/src/fonts/archivo-latin-ext.woff2`,
+`packages/ui/src/fonts/archivo-vietnamese.woff2`
+
+**What:** the Archivo variable font, the typeface the Clipped design system is
+set in. These are the three woff2 subsets Google Fonts serves for Archivo v25 —
+Latin, Latin Extended and Vietnamese — carrying the whole 100–900 weight axis.
+They are redistributed in the repository, bundled into the application, and
+served from it at runtime.
+
+They are vendored rather than fetched because a desktop application that
+requests a font from a third party every time it starts is network
+communication the user did not ask for (AGENTS.md section 14,
+[docs/privacy.md](docs/privacy.md)), and because the interface would otherwise
+fall back to a system font whenever the machine is offline.
+
+**Source:** [Omnibus-Type/Archivo](https://github.com/Omnibus-Type/Archivo),
+served through [Google Fonts](https://fonts.google.com/specimen/Archivo). The
+files are unmodified: they are the exact bytes Google Fonts serves, and
+`packages/ui/src/styles/fonts.css` keeps the `unicode-range` declarations that
+came with them.
+
+**Licence:** SIL Open Font License 1.1. The full text is carried beside the
+fonts in [`packages/ui/src/fonts/OFL.txt`](packages/ui/src/fonts/OFL.txt), as
+the licence requires; the copyright notice at the head of it is reproduced here.
+
+```text
+Copyright 2020 The Archivo Project Authors (https://github.com/Omnibus-Type/Archivo)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
+```
+
+The OFL's conditions that bear on us: the font is redistributed with its licence
+and copyright notice, it is not sold on its own, and it is not renamed — the
+files keep the name Archivo, which is what the reserved font name clause asks
+of a redistributor who does not modify the font.
+
 ## AMD Advanced Media Framework headers (AMF SDK)
 
 **Where:** `crates/encoder/src/windows/amf/sys.rs`

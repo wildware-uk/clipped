@@ -53,7 +53,30 @@ yanked = "deny"
 # Advisories that have been reviewed and consciously accepted go here, each with
 # the issue that records the decision. Empty is the correct state; an entry
 # added without a linked issue is a policy failure, not a workaround.
-ignore = []
+#
+# The five below are one decision, not five: every crate in the `rust-unic`
+# family is unmaintained (rustsec/advisory-db#2414), and they reach the desktop
+# shell as `unic-* -> urlpattern -> tauri-utils -> tauri`. None is a
+# vulnerability - each is a "no longer maintained" notice - and each advisory
+# records that no safe upgrade exists. Nothing in this repository chooses them,
+# and the only way to stop depending on them is for Tauri to stop, so failing
+# every pull request on them would train everyone to ignore `cargo deny` rather
+# than fix anything. Issue #200 watches for the upstream release that drops
+# them, and removing these entries is the work of closing it.
+#
+# One deny.toml serves two manifests - this workspace and the desktop shell's
+# excluded crate - because the policy is a decision about the project, not about
+# a directory in it. The consequence is that `cargo deny --all-features check`
+# at the repository root prints "advisory was not encountered" for all five:
+# nothing in the workspace reaches them. That warning is expected, and it
+# disappears when the entries do.
+ignore = [
+    "RUSTSEC-2025-0075", # unic-char-property
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-range
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+]
 
 [licenses]
 # Clipped is MPL-2.0 (LICENSE, CONTRIBUTING.md "Licensing and dependencies").

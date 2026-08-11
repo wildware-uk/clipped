@@ -230,11 +230,17 @@ fn test_only_packages_are_never_linked_into_the_product() {
 }
 
 #[test]
-fn no_crate_depends_on_the_desktop_application() {
-    // The desktop application and the web packages are not Cargo packages at
-    // all, which is what keeps them unreachable from the Rust dependency
-    // graph. Assert that property directly, so that turning one of them into a
-    // crate is a deliberate decision rather than an accident.
+fn the_web_packages_are_not_cargo_packages() {
+    // The TypeScript half of the desktop application is not Cargo's business
+    // at all, which is what keeps it unreachable from the Rust dependency
+    // graph. Assert that property directly, so that turning one of these into
+    // a crate is a deliberate decision rather than an accident.
+    //
+    // `apps/desktop` is on this list even though the desktop application does
+    // have a Cargo package: that package lives one level down, in
+    // `apps/desktop/src-tauri`, and is checked by the test below. A
+    // `Cargo.toml` beside `package.json` would be a *second* one, which is
+    // exactly the accident worth catching.
     let root = workspace_root();
 
     for directory in ["apps/desktop", "packages/ui", "packages/shared"] {
@@ -245,4 +251,36 @@ fn no_crate_depends_on_the_desktop_application() {
              talks to the recorder over IPC, not by linking to it"
         );
     }
+}
+
+#[test]
+fn the_desktop_shell_links_no_crate_from_this_workspace() {
+    // `apps/desktop/src-tauri` is a Cargo package, and deliberately not a
+    // member of this workspace (see the `exclude` entry in the root manifest
+    // and docs/desktop-ui.md). Being outside it is what keeps it out of
+    // `cargo metadata` above - and it is also what would let a `clipped-*`
+    // dependency appear there without any of the layering tests noticing.
+    //
+    // So this reads its manifest as text. The rule it enforces is the one
+    // SPEC.md section 5 and ADR 0002 both state: the desktop application is a
+    // client of the recorder over IPC, and a `[dependencies]` entry naming a
+    // crate from this workspace would link the recording engine into the UI
+    // process, where a crash takes the recording with it.
+    let manifest_path = workspace_root().join("apps/desktop/src-tauri/Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .expect("the desktop shell's Cargo.toml should be readable");
+
+    let offenders: Vec<&str> = manifest
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| line.starts_with("clipped-"))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "the desktop shell must not depend on a crate from this workspace, and \
+         {} names: {offenders:#?}",
+        manifest_path.display()
+    );
 }

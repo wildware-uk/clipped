@@ -104,6 +104,7 @@ Two things to know about that route:
 | LLVM (`libclang`) | any recent release | check script |
 | FFmpeg libraries | the pin in `scripts/fetch-ffmpeg.ps1` | check script; see [FFmpeg libraries](#ffmpeg-libraries) |
 | Node | major version from `.nvmrc` | check script; see [Node](#node) |
+| WebView2 runtime | any; ships with Windows 11 | see [WebView2](#webview2) |
 | GPU driver | vendor-current | reported, not enforced |
 | `ffprobe` (test tool) | any recent build | check script, warning only |
 
@@ -295,18 +296,20 @@ verifies the recorded pin, touches no network and says so.
 ## Node
 
 `.nvmrc` pins the Node version. Node is not needed to build or test the Rust
-workspace, so the check script currently reports a missing Node as a warning
-rather than a failure.
+workspace — the recorder has no JavaScript in it — but it is required to build
+the desktop application, and `apps/desktop/package.json` now exists, so the
+check script treats a missing Node as a failure rather than a warning.
 
-That changes when the desktop application lands: `apps/desktop` is a placeholder
-today, and once it gains a `package.json` the check script promotes Node to a
-required prerequisite automatically (it tests for that file). The pin should then
-also be enforced in two more places:
+The same pin is read in two more places, so that nobody has to remember it:
 
-- `engines.node` in the desktop application's `package.json`, so `npm install`
-  refuses a wrong major version.
+- `engines.node` in the root `package.json`, which `npm install` checks.
 - `actions/setup-node` with `node-version-file: .nvmrc` in CI, so the workflow
-  and contributors read the same pin from the same file.
+  and contributors read the pin from the same file.
+
+One dependency is held back by this pin: `jsdom`, which the component tests run
+in, requires Node 22.22.2 or newer from version 30 onwards, so `packages/ui`
+stays on `jsdom` 29. Moving the pin forward and moving `jsdom` with it is one
+change, not two.
 
 Check:
 
@@ -320,6 +323,35 @@ right major is not.
 Fix: install the pinned version from [nodejs.org](https://nodejs.org), or use a
 version manager that understands `.nvmrc` and run `nvm install` (nvm-windows) or
 `fnm use` in the repository root.
+
+## WebView2
+
+The desktop application renders its interface in Microsoft's WebView2, which is
+the Edge rendering engine hosted in an ordinary window. Tauri links against its
+loader; there is no bundled browser and no Electron-sized runtime in the
+installer.
+
+Windows 11 ships WebView2 as part of the operating system, and it is present on
+most Windows 10 installations through Edge. Nothing needs installing on a
+machine that has it, and there is no version to pin: it is evergreen, updated by
+Windows rather than by Clipped.
+
+Check: the "Microsoft Edge WebView2 Runtime" entry in Installed apps, or
+
+```text
+Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object pv
+```
+
+Fix: install the Evergreen Runtime from
+[Microsoft](https://developer.microsoft.com/microsoft-edge/webview2/). The
+installer Clipped produces does this for the user automatically when it is
+missing — `webviewInstallMode` in `tauri.conf.json` — which is a download from
+Microsoft at install time and the one piece of network access the installation
+performs.
+
+The check script does not test for WebView2. It is present by default on every
+supported Windows version, and a missing one shows up immediately: the window
+does not open and the application says why.
 
 ## GPU and drivers
 

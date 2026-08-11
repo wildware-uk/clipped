@@ -74,11 +74,15 @@ capture pipeline, and it is not required for recording to start, continue or
 finalise. The reasoning and the alternatives considered are in
 [ADR 0002](adr/0002-separate-recorder-process.md).
 
-One consequence is enforced in the repository: `apps/desktop` and `packages/`
-are deliberately **not** Cargo packages, so the UI cannot be linked into the
-recorder even by mistake. The test `no_crate_depends_on_the_desktop_application`
-in `tests/integration/tests/workspace_layering.rs` fails if a `Cargo.toml`
-appears in any of them.
+One consequence is enforced in the repository. The desktop application has
+exactly one Cargo package — `apps/desktop/src-tauri`, the Tauri shell — and it
+is outside the Cargo workspace and depends on no crate in it, so the UI cannot
+be linked into the recorder even by mistake. Two tests in
+`tests/integration/tests/workspace_layering.rs` hold that:
+`the_web_packages_are_not_cargo_packages` fails if a `Cargo.toml` appears beside
+`package.json` in `apps/desktop`, `packages/ui` or `packages/shared`, and
+`the_desktop_shell_links_no_crate_from_this_workspace` reads the shell's own
+manifest, which `cargo metadata` cannot see from here.
 
 A second consequence is a convention held up by review, not by a check: no crate
 under `crates/` may refer to UI concerns at all. `clipped-session`, the top
@@ -184,7 +188,10 @@ large:
   to the thread that writes the file — which is what keeps the capture thread
   off the filesystem (AGENTS.md section 20). Per-game settings, game detection
   and the replay buffer are later milestones and are not there.
-- `apps/desktop` and `packages/` are README placeholders.
+- `apps/desktop` and `packages/` are the application shell and nothing behind
+  it: the window, the navigation and the theming exist, every screen the
+  navigation lists says it is not built yet, and there is no path from the
+  window to the recorder ([desktop-ui.md](desktop-ui.md)).
 - The tests assert the behaviour that exists: the workspace layering test,
   `clipped-logging`'s unit and integration tests, `clipped-capture`'s tests for
   the selection policy and the frame and timestamp types, and
@@ -214,11 +221,18 @@ clipped-recorder list-windows
 clipped-recorder record --window <window>
 ```
 
-The desktop application is not runnable and will not be until the M5 scaffold
-([issue #48](https://github.com/wildware-uk/clipped/issues/48)). When it is, it
-is started separately and connects to the recorder; there is no combined "run
-the app" command by design, because in production the two processes have
-independent lifetimes.
+The desktop application runs from the repository root:
+
+```text
+npm install
+npm run dev
+```
+
+It is started separately from the recorder and will connect to it over IPC.
+There is no combined "run the app" command, by design: in production the two
+processes have independent lifetimes, and a command that started both would
+suggest otherwise. Nothing connects yet — see
+[desktop-ui.md](desktop-ui.md).
 
 Toolchain and platform prerequisites are in [prerequisites.md](prerequisites.md).
 

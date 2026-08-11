@@ -1,0 +1,59 @@
+# An empty `[workspace]` table makes this crate its own workspace root rather
+# than a member of whatever workspace it happens to sit inside. The root
+# manifest already excludes it - see the `exclude` entry there for *why* it is
+# separate - but the exclusion only holds when the repository root is the
+# workspace Cargo walks up to. This line is what makes that true wherever the
+# checkout lives, including inside another checkout, and it is what Cargo
+# itself suggests when the two disagree.
+[workspace]
+
+[package]
+name = "clipped-desktop"
+description = "The Tauri shell hosting the Clipped desktop interface"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MPL-2.0"
+repository = "https://github.com/wildware-uk/clipped"
+authors = ["The Clipped contributors"]
+publish = false
+
+[[bin]]
+name = "clipped-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+# Generates the Tauri context - the parsed configuration, the embedded frontend
+# and the Windows resource carrying the icon and version - at compile time.
+# Dual MIT/Apache-2.0.
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The application framework. No features are enabled: this shell opens a window
+# and nothing else. Every capability it is granted is listed in
+# capabilities/default.json rather than being implied by a feature flag.
+# Dual MIT/Apache-2.0.
+tauri = { version = "2", features = [] }
+
+# This crate is deliberately outside the root Cargo workspace (see the
+# `exclude` entry and its comment in the workspace manifest), so it cannot
+# inherit `[workspace.lints]`. The list below is a copy of it. Keep the two in
+# step: a lint that is on for the recorder and off for the desktop shell is a
+# lint nobody can rely on.
+[lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

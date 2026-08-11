@@ -105,6 +105,26 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+If the change touches the desktop application — anything under `apps/desktop` or
+`packages/` — these must pass too, from the repository root:
+
+```text
+npm run format:check
+npm run lint
+npm run typecheck
+npm run test
+```
+
+And if it touches `apps/desktop/src-tauri`, which is deliberately outside the
+Cargo workspace and so is missed by the four commands above
+([docs/desktop-ui.md](docs/desktop-ui.md)):
+
+```text
+cd apps/desktop/src-tauri && cargo fmt --all --check
+cd apps/desktop/src-tauri && cargo clippy --all-targets -- -D warnings
+npm run build:app
+```
+
 Beyond that, a change is done when it is implemented, builds, is covered by
 tests where tests are meaningful, has had its behaviour actually verified,
 handles its failure cases, updates the documentation it invalidates, and
@@ -143,7 +163,7 @@ Three jobs run in parallel:
 | --- | --- |
 | **Rust (format, lint, build, test)** | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`, `cargo test --workspace` |
 | **Dependencies (licences and advisories)** | `cargo deny --all-features check` |
-| **Desktop UI (lint and build)** | `npm ci`, `npm run lint`, `npm run build` in `apps/desktop` (once `apps/desktop` exists — see below) |
+| **Desktop UI (lint, typecheck, test, build)** | `npm ci` and the four npm commands above, then `cargo fmt`, `cargo clippy`, `cargo deny` and a `--no-bundle` production build of `apps/desktop/src-tauri` |
 
 `main` is **not** branch-protected at the moment, so nothing mechanically blocks
 a red pull request from being merged. A red build is still a blocker: it is
@@ -166,14 +186,11 @@ The compiler is not installed by the workflow. CI runs `rustup toolchain
 install`, which reads `rust-toolchain.toml`, so CI and your machine use the same
 compiler by construction.
 
-### Steps that skip themselves
-
-Parts of the project do not exist yet, and the workflow says so rather than
-passing silently. The desktop UI steps skip until `apps/desktop/package.json`
-appears, printing a `SKIPPED - …` line into the log and the run summary
-explaining what is missing. When you add the missing piece, the steps start
-running on their own — but read the skip notice first, because a step that has
-never executed has never been tested either.
+The desktop UI job exists because the Rust jobs cannot cover
+`apps/desktop/src-tauri`: it is not a member of the Cargo workspace, for the
+reason [docs/desktop-ui.md](docs/desktop-ui.md) sets out, so `cargo fmt`,
+`cargo clippy` and `cargo deny` are run against it from there instead. Nothing
+about the standard it is held to differs; only where the command runs from.
 
 Hardware-dependent capture and encoder tests are **not** run in CI. A hosted
 runner has no GPU and nothing to record, so those tests would be measuring the

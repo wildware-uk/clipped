@@ -210,6 +210,27 @@ not to imply they exist:
   game's local telemetry or Game State Integration endpoint, active only while
   the relevant plugin is enabled. See below.
 
+### Installing is not running
+
+One thing the *installer* does is worth stating here, because it is the kind of
+detail that is otherwise discovered by somebody watching a firewall log. The
+Windows installer Clipped produces downloads the Microsoft Edge WebView2
+runtime from Microsoft if the machine does not already have it
+(`webviewInstallMode` in `apps/desktop/src-tauri/tauri.conf.json`), which is a
+one-time request made by the installer, to Microsoft, before Clipped has run at
+all. Windows 11 ships WebView2, so on most machines nothing is downloaded.
+
+That is not a register row: the register governs what the application does while
+it is running, and the running application still makes no request of any kind.
+
+The desktop interface is deliberately built so that this stays true. The design
+system's own stylesheet imports its typeface from Google Fonts; Clipped vendors
+the font files instead (`packages/ui/src/fonts`), because otherwise every start
+of the application would tell a third party the user's IP address and that
+Clipped was running. The window's content security policy allows `connect-src`
+to reach nothing but the application's own IPC channel, so a dependency that
+tried to make a request would be blocked rather than merely discouraged.
+
 ## Plugin network access
 
 Everything in this section is **policy to be implemented in Milestone 9

@@ -1,0 +1,33 @@
+# Generated or fetched trees. Nothing here is written by hand, so reformatting
+# it would only produce diffs that hide the changes that matter.
+dist/
+node_modules/
+target/
+third-party/
+Cargo.lock
+package-lock.json
+
+# Written by `tauri-build` on every build: the permission schemas the capability
+# files are validated against.
+/apps/desktop/src-tauri/gen/
+
+# Prose. The repository's Markdown is hand-wrapped to a column that keeps a
+# `git diff` readable, and Prettier's own wrapping disagrees with it - running
+# it over the documentation would rewrite every file for no gain and bury the
+# real change in a reflow. Markdown is covered by .editorconfig instead.
+*.md
+
+# Everything outside the npm workspace. Prettier formats TypeScript, CSS, HTML
+# and the JSON that configures them; Rust is rustfmt's and the workflows,
+# scripts and issue templates are hand-written YAML that Prettier would
+# re-indent for its own reasons.
+/.github/
+/crates/
+/docs/
+/scripts/
+/tests/
+/test-apps/
+
+# Vendored verbatim from the Clipped design project so that a change made there
+# can be diffed against this file. Reformatting it would break that comparison.
+/packages/ui/src/styles/tokens.css

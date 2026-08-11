@@ -14,6 +14,25 @@ members = [
     "tests/media",
 ]
 
+# The desktop application's Tauri crate is a Cargo package, but not one of
+# ours to build here. `tauri-build` embeds the bundled web interface at compile
+# time and fails if it has not been produced yet, so a member entry would mean
+# `cargo build --workspace` on a clean clone could not succeed until `npm
+# install && npm run build` had run first - and the four commands in
+# CONTRIBUTING.md would stop being the truth about how to build this
+# repository.
+#
+# It is excluded rather than left unlisted so that the exclusion is a stated
+# decision: without this line, `cargo` walks up from `apps/desktop/src-tauri`
+# and refuses to build it at all, with an error about a package that is inside
+# a workspace directory but not a member.
+#
+# The cost is that the root `cargo fmt`, `cargo clippy` and `cargo deny` do not
+# reach it. The `ui` job in .github/workflows/ci.yml runs each of them against
+# it directly, so it is covered by the same checks, just from a second place.
+# docs/desktop-ui.md records this.
+exclude = ["apps/desktop/src-tauri"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
