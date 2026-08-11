@@ -68,7 +68,9 @@ use windows::Win32::Security::{
     GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
     TOKEN_USER,
 };
-use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
+};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
     PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -394,10 +396,23 @@ fn connect_instance(instance: &File) -> Result<(), TransportError> {
 }
 
 /// Opens the client end of an endpoint, once, without retrying.
+///
+/// `security_qos_flags` is what stops the other end impersonating the caller.
+/// Windows' default for a named pipe opened without it is
+/// `SECURITY_IMPERSONATION`, which lets the *server* act as this process
+/// elsewhere on the machine — a grant no control protocol needs.
+/// `SECURITY_IDENTIFICATION` lets it find out who connected and no more, and
+/// `std` sets `SECURITY_SQOS_PRESENT` alongside it. Under the same-user threat
+/// model in `docs/ipc.md` this changes nothing an attacker could not already do;
+/// it is the smaller grant, asked for because the endpoint name is predictable
+/// and nothing authenticates the server to its client.
 fn open_client(endpoint: &Endpoint) -> io::Result<Connection> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
     OpenOptions::new()
         .read(true)
         .write(true)
+        .security_qos_flags(SECURITY_IDENTIFICATION.0)
         .open(endpoint.path())
         .map(|pipe| Connection { pipe })
 }

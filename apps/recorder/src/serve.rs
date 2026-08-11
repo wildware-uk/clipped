@@ -423,14 +423,24 @@ impl RecordingState {
     }
 
     /// What the recorder is doing.
+    ///
+    /// Deliberately reads through a poisoned lock. A panic while the state was
+    /// held does not stop the recording thread — `clipped_session::record` is
+    /// running on a thread of its own and the file is still growing — so
+    /// answering "idle" would be telling the UI that nothing is being recorded
+    /// while a recording continues, which is the failure AGENTS.md sections 15
+    /// and 54 are about. Nothing here is left half-written by a panic in the
+    /// Rust sense: the state is an `Option<Running>` of owned values, so the
+    /// worst a poisoned read can be is out of date, and a stale answer about a
+    /// real recording beats a confident answer about a fictional idle one.
     fn status(&self) -> RecorderStatus {
-        match self.lock() {
-            Ok(current) => status_of(current.as_ref()),
-            // A poisoned lock means something panicked while holding it. Saying
-            // "idle" would be a guess; the honest answer is that this process is
-            // not recording anything it can account for.
-            Err(_) => RecorderStatus::Idle,
-        }
+        let current = self.current.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "the recording state was poisoned by an earlier panic; reporting what it holds"
+            );
+            poisoned.into_inner()
+        });
+        status_of(current.as_ref())
     }
 
     /// Records a thread's outcome and tells every subscriber what changed.

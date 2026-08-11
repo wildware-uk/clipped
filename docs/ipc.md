@@ -114,6 +114,38 @@ SMB by default — `\\machine\pipe\name` from another computer is the same objec
 — and that flag refuses any client that did not come from this machine. Without
 it the "not network communication" claim above would be false.
 
+### Who the client is talking to
+
+The descriptor above answers "who may open this pipe". It does not answer the
+other direction — "whose pipe is this?" — and this document should say so rather
+than leave it implied.
+
+The endpoint name is predictable: `clipped-recorder.<session>`, where the session
+identifier is not a secret. Any process running as the user can create that name
+before the real recorder does, and be what the desktop application connects to.
+`FILE_FLAG_FIRST_PIPE_INSTANCE` does not prevent that; it protects the *server*,
+so the genuine recorder finds the name taken and exits saying another recorder is
+already listening rather than half-serving it. A client has nothing equivalent:
+there is no authentication in either direction, by design, because the operating
+system's access control is the authentication.
+
+**Under the threat model this transport is built for, that costs nothing.** The
+threat is another *user* on the machine, and the DACL keeps them out. A process
+running as this user could already send the real recorder any command, read its
+replies, or terminate it; squatting the name buys it nothing it could not do
+more simply. It would matter if the recorder ever ran as a different account —
+a service, say — and that is the change that would require the client to verify
+the server rather than assume it.
+
+What the client does do is ask for the smaller of the two grants Windows offers
+it. `open_client` opens the pipe with
+`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so the server can find out
+who connected and no more. Without those flags Windows applies
+`SECURITY_IMPERSONATION`, which would let whatever holds the server end act as
+the connecting process elsewhere on the machine — a capability nothing in this
+protocol needs, and one worth not handing to a pipe whose name anything running
+as the user can take.
+
 ### Not Windows
 
 `clipped-ipc`'s messages, framing and dispatch are platform-independent and are
@@ -334,6 +366,15 @@ Adding a command, a field, an event, an error code, an end reason or a feature
 does **not** increment the protocol version. Removing one, renaming one, or
 changing what one means does.
 
+A new **recorder state** is deliberately not on that list. `status` is a tagged
+union with no catch-all, so a client that met a state it had never heard of
+would fail to read the message rather than guess at it — and that is the wanted
+behaviour, because the alternative is a window showing "idle" for a recorder
+that is doing something else. An event a client cannot read is information it
+does without; a state it cannot read is a lie it would otherwise tell. Adding
+one is a version bump, and the handshake is then what stops the two ever
+meeting.
+
 ### An unknown command: refused by name
 
 `unknown_command`, naming the command. Deliberately not a parse failure: a
@@ -342,16 +383,32 @@ and a corrupt frame is a bug. They must not look the same, which is why a
 request carries its command as a string and its parameters as an open object,
 and why the typed dispatch happens after the envelope has been read.
 
-### An unknown error code, end reason or event stream name: kept
+### An unknown error code, error detail, end reason or event: kept
 
 A client compiled against protocol 1 that meets an error code added later keeps
-the code verbatim and shows the message. The same holds for an end reason. The
-alternative — failing to parse the frame — would turn "a refusal you have not
-seen before" into "the connection is broken".
+the code verbatim and shows the message. The same holds for an end reason, for
+an error's machine-readable `detail`, and for an event: each is kept as it
+arrived rather than failing the frame that carried it. The alternative — failing
+to parse the frame — would turn "a refusal you have not seen before" into "the
+connection is broken".
+
+That is a stronger requirement than it first looks, and it is the one place this
+policy has to be implemented rather than inherited. An unknown *field* is
+ignorable for nothing, because that is what JSON deserialisation does by
+default. An unknown *variant* is not: a tagged union whose tag a build does not
+recognise fails the whole message it is part of, so a `detail` invented later
+would take its refusal's code and message down with it, and an event invented
+later would end a subscription. Both types therefore keep a catch-all holding
+the raw JSON — `ErrorDetail::Other` and `Event::Other` — which is what makes the
+paragraph above true rather than aspirational. `crates/ipc`'s tests assert it in
+both directions, including that a known message carrying a field added later is
+still read as itself rather than falling into the catch-all.
 
 An unknown *event stream* name is the exception, and it is refused: a
 subscription that was accepted and then never delivered anything would be a UI
-showing an empty panel with no explanation.
+showing an empty panel with no explanation. The difference is that a stream is
+something a client *asks for* and can be told about, while an event and a detail
+arrive unannounced.
 
 ## Commands
 
@@ -533,7 +590,11 @@ person reads, written to AGENTS.md section 28.
 | `too_many_connections` | The recorder is serving as many connections as it will. |
 | `internal` | The recorder is at fault and cannot say more usefully. |
 
-A code a client has never seen is kept verbatim and its message shown.
+A code a client has never seen is kept verbatim and its message shown, and so is
+a `detail` whose shape it does not know — see [the compatibility
+policy](#an-unknown-error-code-error-detail-end-reason-or-event-kept). A refusal
+is the one message that must stay readable by a build that understands nothing
+else about it.
 
 ## When something goes wrong
 
@@ -631,9 +692,9 @@ Being able to do that at all is one of the reasons the format is JSON.
 
 | Where | What it covers |
 | --- | --- |
-| `crates/ipc/src/*.rs` unit tests | Message round trips, the frozen handshake shape, unknown versions, unknown fields, unknown codes, framing including a hostile length prefix, dispatch, event routing |
+| `crates/ipc/src/*.rs` unit tests | Message round trips, the frozen handshake shape, unknown versions, unknown fields, unknown codes, unknown error details, unknown events, framing including a hostile length prefix, dispatch, event routing |
 | `crates/ipc/src/transport/windows.rs` tests | A real pipe: a round trip, endpoint exclusivity, connecting to nothing, stopping a blocked listener |
-| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, a client that vanishes, a second recorder, and Ctrl+C |
+| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, and Ctrl+C |
 
 The rejection tests each end by asserting that the *next* client is still
 served. The interesting half of "a bad client is refused" is that a bad client

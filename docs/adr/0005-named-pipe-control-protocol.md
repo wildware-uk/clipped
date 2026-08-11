@@ -145,6 +145,16 @@ I/O is where to go, and this is the paragraph to reread.
   any token scheme this project would have written. `SYSTEM` and Administrators
   can take ownership of any object and rewrite its ACL; the documentation says so
   rather than implying a guarantee Windows does not offer.
+- **The endpoint name is predictable, and nothing tells a client whose pipe it
+  opened.** Access control answers "who may open this", not "whose is this", so a
+  process running as the user can take the name before the recorder does — at
+  which point the real recorder fails to bind and says so, and a client connects
+  to the squatter. That is accepted rather than solved: a process running as this
+  user could already drive or terminate the real recorder, so it gains nothing.
+  The client does ask for `SECURITY_IDENTIFICATION` rather than letting Windows
+  grant a pipe server impersonation by default, and [ipc.md](../ipc.md) states
+  the position. It is the first thing to revisit if the recorder ever runs as a
+  different account from the UI.
 - **The protocol is Windows-only, and the rest of the crate is not.** Messages,
   framing and dispatch are platform-independent and unit-tested anywhere; only
   `crates/ipc/src/transport/windows.rs` is not. A Linux port adds a file beside
