@@ -417,6 +417,7 @@ pub struct VideoStream {
     frame_rate: Option<String>,
     title: Option<String>,
     decoded_frames: Option<u64>,
+    least_decoded_frames: Option<u64>,
     packets: Option<u64>,
 }
 
@@ -469,6 +470,20 @@ impl VideoStream {
         self
     }
 
+    /// How many pictures must come out of a decoder, at the least.
+    ///
+    /// For a recording whose exact length nobody can know — a file left by a
+    /// process that was killed, where the count depends on when the kill
+    /// landed. The distinction it draws is the one that matters: a container
+    /// can list ninety-two packets, have monotonic timestamps and one video
+    /// stream, and still decode to nothing at all. Every assertion but this one
+    /// passes on that file.
+    #[must_use]
+    pub fn decoded_frames_at_least(mut self, frames: u64) -> Self {
+        self.least_decoded_frames = Some(frames);
+        self
+    }
+
     /// How many packets the stream must hold.
     #[must_use]
     pub fn packets(mut self, packets: u64) -> Self {
@@ -502,6 +517,12 @@ impl VideoStream {
         expect_count(stream, "width", self.width.map(u64::from), failures);
         expect_count(stream, "height", self.height.map(u64::from), failures);
         expect_count(stream, "nb_read_frames", self.decoded_frames, failures);
+        expect_at_least(
+            stream,
+            "nb_read_frames",
+            self.least_decoded_frames,
+            failures,
+        );
         expect_count(stream, "nb_read_packets", self.packets, failures);
     }
 }
@@ -647,12 +668,7 @@ fn expect_count(
     let Some(expected) = expected else {
         return;
     };
-    let what = match field {
-        "nb_read_frames" => "decoded frames",
-        "nb_read_packets" => "packets",
-        "sample_rate" => "sample rate",
-        other => other,
-    };
+    let what = describe_field(field);
     match stream.number(field) {
         Some(found) if (found - expected as f64).abs() < f64::EPSILON => {}
         Some(found) => failures.push(format!(
@@ -661,6 +677,47 @@ fn expect_count(
         )),
         None => failures.push(format!(
             "{} {what}: expected {expected}, but the file does not report it",
+            stream.label()
+        )),
+    }
+}
+
+/// What a report calls an `ffprobe` field.
+fn describe_field(field: &str) -> &str {
+    match field {
+        "nb_read_frames" => "decoded frames",
+        "nb_read_packets" => "packets",
+        "sample_rate" => "sample rate",
+        other => other,
+    }
+}
+
+/// A lower bound on a count, for a recording whose exact length is not knowable.
+///
+/// A field the file does not report is a failure rather than a zero, for the
+/// reason `expect_count` gives: absence of evidence is not evidence (AGENTS.md
+/// section 22). `ffprobe` reports `nb_read_frames` only when it was asked to
+/// count them, so this failing that way means the harness stopped counting, not
+/// that the recording is empty — and the message says which.
+fn expect_at_least(
+    stream: &Stream<'_>,
+    field: &str,
+    expected: Option<u64>,
+    failures: &mut Vec<String>,
+) {
+    let Some(expected) = expected else {
+        return;
+    };
+    let what = describe_field(field);
+    match stream.number(field) {
+        Some(found) if found >= expected as f64 => {}
+        Some(found) => failures.push(format!(
+            "{} {what}: expected at least {expected}, found {found}",
+            stream.label()
+        )),
+        None => failures.push(format!(
+            "{} {what}: expected at least {expected}, but the file does not report it — which \
+             means it was probed without `-count_frames` rather than that it holds none",
             stream.label()
         )),
     }
@@ -691,4 +748,90 @@ fn stream_labels(media: &Media) -> HashMap<i64, String> {
         .iter()
         .filter_map(|stream| Some((stream.number("index")? as i64, stream.label())))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use super::{Stream, VideoStream};
+
+    /// What `VideoStream` says about one `ffprobe` object.
+    fn checked(stream: &Value, expected: VideoStream) -> Vec<String> {
+        let mut failures = Vec::new();
+        expected.check(&Stream::from_probe(stream, "video", 0), &mut failures);
+        failures
+    }
+
+    #[test]
+    fn a_track_that_decodes_nothing_fails_a_lower_bound_that_its_packets_satisfy() {
+        // The distinction the whole method exists to draw, and the reason a
+        // recording left by a killed recorder is not proved playable by its
+        // packet count: this file lists ninety-two packets and produces no
+        // pictures at all. Every other expectation in this module passes on it.
+        let undecodable = json!({
+            "codec_type": "video",
+            "codec_name": "av1",
+            "nb_read_packets": "92",
+            "nb_read_frames": "0",
+        });
+
+        assert!(
+            checked(&undecodable, VideoStream::default().packets(92)).is_empty(),
+            "the packet count is exactly what such a file does satisfy"
+        );
+        assert_eq!(
+            checked(
+                &undecodable,
+                VideoStream::default().decoded_frames_at_least(1)
+            ),
+            vec!["v:0 decoded frames: expected at least 1, found 0".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_bound_a_recording_clears_is_not_reported() {
+        let recorded = json!({
+            "codec_type": "video",
+            "codec_name": "av1",
+            "nb_read_packets": "93",
+            "nb_read_frames": "93",
+        });
+
+        assert!(checked(&recorded, VideoStream::default().decoded_frames_at_least(1)).is_empty());
+        assert_eq!(
+            checked(
+                &recorded,
+                VideoStream::default().decoded_frames_at_least(94)
+            ),
+            vec!["v:0 decoded frames: expected at least 94, found 93".to_owned()],
+            "a bound is a bound: the count either reaches it or it does not"
+        );
+    }
+
+    #[test]
+    fn a_decode_count_the_file_does_not_report_is_a_failure_and_not_a_zero() {
+        // `ffprobe` reports `nb_read_frames` only when it was asked to count
+        // frames. A harness that quietly read the missing field as zero would
+        // fail every recording; one that read it as "satisfied" would pass a
+        // file it never decoded. It says which of the two happened instead
+        // (AGENTS.md section 22).
+        let never_counted = json!({
+            "codec_type": "video",
+            "codec_name": "av1",
+            "nb_read_packets": "93",
+        });
+
+        let failures = checked(
+            &never_counted,
+            VideoStream::default().decoded_frames_at_least(1),
+        );
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].contains("without `-count_frames`"),
+            "the report has to say the harness stopped counting rather than that the recording is \
+             empty: {}",
+            failures[0]
+        );
+    }
 }

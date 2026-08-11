@@ -304,6 +304,21 @@ impl<'a> Stream<'a> {
         self.value
     }
 
+    /// A stream built straight from an `ffprobe` object.
+    ///
+    /// For this crate's own tests, which have to check what an expectation says
+    /// about a file `ffprobe` would report a particular way — including files
+    /// no encoder here can be made to produce on demand, such as a video track
+    /// that lists packets and decodes none.
+    #[cfg(test)]
+    pub(crate) const fn from_probe(value: &'a Value, kind: &'a str, position: usize) -> Self {
+        Self {
+            value,
+            kind,
+            position,
+        }
+    }
+
     /// One line naming the stream and everything a reader needs to see why an
     /// expectation about it failed.
     pub fn describe(&self) -> String {
