@@ -65,7 +65,13 @@
 //! wall-clock each, and they put a window on a display. CI has none of that, so
 //! what they would test there is the runner. Being `#[ignore]`d rather than
 //! quietly skipped is deliberate: a test that decides for itself that it could
-//! not run reads as a pass.
+//! not run reads as a pass. The one that checks what is said about a game with
+//! *no* window needs neither a GPU nor an encoder — nothing is ever captured —
+//! but it still needs WMI and a machine of its own, so it is ignored with the
+//! rest rather than being the one that fails on CI.
+//!
+//! `cargo test --workspace` builds the examples these need; a bare
+//! `cargo build --workspace` does not.
 //!
 //! ```text
 //! cargo test -p clipped-recorder --test automatic_sessions -- --ignored --nocapture --test-threads=1
@@ -88,8 +94,8 @@ use clipped_media_validation::{require_media_tools, Media, TemporaryDirectory, V
 use serde_json::Value;
 
 use support::{
-    ensure_console, read_stderr, recorder_binary, send_ctrl_c, terminate, video_pattern_binary,
-    wait_for_exit, CREATE_NEW_PROCESS_GROUP,
+    ensure_console, example_binary, read_stderr, recorder_binary, send_ctrl_c, terminate,
+    video_pattern_binary, wait_for_exit, CREATE_NEW_PROCESS_GROUP,
 };
 
 /// The rate the pattern application presents at.
@@ -127,6 +133,22 @@ game_id = "clipped-video-pattern"
 name = "Clipped Video Pattern"
 [[game.executables]]
 name = "video-pattern.exe"
+"#;
+
+/// An overlay entry naming something that will never put a window on screen.
+///
+/// `shutdown_fixture` is the recorder's own Ctrl+C fixture: it starts, says
+/// `ready`, and waits. That makes it a real process the watcher really reports
+/// and really has to give up looking for a window of — which is exactly the
+/// case being checked, and one no game can be relied upon to produce on demand.
+const WINDOWLESS_OVERLAY: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "clipped-windowless"
+name = "Clipped Windowless"
+[[game.executables]]
+name = "shutdown_fixture.exe"
 "#;
 
 #[test]
@@ -290,6 +312,54 @@ fn stopping_the_recorder_mid_recording_finalises_it_and_finishes_the_session() {
     );
 }
 
+#[test]
+#[ignore = "needs a desktop session and WMI; see the module docs"]
+fn a_game_that_never_shows_a_window_is_said_so_and_never_claimed_as_a_recording() {
+    // A launch is noticed seconds before there is anything to capture, and the
+    // search for a window can run for `--window-timeout` and then fail. The
+    // console must not announce a recording at the moment the game was noticed,
+    // because that is a claim about something that may never happen — and when
+    // the search does give up it must say so, or a user whose game was never
+    // captured has nothing to read but a summary saying zero recordings
+    // (AGENTS.md section 27).
+    ensure_console();
+
+    let workspace = Workspace::with_overlay("watch-no-window", WINDOWLESS_OVERLAY);
+    let mut recorder = workspace.start_recorder();
+
+    recorder.wait_for("Watching for games.");
+    thread::sleep(Duration::from_secs(1));
+
+    let subject = WindowlessSubject::start(&workspace.path().join("marker"));
+
+    // In order, which is the whole point: the launch is noticed first, and that
+    // is all that has happened. `wait_for` reads the stream forwards, so a
+    // console that announced a recording up front would never reach this line.
+    recorder.wait_for("Clipped Windowless started. Looking for its window.");
+    recorder.wait_for("Nothing was recorded of Clipped Windowless");
+
+    let diagnostics = recorder.stop();
+    drop(subject);
+
+    assert!(
+        !diagnostics.contains("Recording Clipped Windowless to"),
+        "nothing ever had a window, so nothing was ever recorded, and the console must not have \
+         said otherwise:\n{diagnostics}"
+    );
+
+    let session = workspace.only_session();
+    let recordings = session["recordings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the session record has no recordings:\n{session:#}"));
+    assert!(
+        !recordings.is_empty()
+            && recordings
+                .iter()
+                .all(|recording| recording["outcome"] == "no-window"),
+        "every attempt should be recorded as having found no window:\n{session:#}\n{diagnostics}"
+    );
+}
+
 /// A temporary directory holding a run's clips, its session records and the
 /// user data the recorder is pointed at.
 #[derive(Debug)]
@@ -299,19 +369,27 @@ struct Workspace {
 
 impl Workspace {
     fn new(label: &str) -> Self {
+        Self::with_overlay(label, OVERLAY)
+    }
+
+    fn with_overlay(label: &str, overlay: &str) -> Self {
         let directory = TemporaryDirectory::new(label);
         let workspace = Self { directory };
 
         fs::create_dir_all(workspace.clips()).expect("the clips directory can be created");
         let application = workspace.local_app_data().join("Clipped");
         fs::create_dir_all(&application).expect("the data directory can be created");
-        fs::write(application.join("games.toml"), OVERLAY).expect("the overlay can be written");
+        fs::write(application.join("games.toml"), overlay).expect("the overlay can be written");
 
         workspace
     }
 
     fn clips(&self) -> PathBuf {
         self.directory.path().join("clips")
+    }
+
+    fn path(&self) -> &Path {
+        self.directory.path()
     }
 
     fn local_app_data(&self) -> PathBuf {
@@ -548,6 +626,50 @@ impl Drop for LaunchedPattern {
                 Err(_) => break,
             }
         }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A running process that the overlay calls a game and that never draws.
+///
+/// It is killed rather than asked to stop: what it is here for is to exist
+/// while the recorder looks for a window it does not have, and a fixture left
+/// running would sit in the watcher's view of the machine for the next test.
+#[derive(Debug)]
+struct WindowlessSubject {
+    child: Child,
+}
+
+impl WindowlessSubject {
+    fn start(marker: &Path) -> Self {
+        let mut child = Command::new(example_binary("shutdown_fixture"))
+            .arg(marker)
+            .stdout(Stdio::piped())
+            // Its own group, so that the Ctrl+C aimed at the recorder cannot
+            // reach it and end this test's subject early.
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .expect("the shutdown fixture can be started");
+
+        // It says `ready` once it is up, which is what makes the wait below a
+        // wait on the recorder rather than on this process starting.
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("the fixture announces itself");
+        assert!(
+            line.trim() == "ready",
+            "the fixture should have said it was ready, and said {line:?}"
+        );
+
+        Self { child }
+    }
+}
+
+impl Drop for WindowlessSubject {
+    fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

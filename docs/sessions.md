@@ -376,7 +376,10 @@ They start the real recorder as a child process, launch `test-apps/video-pattern
 not start and has no handle on — and validate the resulting file with
 `clipped-media-validation`, asserting that it **decodes** rather than merely
 opens. One of them sends a real Ctrl+C while a recording is still running, which
-is the path on which the session has to survive being stopped from underneath.
+is the path on which the session has to survive being stopped from underneath. A
+fourth uses a real process that never draws anything — the recorder's own Ctrl+C
+fixture — to check what the console says when the search for a window gives up,
+and that it never claimed a recording that did not happen.
 
 The `cmd.exe` parent does **not** reliably prove that the debounce joins a
 launcher and its game into one launch, and the test module says so at length:
