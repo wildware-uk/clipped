@@ -52,7 +52,15 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # The window, the WebView2 host and the asset protocol that serves the built
 # interface. Dual MIT/Apache-2.0.
-tauri = { version = "2", features = [] }
+#
+# `tray-icon` is what puts Clipped in the notification area (SPEC.md section 33,
+# issue #50). It is a Cargo feature rather than a separate crate because Tauri
+# owns the message loop the tray's window procedure runs on, and a second tray
+# implementation beside it would need a second one. The feature brings in
+# `tray-icon` and `muda`, which are Tauri's own; among other things `tray-icon`
+# is what re-adds the icon when Explorer restarts, by listening for the
+# `TaskbarCreated` message every application has to handle for itself.
+tauri = { version = "2", features = ["tray-icon"] }
 # The recorder control protocol and the supervision built on it: the named pipe,
 # the handshake, and deciding whether a recorder is running
 # (docs/ipc.md, docs/adr/0006-recorder-lifetime-and-supervision.md).
@@ -74,3 +82,28 @@ tauri = { version = "2", features = [] }
 # dependency in the root workspace carries the same pair. MPL-2.0, like the rest
 # of Clipped.
 clipped-ipc = { path = "../../../crates/ipc", version = "0.1.0" }
+# Microsoft's generated bindings to the Windows API, for one thing this crate
+# cannot get from Tauri: which window the user was last looking at.
+#
+# The tray's Start Recording has to name something to record, and the recorder's
+# `start_recording` takes a window, a process name or a process identifier. The
+# honest answer for a tray is "the application you were in when you opened this
+# menu", and the only way to know that is `EVENT_SYSTEM_FOREGROUND` — a window
+# event hook, which costs nothing until a foreground window changes and is the
+# non-polling half of the same choice `clipped-game-detection` made for process
+# starts (issue #41). Without it the menu item would have to be permanently
+# disabled, and a control that can never do anything is one that should not be
+# drawn.
+#
+# `clipped-windows` in the repository's workspace does the same sort of thing
+# and is deliberately *not* used: `tests/integration/tests/workspace_layering.rs`
+# allows this manifest exactly one member of that workspace, `clipped-ipc`, so
+# that closing this window can never reach capture or encoding. The version is
+# the one the root workspace pins, so a machine with both checkouts built
+# compiles one copy of it. Dual MIT/Apache-2.0.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }

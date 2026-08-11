@@ -65,7 +65,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::command::{Command, Reply, StartRecording, StopRecording, UnbuiltCommand};
+use crate::command::{Command, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand};
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 use crate::message::{
@@ -408,8 +408,21 @@ fn structures() -> BTreeMap<String, Structure> {
             ),
         ),
         (
+            "shutdown".to_owned(),
+            structure_of(
+                &Shutdown {
+                    finalise_recording: true,
+                },
+                &[],
+            ),
+        ),
+        (
             "recording_summary".to_owned(),
             structure_of(&exemplar_summary(), &[]),
+        ),
+        (
+            "active_recording".to_owned(),
+            structure_of(&exemplar_active_recording(), &[]),
         ),
     ]);
 
@@ -457,6 +470,7 @@ fn commands() -> Vec<CommandSchema> {
             params: match command {
                 Command::StartRecording(_) => Some("start_recording".to_owned()),
                 Command::StopRecording(_) => Some("stop_recording".to_owned()),
+                Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping | Command::GetStatus | Command::Unbuilt(_) => None,
             },
             reply: match command {
@@ -464,6 +478,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::GetStatus => Some("reply.status".to_owned()),
                 Command::StartRecording(_) => Some("reply.recording_started".to_owned()),
                 Command::StopRecording(_) => Some("reply.recording_stopped".to_owned()),
+                Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
                 Command::Unbuilt(_) => None,
             },
             available_in_this_build: true,
@@ -523,6 +538,26 @@ fn samples() -> Vec<Sample> {
                 command: "start_recording".to_owned(),
                 params: serde_json::to_value(exemplar_start_recording())
                     .expect("the start options serialise"),
+            }),
+        ),
+        (
+            "asking the recorder to exit",
+            ClientMessage::Request(Request {
+                id: 8,
+                command: "shutdown".to_owned(),
+                params: serde_json::to_value(Shutdown::default())
+                    .expect("the shutdown options serialise"),
+            }),
+        ),
+        (
+            "asking the recorder to finish a recording and exit",
+            ClientMessage::Request(Request {
+                id: 8,
+                command: "shutdown".to_owned(),
+                params: serde_json::to_value(Shutdown {
+                    finalise_recording: true,
+                })
+                .expect("the shutdown options serialise"),
             }),
         ),
     ] {
@@ -605,6 +640,33 @@ fn samples() -> Vec<Sample> {
                         ..exemplar_summary()
                     },
                 }),
+            }),
+        ),
+        (
+            "a shutdown accepted, with nothing being recorded",
+            ServerMessage::Response(Response {
+                id: 8,
+                outcome: Outcome::Ok(Reply::ShuttingDown { finalising: None }),
+            }),
+        ),
+        (
+            "a shutdown accepted, naming the recording it will finish",
+            ServerMessage::Response(Response {
+                id: 8,
+                outcome: Outcome::Ok(Reply::ShuttingDown {
+                    finalising: Some(exemplar_active_recording()),
+                }),
+            }),
+        ),
+        (
+            "a shutdown refused because a recording is running",
+            ServerMessage::Response(Response {
+                id: 8,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::AlreadyRecording,
+                    "`process `cs2.exe`` is being recorded to D:\\clips\\session.mkv; ask again \
+                     with `finalise_recording` to finish that file and exit",
+                )),
             }),
         ),
         (
@@ -823,6 +885,13 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::RecordingStopped { summary } => {
             format!("recording_stopped.{}", summary.end_reason.as_str())
         }
+        // Whether a recording is being finished is the whole of what this reply
+        // says, so it is part of the path: a mirror that dropped the field would
+        // otherwise reach the same discriminant either way.
+        Reply::ShuttingDown { finalising: None } => "shutting_down".to_owned(),
+        Reply::ShuttingDown {
+            finalising: Some(_),
+        } => "shutting_down.finalising".to_owned(),
     }
 }
 
@@ -1008,12 +1077,17 @@ fn exemplar_start_recording() -> StartRecording {
 
 /// A recording in progress.
 fn exemplar_recording() -> RecorderStatus {
-    RecorderStatus::Recording(ActiveRecording {
+    RecorderStatus::Recording(exemplar_active_recording())
+}
+
+/// The recording itself, without the state tag around it.
+fn exemplar_active_recording() -> ActiveRecording {
+    ActiveRecording {
         recording_id: "r-1".to_owned(),
         output: r"D:\clips\session.mkv".to_owned(),
         target: "process `cs2.exe`".to_owned(),
         elapsed_ms: 4_200,
-    })
+    }
 }
 
 /// A finished recording.
@@ -1130,6 +1204,7 @@ fn every_built_command() -> Vec<Command> {
         Command::GetStatus,
         Command::StartRecording(exemplar_start_recording()),
         Command::StopRecording(StopRecording::default()),
+        Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
         match command {
@@ -1137,6 +1212,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::GetStatus
             | Command::StartRecording(_)
             | Command::StopRecording(_)
+            | Command::Shutdown(_)
             | Command::Unbuilt(_) => {}
         }
     }
@@ -1157,6 +1233,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::TargetNotFound,
         ErrorCode::RecordingFailed,
         ErrorCode::TooManyConnections,
+        ErrorCode::ShuttingDown,
         ErrorCode::Internal,
     ];
     for code in &codes {
@@ -1172,6 +1249,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::TargetNotFound
             | ErrorCode::RecordingFailed
             | ErrorCode::TooManyConnections
+            | ErrorCode::ShuttingDown
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
         }
@@ -1271,13 +1349,18 @@ fn every_reply() -> Vec<Reply> {
         Reply::RecordingStopped {
             summary: exemplar_summary(),
         },
+        Reply::ShuttingDown {
+            // `Some`, or the field is skipped and the schema would not see it.
+            finalising: Some(exemplar_active_recording()),
+        },
     ];
     for reply in &replies {
         match reply {
             Reply::Pong
             | Reply::Status { .. }
             | Reply::RecordingStarted { .. }
-            | Reply::RecordingStopped { .. } => {}
+            | Reply::RecordingStopped { .. }
+            | Reply::ShuttingDown { .. } => {}
         }
     }
     replies
@@ -1323,11 +1406,14 @@ mod tests {
             "peer_identity",
             "start_recording",
             "stop_recording",
+            "shutdown",
             "recording_summary",
+            "active_recording",
             "reply.pong",
             "reply.status",
             "reply.recording_started",
             "reply.recording_stopped",
+            "reply.shutting_down",
             "event.status_changed",
             "event.recording_failed",
             "recorder_status.idle",

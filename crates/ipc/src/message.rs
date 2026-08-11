@@ -113,6 +113,18 @@ pub mod features {
         RECORDING = "recording";
         /// The recorder can report its status, and push status events.
         STATUS_EVENTS = "status_events";
+        /// The recorder can be asked to finish and exit over the protocol.
+        ///
+        /// Unlike the two above, this one is not the application's to claim:
+        /// it is [`Server`](crate::Server) that ends the accept loop, so
+        /// [`Server::serve`](crate::Server::serve) is what adds this to a
+        /// [`Welcome`], and a [`CommandHandler`](crate::CommandHandler) neither
+        /// advertises nor performs it. A recorder built before the command
+        /// existed does not advertise it and refuses it with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand),
+        /// which is what a client checks for before offering an "Exit" that
+        /// would do nothing.
+        SHUTDOWN = "shutdown";
     }
 }
 

@@ -22,6 +22,17 @@ use windows_sys::Win32::System::Console::{AllocConsole, GenerateConsoleCtrlEvent
 /// <https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags>
 pub(crate) const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
+/// No console at all, which is how the desktop application starts a recorder.
+///
+/// `crates/ipc/src/supervisor/platform.rs` spawns it with exactly
+/// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, and the first of those is what
+/// makes [issue #220](https://github.com/wildware-uk/clipped/issues/220) a
+/// problem: a process with no console cannot receive `CTRL_C_EVENT`, so before
+/// the `shutdown` command there was no way to end one but Task Manager.
+/// `tests/shutdown_command.rs` starts a recorder the same way, so that what it
+/// proves is about the recorder a user actually has.
+pub(crate) const DETACHED_PROCESS: u32 = 0x0000_0008;
+
 /// How long a child is given to do something before a test gives up on it.
 ///
 /// Generous on purpose. The assertion is "this happens", not "this happens
@@ -53,17 +64,26 @@ pub(crate) fn ensure_console() {
 
 /// Sends a real Ctrl+C to the child's process group.
 pub(crate) fn send_ctrl_c(child: &Child) {
+    assert!(
+        try_send_ctrl_c(child),
+        "GenerateConsoleCtrlEvent failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// Sends a real Ctrl+C to the child's process group, and says whether Windows
+/// accepted it.
+///
+/// Separate from [`send_ctrl_c`] for the one caller that expects a refusal:
+/// `tests/shutdown_command.rs` sends one to a **detached** child to show it
+/// cannot arrive, and there the call failing is the point rather than a fault.
+pub(crate) fn try_send_ctrl_c(child: &Child) -> bool {
     // SAFETY: `GenerateConsoleCtrlEvent` takes two integers by value. The group
     // id is the child's process id, which is a group id because the child was
     // created with CREATE_NEW_PROCESS_GROUP, so the event cannot reach this
     // process or the rest of the test run.
     let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, child.id()) };
-    assert_ne!(
-        sent,
-        0,
-        "GenerateConsoleCtrlEvent failed: {}",
-        std::io::Error::last_os_error()
-    );
+    sent != 0
 }
 
 /// Waits for the child, killing it rather than hanging the suite for ever.

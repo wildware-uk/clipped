@@ -469,15 +469,27 @@ builds on it rather than adding a second mechanism, and two applications
 starting at the same instant produce one serving recorder and one that exits
 ([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
 
-**Nothing asks it to exit.** Ctrl+C is the only way to stop `serve`, and a
-recorder started detached by the desktop application has no console to receive
-one — so it can only be killed. A `shutdown` command is
-[#220](https://github.com/wildware-uk/clipped/issues/220).
-
 **Ctrl+C stops it the way it stops `record`.** The listener stops first, so
 nothing new arrives, and then any recording is stopped and its file finished
 before the process exits — the recording is the only thing here that has to end
 correctly. Connection threads own nothing and go with the process.
+
+**A client can ask it to exit**, which is how a recorder started detached by the
+desktop application is stopped: it has no console, so Ctrl+C cannot reach it, and
+before the `shutdown` command it could only be killed
+([#220](https://github.com/wildware-uk/clipped/issues/220)). The command runs the
+path above rather than a second one — it stops the listener, and everything after
+that is the same code Ctrl+C reaches. It **refuses** while a recording is running
+unless the request says in as many words that it may finish one, so nothing that
+can open the pipe can end somebody's recording by accident;
+[ipc.md](ipc.md#shutdown) has the shape of it.
+
+```powershell
+# see docs/ipc.md, "Trying it by hand", for Send-Frame and Read-Frame
+Send-Frame $pipe @{ type = 'request'; id = 1; command = 'shutdown' }
+Read-Frame $pipe
+# {"type":"response","id":1,"outcome":{"ok":{"reply":"shutting_down"}}}
+```
 
 Exit codes are the ordinary ones: 0 when it was stopped, 1 if the endpoint could
 not be taken or serving failed. A recording that fails while it is being served

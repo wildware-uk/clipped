@@ -44,6 +44,12 @@
 //! is the only thing here that must survive its process ending correctly
 //! (AGENTS.md section 17); connection threads own nothing and are left to go
 //! with the process.
+//!
+//! The `shutdown` command takes the same path and deliberately not a second one:
+//! `clipped-ipc` answers it by stopping the listener, so everything below
+//! `server.serve` in [`run`] happens exactly as it does for Ctrl+C. That is what
+//! makes a recorder started detached — with no console to receive Ctrl+C —
+//! stoppable at all ([issue #220](https://github.com/wildware-uk/clipped/issues/220)).
 
 use std::error::Error;
 use std::fmt;
@@ -251,6 +257,18 @@ impl CommandHandler for RecorderService {
             // answer a command whose subsystem does not exist (AGENTS.md
             // section 54). Reaching here would be a bug in that refusal.
             Command::Unbuilt(unbuilt) => Err(unbuilt.refusal()),
+            // Also answered by `clipped-ipc` before dispatch, for the opposite
+            // reason: what a shutdown ends is the accept loop, which belongs to
+            // the server rather than to this service. It stops the listener,
+            // `run` below then stops any recording and waits for its file, and
+            // the process exits — the same path Ctrl+C takes
+            // (`crates/ipc/src/server.rs`, issue #220). Reaching here would be a
+            // bug in that dispatch.
+            Command::Shutdown(_) => Err(ProtocolError::new(
+                ErrorCode::Internal,
+                "`shutdown` is answered by the protocol layer and should not have reached the \
+                 recorder",
+            )),
         }
     }
 
