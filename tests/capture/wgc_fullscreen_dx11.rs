@@ -9,43 +9,41 @@
 //! does. `test-apps/fullscreen-dx11` is that subject, and this is the test that
 //! points a capture at it.
 //!
-//! # The answer, and the thing that nearly hid it
+//! # The answer
 //!
-//! Windows Graphics Capture does capture a window holding a display
-//! exclusively. On Windows 11 build 26200 with an RTX 4090, one run of this
-//! test decoded **274 of a possible 300 frames in five seconds, with zero
-//! acquisition timeouts and zero undecodable frames**, from a subject that
-//! reported `exclusive=yes` and that said afterwards it had presented all 318
-//! of its frames with the display held exclusively.
+//! Windows Graphics Capture does capture a window that holds a display through
+//! `IDXGISwapChain::SetFullscreenState`. It delivers about nine frames in ten
+//! of the three hundred a 60 fps subject could present in five seconds —
+//! measurably fewer than the *same* run delivers when Windows refuses the
+//! transition and the subject is a borderless window covering the same display,
+//! which returns 290 to 301 of 300. That gap is a finding in its own right and
+//! is not yet explained; `docs/capture-pipeline.md` has the table and
+//! [issue #192](https://github.com/wildware-uk/clipped/issues/192) owns it.
 //!
-//! What made that hard to find is worth writing down, because it will waste
-//! somebody's afternoon otherwise. **A display that Windows has powered off
-//! makes every capture measurement meaningless.** With both displays asleep on
-//! the idle timeout, the compositor runs at about 4 Hz — measured, repeatedly,
-//! at 3.97 fps with a median interval of 251.6 ms — so Windows Graphics Capture
-//! delivers about one frame in fifteen for *any* target, and
-//! `SetFullscreenState` is refused with `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
-//! (0x887A0022)`. Nothing about that is a capture defect and none of it
-//! reproduces once the display is awake. `tests/capture/README.md` says how to
-//! tell, and `docs/capture-pipeline.md` has the numbers.
+//! # Windows decides whether there is anything to measure
 //!
-//! # What it decides, and what it only reports
+//! `SetFullscreenState` needs the foreground, and on this machine exactly one
+//! thing decides whether a test-started process gets it: **whether a process
+//! that synthesised an input event is still running.** Not the launch path, not
+//! how long the session has been idle, and not whether the displays are powered
+//! on — all three were varied and none of them moved the answer.
+//! `tests/capture/README.md` has the measurements and the procedure; there is
+//! no way for this test to create that state for itself, and it does not try —
+//! injecting input into somebody's session because they ran `cargo test` is not
+//! this test's business.
 //!
-//! The subject asks DXGI for the display and prints whether it was given it, so
-//! this test reads the `exclusive` field rather than assuming (AGENTS.md
-//! section 16):
+//! So an unattended run is worth nothing unless it says which case it got:
 //!
 //! - **Granted (`exclusive=yes`).** This is the case issue #12 exists to check,
 //!   and it is asserted: the subject has to survive the run, the frames have to
-//!   arrive, and every one of them has to decode as the pattern. A future
-//!   Windows that stops composing a window which owns its display would fail
-//!   here, which is the point.
+//!   arrive, and every one of them has to decode as the pattern.
 //! - **Refused (`exclusive=no`).** The subject is then a borderless window
 //!   covering the display, which is what a game in "fullscreen (windowed)" mode
-//!   is, and the same assertions apply — but the run is *not* evidence about
-//!   exclusive fullscreen and says so in as many words before it ends. A test
-//!   that quietly passed either way would be no evidence at all (AGENTS.md
-//!   section 54).
+//!   is. The same assertions apply, against a tighter frame floor — but the run
+//!   is *not* evidence about exclusive fullscreen, so it prints `NOT EXERCISED`
+//!   and, under `CLIPPED_REQUIRE_CAPTURE`, **fails**. A green run that never
+//!   reached the one case the test is named for is worse than no run at all
+//!   (AGENTS.md section 54), and on an untouched machine it is the run you get.
 //!
 //! # Why it is `#[ignore]`d
 //!
@@ -70,6 +68,8 @@ use clipped_capture::{
 };
 use clipped_video_pattern::harness::TestApp;
 use clipped_video_pattern::pattern::{self, Surface};
+use windows::Win32::System::SystemInformation::GetTickCount;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
 use readback::FrameReader;
 
@@ -81,6 +81,10 @@ const SOURCE_FPS: u32 = 60;
 /// Short on purpose. A display held exclusively is a display nobody else can
 /// use, and five seconds at 60 fps is still three hundred frames of evidence.
 const CAPTURE_FOR: Duration = Duration::from_secs(5);
+
+/// The frames the source could have presented while capture was running, which
+/// is what every count below is a fraction of.
+const POSSIBLE_FRAMES: u64 = SOURCE_FPS as u64 * CAPTURE_FOR.as_secs();
 
 /// How long the application is given to appear. Longer than the windowed
 /// tests: a mode switch takes a moment, and the `ready` line comes after it.
@@ -106,6 +110,58 @@ fn skipped(reason: &str) {
         "{REQUIRE_CAPTURE} is set, so this must not be skipped: {reason}"
     );
     let _ = writeln!(std::io::stderr(), "SKIPPED (capture): {reason}");
+}
+
+/// Reports that the run happened but never reached exclusive fullscreen.
+///
+/// A different statement from [`skipped`], and the one this test needs most:
+/// the machine could run it, it did run, and the single case it is named for
+/// did not occur, because Windows refused the display. Under
+/// [`REQUIRE_CAPTURE`] that is a failure for exactly the reason a skip is — a
+/// run whose numbers are being recorded must not report "ok" for a case it
+/// never entered (AGENTS.md section 54). Without the variable it is a loud
+/// note, because a refusal is what an untouched machine gets, and failing every
+/// casual run over Windows' focus policy would teach people to ignore this
+/// test.
+fn not_exercised(reason: &str) {
+    assert!(
+        std::env::var_os(REQUIRE_CAPTURE).is_none_or(|value| value.is_empty()),
+        "{REQUIRE_CAPTURE} is set, so this run had to exercise exclusive fullscreen and did \
+         not: {reason} tests/capture/README.md has what decides it and the procedure that \
+         produces a grant."
+    );
+    let _ = writeln!(
+        std::io::stderr(),
+        "\n*** NOT EXERCISED: {reason} This run covered borderless fullscreen only and says \
+         nothing about the exclusive case. Set {REQUIRE_CAPTURE} to make that a failure \
+         rather than a pass; tests/capture/README.md has the procedure. ***\n"
+    );
+}
+
+/// How long the session has been idle, as Windows measures it for the display
+/// timeout.
+///
+/// Printed with every result. It is not what decides whether the display is
+/// granted — that was measured, at idle times from thirty seconds to twenty
+/// minutes, and it made no difference — but it is the cheapest thing that says
+/// how awake the machine was, and a run taken on a machine nobody has touched
+/// can deliver materially fewer frames because the *subject* presents fewer. A
+/// frame count without it is not reproducible.
+fn session_idle() -> Duration {
+    let size = u32::try_from(size_of::<LASTINPUTINFO>()).unwrap_or(0);
+    let mut info = LASTINPUTINFO {
+        cbSize: size,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a live local with `cbSize` set, which is the call's one
+    // requirement; it only reads the session's last-input tick.
+    if !unsafe { GetLastInputInfo(&raw mut info) }.as_bool() {
+        return Duration::ZERO;
+    }
+    // SAFETY: no preconditions — it reads a counter. `wrapping_sub` because
+    // both are the same 32-bit millisecond tick, which wraps every 49 days.
+    let now = unsafe { GetTickCount() };
+    Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime)))
 }
 
 #[test]
@@ -190,6 +246,7 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
     );
 
     let granted = app.is_exclusive();
+    let idle = session_idle();
     eprintln!(
         "[info] Windows {} the display exclusively",
         if granted { "granted" } else { "refused" }
@@ -199,23 +256,33 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
 
     eprintln!(
         "\n=== wgc_fullscreen_dx11 ===\n\
-         exclusive granted   : {}\n\
-         client size         : {}x{}\n\
-         frames delivered    : {}\n\
-         frames decoded      : {}\n\
-         acquisition timeouts: {}\n\
-         counters            : {} to {}\n\
-         subject survived    : {}\n\
-         undecodable frames  : {}{}\n",
+         exclusive granted    : {}\n\
+         client size          : {}x{}\n\
+         session idle at start: {:.0}s\n\
+         frames delivered     : {} of a possible {POSSIBLE_FRAMES}\n\
+         frames decoded       : {}\n\
+         acquisition timeouts : {}\n\
+         backend said missed  : {}\n\
+         counters             : {} to {}\n\
+         subject survived     : {}\n\
+         undecodable frames   : {}{}\n",
         if granted { "yes" } else { "no" },
         app.client_size().0,
         app.client_size().1,
+        idle.as_secs_f64(),
         outcome.delivered,
         outcome.decoded,
         outcome.timeouts,
+        outcome
+            .missed
+            .map_or_else(|| "not reported".to_owned(), |missed| missed.to_string()),
         outcome.first.unwrap_or(0),
         outcome.last.unwrap_or(0),
-        if outcome.target_lost { "no" } else { "yes" },
+        if outcome.lost_after.is_some() {
+            "no"
+        } else {
+            "yes"
+        },
         outcome.undecodable.len(),
         outcome
             .undecodable
@@ -232,50 +299,49 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
     );
 
     assert!(
-        !outcome.target_lost,
-        "the subject's window went away {:.0}s into a run it was asked to keep going for 60s, \
-         so there was nothing left to capture. The known way to reach this is a display that \
-         has been powered off — Windows then revokes the exclusive mode a frame after granting \
-         it and the subject does not survive that, which is \
+        outcome.lost_after.is_none(),
+        "the subject's window went away {}, in a run it was asked to keep going for 60s, so \
+         there was nothing left to capture. The known way to reach this is a display that \
+         has been powered off — Windows then revokes the exclusive mode a frame after \
+         granting it and the subject does not survive that, which is \
          https://github.com/wildware-uk/clipped/issues/178. The subject's own message is on \
          standard error above.",
-        CAPTURE_FOR.as_secs_f64()
+        match outcome.lost_after {
+            Some(after) if after.is_zero() => "before capture could start at all".to_owned(),
+            Some(after) => format!("{:.1}s into the capture", after.as_secs_f64()),
+            None => String::new(),
+        }
     );
 
-    // Half the source's frames, not all of them: this test reads every frame
-    // back into system memory and decodes it, which a recorder does not, and
-    // 2560x1440 of that at 60 fps is enough work to lose some. Half is far more
-    // than is needed to tell "captured" from "not captured" — the run this was
-    // written against decoded 274 of a possible 300 — and it is the number that
-    // moves if the backend stops delivering, which is the regression worth
-    // catching.
-    let floor = u64::from(SOURCE_FPS) * CAPTURE_FOR.as_secs() / 2;
+    let floor = frame_floor(granted);
     assert!(
         outcome.decoded >= floor,
-        "only {} of an expected {} frames decoded in {:.0}s of capturing a {SOURCE_FPS} fps \
-         application covering a display{}. Windows Graphics Capture composed {} frames and \
-         timed out {} times.",
+        "only {} of the {POSSIBLE_FRAMES} frames a {SOURCE_FPS} fps source could present in \
+         {:.0}s decoded, against a floor of {floor}, while capturing an application covering \
+         a display{}. Windows Graphics Capture composed {} frames, timed out {} times and \
+         reported {} frames missed; the session had been idle for {:.0}s when the run \
+         started, and a machine nobody has touched winds its whole display pipeline down \
+         (tests/capture/README.md).",
         outcome.decoded,
-        floor,
         CAPTURE_FOR.as_secs_f64(),
         if granted {
             " that was holding it exclusively, which is the case issue #12 exists to check"
         } else {
-            ""
+            " as a borderless window, Windows having refused the exclusive transition"
         },
         outcome.delivered,
-        outcome.timeouts
+        outcome.timeouts,
+        outcome
+            .missed
+            .map_or_else(|| "no".to_owned(), |missed| missed.to_string()),
+        idle.as_secs_f64()
     );
 
     if !granted {
-        // Said after the assertions rather than before, so that it is the last
-        // thing on the screen: a green run here is evidence about borderless
-        // fullscreen and nothing else.
-        eprintln!(
-            "\n*** NOT EXERCISED: Windows refused the display exclusively, so this run \
-             covered borderless fullscreen only, and says nothing about the exclusive case. \
-             tests/capture/README.md has what makes the difference. ***\n"
-        );
+        // After the assertions rather than before, so that a refused run still
+        // checks everything it legitimately can, and so that this is the last
+        // thing left on the screen.
+        not_exercised("Windows refused the display exclusively.");
     }
 
     let stopped = app
@@ -322,6 +388,42 @@ fn a_fullscreen_application_is_captured_and_gives_its_display_back() {
     );
 }
 
+/// The fewest frames a run may decode and still be worth anything.
+///
+/// Two numbers, because the two cases differ by more than ten points of
+/// delivery — which is the finding under "Exclusive fullscreen" in
+/// `docs/capture-pipeline.md`, not an artefact of this test. Both were measured
+/// on the development machine (Windows 11 build 26200, RTX 4090, 2560x1440 at
+/// 60 fps, five seconds), same binary, same readback, interleaved within
+/// minutes of each other:
+///
+/// - **Refused** — a borderless window covering the display — delivered 301,
+///   300, 300 and 298 of 300 on an active session and 290 on one that had been
+///   idle for ten minutes, so the floor is 90%. That is also the case a machine
+///   without the state described in `tests/capture/README.md` gets, so it is
+///   the run that happens most often, and it can afford to be the stricter of
+///   the two.
+/// - **Granted** — the window holding the display — delivered 266, 268, 270,
+///   272, 272, 274, 274 and 279 of 300 on an active session, and 229 once on
+///   one idle for ten minutes. So 90% is not defensible here however much one
+///   would like it to be: an honest floor sits below the worst measurement,
+///   which puts it at 70%. Anything that drops delivery further is a regression
+///   this catches, and
+///   [issue #192](https://github.com/wildware-uk/clipped/issues/192) is where
+///   the gap between the two cases gets explained and this floor tightened.
+///
+/// Both floors sit below the worst figure measured for their case rather than
+/// near the typical one, because the alternative is a test that fails for
+/// reasons nobody can act on — and a floor that is only ever hit by a machine
+/// nobody has touched teaches contributors to re-run rather than to look.
+fn frame_floor(granted: bool) -> u64 {
+    if granted {
+        POSSIBLE_FRAMES * 7 / 10
+    } else {
+        POSSIBLE_FRAMES * 9 / 10
+    }
+}
+
 /// What the capture saw.
 #[derive(Debug, Default)]
 struct Outcome {
@@ -330,9 +432,21 @@ struct Outcome {
     timeouts: u64,
     first: Option<u32>,
     last: Option<u32>,
-    /// Whether the subject's window went away before the run was over — either
-    /// before capture could start or during it.
-    target_lost: bool,
+    /// What the backend itself reported as missed, summed over the run. [`None`]
+    /// when it never reported the figure at all, which is not the same as zero.
+    ///
+    /// Here to answer one question and no more: whether the frames this test
+    /// does not receive are frames it was too slow to collect or frames the
+    /// compositor never produced. The fuller accounting — drops, duplicates,
+    /// ordering — already exists in `tests/capture/wgc_video_pattern.rs` and
+    /// belongs in a module both tests share rather than copied into this one
+    /// (AGENTS.md section 55, and issue #192).
+    missed: Option<u64>,
+    /// How far into the capture the subject's window went, when it did. [`None`]
+    /// means it survived; `Some(Duration::ZERO)` means it had already gone
+    /// before capture could start. The two print differently because they are
+    /// debugged differently.
+    lost_after: Option<Duration>,
     undecodable: Vec<String>,
 }
 
@@ -359,7 +473,7 @@ fn capture(app: &TestApp, method: clipped_capture::CaptureMethod) -> Outcome {
         // it means — so it is recorded rather than panicked on.
         Err(CaptureError::TargetLost { .. }) => {
             eprintln!("[info] the subject's window had already gone when capture tried to start");
-            outcome.target_lost = true;
+            outcome.lost_after = Some(Duration::ZERO);
             return outcome;
         }
         Err(error) => panic!("capturing a fullscreen application's window should start: {error}"),
@@ -367,12 +481,16 @@ fn capture(app: &TestApp, method: clipped_capture::CaptureMethod) -> Outcome {
 
     let mut reader = FrameReader::default();
     let mut region = None;
-    let deadline = Instant::now() + CAPTURE_FOR;
+    let started = Instant::now();
+    let deadline = started + CAPTURE_FOR;
 
     while Instant::now() < deadline {
         match backend.acquire(Duration::from_millis(100)) {
             Ok(Acquisition::Frame(frame)) => {
                 outcome.delivered += 1;
+                if let Some(missed) = frame.frames_missed() {
+                    *outcome.missed.get_or_insert(0) += u64::from(missed);
+                }
                 // Copied while the frame is held: the texture belongs to the
                 // backend, and the borrow ends here rather than being carried
                 // into the decoding below (`docs/capture-pipeline.md`).
@@ -421,7 +539,7 @@ fn capture(app: &TestApp, method: clipped_capture::CaptureMethod) -> Outcome {
                     "[info] the subject's window went away after {} delivered frames",
                     outcome.delivered
                 );
-                outcome.target_lost = true;
+                outcome.lost_after = Some(started.elapsed());
                 break;
             }
             Err(error) => panic!("capture failed after {} frames: {error}", outcome.delivered),

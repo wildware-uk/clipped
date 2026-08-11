@@ -39,6 +39,11 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # GetLastInputInfo and GetTickCount: the test reports how long the session
+    # had been idle when it started, because a frame count taken on a machine
+    # nobody has touched is not comparable with one taken on a machine in use.
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [lints]

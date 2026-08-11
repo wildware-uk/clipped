@@ -485,42 +485,152 @@ applications exist
 
 ### Exclusive fullscreen
 
-**It works.** A window that has taken a display through
-`IDXGISwapChain::SetFullscreenState` is captured by this backend like any other
-window, and `tests/capture/wgc_fullscreen_dx11.rs` is the automated proof:
-it starts `test-apps/fullscreen-dx11`, checks that Windows really granted the
-display, captures the window, and decodes the frame counter out of every frame
-that arrives. On Windows 11 build 26200 with an RTX 4090, capturing a 2560x1440
-subject presenting at 60 fps on the non-primary display:
+Two questions live here, and they have different answers. Keeping them apart is
+the whole of this section, because an earlier revision of this page ran them
+together and got the second one wrong.
 
-| Run | Granted | Delivered | Decoded of a possible 300 | Timeouts | Undecodable |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 1 | yes | 274 | 274 | 0 | 0 |
-| 2 | yes | 266 | 266 | 0 | 0 |
+1. **Will Windows let a test-started application take the display?** That is
+   Windows' focus policy. It is not about capture and this repository does not
+   control it.
+2. **Once an application does hold a display, does this backend capture it?**
+   That is what
+   [issue #12](https://github.com/wildware-uk/clipped/issues/12) asks.
 
-The subject reported `presented 318 frames with the display held exclusively`
-and `presented 325 frames …` respectively, stopped when the test asked it to,
-and the display was the same shape afterwards. The shortfall against 300 is the
-test reading every 14 MiB frame back into system memory and decoding it, which a
-recorder does not do.
+#### (2) Yes — at about nine frames in ten
 
-That closes the one presentation
-[issue #12](https://github.com/wildware-uk/clipped/issues/12) could not check
-when this backend landed. The earlier note that DXGI refused the transition with
-`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (0x887A0022)` was real but was not about the
-foreground, and is explained by the next section.
+`tests/capture/wgc_fullscreen_dx11.rs` starts `test-apps/fullscreen-dx11`, reads
+from its `ready` line whether Windows granted the display, captures the window
+and decodes the frame counter out of every frame that arrives. It asserts the
+result and, when the display was refused, says so and fails rather than passing
+(see `CLIPPED_REQUIRE_CAPTURE` in `tests/capture/README.md`).
 
-### A powered-off display makes every capture measurement meaningless
+Windows 11 Pro build 26200, RTX 4090, `\\.\DISPLAY1` (non-primary), 2560x1440,
+subject presenting at 60 fps, five seconds of capture — so 300 frames were there
+to be had. Same binary, same readback path, same display; the runs are minutes
+apart and the grants and refusals are interleaved among them:
 
-Worth knowing before trusting any number on this page, and the single biggest
-trap in reproducing them. When Windows has turned the displays off on the idle
+| Windows granted the display | Delivered of 300 | Decoded | Timeouts | Undecodable |
+| --- | ---: | ---: | ---: | ---: |
+| yes | 279 | 279 | 0 | 0 |
+| yes | 274 | 274 | 0 | 0 |
+| yes | 274 | 274 | 0 | 0 |
+| yes | 272 | 272 | 0 | 0 |
+| yes | 272 | 272 | 0 | 0 |
+| yes | 270 | 270 | 0 | 0 |
+| yes | 268 | 268 | 0 | 0 |
+| yes | 266 | 266 | 0 | 0 |
+| yes | 229 | 229 | 4 | 0 |
+| no (borderless) | 301 | 301 | 0 | 0 |
+| no (borderless) | 300 | 300 | 0 | 0 |
+| no (borderless) | 300 | 300 | 0 | 0 |
+| no (borderless) | 298 | 298 | 0 | 0 |
+| no (borderless) | 290 | 290 | 0 | 0 |
+
+That is every run taken, not a selection. Every frame that arrived decoded as
+the pattern in every one of them, the subject survived every run, and the
+display was the shape it started as afterwards. So the answer to (2) is yes, and
+the test asserts it rather than reporting it. (The 301 is not a typo: a capture
+started a frame before the source's five seconds began, so one more counter
+arrived than the arithmetic allows for.)
+
+The two low rows — 229 granted and 290 refused — are the two runs taken on a
+session that had been idle for about ten minutes, and in the 229 the *subject*
+presented 278 frames rather than its usual 320-odd. A machine nobody has touched
+winds its whole display pipeline down, so both halves of the table lose ground
+there. That is why the test now prints the session's idle time beside its frame
+count, and why neither number should be quoted without it.
+
+**The gap between the two halves of that table is real and is not the readback.**
+An earlier revision of this page said the shortfall was the test copying every
+14 MiB frame into system memory and decoding it. It is not: the refused runs do
+exactly the same copying and decoding, at the same size and rate, on the same
+machine minutes apart, and lose almost nothing. Nor is it the caller falling
+behind — the backend's own derived frames-missed figure
+([Dropped frames](#dropped-frames)) is **0** in all four runs taken since the
+test started reporting it, the granted 268 and 266 as well as the refused 301
+and 290. That says the compositor never composed the missing frames rather than
+that this test was too slow to collect them. Whatever costs them is
+specific to capturing a window that owns its display. That is a finding about
+the case issue #12 asks about, so it is
+[issue #192](https://github.com/wildware-uk/clipped/issues/192) rather than a
+sentence explaining it away — and it is why the test's floor for a granted run
+is 70% of the source's frames rather than the 90% the refused case holds.
+
+#### (1) What decides whether the display is granted
+
+`SetFullscreenState` needs the foreground, and Windows will not give the
+foreground to a process the user has not interacted with. On this machine
+exactly one thing changes the answer:
+
+> **A process that has synthesised an input event must still be running.**
+
+Not recent input — a *live process* that produced some. Everything else that
+looked like the cause was varied and did not move the answer. Measured, same
+binary, one afternoon:
+
+| Condition at the moment of the run | Displays | `exclusive` | Delivered of 300 |
+| --- | --- | --- | ---: |
+| Nothing had synthesised input; session idle 45 minutes | off | **no** | — |
+| Injecting process alive; its event 30 s earlier | on | yes | 272 |
+| Injecting process alive; its event 302 s earlier | on | yes | 274 |
+| Injecting process alive; its event 600 s earlier | on | yes | 229 |
+| Injecting process alive; its event 952 s earlier | on | yes | 270 |
+| Injecting process alive; its event 1250 s earlier | on | yes | 274 |
+| Injecting process had exited 36 s before the run | on | **no** | 298 |
+| Nothing had synthesised input | on | **no** | 300 |
+| Injecting process alive; event moments earlier | on | yes | 279 |
+| Injecting process alive; no fresh event for that run | on | yes | 272 |
+| Injecting process exited 5 s before the run | on | **no** | 300 |
+| Nothing had synthesised input; session idle 584 s | on | **no** | 290 |
+
+Read the last five rows together: an input event five seconds old is refused if
+the process that made it has gone, and an input event twenty minutes old is
+granted if that process is still there. The rows in the middle are the same
+`SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)` sweep, which held
+the displays on well past the 15-minute idle timeout: the session being idle for
+twenty minutes did not refuse anything.
+
+Three things this rules out, each of which has been believed on this project at
+some point:
+
+- **The launch path.** A process created through `Win32_Process::Create`, whose
+  parent is `WmiPrvSE` and which is no relation of the injecting process, was
+  granted the display while that process was alive. `cargo test` is granted or
+  refused on the same rule as everything else.
+- **Powered-off displays.** Four of the `no` rows were taken with both displays
+  awake and the compositor at full rate — 290 to 300 of 300 frames, no timeouts
+  in any of them. A powered-off display is a real and separate problem (below),
+  but it is not what refuses the transition.
+- **Idle time.** Grants were measured at every idle time from 30 seconds to 21
+  minutes.
+
+The mechanism behind the rule is not established here, only its behaviour. In
+every `no` row the subject reported that `SetForegroundWindow` had been refused
+as well, so whatever Windows is tracking, it is tracking it in the
+foreground-lock machinery rather than anywhere in DXGI. Two things that do
+*not* work, so that nobody spends the afternoon
+again: `AttachThreadInput` plus `AllowSetForegroundWindow(ASFW_ANY)` returns
+`ERROR_ACCESS_DENIED (5)`, and
+`SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT)` returns
+`ERROR_INVALID_PARAMETER (87)` from a background process.
+
+The consequence for anybody reading a number off this page: **the exclusive rows
+of the first table cannot be reproduced by running the test on its own.**
+`tests/capture/README.md` has the procedure that produces them, and the test
+fails rather than passing when the run did not get there.
+
+### A powered-off display is a separate trap
+
+Not the cause of the refusals above, but still worth knowing before trusting any
+number on this page. When Windows has turned the displays off on the idle
 timeout, the desktop compositor drops to about 4 Hz, so Windows Graphics Capture
 delivers about one frame in fifteen for *any* target — it composes what the
 desktop composes, and a desktop nobody is looking at is barely composed at all.
 
 Measured on the development machine with both displays powered off after the
-15-minute idle timeout, `wgc_probe --mode windowed --seconds 10` at a target of
-60 fps:
+15-minute idle timeout — from an earlier session, and **not reproduced since**;
+see the caveat below the second block — `wgc_probe --mode windowed --seconds 10`
+at a target of 60 fps:
 
 ```text
 frames delivered     : 40
@@ -540,15 +650,26 @@ interval median      : 16.667 ms
 late frames          : 2 of 596 intervals longer than 25.00 ms
 ```
 
-In that state `SetFullscreenState` is also refused with
-`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (0x887A0022)`, and a subject that is granted
-the display loses it again one presented frame later
-([issue #178](https://github.com/wildware-uk/clipped/issues/178)). None of it
-reproduces on an awake display, and none of it is a capture defect.
-`SetThreadExecutionState(ES_DISPLAY_REQUIRED)` is not enough on its own: it
-resets the display idle timer but does not power a display back on.
-`tests/capture/README.md` records how to tell the two states apart before
-recording a number.
+In that state a subject that *is* granted the display loses it again one
+presented frame later
+([issue #178](https://github.com/wildware-uk/clipped/issues/178)), and none of
+it is a capture defect. `SetThreadExecutionState(ES_DISPLAY_REQUIRED)` held for
+the length of a run keeps the displays on and keeps the numbers meaningful; it
+does not power a display back on once Windows has turned it off, and neither
+does `WM_SYSCOMMAND`/`SC_MONITORPOWER`. Only an input event does that.
+
+**A caveat on those two blocks, because they are the only numbers on this page
+that have not been taken twice.** A later attempt to re-enter the powered-off
+state failed: with the session idle for 1,024 seconds — well past the machine's
+900-second display timeout — `wgc_fullscreen_dx11.rs` still delivered 301 of a
+possible 300 frames with zero timeouts, so the compositor was at full rate and
+the display had plainly not gone off. The likeliest reason is that these tests
+put a fullscreen application on that display every few minutes, and Windows
+resets the display's own idle timer for reasons that have nothing to do with
+input. So **a long `GetLastInputInfo` idle time is not on its own evidence that
+the displays are off**, which is what the earlier draft of
+`tests/capture/README.md` said; the reliable tell is the frame count itself,
+because the 4 Hz state is an order of magnitude, not a few percent.
 
 ### What is not covered
 

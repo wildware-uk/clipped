@@ -1008,8 +1008,20 @@ fn capture_item_for(
             // SAFETY: `window` is a live top-level window — checked
             // immediately above — which is what `CreateForWindow` requires.
             // The returned item is an owned reference released on drop.
-            let item = unsafe { interop.CreateForWindow(window) }
-                .map_err(|error| backend_error("creating a capture item for the window", error))?;
+            let item = unsafe { interop.CreateForWindow(window) }.map_err(|error| {
+                // Through `starting_error` rather than `backend_error`, for the
+                // same reason every later step in `Running::start` goes through
+                // it: the `IsWindow` check is one statement away, and a window
+                // can go in that gap exactly as it can in the wider ones. This
+                // is the *earliest* point at which it can, so classifying it
+                // here is what stops a game that exited as the recording
+                // started being reported as a broken backend.
+                starting_error(
+                    Some(window),
+                    "creating a capture item for the window",
+                    error,
+                )
+            })?;
             Ok((item, Some(window)))
         }
         TargetKind::Monitor => {
@@ -1097,14 +1109,15 @@ fn backend_error(operation: &'static str, error: windows::core::Error) -> Captur
 /// started.
 ///
 /// `capture_item_for` checks that the window exists before it asks Windows for
-/// a capture item, but everything after that check is another few milliseconds
-/// in which the window can go — a game that exits exactly as a recording starts
-/// is the ordinary way to reach it (AGENTS.md section 16). Windows reports it
-/// from `CreateCaptureSession` as `ERROR_INVALID_STATE (0x8007139F)`, "the
-/// group or resource is not in the correct state to perform the requested
-/// operation", which names neither the window nor the reason; a caller handed
-/// that has no way to tell a vanished target from a broken backend, and would
-/// report a fault to the user instead of stopping quietly.
+/// a capture item, and everything from the very next statement onwards — the
+/// `CreateForWindow` call itself included — is another few milliseconds in
+/// which the window can go. A game that exits exactly as a recording starts is
+/// the ordinary way to reach it (AGENTS.md section 16). Windows reports it from
+/// `CreateCaptureSession` as `ERROR_INVALID_STATE (0x8007139F)`, "the group or
+/// resource is not in the correct state to perform the requested operation",
+/// which names neither the window nor the reason; a caller handed that has no
+/// way to tell a vanished target from a broken backend, and would report a
+/// fault to the user instead of stopping quietly.
 ///
 /// So the window is asked about again, and only when it has actually gone does
 /// this become [`CaptureError::TargetLost`]. When it is still there, the

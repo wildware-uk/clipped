@@ -159,17 +159,23 @@ display away from whoever is at the machine should be a decision, not a typo.
 cargo run -p clipped-fullscreen-dx11 --bin fullscreen-dx11 -- --seconds 10
 ```
 
-**Windows often refuses the exclusive transition.** `SetFullscreenState` needs
+**Windows usually refuses the exclusive transition.** `SetFullscreenState` needs
 the foreground, and Windows does not grant the foreground to a process the user
-has not interacted with — which includes anything a test started, and anything
-started from a terminal that is not itself in the foreground. The application
+has not interacted with — which includes anything a test started. The application
 says which it got (`exclusive=yes` or `exclusive=no`), warns on standard error
-when it was refused, and carries on as a borderless window covering the display.
-Every measured run on this project's machine so far has been refused with
-`DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`, which is the same result
-`docs/capture-pipeline.md` records for the capture probe. Do not read
+with `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (0x887A0022)` when it was refused, and
+carries on as a borderless window covering the display. Do not read
 `exclusive=no` as a defect in the application, and do not read a passing test as
 proof that exclusive fullscreen capture works — read the field.
+
+It *can* be granted, and what decides it has been measured: a process that
+synthesised an input event has to still be running when the transition is asked
+for. Not the launch path, not how long the session has been idle, and not
+whether the displays are powered on — all three were varied and none of them
+moved the answer. The evidence is under "Exclusive fullscreen" in
+[capture-pipeline.md](capture-pipeline.md) and the procedure is in
+[tests/capture/README.md](../tests/capture/README.md). Running the application
+or the test on its own does not produce a grant, however awake the machine is.
 
 ## The capture tests
 
@@ -179,7 +185,7 @@ applications:
 | Test | What it decides |
 | --- | --- |
 | `wgc_video_pattern.rs` | That a borderless window and an ordinary bordered window are both captured frame for frame: dropped, duplicated, out-of-order and torn frames are counted *and* asserted on, and the checker that does it is itself tested without a GPU |
-| `wgc_fullscreen_dx11.rs` | That an application covering a whole display is captured, that every frame that arrives is the pattern, and that the display is the shape it was afterwards |
+| `wgc_fullscreen_dx11.rs` | That an application covering a whole display is captured, that every frame that arrives is the pattern, and that the display is the shape it was afterwards — and, when Windows refused the exclusive transition, that the run says so and fails under `CLIPPED_REQUIRE_CAPTURE` rather than passing as if it had proved something |
 | `av_sync.rs` | That video and system audio captured at the same time stay within a documented tolerance of each other, and by how much per minute they drift ([av-sync.md](av-sync.md)) |
 | `readback.rs` | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it |
 
@@ -275,6 +281,30 @@ difference between "it ran and passed" and "it did not run" is exactly what this
 file is for. Where a test *can* usefully skip — the capture unit tests inside
 `clipped-capture` — the project has `CLIPPED_REQUIRE_CAPTURE` to turn a skip
 into a failure on a machine that is supposed to be able to capture.
+
+### Clearing up a run by hand, without stopping somebody else's
+
+`TestApp`'s `Drop` stops the application on every path, so an ordinary run leaves
+nothing behind. A run interrupted by hand — a killed shell, a debugger — can, and
+the obvious clean-up is the wrong one:
+
+```text
+# Wrong: stops every checkout's copy, not yours.
+Stop-Process -Name fullscreen-dx11, video-pattern
+
+# Right: matches the executable that came out of this working tree.
+Get-CimInstance Win32_Process |
+    Where-Object { $_.ExecutablePath -like "$PWD*" } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId }
+```
+
+Every checkout of this repository builds test applications with the same file
+names, so two working trees — two `git worktree`s, a clone beside a clone — run
+processes called `video-pattern.exe` that are not the same program. Matching on
+the name stops whichever one answers first, which during this project has meant
+ending another contributor's measurement mid-run and leaving them to work out
+why their numbers stopped. Match on `ExecutablePath`, and check what you are
+about to stop before you stop it.
 
 ## What the pattern cannot see
 
