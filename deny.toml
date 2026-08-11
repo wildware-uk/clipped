@@ -11,9 +11,22 @@
 # reason this file exists rather than a line in CONTRIBUTING.md asking people to
 # be careful.
 #
-# Run it locally exactly as CI does:
+# "Every crate in the dependency graph" is two graphs, because there are two
+# Cargo workspaces: the root one, and apps/desktop/src-tauri, which is detached
+# for the reasons its own manifest gives. This policy is applied to both, so
+# detaching that crate did not quietly take several hundred dependencies out of
+# the question. Run it locally exactly as CI does:
 #
-#   cargo deny --all-features check
+#   cargo deny --all-features check --allow advisory-not-detected
+#   cargo deny --all-features --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check
+#
+# The second needs --config because cargo-deny looks for deny.toml beside the
+# manifest it is given, and there is deliberately only one policy. The first
+# needs --allow because the [advisories] ignore list below is written for the
+# second graph: without it, the root run reports each of those five entries as
+# matching nothing - true, and not worth reading on every pull request. The
+# desktop run is left strict, so an entry that has stopped being needed is still
+# reported there, where the statement would mean something.
 #
 # Install it with `cargo install cargo-deny --locked`.
 
@@ -53,7 +66,29 @@ yanked = "deny"
 # Advisories that have been reviewed and consciously accepted go here, each with
 # the issue that records the decision. Empty is the correct state; an entry
 # added without a linked issue is a policy failure, not a workaround.
-ignore = []
+#
+# The five below are one advisory wearing five crate names: every crate in
+# https://github.com/open-i18n/rust-unic is unmaintained
+# (rustsec/advisory-db#2414). None is a vulnerability - they are "no longer
+# maintained" notices - and each says no safe upgrade exists. Nothing in Clipped
+# chooses them; they arrive as
+#
+#   unic-* -> urlpattern -> tauri-utils -> tauri
+#
+# so the only way to stop reaching them is to stop using Tauri. Accepting them
+# is therefore the honest answer, and it is written down here rather than
+# arrived at by the desktop crate being invisible to the check.
+#
+# https://github.com/wildware-uk/clipped/issues/200 records the decision and
+# names what to watch for: a urlpattern release that drops the unic-* crates, or
+# a tauri-utils release that drops or replaces urlpattern.
+ignore = [
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+]
 
 [licenses]
 # Clipped is MPL-2.0 (LICENSE, CONTRIBUTING.md "Licensing and dependencies").

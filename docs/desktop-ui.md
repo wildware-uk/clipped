@@ -83,10 +83,24 @@ Making the crate a workspace member would therefore make `cargo build
 promise CONTRIBUTING.md makes about a clean clone, and would put several hundred
 crates and a WebView2 dependency in front of every `cargo test --workspace`.
 
-The cost is that `cargo fmt --all`, `cargo clippy --workspace` and `cargo build
---workspace` do not reach it, so the Desktop UI job in CI runs `cargo fmt
---check` and `cargo clippy -- -D warnings` against it explicitly, after the
-frontend build has produced `dist`.
+The cost is that `cargo fmt --all`, `cargo clippy --workspace`, `cargo build
+--workspace` and `cargo deny` do not reach it, and every one of those is paid
+back explicitly rather than dropped:
+
+- the Desktop UI job runs `cargo fmt --check` and `cargo clippy -- -D warnings`
+  against the crate, after the frontend build has produced `dist`;
+- the Dependencies job runs `cargo deny` against it with `--manifest-path` and
+  `--config deny.toml`, so both lockfiles are held to one policy. It needs
+  neither Node nor `dist`, because `cargo metadata` runs no build scripts, which
+  is why it sits in that job rather than beside the two above.
+
+That last one matters more than it looks: the detached lockfile has 429 packages
+against the root's 113, and almost none of them are shared. It reports five
+unmaintained-crate advisories, all of them the `unic-*` family reached through
+`urlpattern` → `tauri-utils` → `tauri`. They are accepted in `deny.toml`'s
+`[advisories] ignore` against
+[issue #200](https://github.com/wildware-uk/clipped/issues/200), which is a
+decision on the record rather than a check that cannot see them.
 
 ### One npm workspace, one lockfile
 

@@ -325,8 +325,26 @@ jobs:
       # RustSec advisories, banned and wildcard version requirements, and the
       # registries dependencies come from. --all-features because an optional
       # dependency's licence is not optional.
+      #
+      # --allow advisory-not-detected because the [advisories] ignore list is
+      # written for the desktop crate's graph, not this one; deny.toml says why,
+      # and the step below is left strict so a stale entry is still reported.
       - name: Check dependency licences and advisories
-        run: cargo deny --all-features check
+        run: cargo deny --all-features check --allow advisory-not-detected
+
+      # apps/desktop/src-tauri is a second Cargo workspace with a second
+      # lockfile - 429 packages against the root's 113, almost none of them
+      # shared - so the step above does not see a single one of them. Detaching
+      # that crate must not be a way for several hundred dependencies to stop
+      # being asked the two questions deny.toml asks of everything else.
+      #
+      # It runs here rather than in the Desktop UI job because cargo-deny reads
+      # `cargo metadata`, which runs no build scripts: the check needs neither
+      # Node nor apps/desktop/dist, and this job already has the toolchain and
+      # the pinned cargo-deny. --config points it back at the one policy, which
+      # it would not find beside a manifest in a different directory.
+      - name: Check the desktop crate's dependency licences and advisories
+        run: cargo deny --all-features --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check
 
   ui:
     name: Desktop UI (lint, test and build)

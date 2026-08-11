@@ -21,9 +21,14 @@ publish = false
 # and several hundred crates in front of every `cargo test --workspace`, for a
 # crate that no other crate may depend on (docs/architecture.md).
 #
-# The cost of detaching is that `cargo fmt --all`, `cargo clippy --workspace`
-# and `cargo build --workspace` do not reach this crate, so CI's Desktop UI job
-# formats and checks it explicitly - see .github/workflows/ci.yml.
+# The cost of detaching is that `cargo fmt --all`, `cargo clippy --workspace`,
+# `cargo build --workspace` and `cargo deny` do not reach this crate, and this
+# is much the larger of the two lockfiles: 429 packages against the root's 113.
+# Each of those checks is paid back explicitly in .github/workflows/ci.yml
+# rather than dropped - the Desktop UI job formats, lints and builds this crate,
+# and the Dependencies job runs `cargo deny` against this manifest with the
+# repository's one deny.toml. Detaching a crate must not be a way for several
+# hundred dependencies to stop being asked about their licences and advisories.
 [workspace]
 
 [lints.rust]
