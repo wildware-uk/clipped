@@ -32,6 +32,17 @@ impl Write for Connection {
     }
 }
 
+impl Connection {
+    /// Unreachable: no connection can be constructed.
+    ///
+    /// # Errors
+    ///
+    /// Never returns.
+    pub fn server_process_id(&self) -> io::Result<u32> {
+        unreachable!("no connection can be created on this platform")
+    }
+}
+
 /// A listener that cannot be created on this platform.
 #[derive(Debug)]
 pub struct Listener(());

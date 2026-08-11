@@ -300,6 +300,28 @@ a {
   color: var(--color-text-muted);
 }
 
+/*
+ * A recording that was interrupted. Full ink rather than the muted grey the
+ * detail above is drawn in, and marked with a rule down its left edge as well
+ * (AGENTS.md section 46 - never colour on its own), because this is not a
+ * description of the current state. It is the one thing recovery exists to tell
+ * somebody, and the file it names is the only way they will ever find that
+ * recording (ADR 0006).
+ *
+ * `overflow-wrap` because what it carries is a Windows path in a sidebar
+ * `--shell-sidebar-width` wide, and a path that overflows is a path nobody can
+ * read.
+ */
+.clipped-status__notice {
+  margin: var(--space-2) 0 0;
+  border-left: var(--marker-weight) solid var(--color-accent);
+  padding-left: var(--space-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
 /* — screen placeholder — */
 
 .clipped-screen__title {

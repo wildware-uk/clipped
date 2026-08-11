@@ -22,9 +22,13 @@ either question can be answered at all:
 
 - no crate in the Cargo workspace names `clipped-desktop`, whatever the
   dependency's source;
-- `apps/desktop/src-tauri` names no crate of the Cargo workspace, so the window
-  reaches the recorder over IPC rather than by linking capture or encoding into
-  its own process;
+- `apps/desktop/src-tauri` names no crate of the Cargo workspace but
+  `clipped-ipc`, so the window reaches the recorder over IPC rather than by
+  linking capture or encoding into its own process. That one exception is the
+  protocol itself — a webview cannot open a named pipe, so the Tauri host is the
+  client — and it is only sound while `clipped-ipc` depends on nothing else in
+  the workspace, which the same test asserts
+  ([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md));
 - `apps/desktop`, `packages/ui` and `packages/shared` are not Cargo packages at
   all, so turning one into a crate has to be a deliberate decision.
 
@@ -32,12 +36,18 @@ The layering table itself covers only workspace members, and `clipped-desktop`
 is not one — which is why these are separate assertions and not something the
 layer table could have caught.
 
-The two processes will speak over the IPC protocol defined by issue #49. **That
-protocol does not exist yet**, and neither does anything in this application
-that pretends it does: the recorder status block in the sidebar says the window
-cannot reach the recorder, and there are no transport controls, because a Start
-Recording button with nothing behind it is exactly what AGENTS.md section 27
-forbids.
+The two processes speak over the IPC protocol in [ipc.md](ipc.md), and this
+application now drives it: at startup it claims a single-instance name, attaches
+to a recorder or starts one detached, and follows its status
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). The recorder status
+block in the sidebar shows what the link reports and nothing else — one wording
+for each of the link's four states, and one for "this is not the Clipped window",
+which is what `npm run dev:web` and the tests see.
+
+There are still no transport controls. A Start Recording button with nothing
+behind it is exactly what AGENTS.md section 27 forbids, and the screens that
+would hold one are not built. A "Try again" control for a link that has given up
+is [issue #221](https://github.com/wildware-uk/clipped/issues/221).
 
 ## What the shell is
 

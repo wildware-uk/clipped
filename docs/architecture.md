@@ -83,9 +83,17 @@ One consequence is enforced in the repository, by three tests in
 - `no_crate_depends_on_the_desktop_application` — `apps/desktop/src-tauri` *is*
   a Cargo package, the Tauri binary that owns the window, in a workspace of its
   own. It fails if any crate of this workspace names `clipped-desktop`.
-- `the_desktop_application_links_no_crate_of_this_workspace` — the same rule
-  facing the other way, so the window reaches the recorder over IPC rather than
-  by linking capture or encoding into its own process.
+- `the_desktop_application_links_nothing_of_this_workspace_but_the_protocol` —
+  the same rule facing the other way, so the window reaches the recorder over
+  IPC rather than by linking capture or encoding into its own process.
+  `clipped-ipc` is the one exception: a webview cannot open a named pipe, so the
+  Tauri host is the protocol's client, and the alternative would be a second
+  implementation of the handshake inside the window
+  ([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
+- `the_crate_the_desktop_application_may_link_drags_nothing_else_in` — what
+  makes that exception sound: `clipped-ipc` must depend on no other crate of the
+  workspace, or the allowance would be linking the recording engine into the
+  window transitively.
 
 A second consequence is a convention held up by review, not by a check: no crate
 under `crates/` may refer to UI concerns at all. `clipped-session`, the top
@@ -196,14 +204,15 @@ large:
   to the thread that writes the file — which is what keeps the capture thread
   off the filesystem (AGENTS.md section 20). Per-game settings, game detection
   and the replay buffer are later milestones and are not there.
-- `apps/desktop` is the application shell and only the shell: a Tauri 2 window
-  hosting a React interface, with its layout, navigation, design tokens and
-  accessibility baseline, drawn from `packages/ui` and typed by
+- `apps/desktop` is the application shell, and the supervision behind it: a
+  Tauri 2 window hosting a React interface, with its layout, navigation, design
+  tokens and accessibility baseline, drawn from `packages/ui` and typed by
   `packages/shared`. It runs — `npm run dev` opens the window — and it shows no
   data it does not have: each of the seven screens says it is not built and
-  names the issue that builds it, and the recorder status block says the window
-  cannot reach the recorder, because the IPC protocol
-  ([#49](https://github.com/wildware-uk/clipped/issues/49)) does not exist yet.
+  names the issue that builds it, and the recorder status block shows what its
+  link with the recorder reports, which is one wording per link state and no
+  guessing ([#106](https://github.com/wildware-uk/clipped/issues/106),
+  [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
   [desktop-ui.md](desktop-ui.md) covers it.
 - The tests assert the behaviour that exists: the workspace layering test,
   `clipped-logging`'s unit and integration tests, `clipped-capture`'s tests for
@@ -408,6 +417,7 @@ that reopening it is a deliberate act.
 | [0003](adr/0003-process-specific-audio-capture.md) | Process-specific audio capture is the basis for track separation |
 | [0004](adr/0004-ffmpeg-dependency-strategy.md) | FFmpeg is a pinned LGPL build, linked dynamically through a sys binding |
 | [0005](adr/0005-named-pipe-control-protocol.md) | A named pipe carries the control protocol between the UI and the recorder |
+| [0006](adr/0006-recorder-lifetime-and-supervision.md) | The desktop application starts a detached recorder and supervises it, and neither stops the other |
 
 [adr/0000-template.md](adr/0000-template.md) is the template. `adr/README.md`
 describes when to write one and how they are numbered.

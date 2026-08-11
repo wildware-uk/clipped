@@ -21,6 +21,9 @@
 //!   desktop application's TypeScript mirror of these messages is checked
 //!   against. The types here are the authority for both ends, and that module
 //!   is how the other end finds out when they change.
+//! - **Whether there is a recorder to talk to at all**: starting one, noticing
+//!   when it has gone, and keeping each side of the conversation to one process
+//!   ([`supervisor`]).
 //!
 //! [`schema`] is public, which for what is a build-time tool wants a reason
 //! (AGENTS.md section 44). The emitter that writes the description is a
@@ -37,12 +40,24 @@
 //! Nothing in it takes part in holding a conversation, and nothing else in this
 //! crate depends on it.
 //!
+//! [`supervisor`] is a deliberate widening of what this crate was when it held
+//! only the wire format, and
+//! [ADR 0006](../../../docs/adr/0006-recorder-lifetime-and-supervision.md)
+//! records why it belongs here: supervision is expressed entirely in terms of
+//! the endpoint, the client and the events — everything above — and both ends of
+//! the boundary need it, which is exactly the property that put the protocol
+//! here. It still names nothing from the recording engine, and nothing in it is
+//! a message: [`schema`] does not describe it, because no recorder ever sends
+//! one.
+//!
 //! # Not responsible for
 //!
 //! Doing anything a command asks for. This crate has no idea what a recording
 //! is. [`CommandHandler`] is the hole the recorder plugs its own subsystems
 //! into, which is what keeps a protocol crate from becoming a second place
-//! where the application's rules live (AGENTS.md section 5).
+//! where the application's rules live (AGENTS.md section 5). [`supervisor`] is
+//! held to the same rule: it starts an executable it is handed the path to, and
+//! could not name `clipped-recorder` if it wanted to.
 //!
 //! # Position in the architecture
 //!
@@ -105,6 +120,7 @@ pub mod message;
 pub mod schema;
 pub mod server;
 pub mod status;
+pub mod supervisor;
 pub mod transport;
 
 pub use client::{Client, ClientError, EventClient};
@@ -119,4 +135,8 @@ pub use message::{
 };
 pub use server::{CommandHandler, EventPublisher, Server, ServerError, MAX_CONCURRENT_CONNECTIONS};
 pub use status::{ActiveRecording, EndReason, RecorderStatus, RecordingSummary};
+pub use supervisor::{
+    ensure_recorder, Attachment, AttachmentOrigin, RecorderLink, RecorderLinkEvent,
+    RecorderLinkState, RestartPolicy, SupervisorError, SupervisorSettings,
+};
 pub use transport::{Endpoint, TransportError};

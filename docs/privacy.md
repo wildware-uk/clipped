@@ -64,6 +64,18 @@ directory you can open, back up or delete.
 | Settings, including per-game settings | Local configuration files | Never |
 | Logs | Local log files | Only if you attach them to a bug report yourself |
 | Detected game list and hardware capabilities | The local database | Never |
+| Starting the recorder at sign-in, if you turn it on | One registry value named `Clipped Recorder` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, holding the path to `clipped-recorder.exe` | Never |
+
+Everything above the last row is a file or a database row under a directory of
+Clipped's own. **That last row is the one exception**, so it is stated plainly:
+it is the only thing Clipped writes anywhere else on your computer, and it is
+written only when you ask for it. `clipped-recorder start-at-login enable` puts
+it there, `disable` removes it and leaves nothing behind, and `status` tells you
+which it is. No installer writes it for you, nothing else in Clipped reads or
+changes that key, and it is under `HKEY_CURRENT_USER`, so it applies to your
+account and to nobody else signed in to the same machine. The value holds a
+path and nothing about you. The decision is
+[ADR 0006](adr/0006-recorder-lifetime-and-supervision.md).
 
 Clipped does not delete or move your recordings on your behalf beyond the
 retention rules you configure, and editing is non-destructive: the source

@@ -4,6 +4,7 @@ import { useCallback, type ReactNode } from 'react';
 import { Route, Routes, useLocation, useNavigate } from 'react-router';
 
 import { UnknownScreen } from './UnknownScreen';
+import { describeInterruption, describeRecorderLink, useRecorderLink } from './useRecorderLink';
 import { useWindowTitle } from './useWindowTitle';
 
 const hrefFor = (screen: Screen): string => `#${screen.path}`;
@@ -21,6 +22,8 @@ export function Shell(): ReactNode {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const screen = screenFor(pathname);
+  const { link, interrupted } = useRecorderLink();
+  const recorder = describeRecorderLink(link);
 
   // The window title is what a person reads in the taskbar, in Alt+Tab and in
   // the window switcher, so it says which screen is open rather than only which
@@ -59,14 +62,26 @@ export function Shell(): ReactNode {
       }
       status={
         /*
-         * The truthful state, and the only one the shell can be in today: there
-         * is no IPC protocol yet (issue #49), so the application has no way to
-         * ask the recorder anything. Showing "Idle", a timer or a level meter
-         * here would be invented (AGENTS.md section 27).
+         * The state the Rust side reports, and nothing more. Every wording comes
+         * from `describeRecorderLink`, which has one rendering for each of the
+         * link's four states and one for "this is not the Clipped window" — so
+         * nothing here can show a state the application does not have
+         * (AGENTS.md section 27, issue #106).
+         *
+         * The notice is the other half, and the only part of this block that is
+         * not a state: when a recorder is killed mid-recording the supervisor
+         * names the file it left, and ADR 0006 settled that naming it is the
+         * whole of what recovery means. Dropping that here would leave the
+         * window showing "Idle" and the user with a recording they cannot find.
+         *
+         * There are still no controls: a "Try again" control for a link that
+         * has given up is issue #221, and a Start Recording button belongs with
+         * the screens that have somewhere to put it.
          */
         <RecorderStatus
-          state="Not connected"
-          detail="This window cannot talk to the recorder yet. Record with the clipped-recorder command line in the meantime."
+          state={recorder.state}
+          detail={recorder.detail}
+          notice={describeInterruption(interrupted)}
         />
       }
     >

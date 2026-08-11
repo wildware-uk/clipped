@@ -18,6 +18,8 @@
 //!   ([issue #14](https://github.com/wildware-uk/clipped/issues/14)).
 //! - `serve` — the recorder as the service the desktop application drives
 //!   ([issue #49](https://github.com/wildware-uk/clipped/issues/49)).
+//! - `start-at-login` — ask Windows to run `serve` when this user signs in
+//!   ([issue #106](https://github.com/wildware-uk/clipped/issues/106)).
 //!
 //! Nothing is currently specified without being declared here. A subcommand
 //! that parses arguments and then does nothing is a control that silently
@@ -26,7 +28,7 @@
 
 use std::path::PathBuf;
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use clipped_windows::{TargetSelector, WindowHandle};
 
 use crate::options::{AudioDeviceSelection, EncoderSelection, Framerate, Resolution, VideoCodec};
@@ -93,6 +95,36 @@ pub enum Command {
     /// commands to and receives status from (ADR 0002, docs/ipc.md). Ctrl+C
     /// stops it, finishing any recording first.
     Serve(ServeArgs),
+
+    /// Turn starting at login on or off for this account, or report it.
+    ///
+    /// Nothing enables this on its own: the only thing that writes the registry
+    /// value is `start-at-login enable`, and `disable` removes it again
+    /// (ADR 0006, docs/privacy.md).
+    StartAtLogin(StartAtLoginArgs),
+}
+
+/// Arguments to `clipped-recorder start-at-login`.
+#[derive(Debug, Args)]
+pub struct StartAtLoginArgs {
+    /// What to do.
+    #[arg(value_enum)]
+    pub action: StartAtLoginAction,
+}
+
+/// What `start-at-login` was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum StartAtLoginAction {
+    /// Write the value, so the recorder starts when this user signs in.
+    Enable,
+    /// Remove the value.
+    Disable,
+    /// Report what is configured, without changing it.
+    ///
+    /// The default action would be a poor choice for a subcommand that can
+    /// change a machine's startup, so there is none: the action is required and
+    /// this is the one that reads.
+    Status,
 }
 
 /// Arguments to `clipped-recorder serve`.

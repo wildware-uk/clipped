@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use windows_sys::Win32::System::Console::{AllocConsole, GenerateConsoleCtrlEvent, CTRL_C_EVENT};
 
@@ -99,21 +99,215 @@ fn target_profile_directory() -> PathBuf {
         .to_path_buf()
 }
 
-/// Where cargo put `examples/shutdown_fixture.rs`.
+/// The command that rebuilds the examples these tests drive.
+const BUILD_EXAMPLES: &str = "cargo build -p clipped-recorder --examples";
+
+/// Where cargo put an `examples/<name>.rs` binary.
 ///
 /// Cargo exports the path of every *binary* target to an integration test but
-/// not of an example, so it is found next to the binary instead. `cargo test`
-/// builds examples, so it is there by the time this runs.
-pub(crate) fn fixture_binary() -> PathBuf {
+/// not of an example, so they are found next to the binary instead.
+///
+/// # Why this checks the file's age
+///
+/// Selecting one test target — `cargo test -p clipped-recorder --test
+/// supervision`, which is the command these modules document — narrows what
+/// cargo builds to that target and the binaries it exports paths for. **It does
+/// not build examples.** So an edit to `crates/ipc` produces a freshly built
+/// test binary driving a fixture compiled from the code as it was yesterday,
+/// and the run passes. For a suite whose whole subject is process supervision,
+/// silently testing the wrong supervisor is the worst failure it could have,
+/// and it has happened in review.
+///
+/// [`assert_fresh`] closes it: an example older than any source it is built
+/// from fails with the command that fixes it, rather than passing on evidence
+/// about a binary nobody meant to run.
+pub(crate) fn example_binary(name: &str) -> PathBuf {
     let path = target_profile_directory()
         .join("examples")
-        .join(format!("shutdown_fixture{}", std::env::consts::EXE_SUFFIX));
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     assert!(
         path.exists(),
-        "the shutdown fixture was not built at {}; run `cargo test`, which builds examples",
+        "the `{name}` example was not built at {}; run `{BUILD_EXAMPLES}`",
         path.display()
     );
+    assert_fresh(&path, name);
     path
+}
+
+/// The workspace root, as this package's manifest locates it.
+fn workspace_root() -> PathBuf {
+    // Popped rather than joined with `..`, so that a failure message names
+    // `…\clipped\crates\ipc\…` and not `…\apps\recorder\..\..\crates\ipc\…`.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("this package is two levels below the workspace root")
+        .to_path_buf();
+    assert!(
+        root.join("Cargo.lock").exists(),
+        "expected the workspace root two levels above {}, and found no Cargo.lock at {}",
+        env!("CARGO_MANIFEST_DIR"),
+        root.display()
+    );
+    root
+}
+
+/// Fails when `binary` is older than something it was built from.
+///
+/// What is scanned is exactly what an example in this package compiles from:
+/// every crate of the workspace, this package's own library and examples, and
+/// the manifests and lock file that decide which versions of everything else
+/// come with them. `tests/` is deliberately *not* scanned — editing the test
+/// that drives a fixture does not make the fixture stale, and a check that said
+/// otherwise would cry wolf on the most ordinary change anybody makes here.
+///
+/// The comparison is against sources rather than against sibling artefacts on
+/// purpose. Two binaries built by one `cargo` invocation are linked in whatever
+/// order cargo felt like, so "the example is older than the test binary" would
+/// be a coin toss; "the example is older than a file it was compiled from" is
+/// never true of an example that was just built.
+fn assert_fresh(binary: &Path, name: &str) {
+    let built = modified(binary);
+    let root = workspace_root();
+
+    let mut newest: Option<(PathBuf, SystemTime)> = None;
+    let mut consider = |path: PathBuf| {
+        let Ok(modified) = path.metadata().and_then(|data| data.modified()) else {
+            return;
+        };
+        if newest.as_ref().is_none_or(|(_, latest)| modified > *latest) {
+            newest = Some((path, modified));
+        }
+    };
+
+    for directory in [
+        root.join("crates"),
+        root.join("apps").join("recorder").join("src"),
+        root.join("apps").join("recorder").join("examples"),
+    ] {
+        walk(&directory, &mut consider);
+    }
+    for file in [
+        root.join("Cargo.toml"),
+        root.join("Cargo.lock"),
+        root.join("apps").join("recorder").join("Cargo.toml"),
+    ] {
+        consider(file);
+    }
+
+    if let Some((source, changed)) = newest {
+        assert!(
+            changed <= built,
+            "the `{name}` example at {} was built before {} was last changed, so this run would \
+             be testing a fixture compiled from code that is no longer there.\n\
+             Run `{BUILD_EXAMPLES}` (or `cargo test --workspace`, which builds examples) and try \
+             again.\n\
+             Selecting a single test target — `cargo test -p clipped-recorder --test NAME` — does \
+             not build examples; that is the whole reason this check exists.",
+            binary.display(),
+            source.display()
+        );
+    }
+}
+
+/// When a file was last written, or a panic naming it.
+fn modified(path: &Path) -> SystemTime {
+    path.metadata()
+        .and_then(|data| data.modified())
+        .unwrap_or_else(|error| {
+            panic!(
+                "the age of {} could not be read, so its freshness cannot be checked: {error}",
+                path.display()
+            )
+        })
+}
+
+/// Hands every file under `directory` to `visit`, depth first.
+///
+/// A directory that cannot be read is skipped rather than reported: this is a
+/// freshness check over source that is normally all present, and a permission
+/// error on one subdirectory is not a reason to fail a supervision test.
+fn walk(directory: &Path, visit: &mut impl FnMut(PathBuf)) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => walk(&path, visit),
+            Ok(kind) if kind.is_file() => visit(path),
+            _ => {}
+        }
+    }
+}
+
+/// Where cargo put `examples/shutdown_fixture.rs`.
+pub(crate) fn fixture_binary() -> PathBuf {
+    example_binary("shutdown_fixture")
+}
+
+/// Ends a process that is not this process's child.
+///
+/// `Child::kill` is `TerminateProcess` on a handle cargo already owns; a
+/// recorder started *by* a fixture is this process's grandchild and detached
+/// from it, so there is no `Child` for it and the handle has to be opened by
+/// identifier. That is the whole difference — what lands on the recorder is the
+/// same `TerminateProcess`, with no notification, no destructors and no flush,
+/// which is what makes it a kill rather than a stop
+/// (`crates/muxer/tests/abrupt_termination.rs`).
+///
+/// A process that has already exited is not an error: that is one of the
+/// outcomes this is used to arrange.
+#[cfg(windows)]
+pub(crate) fn terminate(process_id: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    // SAFETY: `OpenProcess` takes three integers by value and returns a handle
+    // or null. Nothing is dereferenced.
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, process_id) };
+    if handle.is_null() {
+        // Already gone, or never ours to end.
+        return;
+    }
+
+    // SAFETY: `handle` was just opened with PROCESS_TERMINATE and is owned
+    // solely here; the exit code is an integer by value.
+    unsafe {
+        TerminateProcess(handle, 1);
+        CloseHandle(handle);
+    }
+}
+
+/// Whether a process is still running.
+///
+/// Opened with the smallest right that answers the question:
+/// `PROCESS_QUERY_LIMITED_INFORMATION` is enough to read an exit code and is
+/// granted for a process this account owns even when the fuller query right is
+/// not.
+#[cfg(windows)]
+pub(crate) fn is_running(process_id: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: as `terminate` above; three integers in, a handle or null out.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if handle.is_null() {
+        return false;
+    }
+
+    let mut code: u32 = 0;
+    // SAFETY: `handle` is live and owned here, and the out-parameter points at
+    // a live local.
+    let queried = unsafe { GetExitCodeProcess(handle, &raw mut code) };
+    // SAFETY: closed exactly once, and not used afterwards.
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    queried != 0 && code == STILL_ACTIVE as u32
 }
 
 /// The `video-pattern` test application, built beside this test's binaries.
