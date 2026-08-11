@@ -7,12 +7,15 @@
 //! ```text
 //! cargo run -p clipped-game-detection --example process_watch_probe -- latency 20
 //! cargo run -p clipped-game-detection --example process_watch_probe -- idle 300
+//! cargo run -p clipped-game-detection --example process_watch_probe -- start 20
 //! ```
 //!
 //! `latency` starts a `cmd.exe` it can end when it chooses, and times the gap
 //! between the process existing and the watcher saying so, in both directions.
 //! `idle` runs the watcher with nothing happening and reports the processor
-//! time this process used over the interval.
+//! time this process used over the interval. `start` times the one-off cost of
+//! building a watcher, which is the baseline snapshot — one `OpenProcess` per
+//! process on the machine — and the subscription together.
 //!
 //! What `idle` measures is *this* process. The WMI service does the polling
 //! this design moved out of here, and its cost lands in `WmiPrvSE.exe` and in
@@ -25,7 +28,7 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use clipped_game_detection::{ProcessWatcher, WatchConfig, WatchEvent};
+use clipped_game_detection::{Next, ProcessWatcher, WatchConfig, WatchEvent};
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
@@ -55,11 +58,49 @@ fn main() {
     match mode.as_str() {
         "latency" => latency(count, config),
         "idle" => idle(count, config),
+        "start" => start_cost(count, config),
         other => {
-            eprintln!("unknown mode {other}; expected `latency <runs>` or `idle <seconds>`");
+            eprintln!(
+                "unknown mode {other}; expected `latency <runs>`, `idle <seconds>` \
+                 or `start <runs>`"
+            );
             std::process::exit(2);
         }
     }
+}
+
+/// Times building a watcher: the baseline snapshot and the subscription.
+///
+/// The baseline opens every process on the machine to ask what it is running,
+/// which is the most expensive thing the watcher ever does — once. It is paid
+/// while the application is starting anyway, and this is what says whether that
+/// is a fair thing to claim (AGENTS.md section 7).
+fn start_cost(runs: u32, config: WatchConfig) {
+    let mut timings = Vec::new();
+    let mut processes = 0;
+
+    for run in 1..=runs {
+        let began = Instant::now();
+        let watcher = ProcessWatcher::start(config).expect("the watcher starts");
+        let elapsed = began.elapsed();
+
+        processes = watcher.already_running().len();
+        let resolved = watcher
+            .already_running()
+            .iter()
+            .filter(|process| process.image_path.is_some())
+            .count();
+        // Dropping the watcher waits for its source threads, which takes a
+        // notification interval and is not what is being timed, so the clock is
+        // read before it goes.
+        drop(watcher);
+
+        println!("run {run:>3}: start {elapsed:>12.3?}  ({processes} processes, {resolved} paths)");
+        timings.push(elapsed);
+    }
+
+    println!("processes in the baseline: {processes}");
+    report("start", &mut timings);
 }
 
 /// Times detection of a process starting and of the same process exiting.
@@ -110,8 +151,13 @@ fn idle(seconds: u32, config: WatchConfig) {
     let mut events = 0_u32;
 
     while start.elapsed() < duration {
-        if watcher.next_event(Duration::from_secs(1)).is_some() {
-            events += 1;
+        match watcher.next_event(Duration::from_secs(1)) {
+            Next::Event(_) => events += 1,
+            Next::Idle => {}
+            Next::Finished => {
+                eprintln!("the watcher lost every source it had; the measurement is void");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -165,8 +211,10 @@ fn describe(watcher: &ProcessWatcher, config: WatchConfig) {
 fn wait_for(watcher: &mut ProcessWatcher, mut accepts: impl FnMut(&WatchEvent) -> bool) {
     let start = Instant::now();
     while start.elapsed() < PATIENCE {
-        let Some(event) = watcher.next_event(Duration::from_millis(100)) else {
-            continue;
+        let event = match watcher.next_event(Duration::from_millis(100)) {
+            Next::Event(event) => event,
+            Next::Idle => continue,
+            Next::Finished => panic!("the watcher had already finished"),
         };
         if let WatchEvent::Stopped(reason) = &event {
             panic!("the watcher lost every source it had: {reason}");

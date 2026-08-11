@@ -260,4 +260,65 @@ mod tests {
             |event| matches!(event, SourceEvent::Exited { pid: gone } if *gone == pid),
         );
     }
+
+    #[test]
+    fn the_fallback_poller_never_looks_more_often_than_once_a_second() {
+        // `WatchConfig` is public and so are its fields, so the interval that
+        // reaches the poller is whatever a consumer wrote — and this loop
+        // enumerates every process on the machine each time round. Twenty times
+        // a second it would be exactly the high-frequency polling the whole
+        // design exists to avoid (AGENTS.md section 18), so the floor has to
+        // hold on this path and not only on the WQL one.
+        let config = WatchConfig {
+            notification_interval: Duration::from_millis(20),
+            ..WatchConfig::default()
+        };
+        let known: Vec<u32> = snapshot::process_table()
+            .expect("the process table can be read")
+            .iter()
+            .map(|row| row.pid)
+            .collect();
+        let source =
+            Source::start_polling(config, &known).expect("the fallback poller can be started");
+        let started = Instant::now();
+
+        let mut subject = Command::new("cmd.exe")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd.exe is present on every Windows machine");
+        let pid = subject.id();
+
+        // The first pass cannot happen before the floor, so nothing about this
+        // process can be reported inside it. The bound is one-sided on purpose:
+        // a slow machine makes the event later, never sooner, so this cannot
+        // fail for being run on busy continuous integration hardware.
+        let too_soon = Duration::from_millis(700);
+        while started.elapsed() < too_soon {
+            if let Ok(SourceMessage::Event(SourceEvent::Started(process))) =
+                source.events.recv_timeout(Duration::from_millis(50))
+            {
+                assert_ne!(
+                    process.pid,
+                    pid,
+                    "the poller reported a process {:?} after it started: \
+                     it is polling at its configured 20ms, not the one-second floor",
+                    started.elapsed()
+                );
+            }
+        }
+
+        // And it does arrive, so what is being measured is a poller that waited
+        // rather than one that never ran at all.
+        wait_for(
+            &source,
+            |event| matches!(event, SourceEvent::Started(process) if process.pid == pid),
+        );
+
+        drop(subject.stdin.take());
+        subject
+            .wait()
+            .expect("the subject exits when its input closes");
+    }
 }

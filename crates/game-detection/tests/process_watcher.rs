@@ -21,7 +21,7 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use clipped_game_detection::{ProcessWatcher, WatchConfig, WatchEvent};
+use clipped_game_detection::{Next, ProcessWatcher, WatchConfig, WatchEvent};
 
 /// How long a test waits for an event before giving up.
 ///
@@ -61,8 +61,10 @@ fn wait_for(
 ) -> Duration {
     let start = Instant::now();
     while start.elapsed() < PATIENCE {
-        let Some(event) = watcher.next_event(Duration::from_millis(250)) else {
-            continue;
+        let event = match watcher.next_event(Duration::from_millis(250)) {
+            Next::Event(event) => event,
+            Next::Idle => continue,
+            Next::Finished => panic!("the watcher had already finished"),
         };
         if let WatchEvent::Stopped(reason) = &event {
             panic!("the watcher lost every source it had: {reason}");
@@ -218,8 +220,10 @@ fn a_process_that_comes_and_goes_inside_the_debounce_window_is_never_reported() 
     // Long enough for a launch to have been reported twice over.
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
-        let Some(event) = watcher.next_event(Duration::from_millis(250)) else {
-            continue;
+        let event = match watcher.next_event(Duration::from_millis(250)) {
+            Next::Event(event) => event,
+            Next::Idle => continue,
+            Next::Finished => panic!("the watcher lost every source it had"),
         };
         assert!(
             !launch_contains(&event, pid) && !exit_of(&event, pid),

@@ -147,10 +147,17 @@ fn executable_name(raw: &[u16]) -> String {
 /// Polls the process table and reports what changed.
 ///
 /// This is the fallback, and it is the thing the design exists to avoid: it
-/// wakes every [`WatchConfig::notification_interval`] whether anything happened
-/// or not. It is still worth having, because the alternative when WMI is
+/// wakes every [`WatchConfig::source_interval`] whether anything happened or
+/// not. It is still worth having, because the alternative when WMI is
 /// unavailable is no detection at all, and it is deliberately the *only* thing
 /// in the watcher that behaves this way.
+///
+/// The interval comes from [`WatchConfig::source_interval`] and not from the
+/// field behind it, which is public and may say anything. Enumerating every
+/// process on the machine as often as a caller asks would make this the
+/// high-frequency polling loop the whole design exists to avoid (AGENTS.md
+/// section 18), so the one-second floor applies here exactly as it does to the
+/// subscription's `WITHIN` clause.
 ///
 /// Returns when `stop` is signalled or when the process table cannot be read,
 /// in which case it reports [`SourceMessage::Lost`] first.
@@ -161,8 +168,9 @@ pub(crate) fn poll(
     stop: &Arc<Stop>,
 ) {
     let mut known: HashSet<u32> = known.iter().copied().collect();
+    let interval = config.source_interval();
 
-    while !stop.sleep(config.notification_interval) {
+    while !stop.sleep(interval) {
         let current = match process_table() {
             Ok(current) => current,
             Err(error) => {

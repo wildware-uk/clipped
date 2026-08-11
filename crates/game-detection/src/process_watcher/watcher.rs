@@ -11,7 +11,7 @@ use super::error::{SourceError, WatchError};
 use super::process::ProcessSnapshot;
 use super::source::{EventSource, SourceMessage};
 use super::windows::{baseline, Source};
-use super::WatchEvent;
+use super::{Next, WatchEvent};
 
 /// Reports processes starting and stopping, without polling for them.
 ///
@@ -20,20 +20,23 @@ use super::WatchEvent;
 /// ```no_run
 /// use std::time::Duration;
 ///
-/// use clipped_game_detection::{ProcessWatcher, WatchConfig, WatchEvent};
+/// use clipped_game_detection::{Next, ProcessWatcher, WatchConfig, WatchEvent};
 ///
 /// let mut watcher = ProcessWatcher::start(WatchConfig::default())?;
 /// loop {
 ///     match watcher.next_event(Duration::from_secs(1)) {
-///         Some(WatchEvent::Launched(launch)) => {
+///         Next::Event(WatchEvent::Launched(launch)) => {
 ///             println!("{} started", launch.newest().image_name);
 ///         }
-///         Some(WatchEvent::Exited(exit)) => {
+///         Next::Event(WatchEvent::Exited(exit)) => {
 ///             println!("{} exited", exit.process.image_name);
 ///         }
-///         Some(other) => println!("{other:?}"),
+///         Next::Event(other) => println!("{other:?}"),
 ///         // Nothing happened within the timeout, which is the usual answer.
-///         None => {}
+///         Next::Idle => {}
+///         // Every source is gone. Nothing further will ever arrive, so the
+///         // loop ends rather than asking a watcher that has no answer left.
+///         Next::Finished => break,
 ///     }
 /// }
 /// # Ok::<(), clipped_game_detection::WatchError>(())
@@ -140,19 +143,24 @@ impl ProcessWatcher {
 
     /// The next event, waiting up to `timeout` for one.
     ///
-    /// [`None`] means nothing happened in that time, which is the usual answer
-    /// and is not a failure. It also means the watcher has stopped, which
-    /// [`WatchEvent::Stopped`] will have said first.
+    /// [`Next::Idle`] means nothing happened in that time, which is the usual
+    /// answer and is not a failure. [`Next::Finished`] means every source is
+    /// gone and nothing further will ever arrive; [`WatchEvent::Stopped`] is
+    /// delivered once before it, carrying the reason.
     ///
     /// The wait is not a poll: this thread sleeps until the source has
     /// something to say or until a debounce window closes, whichever is sooner,
-    /// and if neither is pending it sleeps for the whole timeout.
-    pub fn next_event(&mut self, timeout: Duration) -> Option<WatchEvent> {
+    /// and if neither is pending it sleeps for the whole timeout. A finished
+    /// watcher waits too. Answering instantly would be cheaper for this call
+    /// and ruinous for the process — the loop above is written to run for days,
+    /// and a call that always returns immediately turns it into a busy-wait on
+    /// a processor from the moment WMI goes away.
+    pub fn next_event(&mut self, timeout: Duration) -> Next {
         let deadline = Instant::now() + timeout;
 
         loop {
             if let Some(event) = self.ready.pop_front() {
-                return Some(event);
+                return Next::Event(event);
             }
 
             let now = Instant::now();
@@ -165,15 +173,29 @@ impl ProcessWatcher {
                 continue;
             }
 
-            if self.stopped || now >= deadline {
-                return None;
+            if now >= deadline {
+                return if self.stopped {
+                    Next::Finished
+                } else {
+                    Next::Idle
+                };
             }
 
             let wake = self
                 .debouncer
                 .next_deadline()
                 .map_or(deadline, |next| next.min(deadline));
-            self.wait(wake.saturating_duration_since(now));
+            let waiting = wake.saturating_duration_since(now);
+
+            if self.stopped {
+                // Sleeping rather than waiting on the source: there is no
+                // source. Its channel is disconnected, so a receive would
+                // return at once and this loop would spin — which is the whole
+                // point of doing it here instead.
+                std::thread::sleep(waiting);
+            } else {
+                self.wait(waiting);
+            }
         }
     }
 
@@ -242,11 +264,18 @@ impl ProcessWatcher {
 /// through [`RedactedPath`], which keeps the file name and a stable digest of
 /// the rest (docs/logging.md). The launch identifier is what ties the lines for
 /// one game together.
+///
+/// At `debug` and not `info`, because nothing in this module knows what a game
+/// is: these fire for Windows' own background churn, which an idle measurement
+/// put at roughly six hundred lines an hour before a single game is detected.
+/// The hourly-rotated logs exist to diagnose recordings, and that volume would
+/// dominate them (AGENTS.md section 35). Whichever layer decides that a launch
+/// *is* a game is the one with something worth an `info` line to say.
 fn record(event: &WatchEvent) {
     match event {
         WatchEvent::Launched(launch) => {
             let newest = launch.newest();
-            tracing::info!(
+            tracing::debug!(
                 launch = launch.id.get(),
                 processes = launch.processes.len(),
                 pid = newest.pid,
@@ -256,7 +285,7 @@ fn record(event: &WatchEvent) {
             );
         }
         WatchEvent::Exited(exit) => {
-            tracing::info!(
+            tracing::debug!(
                 launch = exit.launch.get(),
                 pid = exit.process.pid,
                 image = %redacted(&exit.process),
@@ -278,4 +307,96 @@ fn redacted(process: &ProcessSnapshot) -> RedactedPath {
         .image_path
         .as_ref()
         .map_or_else(|| RedactedPath::new(&process.image_name), RedactedPath::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Short enough that the test is quick, long enough that a spin is
+    /// unmistakable against it.
+    const TIMEOUT: Duration = Duration::from_millis(200);
+
+    /// A watcher whose sources have all been lost, reached the way a real one
+    /// reaches that state.
+    ///
+    /// Nothing is faked and no private field is set: the preferred source is
+    /// declared lost, which makes the watcher fall back, and then the fallback
+    /// is declared lost too, which is the path in [`ProcessWatcher::replace_source`]
+    /// that gives up.
+    fn exhausted_watcher() -> ProcessWatcher {
+        let config = WatchConfig {
+            notification_interval: Duration::from_secs(1),
+            ..WatchConfig::default()
+        };
+        let mut watcher =
+            ProcessWatcher::start(config).expect("a watcher can be started on this machine");
+
+        watcher.replace_source(SourceError::new("test", "the subscription was lost"));
+        assert!(
+            matches!(
+                watcher.next_event(TIMEOUT),
+                Next::Event(WatchEvent::SourceChanged { .. })
+            ),
+            "losing the preferred source falls back rather than stopping"
+        );
+
+        watcher.replace_source(SourceError::new("test", "the fallback was lost"));
+        assert!(
+            matches!(
+                watcher.next_event(TIMEOUT),
+                Next::Event(WatchEvent::Stopped(_))
+            ),
+            "losing the fallback as well stops the watcher, once, with a reason"
+        );
+
+        watcher
+    }
+
+    #[test]
+    fn a_watcher_with_no_source_left_waits_out_its_timeout_rather_than_spinning() {
+        // A recorder runs for days. When WMI goes away, the consumer loop in
+        // this module's own documentation must not become a busy-wait that
+        // burns a processor for the rest of the session: a watcher that has
+        // stopped is worse than useless if it also costs a core.
+        let mut watcher = exhausted_watcher();
+
+        let window = Duration::from_millis(800);
+        let start = Instant::now();
+        let mut answers = 0_u32;
+        while start.elapsed() < window {
+            assert_eq!(watcher.next_event(TIMEOUT), Next::Finished);
+            answers += 1;
+        }
+
+        // Four full timeouts fit in the window; anything much above that is a
+        // call returning without waiting at all.
+        assert!(
+            answers <= 6,
+            "a stopped watcher answered {answers} times in {window:?}: it is spinning, not waiting"
+        );
+    }
+
+    #[test]
+    fn a_finished_watcher_is_not_confused_with_a_quiet_one() {
+        // The two answers call for opposite responses — keep waiting, or tell
+        // the user detection has stopped — so they must not be spelled the same
+        // way. Before this distinction existed both were `None`.
+        let mut live = ProcessWatcher::start(WatchConfig {
+            notification_interval: Duration::from_secs(1),
+            ..WatchConfig::default()
+        })
+        .expect("a watcher can be started on this machine");
+
+        // An idle machine may genuinely start something during the wait, so the
+        // assertion is that a live watcher never says `Finished`, not that it
+        // says `Idle`.
+        assert_ne!(
+            live.next_event(TIMEOUT),
+            Next::Finished,
+            "a watcher with a working source has not finished"
+        );
+
+        assert_eq!(exhausted_watcher().next_event(TIMEOUT), Next::Finished);
+    }
 }

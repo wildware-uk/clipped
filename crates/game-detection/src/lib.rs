@@ -37,8 +37,8 @@ pub mod catalogue;
 mod process_watcher;
 
 pub use process_watcher::{
-    EventSource, LaunchGroup, LaunchId, ProcessExit, ProcessSnapshot, SourceError, WatchConfig,
-    WatchError, WatchEvent,
+    EventSource, LaunchGroup, LaunchId, Next, ProcessExit, ProcessSnapshot, SourceError,
+    WatchConfig, WatchError, WatchEvent,
 };
 
 #[cfg(windows)]

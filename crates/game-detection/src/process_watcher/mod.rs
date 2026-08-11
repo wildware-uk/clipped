@@ -60,6 +60,39 @@ pub use error::{SourceError, WatchError};
 pub use process::{LaunchGroup, LaunchId, ProcessExit, ProcessSnapshot};
 pub use source::EventSource;
 
+/// What a wait for the next event found.
+///
+/// There are three answers and not two, because "nothing happened in the last
+/// second" and "nothing will ever happen again" call for opposite responses:
+/// the first is the normal state of a machine nobody is playing anything on,
+/// and the second means detection is over and the user has to be told. An
+/// [`Option`] would spell them the same way, and a caller who did not already
+/// know to look for [`WatchEvent::Stopped`] would loop forever on the answer
+/// that never changes.
+///
+/// Deliberately not `#[non_exhaustive]`: the point of the type is that a caller
+/// cannot write a loop which forgets [`Self::Finished`], and a wildcard arm
+/// would let them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// Something happened, and this is it.
+    Event(WatchEvent),
+
+    /// Nothing happened within the timeout.
+    ///
+    /// The usual answer, and not a failure: most seconds on most machines have
+    /// no process events in them that anybody wants.
+    Idle,
+
+    /// The watcher has finished. Nothing further will ever be reported.
+    ///
+    /// [`WatchEvent::Stopped`] is delivered once, with the reason; this is the
+    /// answer to every call after it. The wait still costs its timeout, so a
+    /// loop that does not break on this answer idles rather than spinning on a
+    /// processor for the life of the process.
+    Finished,
+}
+
 #[cfg(windows)]
 pub use watcher::ProcessWatcher;
 

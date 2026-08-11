@@ -2,6 +2,16 @@
 
 use std::time::Duration;
 
+/// The shortest interval any source will look at, however it is configured.
+///
+/// Below this the value is not honoured meaningfully by WMI's own scheduling,
+/// and for the poller it is exactly the high-frequency process enumeration this
+/// watcher exists to avoid (AGENTS.md section 18). Both sources ask
+/// [`WatchConfig::source_interval`] rather than reading the field, so the floor
+/// holds on both paths rather than only the one that happens to round to whole
+/// seconds.
+const MINIMUM_NOTIFICATION_INTERVAL: Duration = Duration::from_secs(1);
+
 /// How the watcher trades latency against cost and against noise.
 ///
 /// Every field is a duration, and every one of them is a decision somebody will
@@ -61,16 +71,30 @@ pub struct WatchConfig {
 }
 
 impl WatchConfig {
+    /// How often a source may actually look, never more often than once a
+    /// second.
+    ///
+    /// [`Self::notification_interval`] is a public field on a public type, so
+    /// the value that arrives here is whatever a caller wrote — and a caller
+    /// asking for fifty milliseconds would otherwise get a fifty-millisecond
+    /// enumeration of every process on the machine out of the fallback poller.
+    /// The floor is enforced here rather than trusted to the caller, and *both*
+    /// sources go through this method to get it.
+    #[must_use]
+    pub(crate) fn source_interval(self) -> Duration {
+        self.notification_interval
+            .max(MINIMUM_NOTIFICATION_INTERVAL)
+    }
+
     /// The `WITHIN` interval, in whole seconds, never below one.
     ///
-    /// WQL takes the polling interval as a number of seconds. Sub-second values
-    /// are legal and are exactly the "high-frequency polling" this watcher
-    /// exists to avoid, so the floor is enforced here rather than trusted to
-    /// the caller.
+    /// WQL takes the polling interval as a number of seconds, so this is
+    /// [`Self::source_interval`] truncated; the floor is already applied there,
+    /// which is why nothing clamps again here.
     #[must_use]
     pub(crate) fn notification_interval_seconds(self) -> u32 {
-        let seconds = self.notification_interval.as_secs();
-        u32::try_from(seconds).unwrap_or(u32::MAX).max(1)
+        let seconds = self.source_interval().as_secs();
+        u32::try_from(seconds).unwrap_or(u32::MAX)
     }
 }
 
@@ -120,7 +144,11 @@ mod tests {
             ..WatchConfig::default()
         };
 
+        // Both halves of the floor: the number WQL is given, and the duration
+        // the fallback poller sleeps for. A clamp on only one of them leaves a
+        // caller who writes 20ms with a 20ms enumeration of the process table.
         assert_eq!(config.notification_interval_seconds(), 1);
+        assert_eq!(config.source_interval(), Duration::from_secs(1));
     }
 
     #[test]
@@ -131,5 +159,19 @@ mod tests {
         };
 
         assert_eq!(config.notification_interval_seconds(), 5);
+        assert_eq!(config.source_interval(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_fractional_interval_above_the_floor_keeps_its_fraction() {
+        let config = WatchConfig {
+            notification_interval: Duration::from_millis(2_500),
+            ..WatchConfig::default()
+        };
+
+        // The floor is a floor, not a rounding rule: the poller can sleep for
+        // two and a half seconds even though WQL can only be told about two.
+        assert_eq!(config.source_interval(), Duration::from_millis(2_500));
+        assert_eq!(config.notification_interval_seconds(), 2);
     }
 }
