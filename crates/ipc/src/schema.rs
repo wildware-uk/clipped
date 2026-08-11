@@ -25,11 +25,22 @@
 //!   deserialises to the same variant. That is the deserialiser's own answer to
 //!   "may this be left out", not a guess about what the attributes mean.
 //! - **Wire strings** come from serialising real values.
-//! - **Completeness** comes from the compiler. Every `every_*` function below
-//!   walks its enumeration through an exhaustive `match`, so a variant added to
-//!   [`ErrorCode`], [`Event`], [`Reply`] or any of the others stops this module
-//!   compiling until it is listed here — and therefore until the TypeScript
-//!   check has something to fail against.
+//! - **Completeness** comes from the compiler, and where it can from `serde`
+//!   too. Every `every_*` function below walks its enumeration through an
+//!   exhaustive `match`, so a variant added to [`ErrorCode`], [`Event`],
+//!   [`Reply`] or any of the others stops this module compiling until it is
+//!   named here — and therefore until somebody has been made to look at the
+//!   list it belongs in. Naming a variant and still leaving it out of the list
+//!   is a hole the compiler cannot see, so for the closed enumerations it is
+//!   closed a second way: `serde` publishes its own list of variants in the
+//!   error it raises for a tag it does not know, and
+//!   `a_closed_enumeration_lists_every_variant_the_deserialiser_has` holds this
+//!   schema against it. The two enumerations with an untagged catch-all —
+//!   [`Event`] and [`ErrorDetail`] — have no such list to be held against,
+//!   because their catch-all is what stops the deserialiser ever raising that
+//!   error; the `match` is what covers them. And a capability is not a variant
+//!   at all, so [`features::ALL`] is generated from the constants that define
+//!   it (`message.rs`).
 //! - **What a sample means** comes from parsing it. Every entry in
 //!   [`ProtocolSchema::samples`] records whether *this build* could read the
 //!   frame and what it made of it, taken from running the frame through the
@@ -149,6 +160,13 @@ pub struct Structure {
 }
 
 /// One command, and whether this build can perform it.
+///
+/// Every field here is one the TypeScript check compares. The subsystem, the
+/// milestone and the issue a refused command names are deliberately not among
+/// them: this document exists to be checked rather than to be read, and those
+/// three already cross the check inside the "a command this build cannot
+/// perform" sample, which carries the whole `not_implemented` detail as the
+/// recorder actually sends it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSchema {
     /// The name on the wire.
@@ -159,12 +177,6 @@ pub struct CommandSchema {
     pub reply: Option<String>,
     /// Whether this build performs it, or refuses it with `not_implemented`.
     pub available_in_this_build: bool,
-    /// The subsystem a command this build cannot perform is waiting for.
-    pub subsystem: Option<String>,
-    /// The milestone that builds it.
-    pub milestone: Option<String>,
-    /// The issue that tracks it.
-    pub tracking_issue: Option<u32>,
 }
 
 /// A frame, and what this build made of it.
@@ -455,9 +467,6 @@ fn commands() -> Vec<CommandSchema> {
                 Command::Unbuilt(_) => None,
             },
             available_in_this_build: true,
-            subsystem: None,
-            milestone: None,
-            tracking_issue: None,
         })
         .collect();
 
@@ -470,9 +479,6 @@ fn commands() -> Vec<CommandSchema> {
             params: None,
             reply: None,
             available_in_this_build: false,
-            subsystem: Some(unbuilt.subsystem().to_owned()),
-            milestone: Some(unbuilt.milestone().to_owned()),
-            tracking_issue: Some(unbuilt.tracking_issue()),
         }
     }));
 
@@ -760,7 +766,21 @@ fn server_sample(name: &str, frame: Value) -> Sample {
 /// What a client message turned out to be, as a dotted path of wire strings.
 fn client_discriminant(message: &ClientMessage) -> String {
     match message {
-        ClientMessage::Hello(hello) => format!("hello.{}", hello.role.as_str()),
+        // The streams a handshake asked for are part of the path, and carry the
+        // names this build does not recognise. Without them the sample of a
+        // stream invented later would prove nothing: a mirror that quietly
+        // dropped the unfamiliar name — rather than keeping it, which is what
+        // the recorder does so it can refuse it *by* name — would reach exactly
+        // the same discriminant as one that kept it.
+        ClientMessage::Hello(hello) => {
+            let role = hello.role.as_str();
+            let streams: Vec<&str> = hello.streams.iter().map(EventStream::as_str).collect();
+            if streams.is_empty() {
+                format!("hello.{role}")
+            } else {
+                format!("hello.{role}.{}", streams.join("+"))
+            }
+        }
         ClientMessage::Request(request) => format!("request.{}", request.command),
     }
 }
@@ -1015,8 +1035,11 @@ fn exemplar_summary() -> RecordingSummary {
 
 // Every `every_*` function below exists to make its list exhaustive. The `match`
 // in each one is a no-op at run time and a compile error the moment a variant is
-// added and not listed, which is what keeps this schema — and through it the
+// added and not named, which is what keeps this schema — and through it the
 // TypeScript mirror — from silently describing a protocol that has moved on.
+// Each `match` sits with the list it belongs to, because the arm the compiler
+// demands and the entry the schema needs are the same decision; the tests below
+// then ask `serde` for its own list wherever there is one to ask for.
 
 /// Every envelope the desktop application sends.
 fn every_client_message() -> Vec<ClientMessage> {
@@ -1087,12 +1110,17 @@ fn every_event_stream() -> Vec<EventStream> {
     streams
 }
 
-/// Every capability this build advertises.
+/// Every capability the protocol defines.
+///
+/// [`features::ALL`] is generated from the constants themselves, so this is the
+/// definitions rather than a copy of them: a capability added to [`features`]
+/// changes this schema, and the TypeScript check then has something to fail
+/// against.
 fn every_feature() -> Vec<String> {
-    vec![
-        features::RECORDING.to_owned(),
-        features::STATUS_EVENTS.to_owned(),
-    ]
+    features::ALL
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
 }
 
 /// Every command this build performs.
@@ -1153,7 +1181,7 @@ fn every_error_code() -> Vec<ErrorCode> {
 
 /// Every machine-readable detail this build knows.
 fn every_error_detail() -> Vec<ErrorDetail> {
-    vec![
+    let details = vec![
         ErrorDetail::UnsupportedProtocolVersion {
             requested: 2,
             supported: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
@@ -1164,7 +1192,15 @@ fn every_error_detail() -> Vec<ErrorDetail> {
             milestone: "M3".to_owned(),
             tracking_issue: 37,
         },
-    ]
+    ];
+    for detail in &details {
+        match detail {
+            ErrorDetail::UnsupportedProtocolVersion { .. }
+            | ErrorDetail::NotImplemented { .. }
+            | ErrorDetail::Other(_) => {}
+        }
+    }
+    details
 }
 
 /// Every reason a recording can end that this build knows.
@@ -1187,7 +1223,7 @@ fn every_end_reason() -> Vec<EndReason> {
 
 /// Every event this build knows.
 fn every_event() -> Vec<Event> {
-    vec![
+    let events = vec![
         Event::StatusChanged {
             status: RecorderStatus::Idle,
         },
@@ -1198,20 +1234,32 @@ fn every_event() -> Vec<Event> {
                 "the encoder stopped accepting frames",
             ),
         },
-    ]
+    ];
+    for event in &events {
+        match event {
+            Event::StatusChanged { .. } | Event::RecordingFailed { .. } | Event::Other(_) => {}
+        }
+    }
+    events
 }
 
 /// Both halves of a response.
 fn every_outcome() -> Vec<Outcome> {
-    vec![
+    let outcomes = vec![
         Outcome::Ok(Reply::Pong),
         Outcome::Error(ProtocolError::new(ErrorCode::Internal, "something")),
-    ]
+    ];
+    for outcome in &outcomes {
+        match outcome {
+            Outcome::Ok(_) | Outcome::Error(_) => {}
+        }
+    }
+    outcomes
 }
 
 /// Every reply this build produces.
 fn every_reply() -> Vec<Reply> {
-    vec![
+    let replies = vec![
         Reply::Pong,
         Reply::Status {
             status: RecorderStatus::Idle,
@@ -1223,7 +1271,16 @@ fn every_reply() -> Vec<Reply> {
         Reply::RecordingStopped {
             summary: exemplar_summary(),
         },
-    ]
+    ];
+    for reply in &replies {
+        match reply {
+            Reply::Pong
+            | Reply::Status { .. }
+            | Reply::RecordingStarted { .. }
+            | Reply::RecordingStopped { .. } => {}
+        }
+    }
+    replies
 }
 
 /// Every state a recorder reports.
@@ -1285,6 +1342,100 @@ mod tests {
                 "`{structure}` is on the wire and not in the schema"
             );
         }
+    }
+
+    /// A tag no build will ever have, used to make a deserialiser say what it
+    /// does have.
+    const PROBE: &str = "a-tag-no-build-has";
+
+    /// The variants `serde` itself knows for a closed, tagged enumeration.
+    ///
+    /// A tagged enumeration with no catch-all answers an unrecognised tag with
+    /// the list of the ones it has — "unknown variant `x`, expected one of
+    /// `a`, `b`" — and that list is written by the derive macro from the type
+    /// definition. So it is the definition's own answer to "which variants are
+    /// there", available to a test at run time, which no `match` can give:
+    /// exhaustiveness makes the compiler demand an *arm* for a new variant, and
+    /// an arm can be added without the exemplar beside it. This is what makes
+    /// that omission fail.
+    fn variants_the_deserialiser_has<T: DeserializeOwned>(probe: Value) -> Vec<String> {
+        let refusal = serde_json::from_value::<T>(probe)
+            .err()
+            .expect("a tag no build has is not a variant")
+            .to_string();
+
+        // Everything `serde` quoted: the tag it was given, and then the
+        // variants it expected instead.
+        let mut quoted = refusal.split('`').skip(1).step_by(2);
+        assert_eq!(
+            quoted.next(),
+            Some(PROBE),
+            "`serde` no longer names the unrecognised tag first in `{refusal}`; this test reads \
+             its list of variants out of that sentence and needs re-reading against it"
+        );
+
+        let variants: Vec<String> = quoted.map(ToOwned::to_owned).collect();
+        assert!(
+            !variants.is_empty(),
+            "`serde` listed no variants in `{refusal}`"
+        );
+        variants
+    }
+
+    #[test]
+    fn a_closed_enumeration_lists_every_variant_the_deserialiser_has() {
+        // The `match` in each `every_*` function stops a new variant compiling.
+        // This is the other half: that the variant was not merely named in the
+        // `match` and left out of the list, which the compiler cannot see and
+        // which would leave this schema — and the TypeScript checked against it
+        // — describing a protocol the recorder no longer speaks.
+        //
+        // Only the closed enumerations can be asked. `Event` and `ErrorDetail`
+        // have untagged catch-alls, so an unrecognised tag lands in one instead
+        // of producing the error that carries the list; they are held by their
+        // `match` alone.
+        let schema = protocol_schema();
+        let listed = |name: &str| {
+            let mut values = schema.enumerations[name].values.clone();
+            values.sort();
+            values
+        };
+        let sorted = |mut variants: Vec<String>| {
+            variants.sort();
+            variants
+        };
+
+        assert_eq!(
+            listed("reply"),
+            sorted(variants_the_deserialiser_has::<Reply>(
+                json!({"reply": PROBE})
+            )),
+            "a reply the recorder can produce and this schema does not describe"
+        );
+        assert_eq!(
+            listed("outcome"),
+            sorted(variants_the_deserialiser_has::<Outcome>(json!({PROBE: {}}))),
+            "a response can end in a way this schema does not describe"
+        );
+        assert_eq!(
+            listed("recorder_state"),
+            sorted(variants_the_deserialiser_has::<RecorderStatus>(
+                json!({"state": PROBE})
+            )),
+            "a state the recorder can report and this schema does not describe"
+        );
+        assert_eq!(
+            listed("client_message_type"),
+            sorted(variants_the_deserialiser_has::<ClientMessage>(
+                json!({"type": PROBE})
+            ))
+        );
+        assert_eq!(
+            listed("server_message_type"),
+            sorted(variants_the_deserialiser_has::<ServerMessage>(
+                json!({"type": PROBE})
+            ))
+        );
     }
 
     #[test]

@@ -740,15 +740,26 @@ by hand:
   deserialiser's rather than a reading of the attributes;
 - wire strings come from serialising real values;
 - every enumeration is walked through an exhaustive `match`, so a variant added
-  to the Rust and not to the schema stops the crate compiling;
+  to the Rust stops the crate compiling until it is named in the schema, beside
+  the list it belongs in;
+- naming a variant and still leaving it out of that list is a hole the compiler
+  cannot see, so the closed enumerations — `reply`, `outcome`, `recorder_state`
+  and the two envelope types — are checked a second way, against the list
+  `serde` itself publishes in the error it raises for a tag it does not know.
+  `event` and `error_detail` have untagged catch-alls and so never raise that
+  error; their `match` is what covers them. A capability is a constant rather
+  than a variant and has no `match` at all: `features::ALL` is generated from
+  the same lines that define the constants, which is the same guarantee by
+  another route;
 - and every sample frame — including ones carrying an error code, an end reason,
   an event or a field invented after this build — records what the **real**
   deserialiser made of it.
 
-Two tests then hold the ends together, one in each CI job:
+Three tests then hold the ends together, across the two CI jobs:
 
 | Test | Fails when |
 | --- | --- |
+| `a_closed_enumeration_lists_every_variant_the_deserialiser_has` (`cargo test`) | a variant exists that the schema does not list |
 | `the_committed_schema_is_the_one_this_build_produces` (`cargo test`) | the committed schema is no longer what the Rust types produce |
 | `conformance.test.ts` (`npm test`) | the TypeScript no longer matches the committed schema |
 

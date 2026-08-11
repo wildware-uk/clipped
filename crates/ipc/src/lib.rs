@@ -22,6 +22,21 @@
 //!   against. The types here are the authority for both ends, and that module
 //!   is how the other end finds out when they change.
 //!
+//! [`schema`] is public, which for what is a build-time tool wants a reason
+//! (AGENTS.md section 44). The emitter that writes the description is a
+//! separate Cargo target — `src/bin/protocol-schema.rs` — and a binary reaches
+//! the library beside it only through that library's public API, so the
+//! alternative to exposing the module is not a smaller surface but a second
+//! copy of the protocol's description living in the binary. A `cargo` feature
+//! was weighed and not taken: off by default it would take
+//! `the_committed_schema_is_the_one_this_build_produces` out of `cargo test
+//! --workspace`, and with it the half of the conformance check that runs on
+//! this side; on by default it would be a flag nothing ever turns off
+//! (AGENTS.md section 38). What is exposed is inert — some `serde` data types,
+//! one function that fills them in, and the path the file is written to.
+//! Nothing in it takes part in holding a conversation, and nothing else in this
+//! crate depends on it.
+//!
 //! # Not responsible for
 //!
 //! Doing anything a command asks for. This crate has no idea what a recording

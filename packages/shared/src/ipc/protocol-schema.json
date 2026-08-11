@@ -326,73 +326,49 @@
       "name": "ping",
       "params": null,
       "reply": "reply.pong",
-      "available_in_this_build": true,
-      "subsystem": null,
-      "milestone": null,
-      "tracking_issue": null
+      "available_in_this_build": true
     },
     {
       "name": "get_status",
       "params": null,
       "reply": "reply.status",
-      "available_in_this_build": true,
-      "subsystem": null,
-      "milestone": null,
-      "tracking_issue": null
+      "available_in_this_build": true
     },
     {
       "name": "start_recording",
       "params": "start_recording",
       "reply": "reply.recording_started",
-      "available_in_this_build": true,
-      "subsystem": null,
-      "milestone": null,
-      "tracking_issue": null
+      "available_in_this_build": true
     },
     {
       "name": "stop_recording",
       "params": "stop_recording",
       "reply": "reply.recording_stopped",
-      "available_in_this_build": true,
-      "subsystem": null,
-      "milestone": null,
-      "tracking_issue": null
+      "available_in_this_build": true
     },
     {
       "name": "save_replay",
       "params": null,
       "reply": null,
-      "available_in_this_build": false,
-      "subsystem": "the replay buffer",
-      "milestone": "M3",
-      "tracking_issue": 37
+      "available_in_this_build": false
     },
     {
       "name": "add_bookmark",
       "params": null,
       "reply": null,
-      "available_in_this_build": false,
-      "subsystem": "bookmarks",
-      "milestone": "M8",
-      "tracking_issue": 64
+      "available_in_this_build": false
     },
     {
       "name": "take_screenshot",
       "params": null,
       "reply": null,
-      "available_in_this_build": false,
-      "subsystem": "screenshot capture",
-      "milestone": "M8",
-      "tracking_issue": 67
+      "available_in_this_build": false
     },
     {
       "name": "apply_settings",
       "params": null,
       "reply": null,
-      "available_in_this_build": false,
-      "subsystem": "the settings API",
-      "milestone": "M7",
-      "tracking_issue": 108
+      "available_in_this_build": false
     }
   ],
   "samples": [
@@ -412,7 +388,7 @@
         "type": "hello"
       },
       "parses": true,
-      "discriminant": "hello.control"
+      "discriminant": "hello.control.status"
     },
     {
       "name": "an events handshake, naming its streams",
@@ -431,7 +407,7 @@
         "type": "hello"
       },
       "parses": true,
-      "discriminant": "hello.events"
+      "discriminant": "hello.events.status+errors"
     },
     {
       "name": "a command with no parameters",
@@ -848,7 +824,7 @@
         "type": "hello"
       },
       "parses": true,
-      "discriminant": "hello.events"
+      "discriminant": "hello.events.status+telemetry"
     },
     {
       "name": "a command invented later",

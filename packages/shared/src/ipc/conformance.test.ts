@@ -44,6 +44,7 @@ import type {
   Feature,
   Hello,
   IdleStatus,
+  KnownCommandName,
   KnownErrorDetailName,
   KnownEventName,
   NotImplementedDetail,
@@ -113,6 +114,8 @@ interface SchemaDocument {
   >;
   readonly commands: readonly {
     readonly name: string;
+    readonly params: string | null;
+    readonly reply: string | null;
     readonly available_in_this_build: boolean;
   }[];
   readonly samples: readonly {
@@ -293,6 +296,43 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   }),
 };
 
+/**
+ * What each command takes and gives back, in the names of the structures above.
+ *
+ * `params` and `reply` are keys of {@link TYPESCRIPT_STRUCTURES}, so a command
+ * cannot claim a shape this file does not describe, and the structures those
+ * names point at are themselves held against the Rust. `available_in_this_build`
+ * is the recorder's own answer to whether a command is performed or refused with
+ * `not_implemented`: a build that gains one changes the schema and this list has
+ * to follow, which is the point at which somebody asks whether the interface
+ * should now be offering it.
+ */
+const TYPESCRIPT_COMMANDS: readonly {
+  readonly name: KnownCommandName;
+  readonly params: keyof typeof TYPESCRIPT_STRUCTURES | null;
+  readonly reply: keyof typeof TYPESCRIPT_STRUCTURES | null;
+  readonly available_in_this_build: boolean;
+}[] = [
+  { name: 'ping', params: null, reply: 'reply.pong', available_in_this_build: true },
+  { name: 'get_status', params: null, reply: 'reply.status', available_in_this_build: true },
+  {
+    name: 'start_recording',
+    params: 'start_recording',
+    reply: 'reply.recording_started',
+    available_in_this_build: true,
+  },
+  {
+    name: 'stop_recording',
+    params: 'stop_recording',
+    reply: 'reply.recording_stopped',
+    available_in_this_build: true,
+  },
+  { name: 'save_replay', params: null, reply: null, available_in_this_build: false },
+  { name: 'add_bookmark', params: null, reply: null, available_in_this_build: false },
+  { name: 'take_screenshot', params: null, reply: null, available_in_this_build: false },
+  { name: 'apply_settings', params: null, reply: null, available_in_this_build: false },
+];
+
 /** Which structure each envelope's payload takes, as the types here compose it. */
 const TYPESCRIPT_ENVELOPES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   client: { hello: 'hello', request: 'request' },
@@ -333,8 +373,15 @@ function eventDiscriminant(event: RecorderEvent): string {
 
 function clientDiscriminant(message: ClientMessage): string {
   switch (message.type) {
-    case 'hello':
-      return `hello.${message.role ?? DEFAULT_CONNECTION_ROLE}`;
+    case 'hello': {
+      const role = message.role ?? DEFAULT_CONNECTION_ROLE;
+      const streams = message.streams ?? [];
+      // The streams are in the path so that a mirror which dropped a stream
+      // name it did not recognise reaches a different answer from one that kept
+      // it, which is the only thing the "an event stream invented later" sample
+      // can prove.
+      return streams.length === 0 ? `hello.${role}` : `hello.${role}.${streams.join('+')}`;
+    }
     case 'request':
       return `request.${message.command}`;
   }
@@ -387,6 +434,7 @@ describe('the constants', () => {
 
   it('agree about the commands, including the ones no build performs yet', () => {
     expect([...COMMANDS]).toEqual(schema.commands.map((command) => command.name));
+    expect(TYPESCRIPT_COMMANDS).toEqual(schema.commands);
   });
 });
 
