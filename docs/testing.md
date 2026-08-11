@@ -317,6 +317,34 @@ file is for. Where a test *can* usefully skip — the capture unit tests inside
 `clipped-capture` — the project has `CLIPPED_REQUIRE_CAPTURE` to turn a skip
 into a failure on a machine that is supposed to be able to capture.
 
+## Running the suite without making a noise
+
+Some tests play sound. `crates/audio/tests/system_audio.rs` renders a quiet
+997 Hz tone so it can capture it back and measure it, and the A/V sync tests
+drive `video-pattern --tone`. That is the right way to test a capture path —
+a real reference signal, not a mock — but `cargo test --workspace` is the
+command CONTRIBUTING.md asks every contributor to run before review, and on a
+machine with a sound card it makes noise. On a call, in headphones, or on the
+tenth run of the afternoon, that is unwelcome.
+
+```text
+CLIPPED_SKIP_AUDIO=1 cargo test --workspace
+```
+
+Every test that opens an audio device or plays a tone then skips, reporting
+`SKIPPED (audio): CLIPPED_SKIP_AUDIO is set` on stderr — loudly, like every
+other skip here, so that a quiet run never looks like a passing one.
+
+It is checked *before* a device is opened rather than after, because by the
+time a test has discovered it cannot run it has already made whatever noise it
+was going to make.
+
+`CLIPPED_SKIP_AUDIO` is not the opposite of `CLIPPED_REQUIRE_AUDIO`. That one
+is about whether a machine *can* run these tests; this one is about whether it
+should right now. Setting both is a contradiction — one says they must not run,
+the other says they must not be skipped — and fails with a message saying so,
+rather than letting either win silently.
+
 ### Clearing up a run by hand, without stopping somebody else's
 
 `TestApp`'s `Drop` stops the application on every path, so an ordinary run leaves

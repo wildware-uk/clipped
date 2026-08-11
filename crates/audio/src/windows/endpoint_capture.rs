@@ -1195,10 +1195,55 @@ pub(super) mod testing {
     /// regression that turns this test into a no-op looks like a test that
     /// passed.
     pub(in crate::windows) fn skipped(reason: &str) -> bool {
-        if std::env::var_os(REQUIRE_AUDIO).is_some_and(|value| !value.is_empty()) {
+        if is_set(REQUIRE_AUDIO) {
             panic!("{REQUIRE_AUDIO} is set, so this must not be skipped: {reason}");
         }
         let _ = writeln!(std::io::stderr(), "SKIPPED (audio): {reason}");
+        true
+    }
+
+    /// The environment variable that asks the tests which touch an audio device
+    /// not to.
+    ///
+    /// Distinct from [`REQUIRE_AUDIO`], and not its opposite: that one is about
+    /// whether a machine *can* run these tests, this one is about whether it
+    /// should right now. `cargo test --workspace` is the command CONTRIBUTING.md
+    /// asks every contributor to run before review, and on a machine with a
+    /// sound card it plays audible tones — which is unwelcome on a call, in
+    /// headphones, or simply on the tenth run of the afternoon
+    /// ([issue #206](https://github.com/wildware-uk/clipped/issues/206)).
+    const SKIP_AUDIO: &str = "CLIPPED_SKIP_AUDIO";
+
+    /// Whether an environment variable is set to anything but the empty string.
+    fn is_set(name: &str) -> bool {
+        std::env::var_os(name).is_some_and(|value| !value.is_empty())
+    }
+
+    /// Whether the caller should skip because the machine has been asked for
+    /// quiet.
+    ///
+    /// Consulted *before* a device is opened, which is the difference between
+    /// this and [`skipped`]: by the time a test has discovered it cannot run, it
+    /// has already done whatever it was going to do to the endpoint.
+    ///
+    /// # Panics
+    ///
+    /// When [`SKIP_AUDIO`] and [`REQUIRE_AUDIO`] are both set. One says these
+    /// tests must not run and the other says they must not be skipped; letting
+    /// either win silently would mean a machine configured to prove it can
+    /// record audio quietly proving nothing.
+    pub(in crate::windows) fn suppressed() -> bool {
+        if !is_set(SKIP_AUDIO) {
+            return false;
+        }
+        assert!(
+            !is_set(REQUIRE_AUDIO),
+            "{SKIP_AUDIO} and {REQUIRE_AUDIO} are both set. One says these \
+             tests must not run and the other says they must not be skipped; \
+             there is no behaviour that satisfies both, so neither is being \
+             guessed at."
+        );
+        skipped(&format!("{SKIP_AUDIO} is set"));
         true
     }
 

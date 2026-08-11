@@ -14,7 +14,6 @@
 
 use std::fmt;
 
-use tracing::field::{display, Empty};
 use tracing::Span;
 
 use crate::error::{IdentifierRejection, LoggingError};
@@ -295,31 +294,36 @@ impl SessionContext {
     /// context is therefore present on `DEBUG` and `TRACE` events too.
     ///
     /// This is the single place the standard field names are written.
+    ///
+    /// # Why the values are passed in rather than recorded afterwards
+    ///
+    /// Every field is given its value when the span is created. The obvious
+    /// alternative — declare the optional fields [`Empty`] and fill them in
+    /// with [`Span::record`] — is what this used to do, and it rendered each
+    /// recorded field twice under the subscriber the recorder actually installs
+    /// ([issue #185](https://github.com/wildware-uk/clipped/issues/185)).
+    ///
+    /// `tracing-subscriber` stores a span's formatted fields in a single
+    /// `FormattedFields<DefaultFields>` slot in the span's extensions, keyed by
+    /// type. [`crate::init`] builds two `fmt` layers over one registry, a log
+    /// file and a console, and they share that slot: the first to see the span
+    /// writes the creation-time fields, and then *both* append to it every time
+    /// a field is recorded. Passing the values up front means nothing is ever
+    /// recorded, so there is nothing to append twice — under any subscriber,
+    /// including one this crate did not build.
+    ///
+    /// An absent field is `None`, which `tracing` records as nothing at all, so
+    /// it stays absent rather than appearing empty.
     #[must_use]
     pub fn span(&self) -> Span {
-        let span = tracing::info_span!(
+        tracing::info_span!(
             "clipped_session",
             session_id = %self.session_id,
-            game_id = Empty,
-            capture_backend = Empty,
-            encoder = Empty,
-            audio_source = Empty,
-        );
-
-        if let Some(game_id) = &self.game_id {
-            span.record("game_id", display(game_id));
-        }
-        if let Some(capture_backend) = self.capture_backend {
-            span.record("capture_backend", display(capture_backend));
-        }
-        if let Some(encoder) = self.encoder {
-            span.record("encoder", display(encoder));
-        }
-        if let Some(audio_source) = self.audio_source {
-            span.record("audio_source", display(audio_source));
-        }
-
-        span
+            game_id = self.game_id.as_ref().map(tracing::field::display),
+            capture_backend = self.capture_backend.map(tracing::field::display),
+            encoder = self.encoder.map(tracing::field::display),
+            audio_source = self.audio_source.map(tracing::field::display),
+        )
     }
 }
 

@@ -124,7 +124,7 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-media-validation` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
@@ -143,6 +143,12 @@ crate that writes media checks its output with, so it has to be reachable from
 all of them as a dev-dependency. It is never published, never linked into the
 recorder, and depends on nothing in this workspace — which is what makes
 sitting at layer 0 sound rather than convenient.
+
+`clipped-ffmpeg-runtime` (`crates/ffmpeg-runtime`) sits at layer 0 for the same
+kind of reason. It copies the pinned FFmpeg DLLs beside the binaries a build
+produces, so that nothing has to be on `PATH`, and it is named only by the
+`[build-dependencies]` of the crates that link FFmpeg — `clipped-muxer` and
+`clipped-encoder`. No binary links it, and it depends on nothing at all.
 
 `clipped-logging` owns where diagnostics go and how much is recorded: it
 installs the process-wide `tracing` subscriber, resolves the log level from the

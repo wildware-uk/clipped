@@ -109,11 +109,14 @@ mod tests {
 
     use super::*;
     use crate::buffer::SampleOrigin;
-    use crate::windows::endpoint_capture::testing::{skipped, Contiguity};
+    use crate::windows::endpoint_capture::testing::{skipped, suppressed, Contiguity};
     use crate::windows::notifications::EndpointChange;
 
     /// Opens a capture, or reports why this machine cannot.
     fn open() -> Option<SystemAudioCapture> {
+        if suppressed() {
+            return None;
+        }
         match SystemAudioCapture::open() {
             Ok(capture) => Some(capture),
             Err(AudioError::NoEndpoint) => {
