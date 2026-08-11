@@ -99,21 +99,90 @@ fn target_profile_directory() -> PathBuf {
         .to_path_buf()
 }
 
-/// Where cargo put `examples/shutdown_fixture.rs`.
+/// Where cargo put an `examples/<name>.rs` binary.
 ///
 /// Cargo exports the path of every *binary* target to an integration test but
-/// not of an example, so it is found next to the binary instead. `cargo test`
-/// builds examples, so it is there by the time this runs.
-pub(crate) fn fixture_binary() -> PathBuf {
+/// not of an example, so they are found next to the binary instead. `cargo test`
+/// builds examples, so they are there by the time this runs.
+pub(crate) fn example_binary(name: &str) -> PathBuf {
     let path = target_profile_directory()
         .join("examples")
-        .join(format!("shutdown_fixture{}", std::env::consts::EXE_SUFFIX));
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     assert!(
         path.exists(),
-        "the shutdown fixture was not built at {}; run `cargo test`, which builds examples",
+        "the `{name}` example was not built at {}; run `cargo test`, which builds examples",
         path.display()
     );
     path
+}
+
+/// Where cargo put `examples/shutdown_fixture.rs`.
+pub(crate) fn fixture_binary() -> PathBuf {
+    example_binary("shutdown_fixture")
+}
+
+/// Ends a process that is not this process's child.
+///
+/// `Child::kill` is `TerminateProcess` on a handle cargo already owns; a
+/// recorder started *by* a fixture is this process's grandchild and detached
+/// from it, so there is no `Child` for it and the handle has to be opened by
+/// identifier. That is the whole difference — what lands on the recorder is the
+/// same `TerminateProcess`, with no notification, no destructors and no flush,
+/// which is what makes it a kill rather than a stop
+/// (`crates/muxer/tests/abrupt_termination.rs`).
+///
+/// A process that has already exited is not an error: that is one of the
+/// outcomes this is used to arrange.
+#[cfg(windows)]
+pub(crate) fn terminate(process_id: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    // SAFETY: `OpenProcess` takes three integers by value and returns a handle
+    // or null. Nothing is dereferenced.
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, process_id) };
+    if handle.is_null() {
+        // Already gone, or never ours to end.
+        return;
+    }
+
+    // SAFETY: `handle` was just opened with PROCESS_TERMINATE and is owned
+    // solely here; the exit code is an integer by value.
+    unsafe {
+        TerminateProcess(handle, 1);
+        CloseHandle(handle);
+    }
+}
+
+/// Whether a process is still running.
+///
+/// Opened with the smallest right that answers the question:
+/// `PROCESS_QUERY_LIMITED_INFORMATION` is enough to read an exit code and is
+/// granted for a process this account owns even when the fuller query right is
+/// not.
+#[cfg(windows)]
+pub(crate) fn is_running(process_id: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: as `terminate` above; three integers in, a handle or null out.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if handle.is_null() {
+        return false;
+    }
+
+    let mut code: u32 = 0;
+    // SAFETY: `handle` is live and owned here, and the out-parameter points at
+    // a live local.
+    let queried = unsafe { GetExitCodeProcess(handle, &raw mut code) };
+    // SAFETY: closed exactly once, and not used afterwards.
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    queried != 0 && code == STILL_ACTIVE as u32
 }
 
 /// The `video-pattern` test application, built beside this test's binaries.

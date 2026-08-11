@@ -72,8 +72,8 @@ use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
@@ -116,6 +116,36 @@ impl Write for Connection {
 
     fn flush(&mut self) -> io::Result<()> {
         self.pipe.flush()
+    }
+}
+
+impl Connection {
+    /// Which process is serving the other end of this pipe.
+    ///
+    /// Windows answers this from the pipe object itself, so it names the process
+    /// actually being talked to rather than one this process remembers starting.
+    /// That is the whole of its use: a supervisor that started a recorder and
+    /// lost the race for the endpoint has to be able to tell that the recorder
+    /// answering is not the one it started ([`crate::supervisor`]).
+    ///
+    /// It is **not** authentication. A process running as this user can create
+    /// the endpoint before the real recorder does, and this reports its
+    /// identifier as readily as the genuine one; `docs/ipc.md` sets out why that
+    /// costs nothing under the threat model this transport is built for.
+    ///
+    /// # Errors
+    ///
+    /// Whatever Windows said, most plausibly because the server end has already
+    /// closed.
+    pub fn server_process_id(&self) -> io::Result<u32> {
+        let mut process_id = 0_u32;
+
+        // SAFETY: the handle is the live pipe owned by this value's `File` and
+        // outlives the call, and the out-parameter points at a live local.
+        unsafe { GetNamedPipeServerProcessId(HANDLE(raw_handle(&self.pipe)), &raw mut process_id) }
+            .map_err(platform_io)?;
+
+        Ok(process_id)
     }
 }
 
@@ -590,6 +620,11 @@ fn win32(code: WIN32_ERROR) -> TransportError {
 
 /// A Windows error as this module's platform failure.
 fn platform(error: windows::core::Error) -> TransportError {
+    TransportError::Platform(platform_io(error))
+}
+
+/// A Windows error as an ordinary I/O error.
+fn platform_io(error: windows::core::Error) -> io::Error {
     let code = error.code();
     // A Win32 code wrapped in an HRESULT keeps its number in the low sixteen
     // bits. Unwrapping it means `io::Error` prints the system's own message for
@@ -600,7 +635,7 @@ fn platform(error: windows::core::Error) -> TransportError {
     } else {
         code.0
     };
-    TransportError::Platform(io::Error::from_raw_os_error(raw))
+    io::Error::from_raw_os_error(raw)
 }
 
 #[cfg(test)]

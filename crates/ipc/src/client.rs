@@ -135,6 +135,22 @@ impl Client {
         &self.welcome
     }
 
+    /// Which process is serving this connection.
+    ///
+    /// Asked of the pipe rather than of anything this process remembers, so it
+    /// names the recorder actually on the other end. A supervisor uses it to
+    /// tell a recorder it started from one that was already there
+    /// ([`crate::supervisor`]); it is not authentication, and
+    /// [`Connection::server_process_id`] says why.
+    ///
+    /// # Errors
+    ///
+    /// Whatever Windows said, most plausibly because the recorder has closed
+    /// the connection.
+    pub fn recorder_process_id(&self) -> std::io::Result<u32> {
+        self.connection.server_process_id()
+    }
+
     /// Sends a command and waits for its reply.
     ///
     /// # Errors

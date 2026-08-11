@@ -71,10 +71,17 @@ windows-sys = { version = "0.61", features = [
 
 # `tests/ctrl_c.rs` delivers a real Ctrl+C to a real child process, which needs
 # `GenerateConsoleCtrlEvent` and `AllocConsole` as well.
+#
+# `tests/supervision.rs` needs `Win32_System_Threading` for the other half of
+# the same idea: a recorder started by a fixture is this test's *grandchild* and
+# is deliberately detached from it, so there is no `Child` to call `kill` on and
+# `OpenProcess`/`TerminateProcess` is how it is ended — and
+# `GetExitCodeProcess` is how "did it survive?" is answered rather than assumed.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
+    "Win32_System_Threading",
 ] }
 
 # What the recordings this binary produces are checked with: the container
