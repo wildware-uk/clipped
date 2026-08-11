@@ -45,8 +45,8 @@ use clipped_ipc::transport::connect;
 use clipped_ipc::{
     features, Client, ClientError, ClientMessage, Command as IpcCommand, ConnectionRole, Endpoint,
     ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello, PeerIdentity, RecorderStatus,
-    Reply, ServerMessage, StartRecording, StopRecording, PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS, UNBUILT_COMMANDS,
+    Reply, ServerMessage, StartRecording, StopRecording, MAX_CONCURRENT_CONNECTIONS,
+    PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, UNBUILT_COMMANDS,
 };
 
 use support::{
@@ -463,6 +463,122 @@ fn the_metrics_stream_is_refused_rather_than_accepted_and_left_silent() {
     }
 
     recorder.stop();
+}
+
+#[test]
+fn the_connection_after_the_last_one_the_recorder_will_serve_is_refused_and_the_slot_comes_back() {
+    // The cap exists because the endpoint is reachable by anything running as
+    // the user, and an unbounded accept loop is an unbounded thread count
+    // inside the process that must not fall over (AGENTS.md section 17). It is
+    // the one refusal in the protocol whose whole point is a resource bound, so
+    // both halves are asserted: that the cap holds, and that a connection
+    // ending gives its place back rather than costing the recorder a slot for
+    // the rest of its life.
+    let recorder = ServedRecorder::start("connection-cap");
+
+    let mut held = Vec::with_capacity(MAX_CONCURRENT_CONNECTIONS);
+    for _ in 0..MAX_CONCURRENT_CONNECTIONS {
+        let mut client = recorder.client();
+        assert_eq!(
+            client.call(&IpcCommand::Ping).expect("ping is answered"),
+            Reply::Pong,
+            "every connection up to the cap is served, not merely accepted"
+        );
+        held.push(client);
+    }
+
+    // Deliberately a bare connection rather than `Client::connect`: the cap is
+    // applied at the accept, *before* a handshake is read, so the refusal is
+    // already there for a client that has sent nothing at all. Reading the
+    // frame directly is what asserts that, and it is also what keeps the
+    // assertion honest — through `Client::connect` a refusal and a write that
+    // lost the race to the closing pipe are the same failure.
+    match beyond_the_cap(&recorder) {
+        ServerMessage::Refused(error) => {
+            assert_eq!(error.code, ErrorCode::TooManyConnections);
+            assert!(
+                error
+                    .message
+                    .contains(&MAX_CONCURRENT_CONNECTIONS.to_string()),
+                "the refusal should say how many connections that is: {}",
+                error.message
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    // The ones already being served are untouched by somebody else being turned
+    // away.
+    assert_eq!(
+        held[0].call(&IpcCommand::Ping).expect("ping is answered"),
+        Reply::Pong,
+        "a refused connection must not disturb the ones that were accepted"
+    );
+
+    // And a slot released is a slot reusable. The recorder notices the client
+    // has gone on its own thread, so this is the one place the test has to
+    // wait for something rather than assert it at once.
+    held.pop();
+    let mut replacement = connect_once_a_slot_is_free(&recorder);
+    assert_eq!(
+        replacement
+            .call(&IpcCommand::Ping)
+            .expect("ping is answered"),
+        Reply::Pong,
+        "a connection that ended should have given its place back"
+    );
+
+    drop(replacement);
+    drop(held);
+    recorder.stop();
+}
+
+/// Opens one connection more than the recorder will serve, and reads what it
+/// says about it.
+///
+/// The read happens on a thread of its own because reads on this transport have
+/// no deadline (`docs/ipc.md`): a recorder that accepted this connection instead
+/// of refusing it would leave the read blocked for ever, and a test that hangs
+/// says nothing to whoever broke the cap. This one fails with a sentence.
+fn beyond_the_cap(recorder: &ServedRecorder) -> ServerMessage {
+    let mut connection =
+        connect(recorder.endpoint(), PATIENCE).expect("the pipe itself still accepts a connection");
+
+    let (answers, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answers.send(
+            read_message::<_, ServerMessage>(&mut connection).map_err(|error| error.to_string()),
+        );
+    });
+
+    answer
+        .recv_timeout(PATIENCE)
+        .expect(
+            "a connection past the cap should be refused at once; nothing arrived, so it was \
+             accepted and left waiting",
+        )
+        .expect("the refusal should be a readable frame")
+}
+
+/// Connects, waiting while the recorder is still at its connection cap.
+///
+/// A connection's slot is released by the thread serving it, which notices the
+/// client has gone at its own pace. Anything other than `too_many_connections`
+/// fails the test rather than being retried.
+fn connect_once_a_slot_is_free(recorder: &ServedRecorder) -> Client {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        match Client::connect(recorder.endpoint(), CLIENT_NAME, "0.0.0", PATIENCE) {
+            Ok(client) => return client,
+            Err(ClientError::Refused(refusal))
+                if refusal.code == ErrorCode::TooManyConnections
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("the freed slot was never usable again: {error}"),
+        }
+    }
 }
 
 #[test]
