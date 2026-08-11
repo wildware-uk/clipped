@@ -44,6 +44,7 @@ use clipped_capture::{
 use clipped_encoder::{Codec, Resolution, SourceFrame, SourceTexture, SurfaceKind, VideoEncoder};
 use clipped_logging::{RedactedPath, SessionContext, SessionId};
 use clipped_muxer::{MkvWriter, RecordingLayout, VideoCodec, VideoTrack};
+use clipped_replay::ReplayBuffer;
 
 use crate::encoding;
 use crate::error::SessionError;
@@ -71,10 +72,12 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(100);
 /// diagnosis rather than a wait.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Records `settings.target` until `stop` is raised.
+/// Records `settings.target` until `stop` is raised, feeding `replay` as well
+/// as the file when one is given.
 pub(crate) fn record(
     settings: &RecordingSettings,
     stop: &dyn crate::StopSignal,
+    replay: Option<&ReplayBuffer>,
 ) -> Result<RecordingReport, SessionError> {
     if settings.audio_requested() {
         // Said once, plainly, rather than left to be discovered in a file with
@@ -104,7 +107,7 @@ pub(crate) fn record(
         "capture started"
     );
 
-    let outcome = record_frames(settings, stop, backend.as_mut(), format, method);
+    let outcome = record_frames(settings, stop, backend.as_mut(), format, method, replay);
 
     // The backend is shut down here rather than being left to `Drop` so that
     // the display's duplication, or the compositor's frame pool, is released
@@ -131,6 +134,7 @@ fn record_frames(
     backend: &mut dyn CaptureBackend,
     mut format: FrameFormat,
     method: CaptureMethod,
+    replay: Option<&ReplayBuffer>,
 ) -> Result<RecordingReport, SessionError> {
     // Held for the whole of the recording: the encoder session is opened
     // against it and may not outlive it. `format` is passed by mutable
@@ -157,6 +161,10 @@ fn record_frames(
     let mut encoder = opened.encoder;
     let writer = open_output(settings, encoder.as_ref(), opened.codec, encode_size)?;
     let muxing = MuxingThread::start(writer);
+    let sinks = PacketSinks {
+        muxing: &muxing,
+        replay,
+    };
 
     let mut counters = Counters::default();
     let mut gate = FrameGate::new(settings.framerate())?;
@@ -175,7 +183,7 @@ fn record_frames(
                     &frame,
                     clock,
                     &mut gate,
-                    &muxing,
+                    &sinks,
                     encoder.as_mut(),
                     encode_size,
                     &mut counters,
@@ -215,7 +223,7 @@ fn record_frames(
     // The finalisation, in order: the encoder is told the stream has ended and
     // drained of the pictures it was holding back, then the queue is closed and
     // the trailer written. A failure in the first does not skip the second.
-    if let Err(error) = flush(encoder.as_mut(), &muxing, &mut counters) {
+    if let Err(error) = flush(encoder.as_mut(), &sinks, &mut counters) {
         failure.get_or_insert(error);
     }
     encoder.shut_down();
@@ -257,6 +265,25 @@ fn record_frames(
         "recording finished"
     );
 
+    if let Some(replay) = replay {
+        // Said once, at the end, because it is the only account of what the
+        // buffer actually did: a window that came out shorter than it was
+        // configured for, or a segment count that never grew, is the difference
+        // between a replay that can be saved and one that cannot.
+        let stats = replay.stats();
+        tracing::info!(
+            segments_held = stats.segments_held(),
+            bytes_held = stats.bytes_held(),
+            peak_bytes_held = stats.peak_bytes_held(),
+            covered_seconds = stats
+                .covered()
+                .map_or(0.0, |covered| covered.length().as_secs_f64()),
+            segments_evicted_for_window = stats.segments_evicted_for_window(),
+            segments_evicted_over_ceiling = stats.segments_evicted_over_ceiling(),
+            "replay buffer at the end of the recording"
+        );
+    }
+
     match failure {
         Some(error) => Err(error),
         None => Ok(report),
@@ -296,6 +323,20 @@ struct Counters {
     missed_by_source: u64,
 }
 
+/// Where a drained packet goes.
+///
+/// The file always, and the replay buffer as well when one was given. The two
+/// are a pair rather than two arguments because they are always passed
+/// together, and because the pairing is the point: **there is one encoder**. A
+/// recording and a replay buffer running at the same time encode once and copy
+/// the bytes twice, which is what SPEC.md section 16 asks for and what makes a
+/// replay buffer nearly free while a recording is running.
+#[derive(Debug, Clone, Copy)]
+struct PacketSinks<'sinks> {
+    muxing: &'sinks MuxingThread,
+    replay: Option<&'sinks ReplayBuffer>,
+}
+
 /// Offers one captured frame to the encoder, and queues whatever comes out.
 ///
 /// Three reasons a frame is not encoded, and all three are counted rather than
@@ -306,7 +347,7 @@ fn offer(
     frame: &CapturedFrame<'_>,
     clock: CaptureClock,
     gate: &mut FrameGate,
-    muxing: &MuxingThread,
+    sinks: &PacketSinks<'_>,
     encoder: &mut dyn VideoEncoder,
     size: (u32, u32),
     counters: &mut Counters,
@@ -331,7 +372,7 @@ fn offer(
         counters.skipped_for_rate += 1;
         return Ok(());
     }
-    if muxing.is_behind() {
+    if sinks.muxing.is_behind() {
         counters.dropped_writer_behind += 1;
         return Ok(());
     }
@@ -358,25 +399,34 @@ fn offer(
 
     encoder.submit(&source)?;
     counters.encoded += 1;
-    let packets = drain(encoder, muxing)?;
+    let packets = drain(encoder, sinks)?;
     report_submission_over_headroom(packets);
     Ok(())
 }
 
-/// Moves every packet the encoder has ready into the writer's queue, and
-/// reports how many that was.
-fn drain(encoder: &mut dyn VideoEncoder, muxing: &MuxingThread) -> Result<usize, SessionError> {
+/// Moves every packet the encoder has ready into the writer's queue and, when
+/// there is one, into the replay buffer, and reports how many that was.
+///
+/// The replay buffer is fed second and its result is not a `Result`: it copies
+/// bytes into memory it already owns and has no failure to report. A buffer
+/// that has reached its ceiling drops its own oldest segments and says so in
+/// its statistics rather than refusing the packet, because a replay buffer must
+/// never be able to end a recording (AGENTS.md section 17).
+fn drain(encoder: &mut dyn VideoEncoder, sinks: &PacketSinks<'_>) -> Result<usize, SessionError> {
     let mut moved = 0;
     while let Some(packet) = encoder.next_packet()? {
         // Both timestamps are nanoseconds from the same zero as the frames that
         // went in, which is what the muxer's `PacketTimestamp` wants
         // (`crates/encoder/src/packet.rs`).
-        muxing.write(
+        sinks.muxing.write(
             packet.data(),
             nanos_of(packet.presentation_time()),
             nanos_of(packet.decode_time()),
             packet.is_keyframe(),
         )?;
+        if let Some(replay) = sinks.replay {
+            replay.push(&packet);
+        }
         moved += 1;
     }
     Ok(moved)
@@ -423,12 +473,12 @@ fn report_submission_over_headroom(packets: usize) {
 /// Ctrl+C was watching.
 fn flush(
     encoder: &mut dyn VideoEncoder,
-    muxing: &MuxingThread,
+    sinks: &PacketSinks<'_>,
     counters: &mut Counters,
 ) -> Result<(), SessionError> {
     let before = counters.encoded;
     encoder.finish()?;
-    let result = drain(encoder, muxing).map(|_| ());
+    let result = drain(encoder, sinks).map(|_| ());
     // At `info` rather than `debug`: it happens once per recording, and it is
     // the line that says the pictures the encoder was holding back reached the
     // file — which is the difference between a recording that ends where the

@@ -312,13 +312,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-replay"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clipped-encoder",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "clipped-session"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "clipped-capture",
  "clipped-encoder",
  "clipped-logging",
  "clipped-muxer",
+ "clipped-replay",
  "tracing",
  "windows",
 ]

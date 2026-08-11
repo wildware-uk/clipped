@@ -1,44 +1,438 @@
 # Replay buffer
 
-**Status: stub. The replay buffer does not exist yet.** It is built in the M3
-milestone (SPEC.md section 42). No buffering code exists in the workspace, so
-this page states what the document will contain rather than describing
-behaviour that has not been written (AGENTS.md section 7).
+Clipped keeps the last few minutes of a game in memory so that a hotkey pressed
+*after* something interesting still produces a clip of it. This document covers
+the part of that which exists today: the rolling buffer of encoded segments in
+`crates/replay` ([issue #35](https://github.com/wildware-uk/clipped/issues/35)),
+what it costs, and what it does when it cannot have what it asked for.
 
-Until this document is written, the intended design is SPEC.md section 16: keep
-a rolling window of continuously encoded media segments rather than raw frames,
-retain the segments a saved clip needs, and continue capturing without
-interruption. `crates/session/src/lib.rs` and `crates/muxer/src/lib.rs` state
-which crate owns which part.
+**What does not exist yet is the save.** Turning a leased range into a playable
+file is [issue #37](https://github.com/wildware-uk/clipped/issues/37); the
+`recorder replay` command that would drive it is
+[issue #38](https://github.com/wildware-uk/clipped/issues/38) and the hotkey is
+[issue #39](https://github.com/wildware-uk/clipped/issues/39). Spilling segments
+to disk for long durations is
+[issue #36](https://github.com/wildware-uk/clipped/issues/36), and the
+"per-configuration ceiling" section below is the argument for why it has to
+exist. Nothing in the shipped recorder turns a replay buffer on: `clipped-session`
+exposes `record_with_replay` and `crates/session/examples/replay_probe.rs` drives
+it, but the command line has no option that calls it.
 
-## What this document will cover
+## Encoded segments, never raw frames
 
-Written during M3, alongside the code:
+The rule SPEC.md section 16 states, in the numbers that make it a rule rather
+than a preference. One 1080p60 BGRA frame is 1920 × 1080 × 4 = 7.9 MiB:
 
-- The segment model: how long a segment is, what a segment contains, and why
-  encoded segments rather than raw frames
-  ([issue #35](https://github.com/wildware-uk/clipped/issues/35)).
-- Retention: how the configured window maps to segments held, and when a
-  segment is discarded.
-- Where the buffer lives — memory, disk, or both — and how long durations are
-  supported without the footprint scaling with resolution
-  ([issue #36](https://github.com/wildware-uk/clipped/issues/36)).
-- Saving a clip: identifying the segments that cover the requested range,
-  retaining them against the cleanup that is running concurrently, assembling
-  the output, and doing all of it without a gap in capture
-  ([issue #37](https://github.com/wildware-uk/clipped/issues/37)).
-- Keyframe alignment, and what the boundaries of a saved clip are when the
-  requested range does not land on one.
-- How every audio track survives into a saved replay
-  ([issue #40](https://github.com/wildware-uk/clipped/issues/40)).
-- Interaction with a full-session recording running at the same time, and with
-  automatic highlight clipping in M10.
-- Failure behaviour: what a save does when the disk is full, when the buffer is
-  shorter than the requested duration, and when the hotkey is pressed twice in
-  quick succession.
-- How to exercise it: the `recorder replay` command
-  ([issue #38](https://github.com/wildware-uk/clipped/issues/38)) and the global
-  hotkey service ([issue #39](https://github.com/wildware-uk/clipped/issues/39)).
+| Buffer | Raw BGRA frames | Encoded at 18.7 Mbit/s |
+| --- | --- | --- |
+| 30 seconds | 13.9 GiB | 67 MiB |
+| 5 minutes | 139 GiB | 667 MiB |
+| 30 minutes | 834 GiB | 3.9 GiB |
+
+Memory here is in binary units throughout — MiB is 1024², GiB is 1024³ — which
+is the quantity Windows Task Manager shows and labels MB and GB. Bitrates are in
+decimal Mbit/s, as bitrates always are.
+
+Any design that buffers frames before the encoder has already failed, whatever
+its other merits. So `clipped-replay` sits after the encoder: `clipped-session`
+drains each encoded packet into the Matroska writer and into the buffer, and
+**there is one encode**. A recording and a replay buffer running at the same
+time cost one extra `memcpy` per packet, not a second encoder session.
+
+The consequence worth internalising is that a replay buffer's footprint depends
+on the **bitrate and the duration** and not on the resolution or the frame rate.
+Recording 4K instead of 1080p makes the buffer bigger only in so far as it makes
+the bitrate bigger.
+
+## The segment model
+
+A segment is a run of packets that **begins on a keyframe**. That is the whole
+of the design, and everything else follows from it:
+
+- A coded picture references the pictures before it, so a stream can only be cut
+  immediately before a keyframe. A segment that begins on one can be decoded on
+  its own; one that does not can only be decoded from the previous keyframe.
+- Therefore the buffer's unit of eviction is the segment. Dropping the oldest
+  *packet* would leave every later packet in its group of pictures undecodable
+  while still occupying memory.
+- Therefore a save is bought at segment granularity: the clip begins at the
+  keyframe at or before the requested start, and ends at the end of the segment
+  containing the requested end.
+
+Segments are stored as one `Vec<u8>` per segment with an index of packet
+offsets, rather than a `Vec<u8>` per packet. At 60 frames a second a thirty
+minute window is 108,000 packets, and 108,000 allocations for one buffer is a
+cost paid on the thread that is also capturing (AGENTS.md section 18).
+
+### Granularity, and what it costs
+
+The segment length is a target; the encoder's keyframe interval is what the
+buffer can actually act on, so the granularity is the larger of the two.
+`clipped_encoder::KeyframeInterval::DEFAULT` is a keyframe every two seconds and
+`clipped_replay::DEFAULT_SEGMENT` matches it.
+
+At that default:
+
+- A saved clip carries **up to two seconds of extra video before the requested
+  start** and **up to two seconds after the requested end**.
+  `SegmentLease::leading_slack` and `trailing_slack` report exactly how much,
+  and trimming it to the requested range is issue #37.
+- The requested range is always covered in full when the buffer held it.
+  `SegmentLease::is_complete` says whether it did, and `shortfall` says by how
+  much it did not.
+
+Shortening the segment length buys precision and costs compression: a keyframe
+is several times the size of a predicted picture, so a buffer of half-second
+segments holds noticeably fewer seconds for the same memory. Lengthening it does
+the reverse. Two seconds is the balance the encoder already strikes for
+recordings, and there is no reason for the buffer to disagree with the file.
+
+## Retention
+
+Segments are held oldest-first. The oldest is dropped only when the ones behind
+it still reach back over the configured window from the newest picture in the
+buffer, so a buffer that has been running longer than its window holds:
+
+```text
+window  ≤  what is held  <  window + segment length
+```
+
+Erring on the side of extra is deliberate. A buffer holding slightly less than
+its window would fail the request it was configured for, and the slack costs two
+seconds of video. The extra is however much of the oldest segment is not yet
+needed, and it cannot be trimmed because a segment that does not begin on a
+keyframe cannot be decoded.
+
+The rule is applied on **every packet** rather than at every segment boundary,
+because the newest picture is in the segment currently being written. A buffer
+that only evicted at a boundary would hold a whole segment more than it was
+asked for and would grow past its ceiling until the next keyframe.
+
+Supported windows are 30 seconds to 30 minutes (`MINIMUM_WINDOW`,
+`MAXIMUM_WINDOW`). A window outside that is refused when the buffer is
+configured, not discovered when a clip comes out short.
+
+## Saving while the buffer is evicting
+
+The hard part is not selecting the segments. It is that a save reads them while
+the encoder is still producing new ones and the buffer is still throwing old
+ones away, on three different threads. A thirty-second buffer of two-second
+segments turns over completely in thirty seconds, and writing a five-minute clip
+to a slow disk takes longer than that — so **by the time a save finishes
+reading, the buffer will often have evicted every segment it started with**.
+
+This is solved by a reference count rather than by a rule:
+
+```text
+ReplayBuffer::lease(range)  ──▶  SegmentLease
+        │                             │
+   Arc<Segment>                  Arc<Segment>      (the same segments)
+        │                             │
+   eviction drops this          the save keeps this until it is done
+```
+
+Each sealed segment lives behind an `Arc`. The buffer holds one reference, a
+lease holds another, and eviction drops only the buffer's. A segment the buffer
+has evicted is alive, unchanged and complete for as long as a lease holds it,
+and there is no window in which it could be otherwise, because a lease's
+references are cloned under the same lock eviction takes. The buffer keeps
+evicted-but-leased segments in a list of their own so the memory a save is
+holding open is reported rather than invisible, and they are released when their
+last reader drops.
+
+`crates/replay/tests/save_during_eviction.rs` is what holds that to be true: a
+writer thread turns the whole window over many times while a reader thread walks
+every byte of a lease and checks each packet against the frame number written
+into its first eight bytes. The test fails if a lease loses a segment, gains
+one, or reads bytes that were pushed for a different frame — and it asserts that
+eviction really did overtake the reader, so that it cannot pass by racing
+nothing.
+
+### The newest two seconds
+
+The material somebody just pressed a hotkey about is in the segment still being
+written, which cannot be shared while it is being appended to. A lease therefore
+takes a **copy** of the open segment — one `memcpy` of at most one segment,
+about 4.5 MiB at 1080p60, once per save. Without it every clip would end up to
+two seconds before the moment it was saved for, which is the part that mattered.
+
+### What a lease costs the capture thread
+
+`ReplayBuffer` takes its own lock, and the capture thread holds it for the
+`memcpy` of one packet. That is a deliberate, bounded exception to AGENTS.md
+section 18's "no locks on capture threads", and it is the same cost the capture
+thread already pays: `clipped-session`'s bounded queue to the muxing thread
+takes a lock inside `SyncSender::send` for every packet. The lock is never held
+across a filesystem call, an unbounded allocation, or a wait on another thread.
+
+The one moment a reader holds it longer is the open-segment copy above. Measured
+on the hardware below, taking a lease over a full 5-minute window took **0.77
+ms** — under a twentieth of a frame interval at 60 fps, once per save.
+
+## Per-configuration ceiling
+
+The memory a buffer occupies is arithmetic, not a guess:
+
+```text
+expected bytes = bitrate / 8 × (window + segment length)
+ceiling        = expected bytes × 1.5
+```
+
+The 50 % headroom is for a rate control that overshoots — the measurements below
+show why it is not generous. `ReplayConfig::memory_ceiling` is that number and
+`with_memory_ceiling` overrides it; a ceiling below what the window needs is
+refused rather than accepted, because a buffer that silently keeps ten seconds
+when it was asked for five minutes is worse than one that says the numbers do
+not fit.
+
+At the 18.7 Mbit/s a 1080p60 recording is given:
+
+| Window | Expected | Ceiling |
+| --- | --- | --- |
+| 30 seconds | 71 MiB | 107 MiB |
+| 1 minute | 138 MiB | 207 MiB |
+| 5 minutes | 672 MiB | 1008 MiB |
+| 10 minutes | 1.31 GiB | 1.96 GiB |
+| 30 minutes | 3.91 GiB | 5.87 GiB |
+
+**A save in progress sits outside that ceiling.** While a clip is being written
+the process holds the ceiling *plus the clip*, bounded by the clip's own length,
+so a save of the whole window at most doubles the figure. It is outside rather
+than inside deliberately: counting a lease against the ceiling would make a save
+evict the buffer's history to pay for itself, collapsing it to a single segment
+for as long as the clip took to write and leaving the next hotkey press with
+nothing.
+
+### When the machine cannot provide it
+
+The ceiling is enforced, not merely documented. If what the buffer owns exceeds
+it — which happens when the encoder is producing more than the bitrate the
+buffer was sized from — segments are evicted beyond the window until it is under
+again. The consequences are visible rather than silent:
+
+- The window shortens. `ReplayStats::segments_evicted_over_ceiling` counts every
+  segment lost that way, separately from the ones the window discarded normally,
+  and `ReplayStats::covered` says how much history is actually there.
+- It is reported once at `warn`, naming the ceiling and what is held.
+- One sealed segment is always kept, so a save is never impossible.
+- The recording is never affected. A replay buffer cannot fail a recording: it
+  copies bytes into memory it already owns, and reaching its ceiling costs it
+  its oldest segments rather than costing the file anything (AGENTS.md section
+  17).
+
+Nothing here reserves memory up front, so there is no allocation to fail at
+start-up; and nothing grows without bound, so there is no allocation to fail
+during a match. What a 30-minute window at 3.9 GiB does to a machine with 8 GB of
+RAM is nevertheless a real problem, and the answer to it is issue #36:
+disk-backed buffering, which trades the memory for a bounded amount of disk and
+keeps the long durations SPEC.md section 16 asks for.
+
+## Measured memory use
+
+Real figures, from `crates/replay/examples/buffer_memory.rs`, which opens an
+NVENC session and encodes into a live buffer. It is an example rather than a
+test because it needs an NVIDIA GPU, takes minutes at the longer durations and
+allocates gigabytes at the longest.
+
+```text
+cargo run --release --example buffer_memory -- --window 30
+```
+
+**Method.** 1920×1080 at 60 fps, H.264, NVIDIA NVENC, constant bitrate
+18,662,400 bit/s — the rate `clipped-session` gives a 1080p60 recording — with a
+keyframe every 2 seconds and 2-second segments. The encoder is fed frames of
+pseudo-random noise, because a constant-bitrate encoder given easy content
+spends less than it was configured to and a buffer that was never filled at the
+stated bitrate measures nothing. Each run encodes 20 % more video than the
+window holds, so the buffer is measured while it is evicting rather than while
+it is still filling. Timestamps come from the frame number rather than a clock,
+so a 30-minute buffer is filled with 30 minutes of *video* as fast as the
+encoder will produce it rather than in 30 minutes of waiting; what the buffer
+holds is identical either way, because retention is measured in media time.
+Process memory is `GetProcessMemoryInfo`, sampled once per second of video,
+reported as the growth from a baseline taken after the encoder session and the
+source textures were allocated — so the figures are the buffer and not the
+harness.
+
+**Hardware.** Windows 11 Pro build 26200, NVIDIA GeForce RTX 4090 (driver's
+NVENC, H.264), AMD Ryzen with 61 GB of RAM.
+
+**Results.**
+
+| Window | Held | Peak | Ceiling | Working set growth | Private growth | Wall clock |
+| --- | --- | --- | --- | --- | --- | --- |
+| 30 s | 91.6 MiB | 92.7 MiB | 106.8 MiB | 103.9 MiB | 132.2 MiB | 5.7 s |
+| 5 min | 838.2 MiB | 839.3 MiB | 1008 MiB | 850.9 MiB | 881.1 MiB | 57.2 s |
+| 30 min | 4.87 GiB | 4.87 GiB | 5.87 GiB | 4.88 GiB | 4.92 GiB | 339.3 s |
+
+"Held" is the buffer's own accounting, "working set growth" is what the process
+actually grew by, and the two agreeing to within about 3 % is the point of
+measuring both. Private bytes run higher — 40 MiB above the working set at 30
+seconds and 55 MiB at 30 minutes — which is the allocator holding pages the
+buffer has handed back.
+
+Each run held its window and one segment exactly as the retention rule says:
+32.0 s, 302.0 s and 1802.0 s covered, for windows of 30 s, 300 s and 1800 s with
+2 s segments. No run hit its ceiling.
+
+**These figures are about 27 % above the arithmetic**, and the reason is worth
+stating rather than smoothing over. The buffer was sized for 18.66 Mbit/s and
+NVENC produced 24.03, 23.28 and 23.21 Mbit/s in the three runs: a
+constant-bitrate encoder fed pure noise overshoots, because there is nothing to
+predict and every macroblock costs. Real game footage compresses, so a buffer of
+the same window recording a game will sit closer to the 71 MiB / 672 MiB /
+3.91 GiB the table above predicts. What the runs demonstrate is the harder case:
+**the 50 % ceiling headroom absorbed a 25 % bitrate overshoot at every duration,
+with no segment evicted over the ceiling.**
+
+The 30-minute run encoded 129,600 frames — 36 minutes of video, the window plus
+20 % — in 339 seconds of wall clock, because the timestamps come from the frame
+number. It was not filled in real time and does not claim to have been.
+
+A save of the whole window took **0.68 ms** at 30 minutes and 0.77 ms at 5
+minutes: cloning 901 `Arc`s and copying one open segment. It is flat in the
+window's length, which is what makes it safe to do from a hotkey while the
+capture thread is running.
+
+One transcript, verbatim, so the shape of the output is on the record. This is
+the 30-second run; the other two differ only in their numbers:
+
+```text
+> cargo run --release --example buffer_memory -- --window 30
+configuration
+  encoder          NVIDIA NVENC, H.264
+  picture          1920x1080 at 60 fps
+  bitrate          18.7 Mbit/s (constant)
+  buffer           30s of 18.7 Mbit/s in 2s segments, at most 107 MiB
+  keyframes        every 2 s
+  ... 30% after 2 s
+  ... 50% after 3 s
+  ... 80% after 5 s
+
+what was encoded
+  frames submitted 2160
+  media time       36.0 s
+  wall clock       5.6 s
+  achieved bitrate 24.03 Mbit/s
+
+what the buffer holds
+  segments         16
+  packets          1920
+  covered          32.0 s
+  bytes held       91.6 MiB
+  peak bytes held  92.7 MiB
+  ceiling          106.8 MiB
+  evicted (window) 2
+  evicted (ceiling) 0
+
+what the process holds
+  working set before 78.4 MiB
+  working set after  182.1 MiB
+  working set growth 103.6 MiB
+  private before     207.7 MiB
+  private after      339.4 MiB
+  private growth     131.7 MiB
+
+a save of the whole window
+  segments leased  16
+  bytes leased     88.1 MiB
+  complete         true
+  time to lease    0.640 ms
+  working set      187.6 MiB
+```
+
+The 5-minute and 30-minute runs were made with the same binary before the byte
+labels were corrected from `MB` to `MiB`; the quantities are unchanged, since
+both were 1024².
+
+**And this is the argument for issue #36.** A 30-minute window costs the better
+part of 5 GiB of resident memory on a machine that is also running a game. That
+is affordable on 32 GB and it is not affordable on 8 or 16, which is why
+disk-backed buffering exists as a ticket rather than as an optimisation.
+
+## Attached to a live recording
+
+`clipped_session::record_with_replay` is `record` with a buffer to fill. The
+caller owns the buffer, because the caller is what saves from it: a save runs on
+another thread while the recording carries on.
+
+`crates/session/examples/replay_probe.rs` is how that is exercised without a
+command to drive it. It records a window for a stated number of seconds with a
+buffer attached and prints what the buffer ended up holding. Against
+`test-apps/video-pattern` at 1920×1080 and 60 fps for 50 seconds, on an RTX 4090
+encoding AV1 through NVENC:
+
+```text
+Recorded 2929 frames of 1920x1080 AV1 in 49.78s (NVIDIA NVENC, Windows Graphics
+Capture, 58.8 fps sustained; 0 frames dropped). Stopped by request.
+
+replay buffer after 50.0 s
+  segments held      16
+  packets held       1849
+  bytes held         5048786
+  peak bytes held    5052665
+  ceiling            111974400
+  covered            31.7 s
+  evicted (window)   9
+  evicted (ceiling)  0
+  discarded pre-key  0
+
+a save of the last 15 s
+  segments leased    8
+  beginning on a key 8
+  packets            889
+  bytes              137722
+  requested          34.779s to 49.779s
+  covered            34.412s to 49.779s
+  complete           true
+  leading slack      0.367 s
+  trailing slack     0.000 s
+```
+
+The buffer held 31.7 s of a 30 s window in 16 segments and evicted 9, which is
+the retention rule doing exactly what the arithmetic says. The bytes are small —
+5 MB for 31.7 s, against a 107 MiB ceiling — because a test pattern is nearly
+free to encode and AV1's rate control spends what the content needs rather than
+what it was offered. That is the design working, not a measurement to quote for
+a game: the buffer's footprint follows the bitrate the encoder actually
+produces, which for a real game is the configured one.
+
+## Threading
+
+```text
+ capture + encode thread                    save thread (issue #37)
+ ───────────────────────                    ───────────────────────
+ acquire a frame
+ submit it to the encoder
+ drain packets ─┬─▶ bounded queue ─▶ MkvWriter
+                │
+                └─▶ ReplayBuffer::push        ReplayBuffer::lease(range)
+                        (memcpy)                       │
+                                                 SegmentLease
+                                                       │
+                                             read packets, write the clip
+```
+
+One writer, any number of readers. The buffer takes the lock itself so that
+neither side has to remember to, and a reader that panics while holding it does
+not end the recording — the lock is taken through `PoisonError::into_inner`,
+because the state behind it is a queue of immutable segments and a byte count,
+and a wrong number in a report is a smaller failure than a recording that stops
+(AGENTS.md section 17).
+
+## What is not decided here
+
+- **Audio.** A replay save has to carry every audio track
+  ([issue #40](https://github.com/wildware-uk/clipped/issues/40)), and
+  `clipped-session` has no audio path yet
+  ([issue #180](https://github.com/wildware-uk/clipped/issues/180)). The segment
+  model does not assume one stream, but nothing has been built for more.
+- **Trimming to the requested range.** A lease reports its slack; issue #37
+  decides whether a clip is trimmed to the frame or left on segment boundaries.
+- **Two saves in quick succession.** Concurrent leases work and are tested here;
+  what two overlapping *files* should be called is issue #37's.
+- **Interaction with a full-session recording**, and with automatic highlight
+  clipping in M10. Both consume the same packets and neither has been written.
 
 Related decisions: [ADR 0001](adr/0001-mkv-archival-container.md), because
 segments are standard containers rather than an application-specific format.

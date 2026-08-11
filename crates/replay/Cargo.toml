@@ -1,0 +1,43 @@
+[package]
+name = "clipped-replay"
+description = "Rolling buffer of encoded media segments for replay saves"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The packets this crate buffers. It takes `clipped_encoder::EncodedPacket`
+# directly rather than defining a parallel packet type, because the buffer is a
+# second consumer of the encoder's output and a third description of "coded
+# bytes, two timestamps and a picture kind" would be one that can drift
+# (README, "Dependency direction": layer 2 may name layer 1).
+clipped-encoder.workspace = true
+tracing.workspace = true
+
+# The memory harness that produced the figures in docs/replay-buffer.md. It
+# encodes real 1080p60 video with NVENC and fills the buffer with the packets
+# that come out, so it needs a Direct3D 11 device and the textures to feed the
+# encoder, and it reads the process working set to say what the buffer cost.
+# The `windows` features are exactly what `examples/buffer_memory.rs` names.
+# Dual MIT/Apache-2.0.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# The harness takes command-line arguments, and every executable in this
+# workspace presents the same argument syntax and the same usage errors (the
+# root manifest says why).
+clap.workspace = true
+
+[lints]
+workspace = true

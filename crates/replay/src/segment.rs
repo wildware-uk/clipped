@@ -1,0 +1,444 @@
+//! A segment: the unit the buffer keeps, evicts and hands to a save.
+//!
+//! # Why segments rather than packets
+//!
+//! A replay buffer that evicted individual packets would be simpler and wrong.
+//! Coded pictures reference the pictures before them, so a stream can only be
+//! cut immediately before a keyframe; dropping the oldest packet of a group of
+//! pictures leaves every later packet in that group undecodable while still
+//! occupying memory. Grouping packets into segments that *begin* on a keyframe
+//! makes the buffer's unit the same as the stream's unit of independence: every
+//! segment held is a segment that can be decoded on its own, and evicting one
+//! costs nothing that is still usable.
+//!
+//! # Storage
+//!
+//! One [`Vec<u8>`] per segment holds every packet's bytes end to end, and
+//! [`BufferedPacket`] indexes into it. The alternative — a `Vec<u8>` per packet
+//! — is one allocation per frame, which at 60 frames a second for thirty
+//! minutes is 108,000 of them for one buffer's window (AGENTS.md section 18).
+//! The bytes are copied in, once, because
+//! [`clipped_encoder::EncodedPacket`] borrows the encoder's own output buffer
+//! and is released by the next call to `next_packet`.
+//!
+//! # Ownership
+//!
+//! A sealed segment is immutable and is held behind an [`Arc`](std::sync::Arc).
+//! That is what makes eviction safe while a save is reading: the buffer drops
+//! its reference, the save keeps its own, and the bytes go when the last
+//! reference does. `crate::buffer` describes the whole lifetime.
+
+use core::fmt;
+use core::time::Duration;
+
+use clipped_encoder::EncodedPacket;
+
+use crate::range::TimeRange;
+
+/// Which segment this is, counted from the first one the buffer opened.
+///
+/// Monotonic for the life of a buffer and never reused, so a save that logs the
+/// segments it read names something that cannot come back as a different
+/// segment later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SegmentId(u64);
+
+impl SegmentId {
+    /// The number behind the identifier, for logs and reports.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for SegmentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "segment-{:04}", self.0)
+    }
+}
+
+/// Where one packet sits in its segment, and what it is.
+#[derive(Debug, Clone, Copy)]
+struct BufferedPacket {
+    offset: usize,
+    length: usize,
+    presentation: Duration,
+    decode: Duration,
+    keyframe: bool,
+}
+
+/// One packet, read back out of a segment.
+///
+/// The same shape as [`clipped_encoder::EncodedPacket`], and deliberately not
+/// that type: an encoder packet borrows the encoder's output buffer for one
+/// call, and this borrows a segment that will outlive the encoder session
+/// entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentPacket<'segment> {
+    data: &'segment [u8],
+    presentation: Duration,
+    decode: Duration,
+    keyframe: bool,
+}
+
+impl<'segment> SegmentPacket<'segment> {
+    /// The coded bytes.
+    #[must_use]
+    pub const fn data(&self) -> &'segment [u8] {
+        self.data
+    }
+
+    /// When this picture should be shown, in media time.
+    #[must_use]
+    pub const fn presentation_time(&self) -> Duration {
+        self.presentation
+    }
+
+    /// When this picture must be decoded, in media time.
+    #[must_use]
+    pub const fn decode_time(&self) -> Duration {
+        self.decode
+    }
+
+    /// Whether a stream can be cut immediately before this packet.
+    #[must_use]
+    pub const fn is_keyframe(&self) -> bool {
+        self.keyframe
+    }
+}
+
+/// A sealed run of packets beginning on a keyframe.
+///
+/// Immutable once built. Everything that reads one — a save, a report, a test —
+/// sees the same bytes for as long as it holds a reference, whatever the buffer
+/// does next.
+#[derive(Debug)]
+pub struct Segment {
+    id: SegmentId,
+    bytes: Vec<u8>,
+    packets: Vec<BufferedPacket>,
+    start: Duration,
+    last_presentation: Duration,
+}
+
+impl Segment {
+    /// Which segment this is.
+    #[must_use]
+    pub const fn id(&self) -> SegmentId {
+        self.id
+    }
+
+    /// The presentation time of the keyframe this segment begins with.
+    #[must_use]
+    pub const fn start(&self) -> Duration {
+        self.start
+    }
+
+    /// The presentation time of the last picture in this segment.
+    #[must_use]
+    pub const fn last_presentation(&self) -> Duration {
+        self.last_presentation
+    }
+
+    /// The media time this segment covers.
+    #[must_use]
+    pub fn span(&self) -> TimeRange {
+        TimeRange::new(self.start, self.last_presentation)
+    }
+
+    /// How many packets are in it.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Whether it holds no packets.
+    ///
+    /// Never true of a segment reachable through the buffer: a segment is
+    /// opened by its keyframe, so it has a packet before it exists.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    /// How many bytes of coded video it holds.
+    ///
+    /// The payload, not the allocation. [`resident_bytes`](Self::resident_bytes)
+    /// is what it costs.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// How much memory it occupies: the payload, its allocation's spare
+    /// capacity, and the packet index.
+    ///
+    /// This is the number the buffer's ceiling is enforced against, because a
+    /// ceiling checked against payload alone is a ceiling that is quietly
+    /// exceeded (AGENTS.md section 19).
+    #[must_use]
+    pub fn resident_bytes(&self) -> usize {
+        self.bytes.capacity()
+            + self.packets.capacity() * size_of::<BufferedPacket>()
+            + size_of::<Self>()
+    }
+
+    /// Every packet, in the order the encoder produced them, which is decode
+    /// order.
+    pub fn packets(&self) -> impl ExactSizeIterator<Item = SegmentPacket<'_>> + '_ {
+        self.packets.iter().map(|packet| SegmentPacket {
+            data: &self.bytes[packet.offset..packet.offset + packet.length],
+            presentation: packet.presentation,
+            decode: packet.decode,
+            keyframe: packet.keyframe,
+        })
+    }
+}
+
+/// The segment currently being written.
+///
+/// Separate from [`Segment`] rather than a mutable one because the distinction
+/// is load-bearing: only a sealed segment may be shared, and the type system is
+/// what says so. An open segment is owned by the buffer alone, so appending to
+/// it cannot race with a save reading it.
+#[derive(Debug)]
+pub(crate) struct OpenSegment {
+    id: SegmentId,
+    bytes: Vec<u8>,
+    packets: Vec<BufferedPacket>,
+    start: Duration,
+    last_presentation: Duration,
+}
+
+impl OpenSegment {
+    /// Opens a segment beginning with `keyframe`.
+    ///
+    /// `reserve` is what one segment is expected to hold at the configured
+    /// bitrate. Reserving it up front turns the sixty or so pushes that fill a
+    /// segment into one allocation rather than a run of doubling reallocations
+    /// on the thread that is also capturing (AGENTS.md section 18).
+    pub(crate) fn open(id: SegmentId, keyframe: &EncodedPacket<'_>, reserve: usize) -> Self {
+        let mut segment = Self {
+            id,
+            bytes: Vec::with_capacity(reserve.max(keyframe.data().len())),
+            packets: Vec::with_capacity(64),
+            start: keyframe.presentation_time(),
+            last_presentation: keyframe.presentation_time(),
+        };
+        segment.append(keyframe);
+        segment
+    }
+
+    /// Adds one packet to the end.
+    pub(crate) fn append(&mut self, packet: &EncodedPacket<'_>) {
+        let offset = self.bytes.len();
+        self.bytes.extend_from_slice(packet.data());
+        self.packets.push(BufferedPacket {
+            offset,
+            length: packet.data().len(),
+            presentation: packet.presentation_time(),
+            decode: packet.decode_time(),
+            keyframe: packet.is_keyframe(),
+        });
+        // `max` rather than assignment: an encoder that reorders pictures emits
+        // them in decode order, so a later packet can carry an earlier
+        // presentation time, and the segment's end is the latest picture in it.
+        self.last_presentation = self.last_presentation.max(packet.presentation_time());
+    }
+
+    /// The presentation time of the keyframe it began with.
+    pub(crate) const fn start(&self) -> Duration {
+        self.start
+    }
+
+    /// The presentation time of the newest picture in it.
+    pub(crate) const fn last_presentation(&self) -> Duration {
+        self.last_presentation
+    }
+
+    /// How many packets are in it.
+    pub(crate) fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// How much memory it occupies, including the spare capacity reserved for
+    /// the packets still to come.
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.bytes.capacity()
+            + self.packets.capacity() * size_of::<BufferedPacket>()
+            + size_of::<Segment>()
+    }
+
+    /// Closes it, releasing the capacity that was reserved and not used.
+    ///
+    /// The shrink is why the buffer's accounting can be exact. It copies at
+    /// most one segment's bytes — a few megabytes, once every segment length —
+    /// which at the two-second default is under three megabytes a second of
+    /// memory traffic beside an encode that is producing them.
+    pub(crate) fn seal(mut self) -> Segment {
+        self.bytes.shrink_to_fit();
+        self.packets.shrink_to_fit();
+        Segment {
+            id: self.id,
+            bytes: self.bytes,
+            packets: self.packets,
+            start: self.start,
+            last_presentation: self.last_presentation,
+        }
+    }
+
+    /// A sealed copy of what is in it now, leaving it open.
+    ///
+    /// What a save reads for the newest material. The freshest packets are in
+    /// the open segment — that is where the moment somebody just pressed a
+    /// hotkey for lives — and they cannot be shared while the buffer is still
+    /// appending to them, so a lease takes a copy. It costs one memcpy of at
+    /// most one segment, once per save, and it is what stops a save from losing
+    /// the last two seconds of the thing it was asked to save.
+    pub(crate) fn snapshot(&self) -> Segment {
+        Segment {
+            id: self.id,
+            bytes: self.bytes.clone(),
+            packets: self.packets.clone(),
+            start: self.start,
+            last_presentation: self.last_presentation,
+        }
+    }
+}
+
+/// Builds the identifiers, so that nothing else can invent one.
+#[derive(Debug, Default)]
+pub(crate) struct SegmentIds(u64);
+
+impl SegmentIds {
+    /// The next identifier, which no earlier segment has had.
+    pub(crate) fn next(&mut self) -> SegmentId {
+        let id = SegmentId(self.0);
+        self.0 += 1;
+        id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clipped_encoder::PictureKind;
+
+    use super::*;
+
+    fn packet<'a>(data: &'a [u8], at_ms: u64, keyframe: bool) -> EncodedPacket<'a> {
+        EncodedPacket::new(
+            data,
+            Duration::from_millis(at_ms),
+            Duration::from_millis(at_ms),
+            if keyframe {
+                PictureKind::Keyframe
+            } else {
+                PictureKind::Predicted
+            },
+        )
+    }
+
+    #[test]
+    fn a_segment_reads_back_exactly_what_was_pushed_into_it() {
+        // The whole point of the packed representation: one allocation, and
+        // every packet still comes back with its own bytes and its own times.
+        let mut open = OpenSegment::open(SegmentId(7), &packet(&[1, 2, 3], 0, true), 1024);
+        open.append(&packet(&[4, 5], 16, false));
+        open.append(&packet(&[6, 7, 8, 9], 33, false));
+        let segment = open.seal();
+
+        let read: Vec<(Vec<u8>, u64, bool)> = segment
+            .packets()
+            .map(|packet| {
+                (
+                    packet.data().to_vec(),
+                    packet.presentation_time().as_millis() as u64,
+                    packet.is_keyframe(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            read,
+            vec![
+                (vec![1, 2, 3], 0, true),
+                (vec![4, 5], 16, false),
+                (vec![6, 7, 8, 9], 33, false),
+            ]
+        );
+        assert_eq!(segment.id(), SegmentId(7));
+        assert_eq!(segment.byte_len(), 9);
+        assert_eq!(segment.len(), 3);
+    }
+
+    #[test]
+    fn a_segment_spans_from_its_keyframe_to_its_newest_picture() {
+        let mut open = OpenSegment::open(SegmentId(0), &packet(&[0], 1000, true), 64);
+        open.append(&packet(&[0], 2000, false));
+        let segment = open.seal();
+
+        assert_eq!(segment.start(), Duration::from_secs(1));
+        assert_eq!(segment.last_presentation(), Duration::from_secs(2));
+        assert_eq!(segment.span().length(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_reordered_picture_does_not_pull_the_end_of_a_segment_backwards() {
+        // An encoder emitting B-frames produces them in decode order, so a
+        // packet can carry an earlier presentation time than the one before it.
+        // Taking the last packet's time as the segment's end would make the
+        // segment look shorter than it is, and a buffer would then hold less
+        // history than it was asked for.
+        let mut open = OpenSegment::open(SegmentId(0), &packet(&[0], 0, true), 64);
+        open.append(&packet(&[0], 100, false));
+        open.append(&packet(&[0], 50, false));
+        let segment = open.seal();
+
+        assert_eq!(segment.last_presentation(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn sealing_releases_the_capacity_that_was_reserved_and_not_used() {
+        // Reserving a whole segment up front is what keeps allocation off the
+        // capture thread; giving it back at the seal is what keeps the buffer's
+        // accounting of what it holds honest.
+        let open = OpenSegment::open(SegmentId(0), &packet(&[0; 16], 0, true), 4 * 1024 * 1024);
+        let reserved = open.resident_bytes();
+        let segment = open.seal();
+
+        assert!(reserved > 4 * 1024 * 1024, "{reserved}");
+        assert!(
+            segment.resident_bytes() < 4096,
+            "a sealed segment of 16 bytes still occupies {}",
+            segment.resident_bytes()
+        );
+    }
+
+    #[test]
+    fn a_snapshot_of_an_open_segment_is_independent_of_what_is_appended_next() {
+        // What a save reads for the newest material. If the copy shared the
+        // buffer's allocation, appending would move it and the save would be
+        // reading a segment that changed underneath it.
+        let mut open = OpenSegment::open(SegmentId(3), &packet(&[9, 9], 0, true), 128);
+        let snapshot = open.snapshot();
+        open.append(&packet(&[1], 16, false));
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot.packets().next().expect("one packet").data(),
+            &[9, 9]
+        );
+        assert_eq!(open.last_presentation(), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn identifiers_are_never_reused() {
+        let mut ids = SegmentIds::default();
+        let first = ids.next();
+        let second = ids.next();
+
+        assert_ne!(first, second);
+        assert_eq!(first.to_string(), "segment-0000");
+        assert_eq!(second.to_string(), "segment-0001");
+    }
+}

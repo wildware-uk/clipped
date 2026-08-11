@@ -126,7 +126,7 @@ without being placed in a layer.
 | --- | --- | --- |
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
-| 2 | `clipped-muxer` | layers 0–1 |
+| 2 | `clipped-muxer`, `clipped-replay` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
 | 4 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–3 |
 | 5 | `clipped-video-pattern` (test application) | layers 0–4 |

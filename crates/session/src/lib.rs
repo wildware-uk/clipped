@@ -35,8 +35,16 @@
 //! that asked for a microphone or system audio is told so once, at `warn`,
 //! rather than being left to discover it in the file (AGENTS.md section 54).
 //!
-//! Per-game settings, game detection and the replay buffer are later
-//! milestones; none of them is here.
+//! A recording can also fill a replay buffer: [`record_with_replay`] copies
+//! every packet it writes to the file into a `clipped_replay::ReplayBuffer` as
+//! well, so that a rolling window of the last few minutes is available to save
+//! from. That is one encoder and two consumers, not two encodes
+//! (`docs/replay-buffer.md`). Turning a buffered window into a clip is
+//! [issue #37](https://github.com/wildware-uk/clipped/issues/37) and the
+//! command that would drive it is
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38).
+//!
+//! Per-game settings and game detection are later milestones; neither is here.
 //!
 //! # Threading
 //!
@@ -152,7 +160,42 @@ pub fn record(
     settings: &RecordingSettings,
     stop: &dyn StopSignal,
 ) -> Result<RecordingReport, SessionError> {
-    recording::record(settings, stop)
+    recording::record(settings, stop, None)
+}
+
+/// Records `settings.target`, filling `replay` from the same encoder.
+///
+/// Identical to [`record`] in every respect except that each encoded packet is
+/// copied into `replay` as well as written to the file. **There is one
+/// encoder**: a rolling replay buffer alongside a recording costs one memcpy
+/// per packet and the memory the buffer's own configuration bounds, not a
+/// second encode (SPEC.md section 16, `docs/replay-buffer.md`).
+///
+/// The buffer is owned by the caller rather than by the session, because the
+/// caller is what saves from it: a save runs on another thread while this one
+/// carries on recording, and
+/// [`ReplayBuffer::lease`](clipped_replay::ReplayBuffer::lease) is what holds
+/// the segments it reads against the eviction happening underneath it.
+///
+/// Nothing in this workspace saves from one yet — building the clip is
+/// [issue #37](https://github.com/wildware-uk/clipped/issues/37) and the
+/// `recorder replay` command that would drive it is
+/// [issue #38](https://github.com/wildware-uk/clipped/issues/38) — so today
+/// this fills a buffer and reports what it holds at the end.
+///
+/// # Errors
+///
+/// Exactly [`record`]'s. A replay buffer cannot fail a recording: it copies
+/// bytes into memory it already owns, and reaching its ceiling costs it its
+/// oldest segments rather than costing the recording anything (AGENTS.md
+/// section 17).
+#[cfg(windows)]
+pub fn record_with_replay(
+    settings: &RecordingSettings,
+    stop: &dyn StopSignal,
+    replay: &clipped_replay::ReplayBuffer,
+) -> Result<RecordingReport, SessionError> {
+    recording::record(settings, stop, Some(replay))
 }
 
 /// Recording is a Windows feature; this build has no capture backend.
@@ -171,5 +214,20 @@ pub fn record(
     stop: &dyn StopSignal,
 ) -> Result<RecordingReport, SessionError> {
     let _ = (settings, stop);
+    Err(SessionError::UnsupportedPlatform)
+}
+
+/// Recording is a Windows feature; this build has no capture backend.
+///
+/// # Errors
+///
+/// Always [`SessionError::UnsupportedPlatform`].
+#[cfg(not(windows))]
+pub fn record_with_replay(
+    settings: &RecordingSettings,
+    stop: &dyn StopSignal,
+    replay: &clipped_replay::ReplayBuffer,
+) -> Result<RecordingReport, SessionError> {
+    let _ = (settings, stop, replay);
     Err(SessionError::UnsupportedPlatform)
 }
