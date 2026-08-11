@@ -65,10 +65,14 @@
 /*
  * WCAG 2.1 does not require a disabled control to meet 1.4.3 or 1.4.11 - both
  * exempt an inactive component - so the system's 45% is kept as it is. It is
- * the only place in the interface where text is dimmed by opacity.
+ * the only place in the interface where text is dimmed by opacity, and every
+ * control that can be disabled is dimmed the same way: the button here, and the
+ * field, the radio and the segmented option below. `stylesheet.test.ts` lists
+ * the four, so a fifth control that ships without one fails the suite rather
+ * than being drawn identically whether it is live or not.
  */
 .clipped-btn:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: not-allowed;
 }
 
@@ -154,9 +158,20 @@
 
 /* — fields — */
 
+/*
+ * The label-and-control pair, which the reference page's `.field` wrapper
+ * carries. It is a block here rather than being left to each screen: the gap
+ * between a label and the thing it names is a property of the component, and
+ * seven screens each choosing their own would be seven different forms.
+ */
+.clipped-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
 .clipped-field__label {
   display: block;
-  margin-bottom: var(--space-1);
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
@@ -174,12 +189,22 @@
   font-size: var(--text-md);
 }
 
-.clipped-input:hover {
+.clipped-input:hover:not(:disabled) {
   border-color: var(--color-control-edge-hover);
 }
 
-/* The focus ring is the border itself, so it needs no offset: an outline
-   outside a field in a dense form would collide with the field above it. */
+.clipped-input:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
+}
+
+/*
+ * The global `:focus-visible` ring still applies here; all this rule does is
+ * pull it flush against the border box, because at the global offset an outline
+ * around a field in a dense form would collide with the field above it. The
+ * accent border is a second, redundant mark on the same event - not the ring
+ * itself.
+ */
 .clipped-input:focus-visible {
   border-color: var(--color-accent);
   outline-offset: 0;
@@ -222,8 +247,13 @@ textarea.clipped-input {
   border-radius: 50%;
 }
 
-.clipped-radio:hover .clipped-radio__dot {
+.clipped-radio:hover:not(:has(input:disabled)) .clipped-radio__dot {
   border-color: var(--color-accent);
+}
+
+.clipped-radio:has(input:disabled) {
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
 }
 
 .clipped-radio input:checked + .clipped-radio__dot {
@@ -265,8 +295,13 @@ textarea.clipped-input {
   color: var(--color-bg);
 }
 
-.clipped-segment__option:not(:has(input:checked)):hover {
+.clipped-segment__option:not(:has(input:checked, input:disabled)):hover {
   background: var(--tint-hover);
+}
+
+.clipped-segment__option:has(input:disabled) {
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
 }
 
 /*

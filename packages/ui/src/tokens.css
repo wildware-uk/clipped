@@ -141,6 +141,13 @@
   --tracking-caps: 0.1em;
   --tracking-brand: 0.16em;
 
+  /*
+   * A disabled control, at the system's 45%. WCAG 2.1 exempts an inactive
+   * component from both 1.4.3 and 1.4.11, which is why this is the one place in
+   * the interface text is dimmed by an opacity rather than given a role.
+   */
+  --disabled-opacity: 0.45;
+
   /* — space — */
   --space-1: 4px;
   --space-2: 8px;
