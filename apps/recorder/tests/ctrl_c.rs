@@ -21,6 +21,18 @@
 //! reaches it and not `cargo test`. The cost is that Ctrl+C starts out disabled
 //! in the child, which is why the fixture — and the recorder itself — calls
 //! `clipped_recorder::shutdown::allow_ctrl_c`.
+//!
+//! # Running it on its own
+//!
+//! ```text
+//! cargo build -p clipped-recorder --examples
+//! cargo test  -p clipped-recorder --test ctrl_c
+//! ```
+//!
+//! The build line first, because selecting one test target does not build
+//! examples and `examples/shutdown_fixture.rs` is what this drives.
+//! `support::example_binary` refuses one older than the code it was built from,
+//! rather than letting a run report on a binary nobody meant to test.
 
 #![cfg(windows)]
 

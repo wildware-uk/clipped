@@ -236,7 +236,26 @@ rather than any one crate:
 
 Most of these need a GPU and a display, so they skip themselves without one and
 `CLIPPED_REQUIRE_CAPTURE` turns that skip into a failure. The command-line and
-Ctrl+C tests do not, and run anywhere.
+Ctrl+C tests do not, and run anywhere; so does all of `supervision.rs` except
+the two `#[ignore]`d tests that record a real window.
+
+### Running one of them on its own
+
+`supervision.rs` and `ctrl_c.rs` drive a fixture from `apps/recorder/examples/`,
+and **selecting a single test target does not build examples**:
+
+```text
+cargo build -p clipped-recorder --examples
+cargo test  -p clipped-recorder --test supervision
+```
+
+Without the first line, `cargo test --test supervision` after an edit to
+`crates/ipc` builds a fresh test binary and runs it against a fixture compiled
+from the code as it was before the edit — and passes. For a suite whose subject
+is process supervision that is the worst failure mode it could have, so
+`support::example_binary` refuses an example older than anything it was built
+from and names the command above. `cargo test --workspace`, which is what CI
+runs, builds examples itself and is unaffected.
 
 ### How a test drives an application
 
