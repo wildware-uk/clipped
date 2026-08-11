@@ -17,3 +17,5 @@
 //! # Position in the architecture
 //!
 //! Sits above `clipped-windows` and below `clipped-session`.
+
+pub mod catalogue;

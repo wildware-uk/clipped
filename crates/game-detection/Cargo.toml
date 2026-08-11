@@ -8,5 +8,41 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The game catalogue is data, not code: a contributor adds a game by editing
+# `data/games.toml` and opening a pull request, and a user adds one by editing
+# a file in their own data directory (docs/game-detection.md). Both files are
+# TOML, so this crate needs a TOML parser.
+#
+# Why TOML rather than the JSON `serde_json` already pinned in the workspace,
+# given that adding a dependency should need a reason (AGENTS.md section 10):
+#
+#   - The seed file is meant to be *read* in a pull request diff. TOML's
+#     `[[game]]` blocks put one entry per stanza with no closing punctuation, so
+#     adding an entry is an addition of contiguous lines rather than a change to
+#     the line above it. JSON's trailing comma makes every insertion a two-line
+#     diff and every entry's last line a merge conflict for the next contributor.
+#   - It has comments. Half of what a catalogue entry needs to say is *why* —
+#     why an executable is path-qualified, what a launcher's identifier refers
+#     to, what has and has not been verified about a game's capture. JSON cannot
+#     carry any of it, and a `_comment` key is a worse version of a comment.
+#   - Its parse errors carry a line and column. A malformed entry has to fail
+#     loudly and say where (issue #42), and that is much of the message for free.
+#
+# The cost is one more parser in the tree; `serde_json` stays where it is for
+# the encoder cache and the IPC protocol, which are machine-written files where
+# none of the three reasons above applies.
+#
+# Dual MIT/Apache-2.0.
+toml = "1.1"
+# The catalogue's shapes are deserialised, and the workspace pins one serde for
+# the reason its manifest gives.
+serde = { workspace = true, features = ["derive"] }
+# The user's overlay lives in Clipped's per-user directory, beside the logs and
+# the encoder's capability cache, and `clipped_logging::application_directory`
+# is the one function that says where that is (issue #228). clipped-logging is
+# layer 0 and this crate is layer 1, so this follows the dependency direction.
+clipped-logging.workspace = true
+
 [lints]
 workspace = true
