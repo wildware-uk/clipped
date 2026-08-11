@@ -393,9 +393,9 @@ to parse the frame — would turn "a refusal you have not seen before" into "the
 connection is broken".
 
 That is a stronger requirement than it first looks, and it is the one place this
-policy has to be implemented rather than inherited. An unknown *field* is
-ignorable for nothing, because that is what JSON deserialisation does by
-default. An unknown *variant* is not: a tagged union whose tag a build does not
+policy has to be implemented rather than inherited. An unknown *field* costs
+nothing to ignore, because ignoring it is what JSON deserialisation does by
+default. An unknown *variant* is not free: a tagged union whose tag a build does not
 recognise fails the whole message it is part of, so a `detail` invented later
 would take its refusal's code and message down with it, and an event invented
 later would end a subscription. Both types therefore keep a catch-all holding

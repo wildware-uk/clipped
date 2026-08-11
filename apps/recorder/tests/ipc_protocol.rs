@@ -563,21 +563,33 @@ fn beyond_the_cap(recorder: &ServedRecorder) -> ServerMessage {
 /// Connects, waiting while the recorder is still at its connection cap.
 ///
 /// A connection's slot is released by the thread serving it, which notices the
-/// client has gone at its own pace. Anything other than `too_many_connections`
-/// fails the test rather than being retried.
+/// client has gone at its own pace, so an attempt made immediately after one is
+/// closed may still meet the cap. It gets [`PATIENCE`] to stop doing so, and
+/// then the failure is the test's.
 fn connect_once_a_slot_is_free(recorder: &ServedRecorder) -> Client {
     let deadline = std::time::Instant::now() + PATIENCE;
     loop {
         match Client::connect(recorder.endpoint(), CLIENT_NAME, "0.0.0", PATIENCE) {
             Ok(client) => return client,
-            Err(ClientError::Refused(refusal))
-                if refusal.code == ErrorCode::TooManyConnections
-                    && std::time::Instant::now() < deadline =>
-            {
+            Err(error) if still_at_the_cap(&error) && std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("the freed slot was never usable again: {error}"),
         }
+    }
+}
+
+/// Whether a failed handshake was the recorder saying it is full.
+///
+/// A capped connection is refused and closed at the accept, before the
+/// handshake is read, so a client can lose the race between writing its `hello`
+/// and the pipe closing under it — in which case it sees its own write fail
+/// rather than the refusal. Both mean the same thing here.
+fn still_at_the_cap(error: &ClientError) -> bool {
+    match error {
+        ClientError::Refused(refusal) => refusal.code == ErrorCode::TooManyConnections,
+        ClientError::Frame(_) => true,
+        _ => false,
     }
 }
 
