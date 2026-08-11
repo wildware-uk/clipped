@@ -347,10 +347,34 @@ const MINIMUM_VIDEO_COVERAGE: f64 = 0.5;
 /// Written through `std::io::stderr()` rather than with `eprintln!` because
 /// libtest captures the macros.
 fn skipped(reason: &str) {
-    if std::env::var_os(REQUIRE_AUDIO).is_some_and(|value| !value.is_empty()) {
+    if is_set(REQUIRE_AUDIO) {
         panic!("{REQUIRE_AUDIO} is set, so this must not be skipped: {reason}");
     }
     let _ = writeln!(std::io::stderr(), "SKIPPED (av-sync): {reason}");
+}
+
+/// The environment variable that asks the tests which make a noise not to.
+const SKIP_AUDIO: &str = "CLIPPED_SKIP_AUDIO";
+
+/// Whether an environment variable is set to anything but the empty string.
+fn is_set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+/// Whether the caller should skip because the machine has been asked for quiet.
+///
+/// Consulted before a subject is started, because the subject is what plays the
+/// tone. See `docs/testing.md`.
+fn suppressed() -> bool {
+    if !is_set(SKIP_AUDIO) {
+        return false;
+    }
+    assert!(
+        !is_set(REQUIRE_AUDIO),
+        "{SKIP_AUDIO} and {REQUIRE_AUDIO} are both set. One says these tests          must not run and the other says they must not be skipped; there is no          behaviour that satisfies both, so neither is being guessed at."
+    );
+    skipped(&format!("{SKIP_AUDIO} is set"));
+    true
 }
 
 fn note(message: &str) {
@@ -370,6 +394,10 @@ fn run_length(variable: &str, default: Duration) -> Duration {
 #[test]
 #[ignore = "needs a GPU, a display, an audio endpoint and minutes of wall-clock time"]
 fn av_offset_stays_within_tolerance_while_video_and_audio_are_captured_together() {
+    if suppressed() {
+        return;
+    }
+
     let run = run_length(RUN_SECONDS, DEFAULT_RUN);
 
     let keeper = match SilenceKeeper::start() {
@@ -410,6 +438,10 @@ fn av_offset_stays_within_tolerance_while_video_and_audio_are_captured_together(
 #[test]
 #[ignore = "needs a GPU, a display and an audio endpoint, and plays a quiet tone"]
 fn the_absolute_av_offset_of_a_synchronised_subject_is_within_tolerance() {
+    if suppressed() {
+        return;
+    }
+
     let run = run_length(TONE_RUN_SECONDS, DEFAULT_TONE_RUN);
 
     // No `SilenceKeeper` here: the subject holds a render stream open for its
