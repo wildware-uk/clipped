@@ -35,6 +35,11 @@ export default defineConfig({
     environment: 'jsdom',
     globals: false,
     setupFiles: ['./src/test/setup.ts'],
-    include: ['src/**/*.test.{ts,tsx}'],
+    // `packages/*` are consumed as source rather than built, so their tests run
+    // here too. One `npm test` for the whole npm workspace is worth more than a
+    // second Vitest configuration somebody has to remember to run, and the
+    // shell's own tests already reach across the boundary: what they exercise is
+    // the application and its component library together.
+    include: ['src/**/*.test.{ts,tsx}', '../../packages/*/src/**/*.test.{ts,tsx}'],
   },
 });

@@ -31,9 +31,12 @@
   --color-text-muted: color-mix(in srgb, #201e1d 70%, transparent);
 
   /*
-   * Accent text. `--color-accent` on the light ground measures about 3.7:1, so
-   * it is used for marks and rules rather than for words; `--color-accent-700`
-   * measures about 6.4:1 and is what accent-coloured text uses.
+   * Accent text. `--color-accent` on the light ground measures 3.76:1, so it is
+   * used for marks and rules rather than for words, and never as the ground
+   * under words either; `--color-accent-700` measures 6.41:1 against both
+   * `--color-text` above it and `--color-bg` on it, which is why accent-coloured
+   * words and the accent-coloured skip link are both drawn from it.
+   * `contrast.test.ts` measures these pairs rather than trusting the comment.
    */
   --color-accent-text: #ae1800;
 
@@ -97,6 +100,11 @@
   --radius-lg: 0px;
   --rule-weight: 2px;
 
+  /* The rule that marks a thing rather than divides two: the accent edge on the
+     open navigation item and on an unbuilt screen's panel. Heavier than
+     `--rule-weight` so the two read as different jobs at a glance. */
+  --marker-weight: 3px;
+
   /* — elevation — */
   --shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
   --shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
@@ -105,4 +113,9 @@
   /* — shell metrics — */
   --shell-sidebar-width: 210px;
   --shell-header-height: 36px;
+  /* The brand square in the title strip, and the recorder's state square in the
+     sidebar. Both are squares of accent or neutral, not glyphs, so their size is
+     a shell metric rather than a type or spacing step. */
+  --mark-size: 12px;
+  --status-marker-size: 8px;
 }
