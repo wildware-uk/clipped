@@ -8,5 +8,33 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The logging facade. Storage accounting walks the user's library, and the two
+# things it can discover — a root it could not read, and a scan that ran out of
+# its budget — are exactly the diagnostics somebody investigating "why does the
+# reported figure look wrong" needs. Diagnostics go through `tracing` directly;
+# `clipped-logging` only decides where they end up (docs/logging.md). MIT.
+tracing.workspace = true
+
+# How much of a volume is free, and how large it is: `GetDiskFreeSpaceExW`.
+# Target-specific so that the platform-neutral half of this crate still compiles
+# and its unit tests still run on a contributor's other machine; the call itself
+# lives behind `#[cfg(windows)]` in `src/accounting/windows/` (AGENTS.md
+# section 5). The feature list is the exact set of namespaces that file names.
+# Dual MIT/Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+# `examples/scan_cost.rs` builds a synthetic library of a requested size and
+# times a scan of it, which is where the figures in docs/storage-management.md
+# come from. It takes arguments, and every executable in this workspace presents
+# the same argument syntax and the same usage errors (the root manifest says
+# why).
+clap.workspace = true
+
 [lints]
 workspace = true

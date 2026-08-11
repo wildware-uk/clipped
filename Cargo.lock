@@ -282,6 +282,11 @@ dependencies = [
 [[package]]
 name = "clipped-library"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "tracing",
+ "windows",
+]
 
 [[package]]
 name = "clipped-logging"
