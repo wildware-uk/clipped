@@ -90,14 +90,28 @@ features = [
     # `GetProcAddress` is the documented entry point
     # (crates/encoder/src/windows/nvenc/api.rs).
     "Win32_System_LibraryLoader",
+    # `ID3D11Device::CreateTexture2D`, for the one backend that has to allocate
+    # a texture rather than only pass one along: oneVPL makes the application's
+    # frame allocator responsible for an encoder's reconstructed pictures
+    # (crates/encoder/src/windows/quicksync/allocator.rs). NVENC needs no such
+    # thing — it is handed a device and a texture as opaque handles — so this is
+    # the exception rather than the rule (docs/encoder-pipeline.md).
+    "Win32_Graphics_Direct3D11",
+    # `DXGI_FORMAT_NV12` and the rest of the formats those textures are created
+    # in.
+    "Win32_Graphics_Dxgi_Common",
 ]
 
 # Creating a device is a test concern, and only a test concern. The backends are
-# handed a device and a texture as opaque handles: NVENC never calls a Direct3D
-# function at all, and the software encoder calls only the two it needs to get a
-# picture into system memory (above). What needs the rest of Direct3D is the
-# test harness, which has to create a device and upload real pictures into real
-# textures before there is anything to encode.
+# handed a device and a texture as opaque handles: NVENC and AMF never call a
+# Direct3D function at all, the software encoder calls only the two it needs to
+# get a picture into system memory (above), and Quick Sync's own device calls
+# are behind the `Win32_Graphics_Direct3D11`/`Win32_Graphics_Dxgi_Common`
+# features already declared above for its frame allocator. What needs the rest
+# of Direct3D is the test harness, which has to create a device on a chosen
+# adapter and upload real pictures into real textures before there is anything
+# to encode — WARP for the software encoder's tests, on a machine with no
+# usable GPU, and real adapter enumeration for the others.
 #
 # Declaring these here rather than widening the dependency above means the
 # shipped recorder does not compile a line of device creation on account of this

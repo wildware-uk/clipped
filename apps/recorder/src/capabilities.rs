@@ -16,12 +16,13 @@
 //! The second thing is the distance between "your machine can do this" and
 //! "Clipped can do this". A report full of green ticks, from a build that
 //! cannot record, would be worse than no report (AGENTS.md sections 27 and 54),
-//! so the footer names the encoders this build has a backend for, the ones it
-//! only detects, and the fact that no session yet connects any of them to a
-//! capture and a file. Which encoders those are is asked of
-//! [`EncoderKind::is_implemented`] rather than written out here: the previous
-//! footer was a hand-written sentence, and it went on saying no encoder was
-//! implemented through two of them landing
+//! so the footer names the encoders this build has a *proven* backend for, the
+//! ones it only detects (which includes a backend nobody has watched encode a
+//! real frame — Quick Sync, currently), and the fact that no session yet
+//! connects any of them to a capture and a file. Which encoders those are is
+//! asked of [`EncoderKind::is_implemented`] rather than written out here: the
+//! previous footer was a hand-written sentence, and it went on saying no
+//! encoder was implemented through two of them landing
 //! ([#167](https://github.com/wildware-uk/clipped/issues/167)).
 
 use std::error::Error;
@@ -318,12 +319,17 @@ fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
 /// cannot do at all.
 ///
 /// Three separate facts, and a reader needs all three. The table above lists
-/// what the *machine* has; whether Clipped has a backend for it is a different
-/// question, answered by [`EncoderKind::is_implemented`] so that this copy
-/// cannot drift from the code again. And whichever encoder is named, no build
-/// records anything yet, because nothing connects a capture to an encoder and
-/// on to a file — a report that let a reader infer otherwise from a list of
-/// working encoders would be the same failure in a new place.
+/// what the *machine* has; whether Clipped has a backend proven to encode with
+/// it is a different question, answered by [`EncoderKind::is_implemented`] so
+/// that this copy cannot drift from the code again. "Not here" does not mean
+/// no code exists — Quick Sync has a real backend that nothing has ever seen
+/// encode a frame on real hardware — so the second line says "not proven"
+/// rather than "no backend", which would be false for that one
+/// ([`EncoderKind::is_implemented`]'s doc explains why it still counts as not
+/// implemented). And whichever encoder is named, no build records anything
+/// yet, because nothing connects a capture to an encoder and on to a file — a
+/// report that let a reader infer otherwise from a list of working encoders
+/// would be the same failure in a new place.
 fn implementation_lines() -> String {
     let (implemented, detected_only): (Vec<EncoderKind>, Vec<EncoderKind>) = EncoderKind::ALL
         .iter()
@@ -340,7 +346,7 @@ fn implementation_lines() -> String {
     }
     if !detected_only.is_empty() {
         out.push_str(&format!(
-            "Detection only, with no backend here: {}.\n    A machine whose best encoder is \
+            "Detection only, not proven to encode: {}.\n    A machine whose best encoder is \
              one of those would encode on the CPU\n    instead.\n",
             names(&detected_only, true)
         ));
@@ -572,8 +578,8 @@ mod tests {
         let footer = footer(&detection, &CapabilityCache::disabled());
 
         // The two halves have to be told apart by name, whichever way round
-        // they are: a family with a backend must not be listed as one Clipped
-        // only detects, and vice versa. Checked against
+        // they are: a family proven to encode must not be listed as one
+        // Clipped only detects, and vice versa. Checked against
         // `EncoderKind::is_implemented` rather than against a list of names
         // written here, because the failure this replaces was exactly a
         // hand-maintained list that stopped being true.
@@ -585,29 +591,30 @@ mod tests {
                 .to_owned()
         };
         let encoding = line("Encoding in this build:");
-        let detected = line("Detection only, with no backend here:");
+        let detected = line("Detection only, not proven to encode:");
 
         for kind in EncoderKind::ALL {
             let name = kind.to_string();
             if kind.is_implemented() {
                 assert!(
                     encoding.contains(&name),
-                    "{kind} has a backend and the footer does not say so: {footer}"
+                    "{kind} is proven to encode and the footer does not say so: {footer}"
                 );
                 assert!(
                     !detected.contains(&name),
-                    "{kind} has a backend and must not be listed as detection only: {footer}"
+                    "{kind} is proven to encode and must not be listed as detection only: \
+                     {footer}"
                 );
             } else {
                 assert!(
                     detected.contains(&name)
                         && detected.contains(&format!("#{}", kind.backend_issue())),
-                    "{kind} has no backend, and the footer should say so and name its \
-                     issue: {footer}"
+                    "{kind} is not proven to encode, and the footer should say so and name \
+                     its issue: {footer}"
                 );
                 assert!(
                     !encoding.contains(&name),
-                    "{kind} has no backend and must not be listed as one: {footer}"
+                    "{kind} is not proven to encode and must not be listed as one: {footer}"
                 );
             }
         }

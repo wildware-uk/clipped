@@ -247,16 +247,23 @@ recording cannot take a session slot from it.
 ([#15](https://github.com/wildware-uk/clipped/issues/15)), AMF
 ([#16](https://github.com/wildware-uk/clipped/issues/16)) and the software
 fallback on the CPU ([#18](https://github.com/wildware-uk/clipped/issues/18))
-have backends in this build; Quick Sync
-([#17](https://github.com/wildware-uk/clipped/issues/17)) is detected and not
-used, so a machine whose best encoder is that one would encode on the CPU.
-And nothing records yet whichever encoder is chosen, because no session connects
-a capture to an encoder and on to a file — `record` still exits 3.
+have a backend proven to encode with in this build, each measured doing so on
+real hardware. Quick Sync ([#17](https://github.com/wildware-uk/clipped/issues/17))
+is different from the two that used to sit beside it in this sentence: it has a
+real backend too, `QuickSyncEncoder`, written to the same interface — but there
+is no Intel GPU on the machine it was written on, so nothing has ever seen it
+encode a frame, and the footer does not count it until it has
+([#160](https://github.com/wildware-uk/clipped/issues/160)). A machine whose
+best encoder is Quick Sync encodes on the CPU today. And nothing records yet
+whichever encoder is chosen, because no session connects a capture to an
+encoder and on to a file — `record` still exits 3.
 
-Which encoders those are comes from `EncoderKind::is_implemented` rather than
-from a sentence in the report, because the sentence that used to be there went
-on claiming no encoder was implemented through two of them landing
-([#167](https://github.com/wildware-uk/clipped/issues/167)).
+Which encoders count comes from `EncoderKind::is_implemented` rather than from
+a sentence in the report, because the sentence that used to be there went on
+claiming no encoder was implemented through two of them landing
+([#167](https://github.com/wildware-uk/clipped/issues/167)). That function's
+own doc comment is where "counts" is defined precisely — proven on real
+hardware, not merely compiling — and why Quick Sync fails it today.
 
 ## Exit codes
 

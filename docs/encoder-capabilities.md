@@ -247,9 +247,10 @@ The machine this was developed on has an NVIDIA RTX 4090 and an integrated AMD
 part, and neither can be removed.
 
 The same goes for **Quick Sync, which is unverified on real hardware**: there is
-no Intel GPU here, so `libmfxhw64.dll` and `libvpl.dll` have only ever been
-observed as absent. The code path is the same one NVENC and AMF take, and that
-is an argument, not a measurement.
+no Intel GPU here, so `libvpl.dll`, `libmfx64.dll` and `libmfxhw64.dll` — the
+list the backend itself loads from, shared with detection so the two cannot
+drift — have only ever been observed as absent. The code path is the same one
+NVENC and AMF take, and that is an argument, not a measurement.
 
 ## What this deliberately cannot tell you
 

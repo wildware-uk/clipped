@@ -26,10 +26,12 @@ mod amf;
 mod dxgi;
 mod media_foundation;
 mod nvenc;
+mod quicksync;
 mod runtime;
 
 pub use amf::AmfEncoder;
 pub use nvenc::NvencEncoder;
+pub use quicksync::QuickSyncEncoder;
 
 use crate::adapter::Adapter;
 use crate::probe::{EncoderObservations, ProbeError, SystemProbe};
@@ -64,8 +66,10 @@ impl SystemProbe for WindowsProbe {
 
     fn encoders(&self) -> Result<EncoderObservations, ProbeError> {
         let mut observations = EncoderObservations::none();
-        for (kind, library) in runtime::LIBRARIES {
-            observations = observations.with_runtime(runtime::observe(*kind, library));
+        for (kind, libraries) in runtime::LIBRARIES {
+            for library in *libraries {
+                observations = observations.with_runtime(runtime::observe(*kind, library));
+            }
         }
 
         // A machine whose Media Foundation cannot be started still has its
