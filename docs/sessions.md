@@ -167,6 +167,17 @@ session ends, **the most recently deferred game that is still running** becomes 
 session of its own and is recorded from that moment — not from its launch, which
 may have been an hour earlier. One that exited while it waited is forgotten.
 
+A game that is waiting is still watched, and so are its helpers. The watcher
+reports a process as gone exactly once, so an exit that arrives while a game is
+deferred is its only chance to be counted: a helper not accounted for then would
+be promoted along with the game as a live child that is already dead and can
+never be seen to die. The session it belonged to would never run out of live
+processes, never begin its grace period and never end — and because a session
+that never ends defers every game after it, the recorder would keep running,
+report nothing wrong, and record nothing ever again. That is the worst outcome
+in this document, and it is why exits are folded into everything the manager is
+tracking rather than only into the session that happens to be open.
+
 ### A suspend ends the recording rather than putting a hole in it
 
 The manager is driven by a loop that calls it at least once a second, so a
@@ -348,8 +359,10 @@ cargo test -p clipped-session automatic
 
 Those cover a crash, a fast restart, a relaunch after the grace, a known child
 process holding a session open, a second game arriving and being recorded
-afterwards, a tie in the catalogue, a suspend during a recording and during a
-grace period, the recording cap, and shutting down.
+afterwards, a deferred game's helper exiting before that game is promoted, a tie
+in the catalogue, a suspend during a recording and during a grace period, the
+recording cap, and shutting down — including shutting down while a recording is
+already being stopped for another reason.
 
 The end-to-end tests need a GPU, an encoder and a desktop session, so they are
 `#[ignore]`d:
@@ -359,10 +372,21 @@ cargo test -p clipped-recorder --test automatic_sessions -- --ignored --nocaptur
 ```
 
 They start the real recorder as a child process, launch `test-apps/video-pattern`
-— once through a `cmd.exe` parent, so the watcher sees a chain and the manager
-has to pick the game out of it — and validate the resulting file with
+— once through a `cmd.exe` parent, so that the recorder records a process it did
+not start and has no handle on — and validate the resulting file with
 `clipped-media-validation`, asserting that it **decodes** rather than merely
-opens.
+opens. One of them sends a real Ctrl+C while a recording is still running, which
+is the path on which the session has to survive being stopped from underneath.
+
+The `cmd.exe` parent does **not** reliably prove that the debounce joins a
+launcher and its game into one launch, and the test module says so at length:
+whether the watcher reports `cmd.exe → video-pattern.exe` as one launch or as
+two depends on the order WMI happens to deliver the two creation events in,
+which is not ordered, and both orderings were observed on this machine. That
+case is pinned deterministically where it can be — against a constructed launch
+in `clipped_session::automatic`'s own tests, which assert that a
+`[launcher.exe, game.exe]` group is recorded by its game and not by its
+launcher.
 
 The recorder is made to recognise the pattern through a **user overlay**, with
 `LOCALAPPDATA` pointed at the test's own directory. `video-pattern.exe` is not in

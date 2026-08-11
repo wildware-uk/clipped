@@ -3,8 +3,9 @@
 //!
 //! These are issue #46's acceptance criteria checked rather than asserted in
 //! prose: a game launching produces a finalised session recording with nobody
-//! touching the recorder, and killing the game's process still leaves a file
-//! that **decodes**.
+//! touching the recorder, killing the game's process still leaves a file that
+//! **decodes**, and stopping the recorder while a game is still being captured
+//! finalises the file *and* finishes the session record that names it.
 //!
 //! Nothing here is mocked. The recorder is the built binary, run as a child
 //! process the way a user runs it. The subject is `test-apps/video-pattern`, a
@@ -50,6 +51,13 @@
 //! said it encoded**. That last one is the point of using
 //! `decoded_frames_at_least` rather than a packet count: a file whose packets
 //! all failed to decode satisfies every other assertion here.
+//!
+//! And, on the one path a user takes most often and the other two do not touch
+//! — Ctrl+C with a game still running and a recording still capturing — that
+//! the session record is *finished*: an end reason of `recorder-stopping`, and
+//! the recording's outcome stored against it. A sidecar saying a recording
+//! began and never ended is what M6's indexer would otherwise have to
+//! reconcile against a file that is complete and playable.
 //!
 //! # Why these are `#[ignore]`d
 //!
@@ -126,8 +134,9 @@ name = "video-pattern.exe"
 fn launching_a_game_produces_a_finalised_session_recording() {
     // Acceptance criterion 1, as far as this machine can honestly check it:
     // nobody touches the recorder, and a session recording appears. The launch
-    // goes through a `cmd.exe` parent so the watcher sees a chain and has to
-    // pick the game out of it rather than being handed one process.
+    // goes through a `cmd.exe` parent so that the recorder records a process it
+    // did not start and holds no handle on. What that does *not* reliably prove
+    // is that the launch chain arrives as one group — see the module docs.
     let Some(_tools) = require_media_tools() else {
         return;
     };
@@ -207,6 +216,75 @@ fn killing_the_game_process_finalises_the_recording_into_a_playable_file() {
         seconds >= 2.0,
         "the recorder ran for about {:.0}s before the kill and the file holds {seconds:.2}s; \
          a fraction of a second is what a recording finalised without its last cluster looks \
+         like:\n{diagnostics}",
+        RECORD_BEFORE_KILL.as_secs_f64()
+    );
+}
+
+#[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see the module docs"]
+fn stopping_the_recorder_mid_recording_finalises_it_and_finishes_the_session() {
+    // The other two tests only ever press Ctrl+C after the recording has ended
+    // by itself, so neither of them touches the path a user actually takes:
+    // stopping the recorder while a game is still being captured. Everything on
+    // that path has to survive being interrupted — the file has to be
+    // finalised, the outcome has to reach the session it belongs to, and the
+    // session has to say a stopping recorder ended it. A session record saying
+    // a recording began and never ended is exactly what M6's indexer would
+    // later have to reconcile against a file that is sitting there, playable.
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    ensure_console();
+
+    let workspace = Workspace::new("watch-ctrl-c");
+    let mut recorder = workspace.start_recorder();
+
+    recorder.wait_for("Watching for games.");
+    thread::sleep(Duration::from_secs(1));
+
+    // Long enough that it is unambiguously still rendering when the recorder is
+    // stopped: the pattern outliving the recorder is the point of this test.
+    let mut pattern = LaunchedPattern::directly(SOURCE_FPS, 300);
+    recorder.wait_for("Recording Clipped Video Pattern");
+    thread::sleep(RECORD_BEFORE_KILL);
+
+    let diagnostics = recorder.stop();
+    assert!(
+        pattern.is_running(),
+        "the game must still have been running when the recorder was stopped, or this test \
+         proves nothing the others do not already prove:\n{diagnostics}"
+    );
+
+    let session = workspace.only_session();
+    assert!(
+        !session["ended_at"].is_null(),
+        "a session the recorder stopped is a finished session:\n{session:#}\n{diagnostics}"
+    );
+    assert!(
+        session["events"].as_array().is_some_and(|events| events
+            .iter()
+            .any(
+                |event| event["event"] == "session-ended" && event["reason"] == "recorder-stopping"
+            )),
+        "the session should record why it ended:\n{session:#}\n{diagnostics}"
+    );
+
+    let recording = playable_recording(&session, &diagnostics);
+    assert_eq!(
+        recording["end_reason"],
+        Value::from("stopped"),
+        "a recording ended by Ctrl+C was stopped by request, not lost:\n{diagnostics}"
+    );
+    assert_media_decodes(recording, pattern.client_size(), &diagnostics);
+
+    let seconds = recording["duration_seconds"]
+        .as_f64()
+        .expect("a finished recording has a duration");
+    assert!(
+        seconds >= 2.0,
+        "the recorder ran for about {:.0}s before Ctrl+C and the file holds {seconds:.2}s; a \
+         fraction of a second is what a recording finalised without its last cluster looks \
          like:\n{diagnostics}",
         RECORD_BEFORE_KILL.as_secs_f64()
     );
@@ -444,6 +522,14 @@ impl LaunchedPattern {
 
     fn client_size(&self) -> (u32, u32) {
         self.client
+    }
+
+    /// Whether the subject is still rendering.
+    ///
+    /// The premise of the test that stops the recorder mid-recording: a pattern
+    /// that had already finished would make it a repeat of the one above it.
+    fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     fn wait_for_exit(&mut self) {
