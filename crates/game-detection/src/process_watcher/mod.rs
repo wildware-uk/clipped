@@ -2,9 +2,9 @@
 //!
 //! This module answers one question — *what started, and what stopped?* — and
 //! deliberately not the next one. Deciding that a process is a game is
-//! [issue #42](https://github.com/wildware-uk/clipped/issues/42) and the
-//! launcher integrations after it; starting a recording is
-//! [issue #46](https://github.com/wildware-uk/clipped/issues/46). What arrives
+//! [`crate::catalogue`] and the launcher integrations after it; deciding what to
+//! do about it is `clipped_session::automatic`
+//! ([issue #46](https://github.com/wildware-uk/clipped/issues/46)). What arrives
 //! here is a launch and an executable, and nothing in this module knows what a
 //! game is.
 //!

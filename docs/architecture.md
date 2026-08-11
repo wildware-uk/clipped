@@ -122,7 +122,7 @@ surrounding responsibility.
 | SPEC.md section 5 module | Lives in | Status |
 | --- | --- | --- |
 | Game Detector | `clipped-game-detection` | M4 |
-| Session Manager, Capture Coordinator | `clipped-session` | M1 onwards |
+| Session Manager, Capture Coordinator | `clipped-session` (`automatic` is the session manager) | M1 onwards |
 | Replay Buffer | `clipped-replay`, attached to a recording by `clipped-session` | M3 |
 | Audio Router | `clipped-audio` | M1–M2 |
 | Encoder Manager | `clipped-encoder` | M1 |
@@ -198,7 +198,11 @@ large:
   target, captures the window, encodes its frames and writes them into a
   Matroska file, and finishes that file when Ctrl+C stops it
   ([#126](https://github.com/wildware-uk/clipped/issues/126)). A recording has a
-  video track and no audio track. `list-windows` lists what could be captured
+  video track and no audio track. `watch` does the same thing without being
+  asked: it waits on the process watcher, matches what launched against the game
+  catalogue, and records a game from its launch to its exit
+  ([#46](https://github.com/wildware-uk/clipped/issues/46),
+  [sessions.md](sessions.md)). `list-windows` lists what could be captured
   and `capabilities` reports the graphics adapters and encoders it found. See
   [recorder-cli.md](recorder-cli.md).
 - `clipped-session` is the crate that joins them, and the only place in the
@@ -211,8 +215,18 @@ large:
   copies each packet into a `clipped-replay` buffer, so a rolling window of the
   last few minutes is there to save from; nothing saves from one yet
   ([#37](https://github.com/wildware-uk/clipped/issues/37)) and no command turns
-  one on ([#38](https://github.com/wildware-uk/clipped/issues/38)). Per-game
-  settings and game detection are later milestones and are not there.
+  one on ([#38](https://github.com/wildware-uk/clipped/issues/38)). It also owns
+  the **session manager**: `clipped_session::automatic` joins
+  `clipped-game-detection`'s watcher and catalogue to that recording loop, and is
+  the policy that decides when a session starts, when it stops, what a fast
+  restart or a second game or a suspend means, and what a session contains
+  ([#46](https://github.com/wildware-uk/clipped/issues/46)). It is a state
+  machine over watcher events and a wall-clock reading — it opens no window and
+  starts no thread — so every one of those rules is tested without a game, a GPU
+  or any waiting; `apps/recorder`'s `watch` is the driver that carries out what
+  it decides. A session's record is a JSON sidecar beside its recordings, and
+  M6's [#55](https://github.com/wildware-uk/clipped/issues/55) owns the real
+  store. Per-game settings are a later milestone and are not there.
 - `apps/desktop` is the application shell, and the supervision behind it: a
   Tauri 2 window hosting a React interface, with its layout, navigation, design
   tokens and accessibility baseline, drawn from `packages/ui` and typed by
@@ -358,14 +372,15 @@ contributor working in it needs.
 | [audio-routing.md](audio-routing.md) | Per-source capture, application-to-track routing, drift correction, the compatibility mix | M2 |
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
 | [game-detection.md](game-detection.md) | The game catalogue and how a process is matched against it; watching for processes starting and stopping, why the source is a subscription rather than a poll, how a launcher and the game it starts become one launch, and what detection costs while nothing is happening | M4 |
+| [sessions.md](sessions.md) | What a session is; how a launch becomes a recording; what happens on a crash, a fast restart, a second game and a suspend; the one capture mode this build has; and where a session is written down before M6's database exists | M4 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 | [ipc.md](ipc.md) | The recorder control protocol: transport, framing, the handshake, the compatibility policy, the commands and events, and the security a local endpoint does and does not promise | M5 |
 | [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
 
 All but [capture-pipeline.md](capture-pipeline.md),
 [encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md),
-[av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md), [ipc.md](ipc.md) and
-[game-detection.md](game-detection.md)
+[av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md), [ipc.md](ipc.md),
+[game-detection.md](game-detection.md) and [sessions.md](sessions.md)
 are stubs today, stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
@@ -384,11 +399,14 @@ that exists and is explicit that no feature screen behind it does. `ipc.md` is a
 specification rather than a description: it is the schema both ends are written
 against, and it says which of the commands it defines this build refuses and
 where each is being built. `game-detection.md` covers the two halves of
-detection that are written — the game catalogue and the process watcher — and is
-explicit that nothing yet joins them, so no running process is matched against
-the catalogue by anything. It records what the watcher costs while idle, which
-is more than was expected and is the reason for
-[issue #230](https://github.com/wildware-uk/clipped/issues/230). The rest
+detection that are written — the game catalogue and the process watcher — and it
+records what the watcher costs while idle, which is more than was expected and is
+the reason for
+[issue #230](https://github.com/wildware-uk/clipped/issues/230).
+`sessions.md` covers what joins them: the session manager, every rule it applies,
+and the sidecar a session is written to until M6's database exists. Both are
+explicit about what is not built, which for sessions is three of the four capture
+modes and every per-game setting. The rest
 stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 

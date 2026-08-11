@@ -21,11 +21,38 @@ clipped-muxer.workspace = true
 # those packets, so a recording and a replay buffer running together encode
 # once.
 clipped-replay.workspace = true
+# What a game is, and what started and stopped. The automatic session manager
+# (`src/automatic`) is the policy between those two answers and a recording, and
+# this crate is deliberately where that policy lives: `clipped-game-detection`'s
+# own documentation says it reports what is running and `clipped-session`
+# decides what to do about it. The dependency direction is the one README.md's
+# layer table gives — game detection is layer 1, this crate is layer 3 — and
+# `tests/integration/tests/workspace_layering.rs` asserts it.
+clipped-game-detection.workspace = true
 # The standard session context — `session_id`, `capture_backend`, `encoder` —
 # so that every line a recording produces is searchable by the same fields
 # (docs/logging.md). `RedactedPath` keeps the output path out of the logs.
 clipped-logging.workspace = true
 tracing.workspace = true
+# A session's record on disk (`src/automatic/sidecar.rs`, docs/sessions.md).
+# It is a documented sidecar rather than a second database: M6's issue #55 owns
+# the SQLite library index, and arriving at a second persistence mechanism by
+# accident is what AGENTS.md section 55 exists to prevent. Both are taken from
+# the workspace for the reason the root manifest gives.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+# Calendar arithmetic, for the one thing a session needs it for: naming itself
+# after the moment it started, in the same `[year][month][day]-[hour][minute]
+# [second]` form `clipped-recorder record` already names its files in. Working
+# a date out of a Unix timestamp by hand is exactly the kind of thing not to
+# hand-roll, and `apps/recorder` already depends on this crate for the same
+# reason. Dual MIT/Apache-2.0.
+time = { version = "0.3", default-features = false, features = [
+    "std",
+    "formatting",
+    "local-offset",
+    "macros",
+] }
 
 # One Direct3D call, and only one: `ID3D11Texture2D::GetDevice`, which is how a
 # session finds the device a captured frame lives on so that it can open an

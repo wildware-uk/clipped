@@ -28,8 +28,14 @@
 //! started and what stopped, debounced so that a launcher handing over to a
 //! game is one launch rather than three, and without polling for it.
 //!
-//! Nothing yet joins them: the watcher does not consult the catalogue, and the
-//! launcher providers that would supply a launcher identity are
+//! Nothing in *this* crate joins them, deliberately: the watcher does not
+//! consult the catalogue. What asks one about the other, and starts a
+//! recording, is `clipped_session::automatic`
+//! ([#46](https://github.com/wildware-uk/clipped/issues/46),
+//! `docs/sessions.md`), which is where that decision belongs — this crate
+//! reports what is running and nothing more.
+//!
+//! The launcher providers that would supply a launcher identity are
 //! [#43](https://github.com/wildware-uk/clipped/issues/43) onwards.
 //! `docs/game-detection.md` is the subsystem document.
 

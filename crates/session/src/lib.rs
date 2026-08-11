@@ -29,6 +29,15 @@
 //! `clipped-encoder` and `clipped-muxer` at once, which is the reason the
 //! layering puts this crate above all three.
 //!
+//! And the policy that starts one without being asked: [`automatic`] joins
+//! `clipped-game-detection`'s process watcher and game catalogue to [`record`],
+//! so that launching a game produces a session recording and quitting it
+//! finalises one ([issue #46](https://github.com/wildware-uk/clipped/issues/46),
+//! `docs/sessions.md`). It is a state machine over watcher events and a
+//! wall-clock reading — it opens no window and starts no thread — and
+//! `apps/recorder`'s `watch` subcommand is the driver that carries out what it
+//! decides.
+//!
 //! **There is no audio track yet.** A recording written here has one video
 //! stream and nothing else; wiring `clipped-audio` in is
 //! [issue #180](https://github.com/wildware-uk/clipped/issues/180). A caller
@@ -44,7 +53,8 @@
 //! command that would drive it is
 //! [issue #38](https://github.com/wildware-uk/clipped/issues/38).
 //!
-//! Per-game settings and game detection are later milestones; neither is here.
+//! Per-game settings are M7 and are not here: a catalogue entry can carry
+//! `default_settings` and nothing reads them, deliberately (SPEC.md section 31).
 //!
 //! # Threading
 //!
@@ -111,6 +121,8 @@
 //! println!("{report}");
 //! # Ok::<(), clipped_session::SessionError>(())
 //! ```
+
+pub mod automatic;
 
 mod error;
 mod pacing;

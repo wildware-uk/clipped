@@ -299,6 +299,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clipped-encoder",
+ "clipped-game-detection",
  "clipped-ipc",
  "clipped-logging",
  "clipped-media-validation",
@@ -328,9 +329,13 @@ dependencies = [
  "clap",
  "clipped-capture",
  "clipped-encoder",
+ "clipped-game-detection",
  "clipped-logging",
  "clipped-muxer",
  "clipped-replay",
+ "serde",
+ "serde_json",
+ "time",
  "tracing",
  "windows",
 ]
