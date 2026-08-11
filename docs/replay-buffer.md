@@ -64,6 +64,17 @@ offsets, rather than a `Vec<u8>` per packet. At 60 frames a second a thirty
 minute window is 108,000 packets, and 108,000 allocations for one buffer is a
 cost paid on the thread that is also capturing (AGENTS.md section 18).
 
+A segment reserves one segment's worth of bytes when it opens, and grows by that
+same step rather than by doubling. Two things follow, and the first is the
+smaller: filling a segment the encoder produced at the bitrate it was configured
+for costs **one** allocation, and one more per further segment's worth of
+overshoot. The measurements below do not support a stronger claim than that —
+NVENC achieved 24.04 Mbit/s against a configured 18.66, so every segment in
+those runs outgrew its reservation once. The second is why the step is fixed:
+the memory ceiling is enforced against the allocation and not merely the
+payload, and a capacity that doubled could carry a segment from just under the
+ceiling to well over it inside a single push.
+
 ### Granularity, and what it costs
 
 The segment length is a target; the encoder's keyframe interval is what the
@@ -217,8 +228,58 @@ again. The consequences are visible rather than silent:
 - One sealed segment is always kept, so a save is never impossible.
 - The recording is never affected. A replay buffer cannot fail a recording: it
   copies bytes into memory it already owns, and reaching its ceiling costs it
-  its oldest segments rather than costing the file anything (AGENTS.md section
-  17).
+  its own oldest segments rather than costing the file anything (AGENTS.md
+  section 17).
+
+### The segment being written is not exempt
+
+Evicting sealed segments cannot bound the buffer on its own, because the segment
+currently being written is not one of them. A segment is sealed by the *next*
+keyframe, so an encoder whose keyframe interval is longer than the buffer's
+window produces a segment that never seals at all: one keyframe followed by five
+minutes of predicted pictures is a single segment, and a ceiling weighed only
+against the sealed queue lets it grow without limit. Measured, on a 30-second /
+18.66 Mbit/s configuration: **1,196,228,696 bytes held against a 111,974,400
+byte ceiling** — 10.7× over, covering 300 s of a 30 s window.
+
+Nothing in this workspace configures an encoder that way:
+`KeyframeInterval::DEFAULT` is two seconds, far more often than any supported
+window. But the keyframe interval belongs to `clipped-encoder`, so "it cannot
+happen" would be a property of another crate's current settings rather than of
+this design.
+
+The ceiling is therefore checked **before** each packet is copied in, against
+what that append would cost, and when evicting sealed segments cannot free
+enough room for it the buffer:
+
+1. **Seals the segment being written where it stands.** A segment is cut at its
+   end, not at its front, so what is kept still begins on a keyframe and is
+   still decodable on its own. Nothing already buffered is thrown away, and a
+   save made during what follows gets real video.
+2. **Discards packets until the encoder's next keyframe**, counted by
+   `ReplayStats::packets_discarded_over_ceiling` and returned as
+   `PushOutcome::DiscardedOverCeiling`. There is nowhere else to put them: a
+   segment that does not begin on a keyframe cannot be decoded, so admitting
+   them would mean holding pictures no save could use.
+3. **Drops what it held from before the gap** when that keyframe arrives.
+   `lease_last` measures "the last thirty seconds" back from the newest picture,
+   so a buffer holding both sides of a gap would select across it and write one
+   clip that silently jumps (AGENTS.md section 22). Material from before a gap
+   cannot serve the request this buffer exists for.
+
+`ReplayStats::segments_sealed_at_the_ceiling` counts step 1, and is zero for
+every encoder in this workspace. Three alternatives were weighed:
+
+| Instead | Why not |
+| --- | --- |
+| Seal early and carry on into a segment that does not begin on a keyframe | Such a segment decodes only behind the keyframe segment it continues, so a 30 s clip would have to drag in the five minutes back to that keyframe. It costs the crate's central invariant and still does not produce the clip. |
+| Refuse the packet and leave the segment open | Bounds nothing: the open segment is what is over the ceiling. |
+| Drop the open segment outright and resume at the next keyframe | Bounds memory equally well, but throws away decodable video that sealing keeps for free. |
+
+None of this makes such a configuration work — no buffer can cut a 30-second
+clip out of a stream with a keyframe every five minutes. What it does is keep
+the memory where this page says it is, keep every byte handed to a save
+decodable, and put the loss in the statistics where somebody can see it.
 
 Nothing here reserves memory up front, so there is no allocation to fail at
 start-up; and nothing grows without bound, so there is no allocation to fail
@@ -261,41 +322,49 @@ NVENC, H.264), AMD Ryzen with 61 GB of RAM.
 
 | Window | Held | Peak | Ceiling | Working set growth | Private growth | Wall clock |
 | --- | --- | --- | --- | --- | --- | --- |
-| 30 s | 91.6 MiB | 92.7 MiB | 106.8 MiB | 103.9 MiB | 132.2 MiB | 5.7 s |
-| 5 min | 838.2 MiB | 839.3 MiB | 1008 MiB | 850.9 MiB | 881.1 MiB | 57.2 s |
-| 30 min | 4.87 GiB | 4.87 GiB | 5.87 GiB | 4.88 GiB | 4.92 GiB | 339.3 s |
+| 30 s | 91.7 MiB | 92.8 MiB | 106.8 MiB | 103.9 MiB | 132.1 MiB | 5.7 s |
+| 5 min | 838.3 MiB | 839.4 MiB | 1007.8 MiB | 851.2 MiB | 879.6 MiB | 89.2 s |
+| 30 min | 4985.0 MiB | 4985.9 MiB | 6013.4 MiB | 4999.8 MiB | 5043.5 MiB | 544.2 s |
+
+Every figure in that table is from the run transcribed below it, or from the two
+runs of the same binary made beside it; nothing is carried over from an earlier
+build.
 
 "Held" is the buffer's own accounting, "working set growth" is what the process
 actually grew by, and the two agreeing to within about 3 % is the point of
-measuring both. Private bytes run higher — 40 MiB above the working set at 30
-seconds and 55 MiB at 30 minutes — which is the allocator holding pages the
+measuring both. Private bytes run higher — 28 MiB above the working set at 30
+seconds and 44 MiB at 30 minutes — which is the allocator holding pages the
 buffer has handed back.
 
 Each run held its window and one segment exactly as the retention rule says:
 32.0 s, 302.0 s and 1802.0 s covered, for windows of 30 s, 300 s and 1800 s with
-2 s segments. No run hit its ceiling.
+2 s segments. No run hit its ceiling, and no run cut a segment short.
 
-**These figures are about 27 % above the arithmetic**, and the reason is worth
+**These figures are 24 % to 29 % above the arithmetic**, and the reason is worth
 stating rather than smoothing over. The buffer was sized for 18.66 Mbit/s and
-NVENC produced 24.03, 23.28 and 23.21 Mbit/s in the three runs: a
+NVENC produced 24.04, 23.29 and 23.21 Mbit/s in the three runs: a
 constant-bitrate encoder fed pure noise overshoots, because there is nothing to
 predict and every macroblock costs. Real game footage compresses, so a buffer of
 the same window recording a game will sit closer to the 71 MiB / 672 MiB /
 3.91 GiB the table above predicts. What the runs demonstrate is the harder case:
-**the 50 % ceiling headroom absorbed a 25 % bitrate overshoot at every duration,
-with no segment evicted over the ceiling.**
+**the 50 % ceiling headroom absorbed a bitrate overshoot of up to 29 % at every
+duration, with no segment evicted over the ceiling.**
 
 The 30-minute run encoded 129,600 frames — 36 minutes of video, the window plus
-20 % — in 339 seconds of wall clock, because the timestamps come from the frame
-number. It was not filled in real time and does not claim to have been.
+20 % — in 544 seconds of wall clock, because the timestamps come from the frame
+number. It was not filled in real time and does not claim to have been. The wall
+clock column is how fast this machine could encode noise while it was also
+running a test suite, not a property of the buffer; an earlier run of the same
+code did the 30-minute fill in 339 s.
 
-A save of the whole window took **0.68 ms** at 30 minutes and 0.77 ms at 5
+A save of the whole window took **0.88 ms** at 30 minutes and 0.77 ms at 5
 minutes: cloning 901 `Arc`s and copying one open segment. It is flat in the
 window's length, which is what makes it safe to do from a hotkey while the
 capture thread is running.
 
 One transcript, verbatim, so the shape of the output is on the record. This is
-the 30-second run; the other two differ only in their numbers:
+the 30-second run in the table above, figure for figure; the other two differ
+only in their numbers:
 
 ```text
 > cargo run --release --example buffer_memory -- --window 30
@@ -312,38 +381,36 @@ configuration
 what was encoded
   frames submitted 2160
   media time       36.0 s
-  wall clock       5.6 s
-  achieved bitrate 24.03 Mbit/s
+  wall clock       5.7 s
+  achieved bitrate 24.04 Mbit/s
 
 what the buffer holds
   segments         16
   packets          1920
   covered          32.0 s
-  bytes held       91.6 MiB
-  peak bytes held  92.7 MiB
+  bytes held       91.7 MiB
+  peak bytes held  92.8 MiB
   ceiling          106.8 MiB
   evicted (window) 2
   evicted (ceiling) 0
+  cut short        0
+  discarded (ceiling) 0
 
 what the process holds
-  working set before 78.4 MiB
-  working set after  182.1 MiB
-  working set growth 103.6 MiB
-  private before     207.7 MiB
-  private after      339.4 MiB
-  private growth     131.7 MiB
+  working set before 78.9 MiB
+  working set after  182.8 MiB
+  working set growth 103.9 MiB
+  private before     207.8 MiB
+  private after      339.9 MiB
+  private growth     132.1 MiB
 
 a save of the whole window
   segments leased  16
   bytes leased     88.1 MiB
   complete         true
-  time to lease    0.640 ms
-  working set      187.6 MiB
+  time to lease    0.823 ms
+  working set      188.3 MiB
 ```
-
-The 5-minute and 30-minute runs were made with the same binary before the byte
-labels were corrected from `MB` to `MiB`; the quantities are unchanged, since
-both were 1024².
 
 **And this is the argument for issue #36.** A 30-minute window costs the better
 part of 5 GiB of resident memory on a machine that is also running a game. That
