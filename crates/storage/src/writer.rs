@@ -250,11 +250,11 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// [`StorageError::Sqlite`] if the writer thread panicked, which is the one
-    /// way its statistics can be unavailable.
+    /// [`StorageError::WriterPanicked`] if the writer thread panicked, which is
+    /// the one way its statistics can be unavailable. A queued write is the
+    /// caller's closure, so that is reachable from outside this crate.
     pub fn stop(mut self) -> Result<WriteStats, StorageError> {
-        Self::join(&mut self.queue, &mut self.thread)
-            .ok_or_else(|| StorageError::Sqlite(rusqlite::Error::InvalidQuery))
+        Self::join(&mut self.queue, &mut self.thread).ok_or(StorageError::WriterPanicked)
     }
 
     /// Asks the thread to finish and waits for it.
@@ -638,6 +638,42 @@ mod tests {
 
         let stats = writer.stop().expect("the writer stops");
         assert!(stats.dropped >= 1, "the refusal was not counted: {stats:?}");
+    }
+
+    #[test]
+    fn a_panicked_writer_thread_says_so_rather_than_blaming_a_statement() {
+        // A write is the caller's closure, so a panic in one is reachable from
+        // outside this crate, and it is the only way `stop` has nothing to
+        // report. Whoever meets this in a user's log has to be sent looking for
+        // a panic; "the Clipped database refused a statement: Query is not
+        // read-only" would send them looking for SQL that was never issued
+        // (AGENTS.md section 15).
+        //
+        // The panic message the test harness prints for this is expected.
+        let (_path, database) = database("writer-panics");
+        let writer = Writer::spawn(database, WriteSettings::default());
+        writer
+            .queue()
+            .submit("panicking", |_| panic!("a caller's write panicked"))
+            .expect("it queues");
+
+        let error = writer
+            .stop()
+            .expect_err("a writer that panicked has no statistics to give");
+
+        assert!(
+            matches!(error, StorageError::WriterPanicked),
+            "a panicked writer was reported as {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("panicked"),
+            "the message does not say what happened: {message}"
+        );
+        assert!(
+            !message.contains("refused a statement"),
+            "a panicked thread was reported as a refused statement: {message}"
+        );
     }
 
     #[test]

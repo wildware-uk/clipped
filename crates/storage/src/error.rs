@@ -107,6 +107,18 @@ pub enum StorageError {
         /// What SQLite said.
         source: rusqlite::Error,
     },
+    /// The background writer thread panicked, so what it was holding was lost.
+    ///
+    /// A queued write is the caller's closure — this crate does not know what a
+    /// row means — and it runs on a thread of its own, so a panic inside one
+    /// takes the writer down and the batch it was in with it. It has a variant
+    /// of its own because whoever finds this in a user's log has to be sent
+    /// looking for a panic, and an SQLite error would send them looking for a
+    /// statement that was never issued (AGENTS.md section 15).
+    ///
+    /// Nothing that was already committed is affected, and no media file is:
+    /// the writer only ever wrote metadata.
+    WriterPanicked,
     /// SQLite refused a statement outside migration.
     Sqlite(rusqlite::Error),
 }
@@ -181,6 +193,11 @@ impl fmt::Display for StorageError {
                  so the database was left unchanged: {source}",
                 destination.display()
             ),
+            Self::WriterPanicked => write!(
+                f,
+                "the Clipped database writer thread panicked, so the writes it had not yet \
+                 committed were lost; recordings are unaffected"
+            ),
             Self::Sqlite(source) => write!(f, "the Clipped database refused a statement: {source}"),
         }
     }
@@ -197,7 +214,8 @@ impl std::error::Error for StorageError {
             Self::NotAClippedDatabase { .. }
             | Self::FromNewerVersion { .. }
             | Self::MigrationRequired { .. }
-            | Self::MigrationBrokeReferences { .. } => None,
+            | Self::MigrationBrokeReferences { .. }
+            | Self::WriterPanicked => None,
         }
     }
 }
