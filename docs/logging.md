@@ -48,6 +48,13 @@ non-Windows machine — Clipped targets Windows, but the crate still builds and
 tests elsewhere — the directory follows `$XDG_STATE_HOME/clipped`, falling back
 to `$HOME/.local/state/clipped`.
 
+`%LOCALAPPDATA%\Clipped` is not only the log directory. The encoder's capability
+cache and the user's own game catalogue live in it too, and
+`clipped_logging::application_directory` is the one function that resolves it
+for all three — it is exported from this crate because this is the lowest layer
+all of them can see, not because where a user's files live is a diagnostics
+concern. Each caller still owns its own file name.
+
 Keeping that true takes a little care in the tests: `Path::file_name` splits on
 the separators of the platform it was compiled for, so a test that asserts on a
 `C:\...` literal passes on Windows and fails on Linux, where the whole literal is

@@ -61,6 +61,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use clipped_logging::application_directory;
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::Adapter;
@@ -121,15 +122,6 @@ pub const CACHE_FORMAT: u32 = 2;
 /// with published ones. That is correct — the measurements described the
 /// previous driver — and `capabilities --refresh` takes them again.
 pub const DETECTION_REVISION: u32 = 3;
-
-/// The directory name Clipped uses under `%LOCALAPPDATA%`.
-///
-/// Deliberately the same word `clipped-logging` uses for the same directory.
-/// The lookup is repeated here rather than shared because the helper in that
-/// crate is private and this crate must not depend on the shape of the log
-/// directory to find its own file; if a third crate needs it, that is the point
-/// at which it should move somewhere both can see.
-const APPLICATION_DIRECTORY: &str = "Clipped";
 
 /// What a display adapter set looks like, condensed to one line.
 ///
@@ -495,29 +487,6 @@ fn temporary_path(path: &Path) -> PathBuf {
     path.with_extension(format!("json.{}.tmp", std::process::id()))
 }
 
-/// Clipped's per-user data directory, by the same rule `clipped-logging` uses.
-fn application_directory() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .map(|local_app_data| PathBuf::from(local_app_data).join(APPLICATION_DIRECTORY))
-    }
-
-    #[cfg(not(windows))]
-    {
-        let state_home = std::env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(|home| PathBuf::from(home).join(".local").join("state"))
-            })?;
-        Some(state_home.join(APPLICATION_DIRECTORY.to_lowercase()))
-    }
-}
-
 /// A directory of one test's own, removed when it is dropped.
 ///
 /// Lives here rather than in a test module because the cache is not the only
@@ -807,10 +776,12 @@ mod tests {
             path.file_name().and_then(|name| name.to_str()),
             Some(CACHE_FILE_NAME)
         );
+        // `Clipped` spelled out rather than taken from `clipped-logging`, so
+        // that this asserts where the file goes rather than that a constant
+        // equals itself.
         let directory = path.parent().expect("the file is inside a directory");
         assert!(
-            directory.ends_with(APPLICATION_DIRECTORY)
-                || directory.ends_with(APPLICATION_DIRECTORY.to_lowercase()),
+            directory.ends_with("Clipped") || directory.ends_with("clipped"),
             "the cache should sit in Clipped's own directory, not in {}",
             directory.display()
         );

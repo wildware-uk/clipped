@@ -40,22 +40,14 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use clipped_logging::application_directory;
+
 use super::entry::{Entry, EntrySource};
 use super::error::CatalogueError;
 use super::schema::{self, Migration};
 
 /// The file name inside Clipped's per-user directory.
 pub const OVERLAY_FILE_NAME: &str = "games.toml";
-
-/// The directory name Clipped uses under `%LOCALAPPDATA%`.
-///
-/// The same word `clipped-logging` and `clipped-encoder` use for the same
-/// directory, and looked up the same way. The lookup is repeated rather than
-/// shared for the reason `crates/encoder/src/cache.rs` gives: the helper there
-/// is private, and this crate must not depend on the shape of another crate's
-/// cache to find its own file. A third copy would be the point at which it
-/// should move somewhere all three can see.
-const APPLICATION_DIRECTORY: &str = "Clipped";
 
 /// What happened to the overlay while loading a catalogue.
 ///
@@ -201,29 +193,6 @@ fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
     let temporary = path.with_file_name(name);
     fs::write(&temporary, text)?;
     fs::rename(&temporary, path)
-}
-
-/// Clipped's per-user data directory, by the same rule `clipped-logging` uses.
-fn application_directory() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .map(|local_app_data| PathBuf::from(local_app_data).join(APPLICATION_DIRECTORY))
-    }
-
-    #[cfg(not(windows))]
-    {
-        let state_home = std::env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(|home| PathBuf::from(home).join(".local").join("state"))
-            })?;
-        Some(state_home.join(APPLICATION_DIRECTORY.to_lowercase()))
-    }
 }
 
 #[cfg(test)]
@@ -629,10 +598,10 @@ name = "my-game.exe"
             // state rather than a failure: the catalogue is then the seed data.
             return;
         };
-        // Spelled out rather than built from `APPLICATION_DIRECTORY`, which
-        // would assert only that a constant equals itself. `Clipped` is the
-        // directory `clipped-logging` and the encoder's capability cache
-        // already use, and the overlay belongs beside them.
+        // Spelled out rather than taken from `clipped-logging`, which would
+        // assert only that a constant equals itself. `Clipped` is the directory
+        // the logs and the encoder's capability cache already use, and the
+        // overlay belongs beside them.
         #[cfg(windows)]
         {
             assert!(

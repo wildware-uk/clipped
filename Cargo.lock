@@ -231,6 +231,7 @@ dependencies = [
 name = "clipped-game-detection"
 version = "0.1.0"
 dependencies = [
+ "clipped-logging",
  "serde",
  "toml",
 ]

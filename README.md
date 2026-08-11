@@ -170,6 +170,13 @@ diagnostic is routed through a Clipped-specific wrapper. `clipped-logging`,
 crate takes it in the change that gives it something to log, and most of
 `crates/` is still documentation-only stubs.
 
+It also answers where Clipped's per-user directory is, for the crates that keep
+a file in it — the encoder's capability cache and the game catalogue's user
+overlay as well as the logs. That is not a diagnostics concern; it lives here
+because layer 0 is the lowest place all three can see, and one function saying
+where the directory is beats three copies that can drift apart (issue #228).
+`clipped-game-detection` takes the dependency for that reason alone.
+
 Two rules matter most:
 
 - **Nothing depends on the user interface.** `apps/desktop` and `packages/` are

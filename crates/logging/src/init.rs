@@ -12,17 +12,14 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt as fmt_layer, EnvFilter};
 
+use crate::directories::application_directory;
 use crate::error::LoggingError;
 use crate::filter::{candidate_directives, directive_from_level_file, FilterSource};
 
-/// The directory Clipped keeps per-user data in, relative to the platform's
-/// local application data directory.
-const APPLICATION_DIRECTORY: &str = "Clipped";
-
-/// The log directory, relative to [`APPLICATION_DIRECTORY`].
+/// The log directory, relative to [`application_directory`].
 const LOG_DIRECTORY: &str = "logs";
 
-/// The level configuration file, relative to [`APPLICATION_DIRECTORY`].
+/// The level configuration file, relative to [`application_directory`].
 const LEVEL_FILE: &str = "log-level.txt";
 
 /// How many rotated log files are kept by default.
@@ -147,34 +144,6 @@ impl fmt::Debug for LoggingGuard {
         // WorkerGuard has no useful representation and the directory contains
         // the account name, so neither is printed.
         f.write_str("LoggingGuard")
-    }
-}
-
-/// Clipped's per-user data directory.
-///
-/// On Windows this is `%LOCALAPPDATA%\Clipped`. Elsewhere — Clipped only
-/// targets Windows, but the crate must still build and test on a contributor's
-/// other machine — it follows the XDG state directory, `$XDG_STATE_HOME/clipped`
-/// or `$HOME/.local/state/clipped`.
-fn application_directory() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .map(|local_app_data| PathBuf::from(local_app_data).join(APPLICATION_DIRECTORY))
-    }
-
-    #[cfg(not(windows))]
-    {
-        let state_home = std::env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(|home| PathBuf::from(home).join(".local").join("state"))
-            })?;
-        Some(state_home.join(APPLICATION_DIRECTORY.to_lowercase()))
     }
 }
 

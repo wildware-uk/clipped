@@ -17,6 +17,10 @@
 //! - Resolving the log level from the environment and a configuration file,
 //!   without a rebuild.
 //! - File output with bounded rotation under a documented per-user directory.
+//! - Answering where that per-user directory is ([`application_directory`]) for
+//!   the other crates that keep a file in it. That is not a logging concern, and
+//!   it lives here because this is the lowest crate all of them can see rather
+//!   than because it belongs to diagnostics; issue #228 has the history.
 //! - The standard context fields ([`SessionContext`]) as types rather than
 //!   loose strings, so a typo cannot produce an unsearchable log line.
 //! - The guard rails that keep per-frame logging off capture threads
@@ -68,6 +72,7 @@
 //! ```
 
 mod context;
+mod directories;
 mod error;
 mod filter;
 mod frame;
@@ -75,6 +80,7 @@ mod init;
 mod redact;
 
 pub use context::{AudioSource, CaptureBackend, GameId, SessionContext, SessionId, VideoEncoder};
+pub use directories::application_directory;
 pub use error::{IdentifierRejection, LoggingError};
 pub use frame::{FrameSampler, FRAME_TRACING};
 pub use init::{

@@ -38,6 +38,11 @@ toml = "1.1"
 # The catalogue's shapes are deserialised, and the workspace pins one serde for
 # the reason its manifest gives.
 serde = { workspace = true, features = ["derive"] }
+# The user's overlay lives in Clipped's per-user directory, beside the logs and
+# the encoder's capability cache, and `clipped_logging::application_directory`
+# is the one function that says where that is (issue #228). clipped-logging is
+# layer 0 and this crate is layer 1, so this follows the dependency direction.
+clipped-logging.workspace = true
 
 [lints]
 workspace = true
