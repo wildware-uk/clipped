@@ -37,6 +37,7 @@
 //! | [`capabilities`] | The `capabilities` subcommand |
 //! | [`serve`] | The `serve` subcommand, and the recorder behind the IPC protocol |
 //! | [`start_at_login`] | The `start-at-login` subcommand: the opt-in registry value |
+//! | [`watch`] | The `watch` subcommand: recording games automatically |
 //! | [`shutdown`] | Ctrl+C, and the finalisation seam a recording ends through |
 
 pub mod capabilities;
@@ -48,6 +49,7 @@ pub mod record;
 pub mod serve;
 pub mod shutdown;
 pub mod start_at_login;
+pub mod watch;
 
 use std::error::Error;
 use std::fmt;
@@ -90,6 +92,8 @@ pub enum RunError {
     Serve(serve::ServeError),
     /// `start-at-login` failed.
     StartAtLogin(start_at_login::StartAtLoginError),
+    /// `watch` failed.
+    Watch(watch::WatchCommandError),
 }
 
 impl RunError {
@@ -131,6 +135,11 @@ impl RunError {
             // Windows arrangement, and a build without one has not met a
             // command line to fix.
             Self::StartAtLogin(_) => EXIT_FAILURE,
+            // A directory that cannot be written to, a catalogue that cannot be
+            // read, or detection that stopped. None of them is a command line
+            // to fix except the first, and that one names a path the user gave
+            // us, so the message is the useful part rather than `--help`.
+            Self::Watch(_) => EXIT_FAILURE,
         }
     }
 
@@ -155,6 +164,7 @@ impl fmt::Display for RunError {
             Self::Capabilities(error) => write!(formatter, "{error}"),
             Self::Serve(error) => write!(formatter, "{error}"),
             Self::StartAtLogin(error) => write!(formatter, "{error}"),
+            Self::Watch(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -167,6 +177,7 @@ impl Error for RunError {
             Self::Capabilities(error) => Some(error),
             Self::Serve(error) => Some(error),
             Self::StartAtLogin(error) => Some(error),
+            Self::Watch(error) => Some(error),
         }
     }
 }
@@ -201,6 +212,12 @@ impl From<start_at_login::StartAtLoginError> for RunError {
     }
 }
 
+impl From<watch::WatchCommandError> for RunError {
+    fn from(error: watch::WatchCommandError) -> Self {
+        Self::Watch(error)
+    }
+}
+
 /// Runs the subcommand the command line selected.
 ///
 /// A new subcommand is a variant on [`Command`] and an arm here.
@@ -216,6 +233,7 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::Capabilities(args) => capabilities::run(args).map_err(RunError::from),
         Command::Serve(args) => serve::run(args).map_err(RunError::from),
         Command::StartAtLogin(args) => start_at_login::run(args).map_err(RunError::from),
+        Command::Watch(args) => watch::run(args).map_err(RunError::from),
     }
 }
 

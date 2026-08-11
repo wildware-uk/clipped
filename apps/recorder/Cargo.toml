@@ -23,6 +23,11 @@ path = "src/main.rs"
 
 [dependencies]
 clipped-encoder.workspace = true
+# What started, what stopped, and whether it is a game. `watch` waits on the
+# process watcher and hands the catalogue to `clipped_session::automatic`, which
+# owns the policy between the two; this package is only the loop and the window
+# resolution the policy deliberately does not do (docs/sessions.md).
+clipped-game-detection.workspace = true
 # The protocol the desktop application drives this process through, and the
 # named pipe it arrives on (docs/ipc.md, ADR 0002). The messages, the framing
 # and the handshake live there so that both ends of the connection use one

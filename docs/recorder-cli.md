@@ -40,6 +40,15 @@ track's dimensions in its header and the encoder is configured for one size. The
 file is finished at that point and says so; what a session should do instead is
 [#184](https://github.com/wildware-uk/clipped/issues/184).
 
+**`watch` records games automatically.** It is the mode the product exists for
+(SPEC.md section 2): a game launching starts a session recording and quitting it
+finalises one, with nothing to press
+([#46](https://github.com/wildware-uk/clipped/issues/46)). It has the same two
+gaps `record` has — no audio track and no scaling — because it makes the same
+recording through the same call. [sessions.md](sessions.md) is the subsystem
+document: what a session is, what happens on a crash, a fast restart, a second
+game or a suspend, and where a session is written down.
+
 Everything else is here: the argument surface, `list-windows`, `capabilities`,
 `serve`, and a shutdown path that is now exercised against a real recording
 rather than only a fixture.
@@ -48,6 +57,7 @@ rather than only a fixture.
 
 ```text
 clipped-recorder record --window <TITLE>
+clipped-recorder watch [--output-directory <PATH>]
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
 clipped-recorder serve [--endpoint <NAME>]
@@ -55,6 +65,7 @@ clipped-recorder start-at-login <enable|disable|status>
 ```
 
 Nothing is currently specified without being declared: `record`,
+`watch` ([#46](https://github.com/wildware-uk/clipped/issues/46)),
 `list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)),
 `capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)),
 `serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)) and
@@ -158,6 +169,60 @@ Validation does write one thing, briefly: a uniquely named zero-byte probe file
 in the output directory, created and immediately deleted, because Windows has no
 permission bit that can be read and believed. Failing here beats failing twenty
 minutes into a session.
+
+## `watch`
+
+Records games as they start and stops when they exit, without being asked.
+
+```text
+clipped-recorder watch
+```
+
+That is a complete invocation. Recordings and session records go to
+`%USERPROFILE%\Videos\Clipped`; the directory is created at start-up rather
+than when a game launches, so a drive that is not connected is reported before
+it costs somebody a session.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--output-directory <PATH>` | the Clipped folder of your videos directory | Where recordings and session records go |
+| `--window-timeout <SECONDS>` | 120 | How long a game may take to put a window on screen |
+| `--resolution`, `--framerate`, `--codec`, `--encoder` | as `record` | Applied to every automatic recording |
+| `--microphone`, `--system-audio` | `default` | As `record`, and with the same warning: there is no audio track yet |
+
+What it prints, on standard error:
+
+```text
+Watching for games. Recordings go to D:\clips. Press Ctrl+C to stop.
+Recording Counter-Strike 2 to D:\clips\clipped-counter-strike-2-20260811-143205.mkv.
+Session counter-strike-2-20260811-143205 of Counter-Strike 2: 1 recording totalling 1084s.
+  D:\clips\clipped-counter-strike-2-20260811-143205.mkv
+Automatic recording stopped.
+```
+
+Standard output is left empty, as it is for `record`: what this command produces
+is files.
+
+`--window-timeout` is not a timeout on something going wrong. A launch is
+reported a few seconds after the process starts and a game can take much longer
+than that to reach a window while it compiles shaders, so this is how long a
+game is allowed to take to appear. A game that never shows one is reported in
+the session's record and not tried again.
+
+There is deliberately **no capture-mode option**. Full Session is the only mode
+this build can run, and an option offering four values three of which would do
+nothing is a control that silently does nothing (AGENTS.md section 27).
+[sessions.md](sessions.md) names the issues that build the other three, and the
+rest of what `watch` decides: a tie in the game catalogue, a crash, a fast
+restart, a second game launching mid-session, and a suspend.
+
+Ctrl+C stops watching. Any recording is finished first, exactly as it is for
+`record`, and the session is written out and reported before the process exits.
+
+The desktop application cannot drive this yet, and cannot see a session even
+when the recorder is running one: the control protocol describes a recording by
+its capture target and has no vocabulary for a game or a session. That is
+[#241](https://github.com/wildware-uk/clipped/issues/241).
 
 ## `list-windows`
 
@@ -472,6 +537,11 @@ to describe the desktop at all.
 `capabilities` exits 0 even on a machine with no hardware encoder — that is a
 report, not a failure — and 1 only when the adapters could not be enumerated at
 all.
+
+`watch` exits 0 when Ctrl+C stopped it, and 1 when the output directory cannot
+be written to, the game catalogue cannot be read, or process detection stopped
+while it was watching — the last of which means no further game would have been
+noticed, so continuing would be a recorder that quietly records nothing.
 
 `start-at-login` exits 0 for all three actions, including `disable` when nothing
 was configured: that is the state being asked for, and treating it as a failure

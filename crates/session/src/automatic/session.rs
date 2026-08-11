@@ -1,0 +1,613 @@
+//! What a session *is*: the thing recordings, clips, bookmarks and events hang
+//! off.
+//!
+//! A session is one sitting with one game. It is not the same thing as a
+//! recording: a player who alt-F4s and comes straight back has had one sitting
+//! and produced two files, and a game whose window is destroyed and recreated
+//! on a resolution change has had one sitting and produced two files as well.
+//! The session is what says those files belong together, which is the whole
+//! reason the model exists rather than the library simply holding a list of
+//! `.mkv` files.
+//!
+//! # What this build models, and what it does not
+//!
+//! Recordings and events, because those are the two that exist. Clips are
+//! [issue #37](https://github.com/wildware-uk/clipped/issues/37) and bookmarks
+//! are M8; nothing in this build can create one, so there is no type for one
+//! here and nothing pretends otherwise (AGENTS.md section 27). Both are
+//! reserved in the sidecar schema — see [`super::sidecar`] — so that adding
+//! them is not a format change.
+//!
+//! # Where it lives
+//!
+//! In memory while the recorder runs, and in a JSON sidecar beside the
+//! recordings ([`super::sidecar`]). **M6's
+//! [issue #55](https://github.com/wildware-uk/clipped/issues/55) owns the real
+//! store**: the SQLite library index that makes sessions searchable, joins them
+//! to clips and survives being asked about a thousand of them. This is the
+//! minimum the recorder needs today so that "which game was this, and which
+//! files belong together" is not held only in the memory of a process that can
+//! be killed (AGENTS.md sections 17 and 55).
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use crate::report::{EndReason, RecordingReport};
+
+/// The `game_id` a session is filed under when the catalogue would not choose.
+///
+/// A tie between catalogue entries is a real answer and not a failure — see
+/// [`GameIdentity::Ambiguous`] — but a session still needs something to be
+/// named after on disk, and it must not be one of the candidates.
+pub const UNATTRIBUTED: &str = "unattributed";
+
+/// Which game a session is of.
+///
+/// There is deliberately no "unknown" variant. A process the catalogue does not
+/// claim never becomes a session at all, so every session here is of something
+/// the catalogue recognised; what varies is whether it recognised *one* thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GameIdentity {
+    /// Exactly one catalogue entry claimed the process.
+    Known {
+        /// The entry's `game_id`.
+        game_id: String,
+        /// What a person calls the game.
+        name: String,
+    },
+
+    /// Several entries claimed it equally well, and the catalogue does not
+    /// guess between them (`clipped_game_detection::catalogue::Match`).
+    ///
+    /// The session is recorded and filed under [`UNATTRIBUTED`] with the
+    /// candidates written down, rather than being filed under a coin toss or
+    /// not recorded at all. The footage is what cannot be made again; which of
+    /// three names it goes under can be decided afterwards by a person, and the
+    /// candidates are the whole of what they need to decide it.
+    Ambiguous {
+        /// Every entry that tied, by `game_id`, in catalogue order.
+        candidates: Vec<String>,
+    },
+}
+
+impl GameIdentity {
+    /// The identifier a session of this game is filed and named under.
+    #[must_use]
+    pub fn slug(&self) -> &str {
+        match self {
+            Self::Known { game_id, .. } => game_id,
+            Self::Ambiguous { .. } => UNATTRIBUTED,
+        }
+    }
+
+    /// What to call the game in a log line or on a screen.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::Known { name, .. } => name,
+            Self::Ambiguous { .. } => "an unattributed game",
+        }
+    }
+
+    /// Whether both identities name the same game.
+    ///
+    /// Two ambiguous matches are the same identity only when they tied between
+    /// exactly the same candidates: a relaunch that ties differently is a
+    /// different answer and does not rejoin the session.
+    #[must_use]
+    pub fn is_same_game_as(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+/// A session's stable identity, and the stem every file of it is named from.
+///
+/// `<game_id>-<yyyymmdd>-<hhmmss>`, from the moment the session started. It is
+/// sortable, it is legible in a directory listing, and it is a legal Windows
+/// file name because a `game_id` is restricted to `[a-z0-9-]`
+/// (`clipped_game_detection::catalogue::GameId`) and the rest is digits.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// The identifier for a session of `game` that started at `started`.
+    #[must_use]
+    pub fn new(game: &GameIdentity, started: SystemTime) -> Self {
+        Self(format!("{}-{}", game.slug(), super::clock::stamp(started)))
+    }
+
+    /// The same, stamped against a stated offset from UTC.
+    ///
+    /// Tests use it: [`Self::new`] reads the machine's own offset, so an
+    /// assertion about the text it produces would pass in one time zone and
+    /// fail in the next (AGENTS.md section 25).
+    #[cfg(test)]
+    pub(crate) fn at(game: &GameIdentity, started: SystemTime, offset: time::UtcOffset) -> Self {
+        Self(format!(
+            "{}-{}",
+            game.slug(),
+            super::clock::stamp_at(started, offset)
+        ))
+    }
+
+    /// The identifier as written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One recording within a session, and what it turned out to be.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionRecording {
+    pub(crate) index: u32,
+    pub(crate) output: PathBuf,
+    pub(crate) started_at: SystemTime,
+    pub(crate) ended_at: Option<SystemTime>,
+    pub(crate) outcome: Option<RecordingOutcomeSummary>,
+}
+
+impl SessionRecording {
+    /// Which recording of the session this is, counting from one.
+    #[must_use]
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The file it was written to.
+    #[must_use]
+    pub fn output(&self) -> &Path {
+        &self.output
+    }
+
+    /// When it started.
+    #[must_use]
+    pub const fn started_at(&self) -> SystemTime {
+        self.started_at
+    }
+
+    /// When it ended, or [`None`] while it is still running.
+    #[must_use]
+    pub const fn ended_at(&self) -> Option<SystemTime> {
+        self.ended_at
+    }
+
+    /// What it turned out to be, or [`None`] while it is still running.
+    #[must_use]
+    pub const fn outcome(&self) -> Option<&RecordingOutcomeSummary> {
+        self.outcome.as_ref()
+    }
+}
+
+/// How a recording ended, in the few fields a session needs to keep.
+///
+/// A summary rather than the whole [`RecordingReport`]: what belongs in a
+/// session's metadata is what somebody looking at their library would ask —
+/// how long, how many frames, what happened — and not the frame accounting a
+/// recording produces for diagnostics, which is in the log.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordingOutcomeSummary {
+    /// The recording ran and the file was finalised.
+    Recorded {
+        /// Frames submitted to the encoder.
+        frames_encoded: u64,
+        /// The span between the first and last timestamps written.
+        duration: Duration,
+        /// The size of the picture.
+        size: (u32, u32),
+        /// Why it ended.
+        end_reason: EndReason,
+    },
+
+    /// No capturable window belonging to the game appeared, so nothing was
+    /// recorded.
+    NoWindow {
+        /// What was tried and what the desktop said.
+        detail: String,
+    },
+
+    /// The recording failed. Whatever had been written before the failure was
+    /// still finalised, unless it failed before its first packet.
+    Failed {
+        /// What went wrong.
+        detail: String,
+    },
+}
+
+impl RecordingOutcomeSummary {
+    /// The token this outcome is written as in the sidecar and in logs.
+    #[must_use]
+    pub const fn token(&self) -> &'static str {
+        match self {
+            Self::Recorded { .. } => "recorded",
+            Self::NoWindow { .. } => "no-window",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    /// Whether a file was produced.
+    #[must_use]
+    pub const fn produced_a_file(&self) -> bool {
+        matches!(self, Self::Recorded { .. })
+    }
+
+    /// The summary of a finished recording.
+    #[must_use]
+    pub fn of(report: &RecordingReport) -> Self {
+        Self::Recorded {
+            frames_encoded: report.frames_encoded(),
+            duration: report.duration(),
+            size: report.size(),
+            end_reason: report.end_reason(),
+        }
+    }
+}
+
+/// Something that happened during a session.
+///
+/// The session's own history, which is what makes "why does this session have
+/// three files in it?" answerable afterwards rather than only from a log that
+/// has since rotated away (`docs/logging.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionEvent {
+    pub(crate) at: SystemTime,
+    pub(crate) kind: SessionEventKind,
+}
+
+impl SessionEvent {
+    /// When it happened.
+    #[must_use]
+    pub const fn at(&self) -> SystemTime {
+        self.at
+    }
+
+    /// What happened.
+    #[must_use]
+    pub const fn kind(&self) -> &SessionEventKind {
+        &self.kind
+    }
+}
+
+/// What a [`SessionEvent`] records.
+///
+/// Game events — a kill, a round starting — are a different vocabulary
+/// entirely, they come from plugins, and they are M9's `clipped-events`. These
+/// are events about the *session*: they explain its shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionEventKind {
+    /// The session began, because this process was recognised as a game.
+    Started {
+        /// The process the game was recognised by.
+        pid: u32,
+        /// Its executable's file name.
+        image_name: String,
+    },
+
+    /// A recording within the session began.
+    RecordingStarted {
+        /// Which recording of the session.
+        index: u32,
+        /// Where it is being written.
+        output: PathBuf,
+    },
+
+    /// A recording within the session ended.
+    RecordingEnded {
+        /// Which recording of the session.
+        index: u32,
+        /// How it ended.
+        outcome: String,
+    },
+
+    /// The game's process exited.
+    GameExited {
+        /// The process that exited.
+        pid: u32,
+    },
+
+    /// The same game launched again while the session was still open, so this
+    /// session continued rather than a second one starting.
+    GameRelaunched {
+        /// The new process.
+        pid: u32,
+    },
+
+    /// A different game started while this session was recording.
+    ///
+    /// There is one encoder and one capture target, so it was not recorded.
+    /// See [`super::SessionManager`] for what happens to it afterwards.
+    AnotherGameStarted {
+        /// What the catalogue made of it.
+        game_id: String,
+        /// Its process.
+        pid: u32,
+    },
+
+    /// The machine appears to have been suspended and resumed.
+    SystemResumed {
+        /// How long the clock jumped by.
+        gap: Duration,
+    },
+
+    /// The session reached its cap on recordings and stopped starting them.
+    RecordingLimitReached {
+        /// The cap that was reached.
+        limit: u32,
+    },
+
+    /// The session ended.
+    Ended {
+        /// Why.
+        reason: SessionEndReason,
+    },
+}
+
+/// Why a session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEndReason {
+    /// The game exited and did not come back within the restart grace period.
+    GameExited,
+    /// The machine was suspended, which ends the grace period rather than
+    /// letting a relaunch hours later look like a fast restart.
+    SystemResumed,
+    /// The recorder was shutting down.
+    RecorderStopping,
+}
+
+impl SessionEndReason {
+    /// The token this reason is written as.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::GameExited => "game-exited",
+            Self::SystemResumed => "system-resumed",
+            Self::RecorderStopping => "recorder-stopping",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionEndReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
+/// One sitting with one game.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Session {
+    pub(crate) id: SessionId,
+    pub(crate) game: GameIdentity,
+    pub(crate) started_at: SystemTime,
+    pub(crate) ended_at: Option<SystemTime>,
+    pub(crate) recordings: Vec<SessionRecording>,
+    pub(crate) events: Vec<SessionEvent>,
+}
+
+impl Session {
+    /// A session of `game` that started at `started`.
+    pub(crate) fn new(game: GameIdentity, started: SystemTime) -> Self {
+        Self {
+            id: SessionId::new(&game, started),
+            game,
+            started_at: started,
+            ended_at: None,
+            recordings: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    /// The session's identifier, which is also the stem its files are named
+    /// from.
+    #[must_use]
+    pub const fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    /// Which game it is of.
+    #[must_use]
+    pub const fn game(&self) -> &GameIdentity {
+        &self.game
+    }
+
+    /// When it started.
+    #[must_use]
+    pub const fn started_at(&self) -> SystemTime {
+        self.started_at
+    }
+
+    /// When it ended, or [`None`] while it is open.
+    #[must_use]
+    pub const fn ended_at(&self) -> Option<SystemTime> {
+        self.ended_at
+    }
+
+    /// The recordings it contains, oldest first.
+    #[must_use]
+    pub fn recordings(&self) -> &[SessionRecording] {
+        &self.recordings
+    }
+
+    /// Its history.
+    #[must_use]
+    pub fn events(&self) -> &[SessionEvent] {
+        &self.events
+    }
+
+    /// Where the sidecar for this session goes, given the recordings directory.
+    #[must_use]
+    pub fn sidecar_path(&self, directory: &Path) -> PathBuf {
+        directory.join(format!("clipped-{}.session.json", self.id))
+    }
+
+    /// Where recording `index` of this session goes.
+    ///
+    /// The first recording of a session takes the plain name so that the
+    /// overwhelmingly common case — one sitting, one file — produces a file
+    /// named after the session and nothing else.
+    #[must_use]
+    pub fn recording_path(&self, directory: &Path, index: u32) -> PathBuf {
+        let name = if index <= 1 {
+            format!("clipped-{}.mkv", self.id)
+        } else {
+            format!("clipped-{}-{index}.mkv", self.id)
+        };
+        directory.join(name)
+    }
+
+    /// Adds an event.
+    pub(crate) fn record(&mut self, at: SystemTime, kind: SessionEventKind) {
+        self.events.push(SessionEvent { at, kind });
+    }
+
+    /// Adds a recording that has just started.
+    pub(crate) fn begin_recording(&mut self, index: u32, output: PathBuf, at: SystemTime) {
+        self.recordings.push(SessionRecording {
+            index,
+            output: output.clone(),
+            started_at: at,
+            ended_at: None,
+            outcome: None,
+        });
+        self.record(at, SessionEventKind::RecordingStarted { index, output });
+    }
+
+    /// Records what a recording turned out to be.
+    pub(crate) fn end_recording(
+        &mut self,
+        index: u32,
+        outcome: RecordingOutcomeSummary,
+        at: SystemTime,
+    ) {
+        let token = outcome.token().to_owned();
+        if let Some(recording) = self
+            .recordings
+            .iter_mut()
+            .find(|recording| recording.index == index)
+        {
+            recording.ended_at = Some(at);
+            recording.outcome = Some(outcome);
+        }
+        self.record(
+            at,
+            SessionEventKind::RecordingEnded {
+                index,
+                outcome: token,
+            },
+        );
+    }
+
+    /// Closes the session.
+    pub(crate) fn end(&mut self, reason: SessionEndReason, at: SystemTime) {
+        self.ended_at = Some(at);
+        self.record(at, SessionEventKind::Ended { reason });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known() -> GameIdentity {
+        GameIdentity::Known {
+            game_id: "counter-strike-2".to_owned(),
+            name: "Counter-Strike 2".to_owned(),
+        }
+    }
+
+    fn at(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn an_identifier_is_the_game_and_the_moment_the_session_started() {
+        // 2026-08-11T14:32:05Z, stamped in UTC so the assertion is about the
+        // shape rather than about where the machine running it is.
+        let id = SessionId::at(&known(), at(1_786_458_725), time::UtcOffset::UTC);
+        assert_eq!(id.as_str(), "counter-strike-2-20260811-143205");
+    }
+
+    #[test]
+    fn a_tie_is_filed_under_a_name_that_is_none_of_the_candidates() {
+        // Filing an ambiguous session under one of the candidates is exactly
+        // the guess the catalogue refuses to make, and it would be invisible
+        // afterwards: the file would simply be named after the wrong game.
+        let ambiguous = GameIdentity::Ambiguous {
+            candidates: vec!["first-game".to_owned(), "second-game".to_owned()],
+        };
+        assert_eq!(ambiguous.slug(), UNATTRIBUTED);
+        let id = SessionId::new(&ambiguous, at(1_786_458_725));
+        assert!(
+            !id.as_str().contains("first-game") && !id.as_str().contains("second-game"),
+            "{id}"
+        );
+    }
+
+    #[test]
+    fn the_first_recording_of_a_session_is_named_after_the_session_alone() {
+        let session = Session::new(known(), at(1_786_458_725));
+        let directory = Path::new(r"D:\clips");
+        let id = session.id();
+
+        assert_eq!(
+            session.recording_path(directory, 1),
+            directory.join(format!("clipped-{id}.mkv"))
+        );
+        assert_eq!(
+            session.recording_path(directory, 2),
+            directory.join(format!("clipped-{id}-2.mkv"))
+        );
+        assert_eq!(
+            session.sidecar_path(directory),
+            directory.join(format!("clipped-{id}.session.json"))
+        );
+    }
+
+    #[test]
+    fn two_ambiguous_matches_are_the_same_game_only_when_they_tied_the_same_way() {
+        let one = GameIdentity::Ambiguous {
+            candidates: vec!["a".to_owned(), "b".to_owned()],
+        };
+        let same = GameIdentity::Ambiguous {
+            candidates: vec!["a".to_owned(), "b".to_owned()],
+        };
+        let different = GameIdentity::Ambiguous {
+            candidates: vec!["a".to_owned(), "c".to_owned()],
+        };
+
+        assert!(one.is_same_game_as(&same));
+        assert!(!one.is_same_game_as(&different));
+        assert!(!one.is_same_game_as(&known()));
+    }
+
+    #[test]
+    fn a_recording_that_ended_is_stored_against_the_recording_it_ended() {
+        let mut session = Session::new(known(), at(1_000));
+        session.begin_recording(1, PathBuf::from("one.mkv"), at(1_000));
+        session.begin_recording(2, PathBuf::from("two.mkv"), at(2_000));
+        session.end_recording(
+            1,
+            RecordingOutcomeSummary::Failed {
+                detail: "the encoder went".to_owned(),
+            },
+            at(1_500),
+        );
+
+        assert_eq!(session.recordings()[0].ended_at(), Some(at(1_500)));
+        assert!(matches!(
+            session.recordings()[0].outcome(),
+            Some(RecordingOutcomeSummary::Failed { .. })
+        ));
+        assert_eq!(
+            session.recordings()[1].outcome(),
+            None,
+            "the second recording is still running and must not have been ended"
+        );
+    }
+}

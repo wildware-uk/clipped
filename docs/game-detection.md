@@ -4,12 +4,14 @@ Clipped records games without being told to, which means it has to know what a
 game is. `clipped-game-detection` is where that knowledge lives.
 
 **Status: the game catalogue exists ([#42]) and the process watcher exists
-([#41]). Nothing joins them yet.** The watcher reports what started and what
-stopped; the catalogue can say which game a process is; the layer that asks one
-about the other, and starts a recording, is [#46]. Launcher-specific detection
-is [#43] and [#44], and the user-facing registration screen is [#45]. This
-document grows a section per part as they land, and marks the rest as intent
-(AGENTS.md section 7).
+([#41]).** The watcher reports what started and what stopped; the catalogue can
+say which game a process is. Nothing in *this* crate joins them, deliberately —
+the layer that asks one about the other, and starts a recording, is the session
+manager in `clipped-session` ([#46], [sessions.md](sessions.md)), because
+deciding what to do about a game is not detection's business. Launcher-specific
+detection is [#43] and [#44], and the user-facing registration screen is [#45].
+This document grows a section per part as they land, and marks the rest as
+intent (AGENTS.md section 7).
 
 [#41]: https://github.com/wildware-uk/clipped/issues/41
 [#42]: https://github.com/wildware-uk/clipped/issues/42

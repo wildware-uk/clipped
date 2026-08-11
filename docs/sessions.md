@@ -1,0 +1,382 @@
+# Sessions and automatic recording
+
+Clipped records games without being told to. This document covers the part that
+decides *when*: what a session is, how a game launching becomes a recording,
+what happens when one crashes, restarts, is joined by a second game or is
+interrupted by the machine going to sleep, and where a session is written down.
+
+**Status: this is built and running.** `clipped-recorder watch` records games as
+they start and finalises the recording when they stop
+([#46]). What is deliberately not built is named as such throughout, with the
+issue that builds it.
+
+[#37]: https://github.com/wildware-uk/clipped/issues/37
+[#41]: https://github.com/wildware-uk/clipped/issues/41
+[#42]: https://github.com/wildware-uk/clipped/issues/42
+[#46]: https://github.com/wildware-uk/clipped/issues/46
+[#55]: https://github.com/wildware-uk/clipped/issues/55
+[#240]: https://github.com/wildware-uk/clipped/issues/240
+[#241]: https://github.com/wildware-uk/clipped/issues/241
+
+## What a session is
+
+**One sitting with one game.** It is not the same thing as a recording, and the
+difference is the whole reason the model exists.
+
+```text
+Session  counter-strike-2-20260811-143205
+  ├── recording 1   clipped-counter-strike-2-20260811-143205.mkv     18m 04s
+  ├── recording 2   clipped-counter-strike-2-20260811-143205-2.mkv   41m 12s
+  └── events        started, recording started, game exited, relaunched, …
+```
+
+Two files, one sitting. A player who alt-F4s and comes straight back has not
+started a second evening; a game whose window is destroyed and recreated on a
+resolution change has not either. A container cannot span a gap and there is one
+encoder, so each of those produces a new file — and the session is what says the
+files belong together.
+
+A session groups **recordings, clips, bookmarks and events**. Recordings and
+events exist and are modelled. Clips are [#37] and bookmarks are M8; nothing in
+this build can create either, so there is no Rust type for one and no invented
+data (AGENTS.md section 27). Both are reserved in the file format below so that
+adding them is an addition rather than a format change.
+
+## Where the pieces are
+
+```text
+ clipped-game-detection            clipped-session::automatic         apps/recorder
+ ──────────────────────            ──────────────────────────         ─────────────
+ ProcessWatcher   what started ──▶ SessionManager                     watch
+ Catalogue        is it a game? ─▶   the policy, and the session ──▶  resolve a window
+                                     model around it              ◀── run the recording
+                                                                      report the outcome
+```
+
+Three things already existed and nothing joined them: the watcher reports
+launches and exits without polling ([#41]), the catalogue answers "which game is
+this process?" ([#42]), and `clipped_session::record` records a window to a
+playable file. `clipped_session::automatic` is the policy between them.
+
+It is a **state machine over `(watcher event, wall-clock reading)`**. It opens no
+window, starts no thread and touches nothing but the small file it writes for
+each session. Every rule below is therefore a rule about timing and identity, and
+is tested against constructed process trees on a clock the test supplies — a
+suspend of eight hours is two `SystemTime` values, not eight hours of waiting.
+`apps/recorder/src/watch.rs` is the driver that carries out what it decides,
+because turning a process identifier into a window needs a desktop.
+
+## The capture mode
+
+**Full Session**, and only that: start when the game starts, stop when it exits,
+keep everything (SPEC.md section 7).
+
+The other three modes are not offered rather than offered and doing nothing.
+Match Recording needs an integration that can say when a match begins, which is
+the highlight provider API in M9. Highlights Only and Manual/Replay Buffer need a
+replay buffer a clip can be *saved* from: the buffer exists and fills from the
+same encoder (`docs/replay-buffer.md`), and turning a window of it into a file is
+[#37].
+
+## How a launch becomes a recording
+
+1. The watcher reports a launch — the whole chain, with a launcher, the game and
+   any wrapper between them collapsed into one thing that started ([#41]).
+2. The session manager tests each member against the catalogue, **newest first**.
+   A process cannot start before its parent, so the last member to start is the
+   best single guess at what was launched, and searching backwards from it finds
+   the game rather than the launcher that started it.
+3. If nothing matches, nothing happens. That is almost every launch on a Windows
+   machine, and it is logged at `debug` because the volume would otherwise
+   dominate the diagnostics.
+4. If something matches, a session opens and a recording is asked for.
+5. The driver waits for the game to put a capturable window on screen —
+   `--window-timeout`, two minutes by default. A launch is reported a few seconds
+   after the process starts and a game can take much longer than that to reach a
+   window while it compiles shaders, so giving up at the first look would mean
+   recording almost nothing.
+6. `clipped_session::record` runs on a thread of its own until the game's window
+   goes or the manager raises the stop signal, and finalises the file on every
+   path out.
+
+## The decisions, and why each one is what it is
+
+### A tie in the catalogue is recorded, and left unattributed
+
+`Catalogue::match_process` can answer `Ambiguous`: several entries claim the
+executable equally well, and the catalogue deliberately does not guess between
+them (`docs/game-detection.md`). Both obvious responses are wrong. Not recording
+loses footage that cannot be made again; guessing files somebody's session under
+the wrong game, silently, and the file is simply named after a game they were
+not playing.
+
+So the session is recorded and filed under `unattributed`, and **every candidate
+is written into its record**. The footage is safe, no claim is made that was not
+earned, and a person — or M6's library — has exactly what they need to say which
+game it was.
+
+### Killing the game finalises the recording
+
+A crash is not a special case. The process vanishes, the window goes with it,
+capture ends, and `clipped_session` flushes the encoder and writes the
+container's trailer on its way out (AGENTS.md section 17,
+[ADR 0001](adr/0001-mkv-archival-container.md)). The watcher reports the process
+exiting a moment later, and the manager raises the stop signal if the recording
+somehow has not ended already.
+
+In practice the window is gone before the watcher notices the process is, which
+is why both paths exist and why the file is finalised by the first of them.
+
+### A fast restart is one session, two recordings
+
+The session stays open for **60 seconds** after the game's last process exits.
+The same game launching inside that window rejoins the session and its recording
+becomes recording 2. A relaunch after it, or of a different game, is a new
+session.
+
+Getting this wrong is costly in both directions. Too short and a library is
+fragmented by somebody restarting a game that crashed on load; too long and a
+session spans a gap the user thinks ended. A minute is comfortably longer than
+alt-F4-and-back and comfortably shorter than a break.
+
+### Known child processes hold a session open, and are never recorded
+
+A catalogue entry can list a game's known helpers. The catalogue is explicit that
+they are **not match keys**: a crash handler is not the game, and treating the
+list as a way in would make every anti-cheat service a reason to start recording.
+
+Here they mean one thing. The 60-second grace does not begin while a process
+named in the entry, from the same launch, is still running. That is the case
+where a launcher exits and hands over, or where a game quits to a helper that
+lingers, and it stops the sitting being split in two. They are never a capture
+target, so the crash reporter is not what gets recorded.
+
+Only processes that were part of the launch that started the session count. A
+helper started much later is a launch of its own, matches nothing, and is
+ignored.
+
+### A second game during a session is noted, not recorded
+
+There is one encoder and one capture target. The session in progress keeps them:
+pre-empting would truncate a recording the user is in the middle of, and a game
+starting while you are playing another is very often a launcher or a companion
+application rather than a change of mind.
+
+The launch is written into the active session's events and remembered. When that
+session ends, **the most recently deferred game that is still running** becomes a
+session of its own and is recorded from that moment — not from its launch, which
+may have been an hour earlier. One that exited while it waited is forgotten.
+
+### A suspend ends the recording rather than putting a hole in it
+
+The manager is driven by a loop that calls it at least once a second, so a
+wall-clock jump of **90 seconds or more** means the machine slept. A file whose
+timestamps span eight hours of nothing is not a recording anybody can use: it
+reports an eight-hour duration, lays out on an editor's timeline at eight hours,
+and holds five minutes of pictures.
+
+So on a resume the recording is finished, and if the game is still running
+another begins in the same session. A session that was inside its restart grace
+is closed outright — hours went by, not seconds, and a game launched after a
+resume must not be joined to yesterday's session.
+
+This is inferred from the clock rather than from `WM_POWERBROADCAST`, which would
+give warning *before* the suspend and let the file be finished first. That needs
+a message loop this crate does not have, and it is [#240].
+
+### A game already running when the recorder starts is not recorded
+
+Full Session means "start when the game starts". Joining halfway would produce a
+session that began at an arbitrary moment and a file that starts in the middle of
+whatever the player was doing.
+
+`watch` says so on start-up, by name, rather than leaving somebody to conclude
+the recorder is broken:
+
+```text
+Clipped Video Pattern is already running, so it is not being recorded.
+Automatic recording starts when a game launches.
+```
+
+### Recordings within a session are bounded
+
+A recording that ends while the game is still running is followed by another,
+after a delay, which is what carries a session across a window being destroyed
+and recreated. A game that somehow ended every recording immediately would spin,
+so a session starts at most **100** recordings and says so when it stops.
+
+The delay is **5 seconds**, and it is a race rather than politeness: a recording
+ends the instant the window goes, and the process exiting reaches the manager
+through the watcher up to `notification_interval + exit_settle_period` — three
+seconds with the shipped configuration — later. Restarting sooner would have the
+recorder go looking for the window of a game it does not yet know has quit, on
+every ordinary exit.
+
+A recording that found **no window at all** is not retried for the same process.
+The window timeout has already given the game its chance, and retrying would have
+the driver searching the desktop for a process that has none for as long as it
+ran.
+
+## Settings
+
+| Setting | Default | What it decides |
+| --- | --- | --- |
+| `restart_grace` | 60s | How long a session waits for the same game to come back |
+| `suspend_gap` | 90s | How large a wall-clock jump is read as the machine having slept |
+| `recording_restart_delay` | 5s | How long before recording the same game again |
+| `max_recordings_per_session` | 100 | The loop guard on recordings in one session |
+| `--window-timeout` | 120s | How long a game may take to put a window on screen |
+
+Only the last is a command-line option. The other four are
+`clipped_session::automatic::AutomaticSettings`, with the defaults above, and are
+not exposed to a user yet because the place a user would set them is the settings
+screen (M5) and the per-game overrides (M7).
+
+**Per-game settings are not applied.** A catalogue entry can carry
+`default_settings` and nothing reads them, deliberately: per-game configuration
+is M7 (SPEC.md section 31), and interpreting them here would be building a later
+milestone's work. Every automatic recording is made with the global settings
+`watch` was given.
+
+## Where a session is written down
+
+**M6's [#55] owns the real store**: the SQLite library index that makes sessions
+searchable, joins them to clips and survives being asked about a thousand of
+them. Nothing here is a second attempt at it (AGENTS.md section 55).
+
+What exists today is the minimum the recorder needs so that "which game was this,
+and which of these files belong together" is not held only in the memory of a
+process that is expected to be killed (AGENTS.md section 17): **one JSON sidecar
+per session**, written beside the recordings and named after the session. It is
+rewritten whenever the session changes — to a temporary file and then renamed
+over the previous one, so a recorder killed mid-write does not leave a truncated
+record where the session's own history used to be.
+
+```text
+D:\clips\
+    clipped-counter-strike-2-20260811-143205.session.json
+    clipped-counter-strike-2-20260811-143205.mkv
+    clipped-counter-strike-2-20260811-143205-2.mkv
+```
+
+A session's identifier is `<game_id>-<yyyymmdd>-<hhmmss>` in local time, matching
+the form `clipped-recorder record` already names its own files in. The first
+recording of a session takes the plain name, so the overwhelmingly common case —
+one sitting, one file — produces a file named after the session and nothing else.
+
+### The file
+
+```json
+{
+  "schema_version": 1,
+  "session_id": "counter-strike-2-20260811-143205",
+  "game": {
+    "kind": "known",
+    "game_id": "counter-strike-2",
+    "name": "Counter-Strike 2"
+  },
+  "started_at": "2026-08-11T14:32:05+01:00",
+  "ended_at": "2026-08-11T15:31:21+01:00",
+  "recordings": [
+    {
+      "index": 1,
+      "output": "D:\\clips\\clipped-counter-strike-2-20260811-143205.mkv",
+      "started_at": "2026-08-11T14:32:09+01:00",
+      "ended_at": "2026-08-11T14:50:13+01:00",
+      "outcome": "recorded",
+      "frames_encoded": 65040,
+      "duration_seconds": 1084.0,
+      "width": 2560,
+      "height": 1440,
+      "end_reason": "target-lost"
+    }
+  ],
+  "clips": [],
+  "bookmarks": [],
+  "events": [
+    { "at": "2026-08-11T14:32:05+01:00", "event": "session-started", "pid": 4242, "image_name": "cs2.exe" },
+    { "at": "2026-08-11T14:32:09+01:00", "event": "recording-started", "index": 1, "output": "…" },
+    { "at": "2026-08-11T14:50:13+01:00", "event": "recording-ended", "index": 1, "outcome": "recorded" },
+    { "at": "2026-08-11T15:31:21+01:00", "event": "session-ended", "reason": "game-exited" }
+  ]
+}
+```
+
+`clips` and `bookmarks` are **always empty in this build**. They are written so
+that a reader can tell "no clips" from "a file that predates clips", and so that
+[#37] and M8 add to the file rather than change its shape (AGENTS.md section 43).
+Their presence is not a claim that the features exist.
+
+An ambiguous session writes its candidates instead of a name it did not earn:
+
+```json
+"game": { "kind": "ambiguous", "candidates": ["half-life-2", "team-fortress-2"] }
+```
+
+`event` values are `session-started`, `recording-started`, `recording-ended`,
+`game-exited`, `game-relaunched`, `another-game-started`, `system-resumed`,
+`recording-limit-reached` and `session-ended`. These are events about the
+*session*; game events — a kill, a round starting — are a different vocabulary
+entirely, they come from plugins, and they are M9's `clipped-events`.
+
+A sidecar that cannot be written is a warning and nothing else. The video is what
+cannot be made again, and a metadata failure must not cost a recording
+(AGENTS.md section 17).
+
+## How to run it
+
+```text
+clipped-recorder watch
+```
+
+Recordings and session records go to `%USERPROFILE%\Videos\Clipped` unless
+`--output-directory` says otherwise. Ctrl+C stops watching, finishing any
+recording first. See [recorder-cli.md](recorder-cli.md) for the options.
+
+The desktop application cannot drive this yet, and cannot see a session even when
+the recorder is running one: the IPC protocol describes a recording by its
+capture target and has no vocabulary for a game, a session or a recorder that is
+watching. That is [#241].
+
+## How to test it
+
+The policy has no machine in it, so most of it is unit tests that run anywhere:
+
+```text
+cargo test -p clipped-session automatic
+```
+
+Those cover a crash, a fast restart, a relaunch after the grace, a known child
+process holding a session open, a second game arriving and being recorded
+afterwards, a tie in the catalogue, a suspend during a recording and during a
+grace period, the recording cap, and shutting down.
+
+The end-to-end tests need a GPU, an encoder and a desktop session, so they are
+`#[ignore]`d:
+
+```text
+cargo test -p clipped-recorder --test automatic_sessions -- --ignored --nocapture --test-threads=1
+```
+
+They start the real recorder as a child process, launch `test-apps/video-pattern`
+— once through a `cmd.exe` parent, so the watcher sees a chain and the manager
+has to pick the game out of it — and validate the resulting file with
+`clipped-media-validation`, asserting that it **decodes** rather than merely
+opens.
+
+The recorder is made to recognise the pattern through a **user overlay**, with
+`LOCALAPPDATA` pointed at the test's own directory. `video-pattern.exe` is not in
+the shipped catalogue and must not be: that file is compiled into every build,
+and a test application in it would have Clipped recording a test application on
+somebody's machine.
+
+## Assumptions
+
+- **The manager is polled at least once a second.** The suspend rule is stated
+  against that promise, and `apps/recorder/src/watch.rs` keeps it.
+- **One recording at a time.** There is one encoder and one capture target, and
+  the manager never asks for a second.
+- **A `game_id` is a legal file name.** The catalogue restricts it to `[a-z0-9-]`,
+  which is what makes a session identifier safe to name a file after.
+- **The watcher reports the exit of every process it reported.** Session lifetime
+  depends on it; `clipped_game_detection`'s `ProcessExit` promises it.

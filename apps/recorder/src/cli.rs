@@ -20,6 +20,8 @@
 //!   ([issue #49](https://github.com/wildware-uk/clipped/issues/49)).
 //! - `start-at-login` — ask Windows to run `serve` when this user signs in
 //!   ([issue #106](https://github.com/wildware-uk/clipped/issues/106)).
+//! - `watch` — record games automatically as they start and stop
+//!   ([issue #46](https://github.com/wildware-uk/clipped/issues/46)).
 //!
 //! Nothing is currently specified without being declared here. A subcommand
 //! that parses arguments and then does nothing is a control that silently
@@ -78,6 +80,14 @@ pub enum Command {
     /// Record a window or process to a file.
     Record(RecordArgs),
 
+    /// Watch for games and record them without being asked.
+    ///
+    /// The mode the product exists for (SPEC.md section 2): a game launching
+    /// starts a session recording and quitting it finalises one, with nothing
+    /// to press. Ctrl+C stops watching, finishing any recording first.
+    /// `docs/sessions.md` describes what a session is and how it decides.
+    Watch(WatchArgs),
+
     /// List the windows that can be captured.
     ListWindows(ListWindowsArgs),
 
@@ -102,6 +112,65 @@ pub enum Command {
     /// value is `start-at-login enable`, and `disable` removes it again
     /// (ADR 0006, docs/privacy.md).
     StartAtLogin(StartAtLoginArgs),
+}
+
+/// Arguments to `clipped-recorder watch`.
+///
+/// The video and audio options are `record`'s, and mean the same things. What
+/// is deliberately absent is a capture-mode option: Full Session is the only
+/// mode this build can run, and an option offering four values three of which
+/// would do nothing is exactly the control AGENTS.md section 27 rules out. Per
+/// game overrides are M7 (SPEC.md section 31) and are also absent for that
+/// reason rather than by oversight.
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    /// Directory to write recordings and session records into. [default: the
+    /// Clipped folder of your videos directory]
+    ///
+    /// Created if it is not there, at start-up rather than when a game
+    /// launches, so that a drive that is not connected is reported before it
+    /// costs somebody a session.
+    //
+    // The default is stated in the summary rather than through a
+    // `default_value` because it is resolved from the environment, and `-h`
+    // should still show what it will be.
+    #[arg(long, value_name = "PATH")]
+    pub output_directory: Option<PathBuf>,
+
+    /// Seconds to wait for a game to put a window on screen before giving up on
+    /// recording it.
+    ///
+    /// A launch is reported a few seconds after the process starts and a game
+    /// can take much longer than that to reach a window while it compiles
+    /// shaders, so this is not a timeout on anything going wrong; it is how
+    /// long a game is allowed to take to appear.
+    #[arg(long, value_name = "SECONDS", default_value_t = 120)]
+    pub window_timeout: u32,
+
+    /// Size to encode at, as WIDTHxHEIGHT, or `source` for the game's own size.
+    #[arg(short, long, value_name = "WIDTHxHEIGHT", default_value_t = Resolution::Source)]
+    pub resolution: Resolution,
+
+    /// Frames per second to encode at.
+    #[arg(short, long, value_name = "FPS", default_value_t = Framerate::DEFAULT)]
+    pub framerate: Framerate,
+
+    /// Video codec to encode with.
+    #[arg(long, value_name = "CODEC", default_value_t = VideoCodec::Auto)]
+    pub codec: VideoCodec,
+
+    /// Encoder to encode with.
+    #[arg(long, value_name = "ENCODER", default_value_t = EncoderSelection::Auto)]
+    pub encoder: EncoderSelection,
+
+    /// Microphone to record, as `default`, `none`, or part of a device name.
+    #[arg(long, value_name = "DEVICE", default_value_t = AudioDeviceSelection::Default)]
+    pub microphone: AudioDeviceSelection,
+
+    /// System audio output to record, as `default`, `none`, or part of a
+    /// device name.
+    #[arg(long, value_name = "DEVICE", default_value_t = AudioDeviceSelection::Default)]
+    pub system_audio: AudioDeviceSelection,
 }
 
 /// Arguments to `clipped-recorder start-at-login`.
