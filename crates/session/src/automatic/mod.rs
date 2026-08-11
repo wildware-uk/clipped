@@ -495,26 +495,37 @@ impl SessionManager {
         self.deferred.clear();
 
         let mut actions = Vec::new();
-        let running = self.active.as_mut().and_then(|active| {
+        let mut stop = None;
+        // Whether a recording is still owed an outcome — which is not the same
+        // question as whether this shutdown is the thing that stops it. A stop
+        // asked for a moment earlier, because the game exited or the machine
+        // resumed, has already reached the recording and its outcome is still
+        // on its way. Closing the session now would throw that outcome away and
+        // leave behind a record saying a recording began and never ended, which
+        // is precisely what M6's indexer would later have to reconcile against
+        // a file that is sitting there, finalised and perfectly playable.
+        let mut owed_an_outcome = false;
+        if let Some(active) = self.active.as_mut() {
             active.pending_start = None;
-            match active.recording {
-                Some(index) if !active.stopping => {
+            if let Some(index) = active.recording {
+                owed_an_outcome = true;
+                if !active.stopping {
                     active.stopping = true;
-                    Some(RecordingId {
+                    stop = Some(RecordingId {
                         session: active.session.id().clone(),
                         index,
-                    })
+                    });
                 }
-                _ => None,
             }
-        });
+        }
 
-        match running {
-            Some(recording) => actions.push(SessionAction::StopRecording {
+        if let Some(recording) = stop {
+            actions.push(SessionAction::StopRecording {
                 recording,
                 cause: StopCause::RecorderStopping,
-            }),
-            None => self.close_active(SessionEndReason::RecorderStopping, now, &mut actions),
+            });
+        } else if !owed_an_outcome {
+            self.close_active(SessionEndReason::RecorderStopping, now, &mut actions);
         }
         actions
     }

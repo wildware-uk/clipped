@@ -834,6 +834,47 @@ fn shutting_down_with_nothing_recording_closes_the_session_at_once() {
 }
 
 #[test]
+fn shutting_down_while_a_stop_is_already_pending_still_waits_for_the_outcome() {
+    // Ctrl+C a moment after the game quit. The recording is already being
+    // stopped and is already finalising its file, and its outcome is still
+    // coming. Closing the session here would throw that outcome away: the
+    // sidecar would say a recording began and never ended, and the summary
+    // would tell the user there were no recordings — about a file sitting on
+    // disk, complete and playable.
+    let mut harness = Harness::new("shutdown-mid-stop");
+    let recording = started(&mut harness, 11, t(0));
+
+    let exited = harness.observe(&exit(11, "test-game.exe"), t(10));
+    assert_eq!(stop_cause(&exited), Some(StopCause::GameExited));
+
+    let asked = harness.shut_down(t(11));
+    assert!(
+        ended_session(&asked).is_none(),
+        "the session must not close while a recording still owes it an outcome: {asked:?}"
+    );
+    assert!(
+        stop_cause(&asked).is_none(),
+        "the recording is already stopping; a second request would be noise: {asked:?}"
+    );
+
+    let closed = harness.finished(
+        &recording,
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
+        t(12),
+    );
+    let session = ended_session(&closed).expect("the outcome closes the session");
+    assert_eq!(session.recordings().len(), 1);
+    assert!(
+        session.recordings()[0]
+            .outcome()
+            .expect("the recording's outcome reached the session it belongs to")
+            .produced_a_file(),
+        "the session must know about the file that was made: {:?}",
+        session.recordings()
+    );
+}
+
+#[test]
 fn an_outcome_for_a_recording_the_session_has_moved_past_is_ignored() {
     // The driver reports outcomes asynchronously, so a late one must not be
     // applied to the recording that replaced it.
