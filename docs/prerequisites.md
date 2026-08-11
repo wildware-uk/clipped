@@ -10,6 +10,10 @@ of seconds:
 powershell -ExecutionPolicy Bypass -File scripts/check-prerequisites.ps1
 ```
 
+The `-ExecutionPolicy Bypass` prefix is not decoration: run the script the
+natural way instead and Windows refuses it outright. [Running the
+scripts](#running-the-scripts) below explains why, and gives two ways out.
+
 It prints one line per prerequisite and exits non-zero listing exactly what is
 missing and what to do about it. The point is that you find out the Windows SDK
 is absent from this script, not from a linker error several minutes into a
@@ -29,6 +33,65 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 cargo test --workspace
 ```
+
+## Running the scripts
+
+Every PowerShell command on this page carries the same prefix, because a stock
+Windows install refuses to run any `.ps1` file at all. Do the natural thing:
+
+```text
+.\scripts\check-prerequisites.ps1
+```
+
+and the shell answers:
+
+```text
+.\scripts\check-prerequisites.ps1 : File ...\scripts\check-prerequisites.ps1
+cannot be loaded because running scripts is disabled on this system.
+```
+
+That is the execution policy, and our scripts are not singled out: Windows
+client editions default to `Restricted`, which runs no script of any kind.
+`powershell -ExecutionPolicy Bypass -File ...` sets the policy for that one
+process, for the lifetime of that one command. It changes nothing on the
+machine and needs no administrator rights, which is why every command on this
+page is written that way, and why CI invokes the scripts in exactly the same
+form.
+
+If typing the prefix each time grates, set the policy once for your own account
+instead. This one does change machine state — your user's setting, which
+persists — but it still needs no administrator rights:
+
+```text
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+`RemoteSigned` runs local scripts and demands a signature only from files marked
+as having come from the internet. `git clone` marks nothing, so a cloned
+checkout's scripts run and `.\scripts\check-prerequisites.ps1` works as typed.
+It is what Microsoft recommends for developer machines, and it is strictly
+narrower than `Unrestricted`.
+
+Two things to know about that route:
+
+- **Downloading the repository as a zip does mark the files**, and
+  `RemoteSigned` then blocks them — with a different message, complaining that
+  the file is not digitally signed rather than that scripts are disabled. Clear
+  the mark:
+
+  ```text
+  Get-ChildItem -Recurse scripts\*.ps1 | Unblock-File
+  ```
+
+- **A managed machine may have the policy set by Group Policy**, which
+  `-Scope CurrentUser` cannot override, so the command above has no effect
+  there. `Get-ExecutionPolicy -List` shows all five scopes; if `MachinePolicy`
+  or `UserPolicy` is anything other than `Undefined`, that is what is in force
+  and the per-process prefix is the only route open to you.
+
+  ```text
+  Get-ExecutionPolicy -List
+  ```
 
 ## Summary
 
