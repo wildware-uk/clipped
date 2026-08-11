@@ -72,13 +72,13 @@ describe('what the Games screen says about detection', () => {
     [
       'when there is no recorder',
       { link: 'unavailable', reason: 'clipped-recorder.exe is not beside this application.' },
-      'Not detecting games',
-      /no recorder to detect them.*not beside this application/,
+      'Not known',
+      /not attached to a recorder.*not beside this application/,
     ],
     [
       'when a recorder is attached',
       { link: 'attached', recorder_process_id: 7, status: { state: 'idle' } },
-      'Not detecting games',
+      'This recorder is not detecting games',
       /clipped-recorder serve.*clipped-recorder watch/,
     ],
   ];
@@ -91,10 +91,39 @@ describe('what the Games screen says about detection', () => {
   });
 
   /*
+   * The link sees one thing: the recorder this window started or attached to. A
+   * `clipped-recorder watch` started in a terminal serves no protocol and is
+   * invisible to it — and that is exactly what the sentence directly beneath
+   * the state recommends. So a rendering that said games were going undetected
+   * would be stating something the window has not looked at, and would
+   * contradict its own next paragraph (AGENTS.md section 27).
+   *
+   * So a state is only ever one of two things: "Not known...", which claims
+   * nothing, or "This recorder...", which names what it is a claim about. The
+   * assertion is on the state alone and deliberately not on the state and its
+   * detail together. The state is the panel's `<h2>`; a heading is read on its
+   * own, skipped to on its own by a screen reader, and is the part somebody
+   * takes away. An earlier draft of this case allowed the detail to supply the
+   * scope, and a break that put "Not detecting games" back at the top of the
+   * attached rendering — leaving the explanation beneath it intact — went
+   * straight through it.
+   *
+   * Asserted over all five renderings rather than over the one that was wrong,
+   * because the defect is a class: it is the same unscoped heading whichever
+   * branch it gets written into.
+   */
+  it.each(STATES)(
+    'either names the recorder it speaks for, or claims nothing, %s',
+    (_case, link) => {
+      expect(describeGameDetection(link).state).toMatch(/^(Not known|This recorder )/);
+    },
+  );
+
+  /*
    * The reason a recorder could not be reached is the only part of that state a
    * user can act on, and it is the recorder's own words. A rendering that
-   * dropped it would leave "Not detecting games" and nothing to do about it
-   * (AGENTS.md section 45).
+   * dropped it would leave "Not known" and nothing to do about it (AGENTS.md
+   * section 45).
    */
   it('carries the recorder link its own reason rather than a generic sentence', () => {
     const described = describeGameDetection({
@@ -106,13 +135,19 @@ describe('what the Games screen says about detection', () => {
   });
 
   /*
-   * "Not detecting games" and "not known" are different answers and are drawn
-   * differently: a link that has not settled has not established anything, and
-   * saying that detection is off would be a claim nobody measured.
+   * A link that has not settled has established nothing, so the two states it
+   * can be in say so and make no claim about detection in either direction.
+   *
+   * Asserted positively. This case used to read `not.toBe('Not detecting
+   * games')`, which went on passing the moment that exact string stopped being
+   * used anywhere — a check on a spelling rather than on the property.
    */
-  it('does not claim detection is off while the link has not settled', () => {
+  it('says nothing about detection while the link has not settled', () => {
     for (const link of [null, { link: 'connecting' } as const]) {
-      expect(describeGameDetection(link).state).not.toBe('Not detecting games');
+      const described = describeGameDetection(link);
+
+      expect(described.state).toMatch(/^Not known/);
+      expect(`${described.state} ${described.detail}`).not.toMatch(/detect/i);
     }
   });
 });
@@ -134,9 +169,11 @@ describe('the Games screen', () => {
     renderApp();
     await openGames(user);
 
+    // Anchored, because "Not known" is a substring of "Not known yet" and an
+    // unanchored match would let the screen sit on one wording for both.
     await waitFor(() => {
       expect(within(detectionPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
-        'Not known yet',
+        /^Not known yet$/,
       );
     });
 
@@ -148,12 +185,28 @@ describe('the Games screen', () => {
 
     await waitFor(() => {
       expect(within(detectionPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
-        'Not detecting games',
+        /^Not known$/,
       );
     });
     expect(
       within(detectionPanel()).getByText(/clipped-recorder\.exe is not beside this application\./),
     ).toBeVisible();
+
+    // And on to the one state that can say anything about detection, so that
+    // the case covers a move in both directions rather than one wording giving
+    // way to another that happens to differ.
+    runtime.emit({
+      event: 'state',
+      link: 'attached',
+      recorder_process_id: 7,
+      status: { state: 'idle' },
+    });
+
+    await waitFor(() => {
+      expect(within(detectionPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
+        /^This recorder is not detecting games$/,
+      );
+    });
   });
 
   it('announces a change of state rather than only drawing it', async () => {

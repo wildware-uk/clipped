@@ -124,12 +124,22 @@ naming the issue — the same contract the unbuilt screens keep.
 for "this is not the Clipped window", and the screen is a pure function of it,
 so it follows the recorder rather than restating a sentence.
 
-Two of those five say **"Not detecting games"** and three say **"Not known"**,
-and the split is the point. A link that is still connecting has established
-nothing; saying detection was off would be a claim nobody measured.
+One of those five says **"This recorder is not detecting games"** and the other
+four say **"Not known"**, and the split is the point. **The link sees exactly one
+thing: the recorder this window started or attached to.** `clipped-recorder
+watch` serves no protocol, so a watcher somebody started in a terminal is
+invisible to it — and the sentence directly beneath the state recommends
+starting exactly that. So no rendering may say that games are going undetected
+on this machine: the window has not looked, and cannot.
 
-The one that is an inference rather than a reading is the attached case, and it
-holds:
+That includes the state for a recorder that could not be reached at all. It
+reads "Not known — this window is not attached to a recorder", not "not
+detecting games". It previously read the latter, which was a claim about the
+machine that nothing here can make, and which contradicted its own next
+paragraph.
+
+The one rendering that says anything about detection names the recorder it is
+about, and it is an inference rather than a reading. It holds:
 
 - the supervisor starts, and can only attach to, `clipped-recorder serve`
   (`SERVE` in `crates/ipc/src/supervisor.rs`), because `serve` is the only
@@ -138,7 +148,8 @@ holds:
   subcommand that takes no `--endpoint`, which is exactly what #241's fourth
   acceptance criterion is about.
 
-So a recorder this window can see is a recorder that is not detecting games.
+So a recorder this window can see is a recorder that is not detecting games —
+which is a statement about that recorder, and about nothing else on the machine.
 
 The screen then says the thing somebody can act on, because there is one
 (AGENTS.md section 45): automatic recording is built and running, from a

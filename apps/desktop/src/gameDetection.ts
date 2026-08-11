@@ -9,9 +9,16 @@ import type { RecorderLinkState } from './useRecorderLink';
  * neither Fast Refresh nor a reader can take apart.
  */
 
-/** The two or three words shown as the detection state, and one sentence. */
+/** The few words shown as the detection state, and one sentence explaining it. */
 export interface GameDetectionText {
-  /** The state, in a few words. */
+  /**
+   * The state, in a few words.
+   *
+   * A phrase rather than a label, because a state that is a claim has to carry
+   * whom it is a claim about: "This recorder is not detecting games" is true,
+   * and the "Not detecting games" it replaced was a statement about the machine
+   * that this window has no way to make.
+   */
   readonly state: string;
   /** One sentence saying what that means for the person reading it. */
   readonly detail: string;
@@ -24,20 +31,28 @@ export interface GameDetectionText {
  * wording is testable without a window, and every link state has exactly one
  * rendering rather than a chain of conditions inside a component.
  *
- * The claim made for an *attached* recorder deserves its justification, because
- * it is the only one here that is an inference rather than a reading. The
- * supervisor starts, and can only attach to, `clipped-recorder serve` (`SERVE`
- * in `crates/ipc/src/supervisor.rs`), and `serve` is the only subcommand that
- * listens on the endpoint. `serve` does not watch for games: `clipped-recorder
- * watch` is a separate subcommand that takes no `--endpoint`, which is the
- * whole of issue #241's fourth acceptance criterion. So a recorder this window
- * can see is a recorder that is not detecting games, and saying so is a reading
- * of the build rather than a guess about it.
+ * # What the link can and cannot establish
  *
- * "Not known" and "Not detecting games" are deliberately different answers. A
- * link that has not settled has established nothing, and a screen that said
- * detection was off while it was still looking would be making a claim nobody
- * measured (AGENTS.md section 27).
+ * The link sees exactly one thing: the recorder this window started or attached
+ * to. `clipped-recorder watch` serves no protocol, so a watcher somebody started
+ * in a terminal is invisible to it — and [`WHAT_WORKS_TODAY`] below tells the
+ * reader to start exactly that. **So no rendering here may say that games are
+ * going undetected on this machine.** The window has not looked, and cannot.
+ *
+ * Only one of the five renderings claims anything about detection at all, and it
+ * names the recorder it is talking about. That claim is an inference rather than
+ * a reading, and it holds: the supervisor starts, and can only attach to,
+ * `clipped-recorder serve` (`SERVE` in `crates/ipc/src/supervisor.rs`), and
+ * `serve` is the only subcommand that listens on the endpoint. `serve` does not
+ * watch for games: `clipped-recorder watch` is a separate subcommand that takes
+ * no `--endpoint`, which is the whole of issue #241's fourth acceptance
+ * criterion. So a recorder this window can see is a recorder that is not
+ * detecting games — which is a statement about that recorder and nothing else.
+ *
+ * The other four say "Not known", including the one for a recorder that could
+ * not be reached at all. A window with no link has established nothing, so
+ * saying detection was off would be a claim nobody measured, and would
+ * contradict the sentence directly beneath it (AGENTS.md section 27).
  */
 export function describeGameDetection(link: RecorderLinkState | null): GameDetectionText {
   if (link === null) {
@@ -58,17 +73,17 @@ export function describeGameDetection(link: RecorderLinkState | null): GameDetec
       };
     case 'unavailable':
       return {
-        state: 'Not detecting games',
-        detail: `There is no recorder to detect them. ${link.reason}`,
+        state: 'Not known',
+        detail: `This window is not attached to a recorder, so it has nothing to ask. ${link.reason}`,
       };
     case 'attached':
       return {
-        state: 'Not detecting games',
+        state: 'This recorder is not detecting games',
         detail:
           'The recorder this window is attached to runs clipped-recorder serve, which records ' +
           'what it is asked to record. Games are detected by clipped-recorder watch, which is a ' +
-          'separate mode and serves no protocol, so this window can neither start it nor follow ' +
-          'it.',
+          'separate mode and serves no protocol, so this window can neither start one nor see ' +
+          'one that is already running.',
       };
   }
 }
