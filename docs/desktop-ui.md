@@ -139,27 +139,145 @@ wrong and no stale artefact to debug.
 
 ## Design system
 
-The interface is drawn in the Modernist system: flat, Archivo, a single red
+The interface is drawn in the **Modernist** system: flat, Archivo, a single red
 accent on a light ground, zero corner radius, strong 2px rules, flush-left
-labels. `packages/ui/src/tokens.css` holds the tokens, and no colour, type size,
-spacing step or typeface appears anywhere else as a value: `styles.css` names a
-token for each, and no component contains any of them. What is left as a literal
-in `styles.css` is one-off geometry that is not a point on any scale — the
-hairline that hides the skip link until it is focused, a link's underline offset,
-and the half-step of vertical padding the utility navigation is drawn at. Issue
-#79 brings the system's full token set and its component layer into the same
-file, which is an addition rather than a rewrite because of that.
+labels, [Lucide](https://lucide.dev) icons. The system is not in this
+repository. It lives in the maintainer's design project, next to the application
+deck that draws every Clipped screen:
 
-Two deliberate differences from the published system, both marked in
-`tokens.css`:
+- **the system** — its tokens, its written guide, and a reference page for each
+  component: <https://claude.ai/design/p/a0eb3af1-6823-4eb0-8953-e637d60c5551>
+- **the Clipped deck** — every screen of this application, drawn:
+  <https://claude.ai/design/p/00676e7a-fd8a-44ce-9410-082644e1418e>
 
-- **Secondary text** is drawn at 70% of the ink rather than 55%. At 55% it
-  measures 3.65:1 on the window ground and 3.54:1 on the sidebar, short of the
-  4.5:1 AGENTS.md section 46 asks of body text; at 70% it measures 5.81:1 and
-  5.55:1.
+Read both before drawing anything new, and build a screen from the classes below
+rather than from a parallel set of your own.
+
+What is in the repository is the system's tokens and the component layer built
+from them, in three files:
+
+| File                             | What is in it                                                                     |
+| -------------------------------- | --------------------------------------------------------------------------------- |
+| `packages/ui/src/tokens.css`     | The tokens — and the only literals in the package                                 |
+| `packages/ui/src/components.css` | The component classes, built entirely from those tokens                           |
+| `packages/ui/src/styles.css`     | The typeface, element defaults and the shell's own classes; imports the other two |
+
+### Consuming it
+
+One rule, and it is enforced rather than asked for: **a colour, a typeface, a
+type size, a distance or a leading is written as a value only in `tokens.css`.**
+Everywhere else it is `var(--token)`. `packages/ui/src/stylesheet.test.ts` reads
+the stylesheets and fails the suite on a hex value, a colour function, a number
+in **any** CSS length unit — the absolute ones, the font-relative ones and every
+viewport flavour, matched case-insensitively, because CSS is — a literal
+typeface, a literal `line-height`, or a `var()` naming a token nobody declares.
+
+Percentages and `fr` are deliberately outside the gate: both are proportions of
+something else rather than distances, so there is nothing for a token to hold.
+That exception is the whole of it. An earlier version of this check covered only
+`px`, `rem` and `em` in lower case, which let `12PX`, `4pt`, `3VW` and `62ch`
+through — and `styles.css` was shipping a `62ch` at the time. A gate narrower
+than the claim built on it is worse than a narrower claim, because the claim is
+what gets believed.
+
+If a screen needs a value the tokens do not carry, add the token — do not write
+the number. If a value is genuinely one-off geometry, it still goes in
+`tokens.css`, next to a comment saying why it is not on a scale; that is where
+`--underline-offset` and `--hairline` came from.
+
+There is no CSS-in-JS and no utility framework. The design system is a
+stylesheet, and this package stays one: a screen writes
+`className="clipped-btn clipped-btn--primary"`.
+
+### The classes
+
+The reference pages name their classes `.btn`, `.card`, `.input`. Here they take
+the shell's `clipped-block__element--modifier` convention, so markup copied out
+of a reference page is renamed mechanically:
+
+| Reference page                                          | Here                                                             |
+| ------------------------------------------------------- | ---------------------------------------------------------------- |
+| `.hr`                                                   | `.clipped-rule`                                                  |
+| `.btn` + `-primary/-secondary/-ghost/-icon/-block`      | `.clipped-btn` + `--primary/--secondary/--ghost/--icon/--block`  |
+| `.tag` + `-accent/-neutral/-outline`                    | `.clipped-tag` + `--accent/--neutral/--outline`                  |
+| `.field` + `label`, `.input`                            | `.clipped-field` + `__label`, `.clipped-input`                   |
+| `.radio` + `.dot`                                       | `.clipped-radio` + `.clipped-radio__dot`                         |
+| `.seg` + `.seg-opt`                                     | `.clipped-segment` + `.clipped-segment__option`                  |
+| `.card` + `-kicker/-title/-body/-meta`                  | `.clipped-card` + `__kicker/__title/__body/__meta`               |
+| `.elev-sm/-md/-lg`                                      | `.clipped-elevation-sm/-md/-lg`                                  |
+| `.table`                                                | `.clipped-table`                                                 |
+| `.dialog-backdrop`, `.dialog` + `-title/-body/-actions` | `.clipped-scrim`, `.clipped-dialog` + `__title/__body/__actions` |
+| `.nav` + `.nav-brand`                                   | the shell's own `.clipped-header` and `.clipped-nav` — see above |
+
+That is the whole set, and it is the set the deck draws with. There is no
+accordion, no toast and no tooltip, because no screen in the deck has one
+(AGENTS.md section 1). Two patterns the deck does use are not here either — the
+Library's underlined tab strip and the export dialog's selectable preset chips —
+and [issue #215](https://github.com/wildware-uk/clipped/issues/215) covers them
+with the screen that first needs them.
+
+**No screen consumes the component layer yet**, because none of the seven
+screens is written; the classes exist so that #60, #107, #83, #51, #94 and #101
+do not each invent their own styling, which is the reason this ticket followed
+the shell.
+
+### Where it departs from the system, and why
+
+Every departure is marked in `tokens.css` or at the rule that makes it, and
+every ratio quoted below is computed by `packages/ui/src/contrast.test.ts`
+rather than asserted.
+
 - **Type sizes are `rem`**, not pixels, so that the Windows text-size setting
   and the application's zoom both work. The values are the system's own sizes at
-  the default root size.
+  the default root size. The scale has seven steps; the reference pages' 10px,
+  12px and 18px snap to the nearest of them.
+- **Secondary text is 70% of the ink, not 55%.** At 55% it measures 3.65:1 on
+  the window ground and 3.54:1 on the sidebar, short of the 4.5:1 AGENTS.md
+  section 46 asks of body text; at 70% it measures 5.81:1 and 5.55:1. It also
+  stands in for the system's softening opacities — the card body at 0.8, the
+  dialog body at 0.85, the card meta row at 50% ink, the table header at 60% —
+  because an opacity cannot be measured without knowing what is behind it, and a
+  role can. The one at 50% would have measured 3.10:1 on a card.
+- **The accent under words is `--color-accent-700`, not `--color-accent`.** The
+  system fills the primary button, the selected segment and the skip link with
+  `#ec3013`; `--color-bg` on it measures 3.76:1, and a 14px label at weight 800
+  is not WCAG large text. One step down the ramp measures 6.41:1. The hover and
+  pressed states shift down a step with it. `--color-accent` itself stays where
+  it is not under words: marks, rules, the focus ring, the caret.
+- **Accent-coloured words are `--color-accent-700` too** — the ghost button, a
+  link, a card's kicker — for the same reason, at 6.41:1 on the window ground
+  and 5.91:1 on a card.
+- **A control's edge is `--color-neutral-600`, not `--color-divider`.** WCAG 2.1
+  1.4.11 asks 3:1 of anything that identifies a control, and the divider
+  measures 2.41:1 on the window ground — so an input's border, a secondary
+  button's border and a radio's ring take an edge that measures 3.85:1 there and
+  3.55:1 on a card. `--color-divider` keeps the rules _between_ things, where
+  1.4.11 does not apply.
+- **A radio's ring is 2px, not 1.5px.** There is no half-pixel step in the
+  system, and the deck draws its own marks at 2px.
+- **The segmented option's focus ring carries a halo.** The control clips its
+  children, so the ring has to be drawn inside an option's border box — and
+  inside means on the option's own fill, which on the _selected_ option is
+  `--color-accent-solid`. The accent measures **1.71:1** there, far below
+  1.4.11's 3:1, and the selected option is exactly the one a keyboard user lands
+  on when tabbing into a control whose whole purpose is that one option is
+  chosen. The indicator is therefore two-tone: the accent ring, and the window
+  ground immediately inside it — the same halo the checked radio already draws.
+  The accent measures 3.76:1 against that halo and the halo 6.41:1 against the
+  fill, so the ring has an edge it clears 3:1 against on every option, selected
+  or not.
+- **Every control that can be disabled is dimmed, not only the button.** Issue
+  #79 asks for "disabled at reduced opacity" of the component set as a whole, so
+  `.clipped-input`, `.clipped-radio` and `.clipped-segment__option` each take
+  `--disabled-opacity` and `cursor: not-allowed` alongside `.clipped-btn`, and
+  none of the three lights up on hover any more.
+  `stylesheet.test.ts` lists the four, so a fifth control that ships without one
+  fails the suite rather than being drawn identically whether it is live or not.
+- **The `.field` wrapper is a block here, not layout left to each screen.** The
+  reference page's `.field` stacks a label above its control; `.clipped-field`
+  does the same, because the gap between a label and the thing it names is a
+  property of the component and seven screens each choosing their own would be
+  seven different forms.
 
 Archivo is bundled from `@fontsource/archivo` (SIL OFL 1.1) rather than fetched
 from Google Fonts as the system's own stylesheet does. A locally installed
@@ -174,7 +292,23 @@ retrofitted:
 - **Keyboard.** Navigation items are real anchors in a real list, so Tab reaches
   them and Enter activates them. The first stop in the tab order is a "Skip to
   content" button. Nothing in the chrome is reachable by mouse alone.
-- **Focus.** `:focus-visible` draws a `--rule-weight` accent outline. After a
+- **Focus.** `:focus-visible` draws a `--rule-weight` accent outline, and
+  `:focus { outline: none }` is the only place a ring is ever suppressed —
+  `stylesheet.test.ts` fails if a second one appears. Two components have to
+  draw the ring themselves, because the global rule cannot reach them: the radio
+  and the segmented option each keep a real `<input>` off-screen for the
+  keyboard behaviour and paint a stand-in beside it, so `:focus-visible` never
+  matches the element that is drawn. Two more take the global ring and only
+  **move** it — the field pulls it flush against its border box (`outline-offset:
+0`) so that in a dense form it does not collide with the field above, and
+  turns its own border accent as a second, redundant mark on the same event; the
+  navigation link pulls it inside, because a link spans the sidebar's full width
+  and an outward ring would be clipped against the divider on its right. Neither
+  of those two replaces the ring, and `stylesheet.test.ts` asserts that they do
+  not: it reads the `outline` **declaration** of the two that draw their own and
+  the absence of one in the two that move it, rather than checking that a
+  selector appears somewhere in the package, which is what it used to do and
+  which passed over both of them. After a
   navigation, focus moves into `<main>` — without that, a screen reader
   announces nothing, because as far as the platform is concerned the window
   never changed. On the _first_ screen it deliberately does not move, which is a
@@ -182,31 +316,96 @@ retrofitted:
   holds the screen key it last acted on rather than a "have I run?" flag, and
   `Shell.test.tsx` mounts the same `<StrictMode>` tree `main.tsx` does so the
   guard is covered as it actually runs.
-- **Contrast.** Every pairing of words and ground in the shell clears WCAG's
-  4.5:1 for body text, and `packages/ui/src/contrast.test.ts` measures it rather
-  than asserting it — it implements the relative-luminance formula, resolves the
-  values out of `tokens.css`, and reads the skip link's own two declarations out
-  of `styles.css`:
+- **Contrast.** Every pairing of words and ground in the shell and in the
+  component layer clears WCAG's 4.5:1 for body text, and
+  `packages/ui/src/contrast.test.ts` measures it rather than asserting it — it
+  implements the relative-luminance formula and resolves both colours of every
+  pair **out of the rule that paints them**, in `styles.css` or `components.css`,
+  through the tokens.
 
-  | | Ratio |
-  | --- | --- |
-  | Body text on the window ground | 14.86:1 |
-  | Secondary text on the window ground | 5.81:1 |
-  | Secondary text in the sidebar | 5.55:1 |
-  | Accent text on the window ground | 6.41:1 |
-  | The open navigation item | 5.83:1 |
-  | The title strip | 11.45:1 |
-  | The title strip's tagline | 4.87:1 |
-  | The skip link | 6.41:1 |
+  That last part is the whole design of the file, and it was not always true of
+  it. A case written as a pair of token names measures two constants: it goes on
+  passing after the rule it claims to be about has been pointed somewhere else.
+  Issue #48 shipped exactly that defect in the skip link, and a review of this
+  ticket found it again in fourteen of the file's own cases — pointing
+  `.clipped-card__kicker`, `.clipped-btn--ghost` and `.clipped-field__label` at
+  colours measuring 3.47:1, 3.76:1 and 2.59:1 left the whole suite green. Every
+  case now names a rule and a property, so changing a rule changes what is
+  measured.
+
+  |                                     | Ratio   |
+  | ----------------------------------- | ------- |
+  | Body text on the window ground      | 14.86:1 |
+  | A button's label, unfilled          | 14.86:1 |
+  | Body text on a card                 | 13.70:1 |
+  | A field's own text                  | 13.70:1 |
+  | A dialog's title                    | 13.70:1 |
+  | The title strip                     | 11.45:1 |
+  | The primary button, pressed         | 13.01:1 |
+  | The primary button, hovered         | 9.59:1  |
+  | The accent tag                      | 9.80:1  |
+  | The neutral tag                     | 9.26:1  |
+  | The skip link                       | 6.41:1  |
+  | The primary button                  | 6.41:1  |
+  | The selected segment                | 6.41:1  |
+  | A link on the window ground         | 6.41:1  |
+  | The ghost button                    | 6.41:1  |
+  | The outlined tag                    | 6.41:1  |
+  | A card's kicker                     | 5.91:1  |
+  | The open navigation item            | 5.83:1  |
+  | Secondary text on the window ground | 5.81:1  |
+  | A field's label                     | 5.81:1  |
+  | A table's header                    | 5.81:1  |
+  | A card's body                       | 5.59:1  |
+  | A card's meta row                   | 5.59:1  |
+  | A dialog's body                     | 5.59:1  |
+  | Secondary text in the sidebar       | 5.55:1  |
+  | The title strip's tagline           | 4.87:1  |
 
   The skip link is why the test reads the stylesheet rather than a table: it
   first shipped on `--color-accent` at 3.76:1, and at 14px weight 800 it is not
   WCAG large text, so 4.5:1 is the bar it has to clear.
+
+  What is not text is held to 1.4.11's 3:1 instead — the edge that says a field
+  is a field, and the ring that says where the keyboard is:
+
+  |                                                           | Ratio  |
+  | --------------------------------------------------------- | ------ |
+  | The segmented option's focus halo, on the selected option | 6.41:1 |
+  | A field's edge on the window ground                       | 3.85:1 |
+  | A secondary button's edge                                 | 3.85:1 |
+  | A radio's ring                                            | 3.85:1 |
+  | The segmented control's edge                              | 3.85:1 |
+  | The focus ring on the window ground                       | 3.76:1 |
+  | The radio's own ring, on its stand-in                     | 3.76:1 |
+  | The segmented option's focus ring, against its halo       | 3.76:1 |
+  | A field's edge against its own fill                       | 3.55:1 |
+  | A field's edge on a card                                  | 3.55:1 |
+  | The focus ring on a card or a dialog                      | 3.47:1 |
+  | A focused field's accent border, against its own fill     | 3.47:1 |
+  | The focus ring in the sidebar                             | 3.42:1 |
+
+  The last two rows of the first non-text group are the correction this round
+  made. The segmented option's ring is drawn _inside_ its own border box,
+  because the control clips its children — so on the selected option it landed
+  on `--color-accent-solid` at **1.71:1**, and that case was missing from the
+  list while the three grounds the ring happens to pass on were in it. It now
+  carries a halo, and both of its edges are measured.
+
+  The rules _between_ things — `.clipped-rule`, the table's row rules, the
+  sidebar's dividers — are deliberately not measured. 1.4.11 applies to what
+  identifies a control or conveys information, and a rule separating two
+  paragraphs does neither; that is the only reason `--color-divider` is allowed
+  to stay at 2.41:1.
+
+  A disabled control is the one place text is dimmed by opacity, to the system's
+  45%. WCAG 2.1 exempts an inactive component from both 1.4.3 and 1.4.11.
+
 - **Labels.** Each of the two navigation lists is a named `<nav>`; the recorder
   status is a named region and a polite live region, so a change in state is
   announced rather than only drawn.
 - **State is never colour alone.** The open screen is marked by an accent rule
-  down its left edge, a heavier weight, *and* `aria-current="page"`.
+  down its left edge, a heavier weight, _and_ `aria-current="page"`.
 - **The window title** names the open screen, so the taskbar, Alt+Tab and the
   screen reader's window announcement all say where you are.
 
@@ -219,14 +418,30 @@ and Enter rather than asserting that the markup looks right.
 `npm test` runs Vitest, from `apps/desktop` but over `packages/*/src` as well,
 because those packages are consumed as source and one test command for the npm
 workspace is worth more than a second configuration to remember. Most of it runs
-against jsdom; `packages/ui/src/contrast.test.ts` asks for the node environment,
-because it reads the stylesheets as text and Vitest replaces a CSS import with an
-empty module.
+against jsdom; `packages/ui/src/contrast.test.ts` and
+`packages/ui/src/stylesheet.test.ts` ask for the node environment, because they
+read the stylesheets as text and Vitest replaces a CSS import with an empty
+module.
 
 The tests assert the things about this shell that would rot quietly: that no
 part of it shows data it does not have — including that the only control in the
 whole window is the skip link — that the chrome is operable from the keyboard
-alone, and that every pairing of words and ground clears 4.5:1.
+alone, that every pairing of words and ground clears 4.5:1, and that the
+component layer still consumes the design system rather than a value somebody
+typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
+colours" is a promise a reviewer has to re-check on every diff, and a test that
+reads the stylesheet is one that cannot be forgotten.
+
+Both files hold to one rule that is easy to lose: **a check must resolve what it
+claims to measure out of the stylesheet, not restate it.** A contrast case that
+names two tokens measures two constants; a focus check that looks for a selector
+somewhere in the package says nothing about what the matching rule draws. Both
+mistakes were in this package and both were found by breaking the CSS and
+watching the suite stay green, which is the only way either would have been.
+Every case in both files now goes through a helper that throws when the rule or
+the declaration it names is missing — `colourOf` in `contrast.test.ts`, `bodyOf`
+in `stylesheet.test.ts` — so a check that has stopped measuring anything fails
+rather than passing on nothing.
 
 `Shell.test.tsx` renders the `<StrictMode>` tree `main.tsx` builds rather than
 `<App />` on its own. That is not ceremony: StrictMode double-invokes effects on
