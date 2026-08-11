@@ -1,0 +1,55 @@
+[package]
+name = "clipped-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MPL-2.0"
+repository = "https://github.com/wildware-uk/clipped"
+authors = ["The Clipped contributors"]
+description = "The Clipped desktop application: a Tauri window hosting the React interface."
+publish = false
+
+# This crate is deliberately NOT a member of the repository's Cargo workspace,
+# and an empty `[workspace]` table is what detaches it.
+#
+# `tauri-build` fails the build when `frontendDist` does not exist, and
+# `frontendDist` is `../dist` - the output of `npm run build`. A workspace member
+# would therefore make `cargo build --workspace` depend on a prior `npm install`
+# and `npm run build`, breaking the promise CONTRIBUTING.md makes about a clean
+# clone: a Rust toolchain, the MSVC build tools, LLVM and one run of
+# scripts/fetch-ffmpeg.ps1 are enough. It would also put a WebView2 dependency
+# and several hundred crates in front of every `cargo test --workspace`, for a
+# crate that no other crate may depend on (docs/architecture.md).
+#
+# The cost of detaching is that `cargo fmt --all`, `cargo clippy --workspace`,
+# `cargo build --workspace` and `cargo deny` do not reach this crate, and this
+# is much the larger of the two lockfiles: 429 packages against the root's 113.
+# Each of those checks is paid back explicitly in .github/workflows/ci.yml
+# rather than dropped - the Desktop UI job formats, lints and builds this crate,
+# and the Dependencies job runs `cargo deny` against this manifest with the
+# repository's one deny.toml. Detaching a crate must not be a way for several
+# hundred dependencies to stop being asked about their licences and advisories.
+[workspace]
+
+[lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[build-dependencies]
+# Generates the Windows resources, the application manifest and the permission
+# schemas the runtime reads. Dual MIT/Apache-2.0.
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The window, the WebView2 host and the asset protocol that serves the built
+# interface. Dual MIT/Apache-2.0.
+tauri = { version = "2", features = [] }

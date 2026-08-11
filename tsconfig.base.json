@@ -1,0 +1,40 @@
+{
+  "//": [
+    "TypeScript settings shared by every package in this workspace.",
+    "",
+    "The strictness here is deliberate and matches the Rust side's: the Cargo",
+    "workspace denies warnings in CI, and a TypeScript package that allows",
+    "implicit `any` or an unchecked index would be held to a lower standard",
+    "than the code it drives.",
+    "",
+    "Nothing emits. Vite compiles the sources it bundles, and `npm run",
+    "typecheck` at the workspace root is what checks the types - including the",
+    "sources of `packages/*`, which are consumed as TypeScript rather than",
+    "built to `dist`, so there is no build order to get wrong and no stale",
+    "artefact to debug."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "useDefineForClassFields": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
+  }
+}

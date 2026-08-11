@@ -24,7 +24,8 @@
     Prerequisites are either required - a missing one fails the run - or
     recommended, which reports a warning and leaves the exit code alone.
     Recommended covers tooling that is not needed for the part of the project
-    that exists today, such as Node before the desktop application lands.
+    that exists today; Node and the WebView2 runtime were both in that category
+    until the desktop application landed, and are required now that it has.
 
 .PARAMETER RustupCommand
     Name or path of the rustup executable.
@@ -94,8 +95,13 @@
 
 .PARAMETER DesktopManifest
     Path to the desktop application's package.json, defaulting to
-    apps/desktop/package.json. Node is only required once this file exists;
-    until then a missing Node is a warning.
+    apps/desktop/package.json. Node and the WebView2 runtime are only required
+    once this file exists; until then a missing one of either is a warning.
+
+.PARAMETER WebView2RegistryPath
+    Registry keys where an installed WebView2 runtime registers itself, tried in
+    order. Three, because the runtime can be installed per machine or per user
+    and a 32-bit Windows does not have the WOW6432Node redirection.
 
 .PARAMETER GraphicsAdapterInventory
     Path to a JSON file describing display adapters (Name, DriverVersion,
@@ -138,6 +144,13 @@ param(
     [string] $FfmpegLinkMode = $env:FFMPEG_LINK_MODE,
     [string] $VsWherePath = (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
     [string] $WindowsKitsRegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots',
+    # {F3017226-...} is the Evergreen runtime's fixed product code, which is how
+    # Microsoft's own documented detection finds it.
+    [string[]] $WebView2RegistryPath = @(
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    ),
     [string] $RustToolchainFile = '',
     [string] $NvmrcFile = '',
     [string] $DesktopManifest = '',
@@ -602,6 +615,56 @@ function Test-Node {
     New-CheckResult -Name $name -Status 'Pass' -Detail "Node $installedVersion (.nvmrc pins $PinnedVersion)"
 }
 
+function Test-WebView2 {
+    <#
+    .SYNOPSIS
+        Checks that the Evergreen WebView2 runtime is installed.
+    .DESCRIPTION
+        The desktop application is a Tauri window, which is a WebView2 host.
+        Without the runtime it does not open: apps/desktop/src-tauri/src/main.rs
+        panics with that sentence, because by then there is no interface left to
+        report it in. Saying so here instead is the difference between a missing
+        prerequisite and a crash several minutes into a first "npm run dev".
+
+        Windows 11 ships it and Windows Update pushes it to Windows 10, so this
+        usually passes without anybody installing anything - which is exactly why
+        it is worth checking rather than assuming.
+
+        Three keys are tried because the runtime registers under a different one
+        depending on how it was installed: per machine on 64-bit Windows, per
+        machine on 32-bit Windows, or per user. An uninstalled runtime can leave
+        its key behind with a `pv` of 0.0.0.0, which Microsoft's own detection
+        guidance treats as absent, so this does too.
+    #>
+    param(
+        [Parameter(Mandatory)] [string[]] $RegistryPath,
+        [Parameter(Mandatory)] [bool] $Required
+    )
+
+    $name = 'WebView2 runtime'
+    $fix = 'Install the Evergreen WebView2 Runtime from https://developer.microsoft.com/microsoft-edge/webview2/. Windows 11 ships it, so a machine without it is unusual.'
+
+    foreach ($path in $RegistryPath) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+
+        $version = ''
+        try {
+            $version = [string] (Get-ItemProperty -LiteralPath $path).pv
+        } catch {
+            $version = ''
+        }
+
+        if ($version -and $version -ne '0.0.0.0') {
+            return New-CheckResult -Name $name -Status 'Pass' -Detail "$version in $path"
+        }
+    }
+
+    $status = 'Warn'
+    if ($Required) { $status = 'Fail' }
+    New-CheckResult -Name $name -Status $status `
+        -Detail 'no runtime registered under any of the WebView2 keys' -Fix $fix
+}
+
 function Get-GraphicsAdapter {
     <#
     .SYNOPSIS
@@ -1053,7 +1116,11 @@ if (-not $pinnedNode) {
     exit 2
 }
 
-$nodeRequired = Test-Path -LiteralPath $DesktopManifest
+# Node and the WebView2 runtime are both needed to build and run the desktop
+# application and neither is needed for anything else, so the same fact decides
+# whether each is required. Testing for the manifest rather than hard-coding
+# "yes" is what let that promotion happen on its own the day the shell landed.
+$desktopApplicationExists = Test-Path -LiteralPath $DesktopManifest
 
 Write-Host ''
 Write-Host 'Clipped prerequisite check'
@@ -1078,7 +1145,9 @@ $results = @(
                 -IncludeDirectory $FfmpegIncludeDir -LibrariesDirectory $FfmpegLibsDir `
                 -LinkMode $FfmpegLinkMode }),
     (Invoke-PrerequisiteCheck -Name 'Node.js' -Check {
-            Test-Node -Node $NodeCommand -PinnedVersion $pinnedNode -Required $nodeRequired }),
+            Test-Node -Node $NodeCommand -PinnedVersion $pinnedNode -Required $desktopApplicationExists }),
+    (Invoke-PrerequisiteCheck -Name 'WebView2 runtime' -Check {
+            Test-WebView2 -RegistryPath $WebView2RegistryPath -Required $desktopApplicationExists }),
     (Invoke-PrerequisiteCheck -Name 'GPU and driver' -Check {
             Test-GraphicsAdapter -MaximumAgeDays $MaximumDriverAgeDays -InventoryPath $GraphicsAdapterInventory }),
     (Invoke-PrerequisiteCheck -Name 'ffprobe' -Check {

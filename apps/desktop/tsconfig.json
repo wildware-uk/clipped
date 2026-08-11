@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "//": [
+    "`node` is here for the two files in this project that genuinely run in",
+    "Node rather than in the window: vite.config.ts, and packages/ui's contrast",
+    "test, which reads the shipped stylesheets off disk because Vitest replaces",
+    "a CSS import with an empty module. It is a typechecking convenience, not a",
+    "licence to reach for `process` or `fs` from the interface - nothing Vite",
+    "bundles has a Node runtime under it, and such an import would fail in the",
+    "window rather than at build time."
+  ],
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src", "vite.config.ts", "../../packages/shared/src", "../../packages/ui/src"]
+}
