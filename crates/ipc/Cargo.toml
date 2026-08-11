@@ -30,12 +30,23 @@ tracing.workspace = true
 #                                created with, and the user SID string in it
 # - Win32_Storage_FileSystem     the file flags CreateNamedPipeW takes, and
 #                                FILE_FLAG_FIRST_PIPE_INSTANCE
-# - Win32_System_Pipes           CreateNamedPipeW, ConnectNamedPipe, Disconnect
-# - Win32_System_IO              CancelIoEx, which is how a blocked connection
-#                                thread is released at shutdown
+# - Win32_System_Pipes           CreateNamedPipeW and ConnectNamedPipe, and the
+#                                pipe modes including PIPE_REJECT_REMOTE_CLIENTS
+# - Win32_System_IO              not called from here at all: `ConnectNamedPipe`
+#                                takes an `Option<*mut OVERLAPPED>`, and the
+#                                whole of `Win32_System_Pipes` is gated behind
+#                                this feature because of it. Removing it stops
+#                                the crate compiling
 # - Win32_System_Threading       OpenProcessToken, GetCurrentProcess
 # - Win32_System_RemoteDesktop   ProcessIdToSessionId, which is what keeps two
 #                                signed-in users' recorders off one pipe name
+#
+# Nothing here cancels a pending read or disconnects an instance. A listener is
+# stopped by connecting to its own endpoint rather than by cancelling the
+# `ConnectNamedPipe` it is blocked in — `src/transport/windows.rs` says why —
+# and a connection thread blocked reading from a client that is still there is
+# left to go with the process (`docs/ipc.md`, "A client that connects and then
+# stalls"). Nothing in this crate releases it.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
