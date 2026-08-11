@@ -502,6 +502,27 @@ pub(super) fn as_int64(variant: &sys::AMFVariantStruct) -> Option<i64> {
     }
 }
 
+/// A variant's value as a whole number, whichever numeric type it holds.
+///
+/// The capability properties are the reason this is not just [`as_int64`]: AMF
+/// declares them as `amf_bool` and `amf_int64` in its headers, and a component
+/// stores each in whichever the header says — so a reader that insisted on
+/// `AMF_VARIANT_INT64` would silently fail to measure whichever of them the
+/// driver happened to store as a boolean. A `false` is `0` and a `true` is `1`,
+/// which is what both callers of this want.
+pub(super) fn as_whole_number(variant: &sys::AMFVariantStruct) -> Option<i64> {
+    match variant.type_ {
+        // SAFETY: the tag says which union member was written, which is exactly
+        // the condition for reading it.
+        sys::AMF_VARIANT_INT64 => Some(unsafe { variant.__bindgen_anon_1.int64Value }),
+        // SAFETY: as above.
+        sys::AMF_VARIANT_BOOL => Some(i64::from(
+            unsafe { variant.__bindgen_anon_1.boolValue } != 0,
+        )),
+        _ => None,
+    }
+}
+
 /// The interface inside a variant, or [`None`] if it holds something else.
 ///
 /// The reference belongs to the caller: `GetProperty` copies the property's
@@ -754,5 +775,21 @@ mod tests {
         // SAFETY: the tag says `rateValue` is the member that was written.
         let value = unsafe { frame_rate.__bindgen_anon_1.rateValue };
         assert_eq!((value.num, value.den), (60_000, 1001));
+    }
+
+    #[test]
+    fn a_capability_reads_as_a_number_whether_amf_stored_it_as_one_or_as_a_flag() {
+        // The capability properties are declared as both types across AMD's
+        // headers, and a reader that took only `AMF_VARIANT_INT64` would report
+        // "not measured" for whichever of them the driver stored as a boolean —
+        // a measurement lost with no failure anywhere.
+        assert_eq!(as_whole_number(&int64(2_073_600)), Some(2_073_600));
+        assert_eq!(as_whole_number(&boolean(true)), Some(1));
+        assert_eq!(as_whole_number(&boolean(false)), Some(0));
+
+        // And anything that is not a number must stay unmeasured rather than
+        // being read out of the wrong union member.
+        assert_eq!(as_whole_number(&size(2560, 1440)), None);
+        assert_eq!(as_whole_number(&empty_variant()), None);
     }
 }

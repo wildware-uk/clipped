@@ -5,6 +5,19 @@
 //! measurement behind them, and answering "we do not know" to all of them would
 //! be useless as well as true.
 //!
+//! # What this is now the fallback for
+//!
+//! Since [issue #133](https://github.com/wildware-uk/clipped/issues/133) an
+//! encoder can be asked directly, and it is
+//! ([`crate::probe::Probing::WithSessions`]) — but only when a user asks,
+//! because asking costs an encode session slot on a machine that may be in the
+//! middle of a match. So every entry below is still what an ordinary run
+//! reports, and every entry is still what a *measured* run falls back to
+//! wherever the encoder declined to answer, or where this project judged the
+//! answer not worth publishing (NVENC's throughput figure; see
+//! `docs/encoder-capabilities.md`). Nothing here has been deleted for being
+//! measurable, because the whole point of it is the run that measures nothing.
+//!
 //! # The rule
 //!
 //! **A capability whose absence would break a recording is never inferred as
@@ -39,11 +52,10 @@
 //!   sessions are issues #15 to #18.
 //!
 //! Issue #14 asked for these four — maximum resolution, framerate, B-frames and
-//! HDR — to be *detected* per encoder, and this table infers them instead.
-//! Measuring them needs a live encoder session, which needs a backend, so
-//! [issue #133](https://github.com/wildware-uk/clipped/issues/133) tracks
-//! replacing the inferred values here with queried ones once one exists. Until
-//! then every value from this module is labelled inferred wherever it is shown.
+//! HDR — to be *detected* per encoder, and this table inferred all four of them.
+//! Issue #133 measures what the vendors will answer, and the table keeps the
+//! rest. Every value from this module is labelled inferred wherever it is
+//! shown, whether or not a session was opened.
 //!
 //! HDR here means 10-bit encoding, which is the necessary condition for it. The
 //! colour signalling that makes a 10-bit stream an HDR one belongs to the muxer
@@ -127,12 +139,22 @@ pub(crate) const fn limits(kind: EncoderKind, codec: Codec) -> ReferenceLimits {
             hdr: Claim::Unknown,
         },
         // NVENC's AV1 encoder exists only on Ada and later, so where it exists
-        // at all, 10-bit does too and B-frames do not.
+        // at all, 10-bit does too.
+        //
+        // B-frames used to be inferred here as absent, and measuring settled
+        // it the other way: `NV_ENC_CAPS_NUM_MAX_BFRAMES` for AV1 on a GeForce
+        // RTX 4090 (driver 32.0.16.1074) is greater than zero, on the same
+        // session whose other answers vary sensibly by codec — 10-bit yes for
+        // AV1 and HEVC, no for H.264 — so it is a real per-codec answer rather
+        // than a stuck field. One card is not a generation, which is why this
+        // became `Unknown` rather than `Inferred(true)`: the entry that was
+        // there has been contradicted, and there is nothing to put in its place
+        // that a machine could not simply be asked (issue #133).
         (EncoderKind::Nvenc, Codec::Av1) => ReferenceLimits {
             supported: Claim::Unknown,
             max_resolution: Claim::Inferred(Resolution::new(8192, 8192)),
             max_luma_samples_per_second: Claim::Inferred(AV1_LEVEL_6_3_LUMA_SAMPLE_RATE),
-            b_frames: Claim::Inferred(false),
+            b_frames: Claim::Unknown,
             hdr: Claim::Inferred(true),
         },
 

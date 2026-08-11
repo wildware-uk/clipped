@@ -89,7 +89,29 @@ pub const CACHE_FORMAT: u32 = 2;
 /// added `libmfx64.dll` to the two already there — so a machine that has not
 /// changed gets an extra measured line, and one that installs only that name
 /// changes availability outright.
-pub const DETECTION_REVISION: u32 = 2;
+///
+/// Revision 3: encoder sessions can now be asked for their own limits
+/// ([#133](https://github.com/wildware-uk/clipped/issues/133)). A stored
+/// revision 2 report has the published limits everywhere, marked inferred, and
+/// this build would answer with measured ones for the same machine — so
+/// without this bump every installation that had already cached would go on
+/// showing yesterday's inferred numbers until its GPU changed.
+///
+/// # Why the key did not have to change with it
+///
+/// The stored report now depends on something outside the key: whether the run
+/// that wrote it opened an encoder session. That does not make the key wrong,
+/// because a measured report and an inferred one are both true of the same
+/// machine — one simply says more. Everything that could make a *measurement*
+/// stale is already in the key, since the encoder's own limits change when the
+/// adapter or its driver changes and at no other time.
+///
+/// What follows from that is worth stating, because it is the one surprising
+/// behaviour: a plain `capabilities` run after a driver update finds the cache
+/// stale, re-probes without opening a session, and replaces measured limits
+/// with published ones. That is correct — the measurements described the
+/// previous driver — and `capabilities --refresh` takes them again.
+pub const DETECTION_REVISION: u32 = 3;
 
 /// The directory name Clipped uses under `%LOCALAPPDATA%`.
 ///

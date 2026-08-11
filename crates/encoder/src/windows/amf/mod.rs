@@ -84,6 +84,7 @@ use crate::config::EncoderConfig;
 use crate::error::{EncodeContext, EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice, SourceFrame, SurfaceKind};
 use crate::packet::{EncodedPacket, PictureKind};
+use crate::probe::EncoderLimits;
 
 /// The kinds of graphics resource this backend can bind.
 const SUPPORTED_SURFACES: &[SurfaceKind] = &[SurfaceKind::D3d11Texture2D];
@@ -121,6 +122,13 @@ const POLL_INTERVAL: Duration = Duration::from_micros(200);
 
 /// One second in the hundred-nanosecond units AMF measures time in.
 const AMF_SECOND: i64 = 10_000_000;
+
+/// How many luma samples a macroblock is.
+///
+/// AMF quotes `MaxThroughput` in macroblocks a second — 16x16 samples — which
+/// is the unit the codec levels are quoted in too (`crate::reference`), and
+/// that is what makes a measured ceiling comparable with the published one.
+const LUMA_SAMPLES_PER_MACROBLOCK: u64 = 16 * 16;
 
 /// A hardware encoding session on an AMD GPU.
 ///
@@ -404,6 +412,61 @@ impl VideoEncoder for AmfEncoder {
     }
 }
 
+/// Asks AMF what it can do, on the device it would encode on.
+///
+/// One AMF context, and one encoder component per codec, created and destroyed
+/// inside this call. No component is ever initialised: `AMFComponent::GetCaps`
+/// answers before `Init`, so nothing is configured, no surface is allocated and
+/// no picture is coded. Creating the component is still what reserves the
+/// hardware encoder, which is why nothing calls this unless a user asked (see
+/// [`crate::probe::Probing`]).
+///
+/// A failure at any point is a measurement that did not happen, not an error:
+/// the published limits stand, and the reason goes to the diagnostics
+/// (AGENTS.md sections 15 and 16).
+pub(in crate::windows) fn measure_limits(device: &GraphicsDevice) -> Vec<EncoderLimits> {
+    // No picture is being encoded, so there is no resolution to name. Nothing
+    // built from this context reaches a user: the failures below are logged as
+    // diagnostics about a query, by kind, never shown as "could not encode".
+    let context = EncodeContext::new(EncoderKind::Amf, Codec::H264, Resolution::new(0, 0));
+
+    let runtime = match api::AmfRuntime::load() {
+        Ok(runtime) => runtime,
+        Err(failure) => {
+            tracing::debug!(
+                library = api::LIBRARY,
+                %failure,
+                "AMF could not be loaded, so its limits were not measured"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut session = match Session::open(runtime, device.as_raw(), context, Codec::H264) {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!(
+                reason = %error.kind(),
+                "an AMF context could not be created, so no limits were measured and the \
+                 published ones stand"
+            );
+            return Vec::new();
+        }
+    };
+
+    let measured = Codec::EFFICIENCY_ORDER
+        .into_iter()
+        .filter_map(|codec| Some((codec, settings::component_id(codec)?)))
+        .map(|(codec, component)| session.measure(codec, component))
+        .collect();
+
+    // The context and the last component are released here, by
+    // `Session::drop`, which gives the hardware encoder back (AGENTS.md section
+    // 58).
+    drop(session);
+    measured
+}
+
 /// The configuration checks that do not need a session.
 fn validate(config: &EncoderConfig) -> Result<(), EncodeErrorKind> {
     let Resolution { width, height } = config.resolution();
@@ -611,6 +674,30 @@ impl Session {
         Ok(())
     }
 
+    /// Terminates and releases the encoder component, if there is one.
+    ///
+    /// Idempotent, and the only place a component is released: it runs from
+    /// `Drop` and from the capability probe, which creates one component per
+    /// codec and must not leave the previous one holding the hardware encoder
+    /// while it asks about the next (AGENTS.md section 58).
+    fn release_component(&mut self) {
+        if self.component.is_null() {
+            return;
+        }
+
+        // SAFETY: the component was created by `create_component` and is
+        // terminated and released exactly once, because the pointer is nulled
+        // below and this is the only path that releases it.
+        if let Some(terminate) = unsafe { (*(*self.component).pVtbl).Terminate } {
+            // SAFETY: as above.
+            let status = unsafe { terminate(self.component) };
+            log_release_failure(status, "AMFComponent::Terminate");
+        }
+        // SAFETY: as above — this session's only reference, given back once.
+        let _ = unsafe { api::release(self.component.cast::<sys::AMFInterface>()) };
+        self.component = ptr::null_mut();
+    }
+
     /// Refuses a picture larger than the encoder says it can take.
     ///
     /// Best effort, deliberately. A driver that will not describe its own
@@ -632,6 +719,18 @@ impl Session {
 
     /// The largest picture the encoder reports it can take, if it will say.
     fn maximum_size(&self) -> Option<Resolution> {
+        self.with_capabilities(|session, capabilities| session.maximum_input_size(capabilities))
+            .flatten()
+    }
+
+    /// Runs `read` against the encoder's capabilities, if it will describe
+    /// them.
+    ///
+    /// # Ownership
+    ///
+    /// The reference `GetCaps` returns belongs to this function and is released
+    /// before it returns, so `read` may use the pointer and must not store it.
+    fn with_capabilities<T>(&self, read: impl FnOnce(&Self, *mut sys::AMFCaps) -> T) -> Option<T> {
         // SAFETY: the component was created by `create_component` and has not
         // been terminated.
         let caps = unsafe { (*(*self.component).pVtbl).GetCaps }?;
@@ -644,18 +743,149 @@ impl Session {
             tracing::debug!(
                 status,
                 status_name = api::status_name(status),
-                "the AMF encoder would not describe its capabilities, so the picture size was \
-                 left to Init to accept or refuse"
+                "the AMF encoder would not describe its capabilities, so the published limits \
+                 stand and the picture size is left to Init to accept or refuse"
             );
             return None;
         }
 
-        let size = self.maximum_input_size(capabilities);
+        let read = read(self, capabilities);
 
         // SAFETY: the reference came from the successful `GetCaps` above and is
         // given back exactly once, here.
         let _ = unsafe { api::release(capabilities.cast::<sys::AMFInterface>()) };
-        size
+        Some(read)
+    }
+
+    /// Everything this encoder's capabilities say about one codec.
+    ///
+    /// Creates the component, reads it, and destroys it again, so that the
+    /// three codecs are not three simultaneous encoders. A component that
+    /// cannot be created because the hardware has no encoder for the codec is a
+    /// measured `false` rather than an absence of an answer: AMF refusing to
+    /// create its own encoder component is the encoder Clipped would record
+    /// through saying it cannot produce this codec.
+    fn measure(&mut self, codec: Codec, component: &[u16]) -> EncoderLimits {
+        let measured = EncoderLimits::new(EncoderKind::Amf, codec);
+
+        if let Err(error) = self.create_component(component) {
+            let missing = matches!(error.kind(), EncodeErrorKind::CodecUnsupported);
+            tracing::debug!(
+                codec = codec.log_value(),
+                reason = %error.kind(),
+                "an AMF encoder component could not be created"
+            );
+            // Only "there is no such encoder" is an answer. Any other failure —
+            // out of memory, a device that went away — says nothing about what
+            // the hardware supports, and reporting `false` from one would be a
+            // measurement of the wrong thing.
+            return if missing {
+                measured.with_supported(false)
+            } else {
+                measured
+            };
+        }
+
+        let measured = measured.with_supported(true);
+        let measured = self
+            .with_capabilities(|session, capabilities| {
+                session.read_capabilities(codec, capabilities, measured)
+            })
+            .unwrap_or(measured);
+
+        self.release_component();
+        measured
+    }
+
+    /// Reads one codec's capability properties out of a live `AMFCaps`.
+    fn read_capabilities(
+        &self,
+        codec: Codec,
+        capabilities: *mut sys::AMFCaps,
+        measured: EncoderLimits,
+    ) -> EncoderLimits {
+        let measured = match self.maximum_input_size(capabilities) {
+            Some(size) => measured.with_max_resolution(size),
+            None => measured,
+        };
+
+        let Some(names) = settings::capability_names(codec) else {
+            return measured;
+        };
+        let storage = capabilities.cast::<sys::AMFPropertyStorage>();
+
+        // Zero is "did not say" rather than "cannot encode a single
+        // macroblock": AMF reports it for a component that does not implement
+        // the capability, and a ceiling of no frames a second would be a worse
+        // answer than the published one.
+        let measured = match self.capability_number(codec, storage, names.max_throughput) {
+            Some(macroblocks) if macroblocks > 0 => measured.with_max_luma_samples_per_second(
+                macroblocks.unsigned_abs() * LUMA_SAMPLES_PER_MACROBLOCK,
+            ),
+            _ => measured,
+        };
+
+        let measured = match names
+            .b_frames
+            .and_then(|name| self.capability_number(codec, storage, name))
+        {
+            // AMF reports the number of B-frames the encoder supports, so any
+            // positive answer is "yes" and zero is a genuine "no" — the answer
+            // AMD's own encoders give on the video engines without them.
+            Some(supported) => measured.with_b_frames(supported > 0),
+            None => measured,
+        };
+
+        match self
+            .capability_number(codec, storage, names.max_profile)
+            .and_then(|profile| settings::ten_bit_from_profile(codec, profile))
+        {
+            Some(ten_bit) => measured.with_hdr(ten_bit),
+            None => measured,
+        }
+    }
+
+    /// One numeric capability property, where the encoder answers with one.
+    ///
+    /// AMF stores these as whole numbers, and a name it does not recognise is
+    /// answered with `AMF_NOT_FOUND` rather than an error — so a property this
+    /// runtime is too old to have leaves the published limit in place instead
+    /// of failing the query.
+    fn capability_number(
+        &self,
+        codec: Codec,
+        storage: *mut sys::AMFPropertyStorage,
+        name: &[u16],
+    ) -> Option<i64> {
+        // SAFETY: `storage` is the live `AMFCaps` the caller holds a reference
+        // to, seen through the property storage its interface derives from (see
+        // `api`), and `name` is nul-terminated.
+        let value = unsafe { api::get_property(storage, name) };
+
+        match value {
+            Ok(variant) => {
+                let number = api::as_whole_number(&variant);
+                if number.is_none() {
+                    tracing::debug!(
+                        codec = codec.log_value(),
+                        capability = %api::name_to_string(name),
+                        variant = variant.type_,
+                        "an AMF capability came back as something other than a number"
+                    );
+                }
+                number
+            }
+            Err(status) => {
+                tracing::debug!(
+                    codec = codec.log_value(),
+                    capability = %api::name_to_string(name),
+                    status,
+                    status_name = api::status_name(status),
+                    "AMF would not answer a capability query, so the published limit stands"
+                );
+                None
+            }
+        }
     }
 
     /// The width and height ranges of the encoder's input, from its
@@ -1324,18 +1554,7 @@ impl Drop for Session {
             self.release_coded(coded);
         }
 
-        if !self.component.is_null() {
-            // SAFETY: the component was created by `create_component` and is
-            // terminated and released exactly once, here.
-            if let Some(terminate) = unsafe { (*(*self.component).pVtbl).Terminate } {
-                // SAFETY: as above.
-                let status = unsafe { terminate(self.component) };
-                log_release_failure(status, "AMFComponent::Terminate");
-            }
-            // SAFETY: as above — this session's only reference, given back once.
-            let _ = unsafe { api::release(self.component.cast::<sys::AMFInterface>()) };
-            self.component = ptr::null_mut();
-        }
+        self.release_component();
 
         if !self.context.is_null() {
             // The context is terminated after the component, because the

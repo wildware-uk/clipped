@@ -22,7 +22,8 @@ use crate::cache::{CacheState, CapabilityCache, HardwareSignature};
 use crate::claim::Claim;
 use crate::codec::{Codec, EncoderKind, Resolution};
 use crate::probe::{
-    HardwareEncoder, ProbeError, RuntimeObservation, RuntimeOutcome, SystemFacts, SystemProbe,
+    EncoderLimits, HardwareEncoder, ProbeError, Probing, RuntimeObservation, RuntimeOutcome,
+    SystemFacts, SystemProbe,
 };
 use crate::reference::{framerate_ceiling, limits};
 
@@ -97,6 +98,13 @@ pub enum Signal {
     Runtime(RuntimeObservation),
     /// Windows lists a hardware encoder for a codec.
     HardwareEncoder(HardwareEncoder),
+    /// An encoder session was opened for a codec and described its own limits.
+    ///
+    /// The evidence behind every unmarked number in that codec's row, and the
+    /// answer to "why does this machine's report have measurements where the
+    /// documentation says these are inferred?" — because somebody ran
+    /// `capabilities --refresh` and paid for a session.
+    SessionLimits(Codec),
     /// The software encoder needs no adapter and no runtime, so there was
     /// nothing to ask.
     NoHardwareRequired,
@@ -110,6 +118,10 @@ impl fmt::Display for Signal {
             Self::HardwareEncoder(encoder) => {
                 write!(formatter, "Windows lists \"{encoder}\"", encoder = encoder)
             }
+            Self::SessionLimits(codec) => write!(
+                formatter,
+                "an encoder session reported its own {codec} limits"
+            ),
             Self::NoHardwareRequired => {
                 formatter.write_str("runs on the CPU, so needs no adapter or driver")
             }
@@ -137,10 +149,14 @@ impl CodecSupport {
 
     /// Whether the encoder can produce it.
     ///
-    /// [`Claim::Measured`] means Windows reported a hardware encoder for it;
-    /// [`Claim::Inferred`] means only the reference table says so;
-    /// [`Claim::Unknown`] means nothing here knows, which is the honest answer
-    /// for HEVC and AV1 on a driver that does not advertise them.
+    /// [`Claim::Measured`] means either that Windows reported a hardware
+    /// encoder for it, or that the vendor runtime itself was asked and answered
+    /// — which is the only way this becomes a measured `false`, because a
+    /// missing transform proves nothing and an encoder that does not enumerate
+    /// a codec proves everything. [`Claim::Inferred`] means only the reference
+    /// table says so; [`Claim::Unknown`] means nothing here knows, which is the
+    /// honest answer for HEVC and AV1 on a driver that does not advertise them
+    /// and has not been asked.
     #[must_use]
     pub const fn supported(&self) -> Claim<bool> {
         self.supported
@@ -165,12 +181,21 @@ impl CodecSupport {
         self.hdr
     }
 
-    /// The framerate the codec's level limit permits at `resolution`.
+    /// The framerate ceiling at `resolution`, and what kind of ceiling it is.
     ///
-    /// A ceiling from the *codec*, not from the silicon: see
-    /// [`crate::reference`]. Nothing in this crate measures how fast an encoder
-    /// actually is, and a number here is an upper bound on what the format
-    /// allows rather than a promise about the hardware.
+    /// The two evidence values mean different things here, and the difference
+    /// is the point of the qualifier:
+    ///
+    /// - [`Claim::Measured`] is the encoder's own answer to how many samples a
+    ///   second it can process — a statement about this silicon, from
+    ///   `NV_ENC_CAPS_MB_PER_SEC_MAX` or AMF's `MaxThroughput`.
+    /// - [`Claim::Inferred`] is the *codec's* level limit and nothing about the
+    ///   hardware at all: HEVC Level 6.2 permits over two thousand frames a
+    ///   second at 1080p and no encoder does that (see [`crate::reference`]).
+    ///
+    /// Neither is a promise that a recording at that rate will keep up, because
+    /// a ceiling on the encoder is not a ceiling on the capture, the disk or
+    /// the machine.
     #[must_use]
     pub fn max_framerate_at(&self, resolution: Resolution) -> Claim<u32> {
         self.max_luma_samples_per_second
@@ -228,6 +253,34 @@ impl EncoderReport {
     pub fn codec(&self, codec: Codec) -> Option<&CodecSupport> {
         self.codecs.iter().find(|support| support.codec == codec)
     }
+
+    /// Whether an encoder session was opened and asked about this encoder.
+    ///
+    /// The difference between "these limits are published because nobody has
+    /// asked" and "these limits are published because the encoder would not
+    /// say", which is the difference between a refresh being worth suggesting
+    /// and being a waste of the user's session slot.
+    #[must_use]
+    pub fn was_asked(&self) -> bool {
+        self.signals
+            .iter()
+            .any(|signal| matches!(signal, Signal::SessionLimits(_)))
+    }
+
+    /// Whether any codec here still carries a limit from the published table.
+    #[must_use]
+    pub fn has_inferred_limit(&self) -> bool {
+        self.codecs.iter().any(|support| {
+            [
+                support.max_resolution.evidence(),
+                support.max_luma_samples_per_second.evidence(),
+                support.b_frames.evidence(),
+                support.hdr.evidence(),
+            ]
+            .into_iter()
+            .any(|evidence| evidence == Some(crate::claim::Evidence::Inferred))
+        })
+    }
 }
 
 /// Everything detection found: the adapters, and the encoders on them.
@@ -276,6 +329,24 @@ impl CapabilityReport {
         self.encoders
             .iter()
             .any(|report| report.kind.is_hardware() && report.availability.is_available())
+    }
+
+    /// Whether an available hardware encoder is still quoting published limits
+    /// without ever having been asked for its own.
+    ///
+    /// What the report uses to decide whether telling the reader about
+    /// `--refresh` would gain them anything, and the reason it is this question
+    /// rather than "is anything inferred?": some limits stay inferred however
+    /// many times a machine is asked — NVENC's framerate ceiling is deliberately
+    /// not published (`crate::windows::nvenc`) — so a report that advertised a
+    /// refresh whenever it saw an `(i)` would go on advertising it to somebody
+    /// who had just done one.
+    #[must_use]
+    pub fn has_unasked_encoder(&self) -> bool {
+        self.encoders
+            .iter()
+            .filter(|report| report.kind.is_hardware() && report.availability.is_available())
+            .any(|report| !report.was_asked() && report.has_inferred_limit())
     }
 }
 
@@ -367,7 +438,7 @@ fn detect_encoder(kind: EncoderKind, facts: &SystemFacts) -> EncoderReport {
             availability: Availability::Available,
             adapter: None,
             signals,
-            codecs: codec_support(kind, &[]),
+            codecs: codec_support(kind, &[], &[]),
         };
     };
 
@@ -406,9 +477,22 @@ fn detect_encoder(kind: EncoderKind, facts: &SystemFacts) -> EncoderReport {
             .map(|encoder| Signal::HardwareEncoder((*encoder).clone())),
     );
 
+    let measured: Vec<&EncoderLimits> = facts
+        .encoders()
+        .limits()
+        .iter()
+        .filter(|limits| limits.kind() == kind)
+        .collect();
+    signals.extend(
+        measured
+            .iter()
+            .filter(|limits| !limits.is_empty())
+            .map(|limits| Signal::SessionLimits((*limits).codec())),
+    );
+
     let availability = availability(&adapters, &runtimes, &hardware_encoders);
     let codecs = if availability.is_available() {
-        codec_support(kind, &hardware_encoders)
+        codec_support(kind, &hardware_encoders, &measured)
     } else {
         Vec::new()
     };
@@ -416,7 +500,9 @@ fn detect_encoder(kind: EncoderKind, facts: &SystemFacts) -> EncoderReport {
     EncoderReport {
         kind,
         availability,
-        adapter: choose_adapter(&adapters),
+        // The same rule the capability probe follows when it chooses which
+        // adapter to open a session on, from the same function.
+        adapter: crate::adapter::encoding_adapter(facts.adapters(), vendor).map(Adapter::id),
         signals,
         codecs,
     }
@@ -459,54 +545,77 @@ fn availability(
     Availability::Unavailable(Unavailable::RuntimeNotInstalled)
 }
 
-/// Picks the adapter an encoder runs on.
+/// Builds the per-codec table: measured where something answered, from the
+/// reference table where nothing did.
 ///
-/// Always a guess, and worth saying so plainly: nothing this crate measures
-/// says which GPU a hardware encoder belongs to. Media Foundation documents
-/// `MFT_ENUM_ADAPTER_LUID` as an input filter for `MFTEnum2` rather than as an
-/// attribute on an activation object, and it is absent from every transform on
-/// the machine this was written on, so attribution is the vendor's own adapter,
-/// preferring the one with the most video memory of its own. That is right
-/// whenever a machine has one card per vendor, and a machine with two cards
-/// from one vendor and only one of them encoding is beyond what this can tell.
-/// The report prints which adapter it picked rather than implying it knew.
-fn choose_adapter(adapters: &[&Adapter]) -> Option<AdapterId> {
-    adapters
-        .iter()
-        .max_by_key(|adapter| adapter.dedicated_video_memory())
-        .map(|adapter| adapter.id())
-}
-
-/// Builds the per-codec table: measured where Windows answered, from the
-/// reference table where it did not.
-fn codec_support(kind: EncoderKind, hardware_encoders: &[&HardwareEncoder]) -> Vec<CodecSupport> {
+/// Two kinds of measurement arrive here and they are not interchangeable.
+/// `hardware_encoders` is what Windows lists, which costs no session and
+/// answers only "is there an encoder for this codec". `measured` is what an
+/// encoder session said when one was opened, which answers the numeric limits
+/// as well — and only exists when the caller asked for
+/// [`Probing::WithSessions`].
+///
+/// The rule for combining them is the same in every field: **a measurement
+/// replaces the table entry and the absence of one leaves it alone.** A field
+/// nobody measured keeps the published limit, still labelled inferred, rather
+/// than becoming a measurement because the session it might have come from
+/// happened to open.
+fn codec_support(
+    kind: EncoderKind,
+    hardware_encoders: &[&HardwareEncoder],
+    measured: &[&EncoderLimits],
+) -> Vec<CodecSupport> {
     Codec::EFFICIENCY_ORDER
         .into_iter()
         .map(|codec| {
             let entry = limits(kind, codec);
-            let measured = hardware_encoders
+            let session = measured
+                .iter()
+                .copied()
+                .find(|limits| limits.codec() == codec);
+            let registered = hardware_encoders
                 .iter()
                 .any(|encoder| encoder.codec() == codec);
 
             CodecSupport {
                 codec,
-                // A measurement replaces the table entry; the absence of one
-                // does not. Windows not listing an AV1 transform is not proof
-                // that the encoder cannot produce AV1 — it may simply not
-                // expose one — so the fallback is what the table says, which
-                // for AV1 is `Unknown`.
-                supported: if measured {
-                    Claim::Measured(true)
-                } else {
-                    entry.supported
-                },
-                max_resolution: entry.max_resolution,
-                max_luma_samples_per_second: entry.max_luma_samples_per_second,
-                b_frames: entry.b_frames,
-                hdr: entry.hdr,
+                // Windows not listing an AV1 transform is not proof that the
+                // encoder cannot produce AV1 — a driver may simply not register
+                // one — so a missing transform falls through to what the table
+                // says, which for AV1 is `Unknown`. The vendor runtime's own
+                // codec list is a stronger answer than either, in both
+                // directions: an encoder that does not enumerate a codec cannot
+                // encode it, whatever Windows registered.
+                supported: measured_or(
+                    session.and_then(EncoderLimits::supported),
+                    if registered {
+                        Claim::Measured(true)
+                    } else {
+                        entry.supported
+                    },
+                ),
+                max_resolution: measured_or(
+                    session.and_then(EncoderLimits::max_resolution),
+                    entry.max_resolution,
+                ),
+                max_luma_samples_per_second: measured_or(
+                    session.and_then(EncoderLimits::max_luma_samples_per_second),
+                    entry.max_luma_samples_per_second,
+                ),
+                b_frames: measured_or(session.and_then(EncoderLimits::b_frames), entry.b_frames),
+                hdr: measured_or(session.and_then(EncoderLimits::hdr), entry.hdr),
             }
         })
         .collect()
+}
+
+/// A measurement if there is one, and the published limit if there is not.
+///
+/// One function so that the rule is written once. Five fields each deciding for
+/// themselves is how one of them ends up promoting a table entry to
+/// [`Claim::Measured`].
+fn measured_or<T>(measurement: Option<T>, published: Claim<T>) -> Claim<T> {
+    measurement.map_or(published, Claim::Measured)
 }
 
 /// Detects, using the cache when the hardware has not changed under it.
@@ -514,8 +623,14 @@ fn codec_support(kind: EncoderKind, hardware_encoders: &[&HardwareEncoder]) -> V
 /// The cheap half of the probe runs every time, because its answer is the cache
 /// key: a new GPU or a driver update has to invalidate the stored report, and
 /// nothing else on the machine can be trusted to say that it happened. The
-/// expensive half — starting Media Foundation, loading vendor runtimes — runs
-/// only on a miss.
+/// expensive half — starting Media Foundation, loading vendor runtimes, and
+/// with [`Probing::WithSessions`] opening an encoder — runs only on a miss.
+///
+/// `probing` decides whether an encoder session may be opened. It applies only
+/// to a miss: a cache hit opens nothing whatever it says, because the answers
+/// are already stored. So a run that measures the limits is a run that was
+/// going to probe anyway, and the machine pays for a session once per
+/// `--refresh` rather than once per question.
 ///
 /// A cache that cannot be read or cannot be written never fails a detection.
 /// The worst a broken cache can do is make this slow, and refusing to report
@@ -528,6 +643,7 @@ fn codec_support(kind: EncoderKind, hardware_encoders: &[&HardwareEncoder]) -> V
 pub fn detect_cached(
     probe: &dyn SystemProbe,
     cache: &CapabilityCache,
+    probing: Probing,
 ) -> Result<Detection, ProbeError> {
     let started = Instant::now();
     let adapters = probe.adapters()?;
@@ -554,8 +670,28 @@ pub fn detect_cached(
             })
         }
         CacheState::Stale(reason) => {
-            tracing::debug!(%reason, "probing encoder capabilities");
-            let facts = SystemFacts::new(adapters, probe.encoders()?);
+            tracing::debug!(%reason, %probing, "probing encoder capabilities");
+            let mut observations = probe.encoders()?;
+
+            if probing.opens_sessions() {
+                // Timed separately from the rest, because this is the half the
+                // whole design of the cache is an argument about: a number
+                // nobody measures is how that argument survives being wrong
+                // (AGENTS.md section 18).
+                let session_probe = Instant::now();
+                let measured = probe.encoder_limits(&adapters)?;
+                let codecs = measured.len();
+                for limits in measured {
+                    observations = observations.with_limits(limits);
+                }
+                tracing::info!(
+                    elapsed_ms = session_probe.elapsed().as_millis(),
+                    codecs,
+                    "asked the encoder sessions for their own limits"
+                );
+            }
+
+            let facts = SystemFacts::new(adapters, observations);
             let report = detect(&facts);
             if let Err(error) = cache.store(&signature, &report) {
                 // Not fatal, and not silent either (AGENTS.md section 15): the
@@ -917,6 +1053,183 @@ mod tests {
                 .adapter(basic_render_driver().id())
                 .map(Adapter::kind),
             Some(AdapterKind::Software)
+        );
+    }
+
+    #[test]
+    fn a_limit_an_encoder_session_answered_is_reported_as_measured() {
+        // The whole of issue #133 in one assertion: a number the encoder itself
+        // gave has to arrive as `Measured`, so that the report prints it
+        // without the marker that says "we looked this up".
+        let facts = SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(nvenc_runtime(RuntimeOutcome::Loaded))
+                .with_limits(
+                    EncoderLimits::new(EncoderKind::Nvenc, Codec::Hevc)
+                        .with_supported(true)
+                        .with_max_resolution(Resolution::new(8192, 8192))
+                        .with_b_frames(true)
+                        .with_hdr(true),
+                ),
+        );
+        let report = detect(&facts);
+        let hevc = report
+            .encoder(EncoderKind::Nvenc)
+            .and_then(|nvenc| nvenc.codec(Codec::Hevc))
+            .copied()
+            .expect("HEVC is reported");
+
+        assert_eq!(hevc.supported(), Claim::Measured(true));
+        assert_eq!(
+            hevc.max_resolution(),
+            Claim::Measured(Resolution::new(8192, 8192))
+        );
+        assert_eq!(hevc.b_frames(), Claim::Measured(true));
+        assert_eq!(hevc.hdr(), Claim::Measured(true));
+    }
+
+    #[test]
+    fn a_field_the_session_did_not_answer_keeps_the_published_limit() {
+        // The rule that keeps the distinction worth anything. A session that
+        // opened and answered two questions must not turn the other three into
+        // measurements, and the table's own `Unknown` must survive as well: the
+        // NVENC HEVC row publishes no B-frame claim, and a session that did not
+        // mention them leaves it that way.
+        let facts = SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(nvenc_runtime(RuntimeOutcome::Loaded))
+                .with_limits(
+                    EncoderLimits::new(EncoderKind::Nvenc, Codec::Hevc)
+                        .with_supported(true)
+                        .with_max_resolution(Resolution::new(4096, 4096)),
+                ),
+        );
+        let report = detect(&facts);
+        let hevc = report
+            .encoder(EncoderKind::Nvenc)
+            .and_then(|nvenc| nvenc.codec(Codec::Hevc))
+            .copied()
+            .expect("HEVC is reported");
+
+        assert_eq!(
+            hevc.max_resolution(),
+            Claim::Measured(Resolution::new(4096, 4096))
+        );
+        assert!(
+            !hevc.max_framerate_at(Resolution::HD_1080P).is_measured(),
+            "the framerate ceiling was not measured and must not say it was: {}",
+            hevc.max_framerate_at(Resolution::HD_1080P)
+        );
+        assert_eq!(
+            hevc.b_frames(),
+            Claim::Unknown,
+            "a session that said nothing about B-frames cannot have settled them"
+        );
+    }
+
+    #[test]
+    fn an_encoder_that_says_it_cannot_produce_a_codec_is_believed_over_the_transforms() {
+        // Windows lists an AV1 transform and the vendor runtime does not
+        // enumerate AV1. Clipped records through the runtime, so the runtime is
+        // the answer — and this is a measured "no", which is different from the
+        // table's `Unknown` and different again from the `Measured(true)` the
+        // transform alone would have produced.
+        let facts = SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none()
+                .with_runtime(nvenc_runtime(RuntimeOutcome::Loaded))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Nvidia,
+                    Codec::Av1,
+                    "NVIDIA AV1 Encoder MFT",
+                ))
+                .with_limits(
+                    EncoderLimits::new(EncoderKind::Nvenc, Codec::Av1).with_supported(false),
+                ),
+        );
+        let report = detect(&facts);
+
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Nvenc)
+                .and_then(|nvenc| nvenc.codec(Codec::Av1))
+                .map(CodecSupport::supported),
+            Some(Claim::Measured(false))
+        );
+    }
+
+    #[test]
+    fn one_encoder_s_measurements_do_not_reach_another_s_row() {
+        // Two vendors, one of them measured. Attributing NVENC's maximum size
+        // to AMD would be a measurement of hardware that never gave it, and
+        // both are 4096-wide often enough that a wrong answer would look right.
+        let facts = SystemFacts::new(
+            vec![nvidia_card(), integrated_amd()],
+            EncoderObservations::none()
+                .with_runtime(nvenc_runtime(RuntimeOutcome::Loaded))
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::Amf,
+                    "amfrt64.dll",
+                    RuntimeOutcome::Loaded,
+                ))
+                .with_limits(
+                    EncoderLimits::new(EncoderKind::Nvenc, Codec::H264)
+                        .with_max_resolution(Resolution::new(8192, 8192)),
+                ),
+        );
+        let report = detect(&facts);
+
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Amf)
+                .and_then(|amf| amf.codec(Codec::H264))
+                .map(CodecSupport::max_resolution),
+            Some(Claim::Inferred(Resolution::new(4096, 2160))),
+            "AMF's row must keep the published limit it had before NVENC was asked"
+        );
+    }
+
+    #[test]
+    fn a_report_says_whether_anything_is_still_worth_asking_for() {
+        // What the printed report uses to decide whether to mention
+        // `--refresh`. An encoder nobody has asked has something to gain from
+        // one; an encoder that was asked has not, *even though* some of its
+        // limits are still published — asking again would produce the same
+        // report, and suggesting it would cost a session slot for nothing.
+        let unasked = detect(&SystemFacts::new(
+            vec![nvidia_card()],
+            EncoderObservations::none().with_runtime(nvenc_runtime(RuntimeOutcome::Loaded)),
+        ));
+        assert!(unasked.has_unasked_encoder());
+
+        // Answered about one field only, which is the NVENC shape: the
+        // framerate ceiling stays published for ever, so a rule that looked for
+        // an inferred value rather than for an unasked encoder would advertise
+        // a refresh to somebody who had just done one.
+        let asked = detect(&SystemFacts::new(
+            vec![nvidia_card()],
+            Codec::EFFICIENCY_ORDER.into_iter().fold(
+                EncoderObservations::none().with_runtime(nvenc_runtime(RuntimeOutcome::Loaded)),
+                |observations, codec| {
+                    observations.with_limits(
+                        EncoderLimits::new(EncoderKind::Nvenc, codec)
+                            .with_supported(true)
+                            .with_max_resolution(Resolution::new(4096, 4096)),
+                    )
+                },
+            ),
+        ));
+        assert!(
+            asked
+                .encoder(EncoderKind::Nvenc)
+                .is_some_and(EncoderReport::has_inferred_limit),
+            "this report should still have published limits in it, or it tests nothing"
+        );
+        assert!(
+            !asked.has_unasked_encoder(),
+            "the only hardware encoder has been asked: {asked:?}"
         );
     }
 

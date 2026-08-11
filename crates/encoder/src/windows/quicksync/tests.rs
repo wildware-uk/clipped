@@ -49,7 +49,7 @@ use crate::config::{BitRate, EncoderConfig, FrameRate, RateControl, SurfaceForma
 use crate::detection::{detect, Availability, Unavailable};
 use crate::error::{EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice};
-use crate::probe::probe;
+use crate::probe::{probe, Probing};
 use crate::recommendation::recommend;
 
 use super::{sys, InitParams, QuickSyncEncoder};
@@ -296,7 +296,13 @@ fn a_recording_cannot_start_on_this_machine_and_says_why() {
 
 #[test]
 fn detection_reports_quick_sync_with_a_reason_when_it_is_not_there() {
-    let facts = probe(&crate::windows::WindowsProbe::new()).expect("this machine can be probed");
+    let facts = probe(
+        &crate::windows::WindowsProbe::new(),
+        // Detection reasons only: no session is needed to learn that there is no
+        // Intel adapter, and opening one here would cost a slot for nothing.
+        Probing::WithoutSessions,
+    )
+    .expect("this machine can be probed");
     let report = detect(&facts);
     let quick_sync = report
         .encoder(EncoderKind::QuickSync)
@@ -334,7 +340,13 @@ fn the_encoders_that_work_are_still_recommended() {
     // it is told to use. On the machine this was written on that is NVENC; on a
     // machine with no hardware encoder at all it is the software fallback, which
     // is why this asserts the property rather than a vendor.
-    let facts = probe(&crate::windows::WindowsProbe::new()).expect("this machine can be probed");
+    let facts = probe(
+        &crate::windows::WindowsProbe::new(),
+        // Detection reasons only: no session is needed to learn that there is no
+        // Intel adapter, and opening one here would cost a slot for nothing.
+        Probing::WithoutSessions,
+    )
+    .expect("this machine can be probed");
     let report = detect(&facts);
     let ranking = recommend(&report);
 

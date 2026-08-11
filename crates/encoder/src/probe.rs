@@ -16,15 +16,21 @@
 //! key ([`crate::cache`]), so a run that hits the cache never pays for the
 //! expensive half.
 //!
-//! # What is deliberately not done
+//! # What costs a session, and when it is paid
 //!
-//! Nothing here creates an encoder session. Opening NVENC or AMF and asking it
-//! directly would be the most truthful answer available, and it is also the one
-//! that allocates GPU memory and takes a session slot on a machine that may be
-//! in the middle of a match. The trade-off, and what it costs in accuracy, is
-//! written up in `docs/encoder-capabilities.md`; the short version is that
-//! codec *availability* is measured through the operating system instead, and
-//! the numeric limits are inferred and labelled as inferred.
+//! Creating an encoder session is the only way to learn the numeric limits —
+//! how large a picture the encoder takes, how much it can encode per second,
+//! whether it has B-frames, whether it will encode 10-bit. It is also the one
+//! measurement that allocates GPU memory and takes an encode session slot from
+//! a machine that may be in the middle of a match, so it is not something to do
+//! behind a user's back.
+//!
+//! [`Probing`] is that choice, made by the caller rather than here. Every
+//! ordinary run asks only the questions that cost nothing and reports the
+//! numeric limits as inferred; a run the user asked for — `capabilities
+//! --refresh` — opens one session per available hardware encoder, asks it, and
+//! caches the answers so that the next run pays nothing for them
+//! (`docs/encoder-capabilities.md`).
 
 use core::fmt;
 use std::error::Error;
@@ -32,7 +38,7 @@ use std::error::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::Adapter;
-use crate::codec::{Codec, EncoderKind, Vendor};
+use crate::codec::{Codec, EncoderKind, Resolution, Vendor};
 
 /// Why the machine could not be asked.
 ///
@@ -219,11 +225,192 @@ impl fmt::Display for HardwareEncoder {
     }
 }
 
+/// What one encoder answered when it was asked about one codec.
+///
+/// Every field is [`None`] until something measured it, and a field that stays
+/// [`None`] falls back to the published limit in [`crate::reference`] — which
+/// is the whole discipline of this crate expressed in a type: a value nobody
+/// measured does not become a measurement because the session it would have
+/// come from happened to open.
+///
+/// The vendors answer different subsets of this, and no vendor answers all of
+/// it. NVENC has a capability query per codec and a numeric answer for each of
+/// the four; AMF describes its input size range and its throughput, has a
+/// B-frame capability for H.264 only, and says what its highest profile is,
+/// which is where 10-bit comes from for HEVC. What each backend does and does
+/// not fill in is written up in `docs/encoder-capabilities.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderLimits {
+    kind: EncoderKind,
+    codec: Codec,
+    supported: Option<bool>,
+    max_resolution: Option<Resolution>,
+    max_luma_samples_per_second: Option<u64>,
+    b_frames: Option<bool>,
+    hdr: Option<bool>,
+}
+
+impl EncoderLimits {
+    /// An answer about `codec` on `kind`, with nothing measured yet.
+    #[must_use]
+    pub const fn new(kind: EncoderKind, codec: Codec) -> Self {
+        Self {
+            kind,
+            codec,
+            supported: None,
+            max_resolution: None,
+            max_luma_samples_per_second: None,
+            b_frames: None,
+            hdr: None,
+        }
+    }
+
+    /// Records whether the encoder itself lists this codec.
+    ///
+    /// A vendor runtime saying "no" here is a measurement and not an absence of
+    /// one: unlike the Media Foundation transforms, which a driver may simply
+    /// not register, this is the encoder Clipped would record through
+    /// enumerating its own codecs.
+    #[must_use]
+    pub const fn with_supported(mut self, supported: bool) -> Self {
+        self.supported = Some(supported);
+        self
+    }
+
+    /// Records the largest picture the encoder says it takes.
+    #[must_use]
+    pub const fn with_max_resolution(mut self, resolution: Resolution) -> Self {
+        self.max_resolution = Some(resolution);
+        self
+    }
+
+    /// Records how many luma samples a second the encoder says it can process.
+    ///
+    /// Both vendors report this as macroblocks — 16x16 samples — per second,
+    /// and it is a statement about the *silicon* rather than about the codec's
+    /// level, which is what makes it worth more than the number it replaces.
+    #[must_use]
+    pub const fn with_max_luma_samples_per_second(mut self, rate: u64) -> Self {
+        self.max_luma_samples_per_second = Some(rate);
+        self
+    }
+
+    /// Records whether the encoder offers B-frames.
+    #[must_use]
+    pub const fn with_b_frames(mut self, b_frames: bool) -> Self {
+        self.b_frames = Some(b_frames);
+        self
+    }
+
+    /// Records whether the encoder offers 10-bit encoding.
+    #[must_use]
+    pub const fn with_hdr(mut self, hdr: bool) -> Self {
+        self.hdr = Some(hdr);
+        self
+    }
+
+    /// Which encoder family answered.
+    #[must_use]
+    pub const fn kind(&self) -> EncoderKind {
+        self.kind
+    }
+
+    /// Which codec it was asked about.
+    #[must_use]
+    pub const fn codec(&self) -> Codec {
+        self.codec
+    }
+
+    /// Whether the encoder lists the codec, where it said.
+    #[must_use]
+    pub const fn supported(&self) -> Option<bool> {
+        self.supported
+    }
+
+    /// The largest picture, where the encoder said.
+    #[must_use]
+    pub const fn max_resolution(&self) -> Option<Resolution> {
+        self.max_resolution
+    }
+
+    /// The luma sample rate, where the encoder said.
+    #[must_use]
+    pub const fn max_luma_samples_per_second(&self) -> Option<u64> {
+        self.max_luma_samples_per_second
+    }
+
+    /// Whether B-frames are offered, where the encoder said.
+    #[must_use]
+    pub const fn b_frames(&self) -> Option<bool> {
+        self.b_frames
+    }
+
+    /// Whether 10-bit encoding is offered, where the encoder said.
+    #[must_use]
+    pub const fn hdr(&self) -> Option<bool> {
+        self.hdr
+    }
+
+    /// Whether anything at all was measured.
+    ///
+    /// An answer with nothing in it is what a session that opened and would not
+    /// describe itself produces, and it is worth telling apart from one that
+    /// filled a field in: the first changes no claim in the report.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.supported.is_none()
+            && self.max_resolution.is_none()
+            && self.max_luma_samples_per_second.is_none()
+            && self.b_frames.is_none()
+            && self.hdr.is_none()
+    }
+}
+
+/// How much a probe may spend on an answer.
+///
+/// The distinction is one thing: whether an encoder session may be opened. It
+/// is the caller's to make, because the caller is the only one that knows
+/// whether the user asked for this or whether it is happening underneath a
+/// game (`docs/encoder-capabilities.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Probing {
+    /// Ask only what costs no encoder session: the adapters, the runtimes, and
+    /// the codecs the driver registers a transform for. What every ordinary run
+    /// does, and what runs at start-up.
+    #[default]
+    WithoutSessions,
+    /// Also open one encoder session per available hardware encoder and ask it
+    /// for its own limits.
+    ///
+    /// Costs GPU memory and an encode session slot for as long as the query
+    /// takes, so it belongs to a user who asked — `capabilities --refresh` —
+    /// and never to a recording in progress.
+    WithSessions,
+}
+
+impl Probing {
+    /// Whether this probe may open an encoder session.
+    #[must_use]
+    pub const fn opens_sessions(self) -> bool {
+        matches!(self, Self::WithSessions)
+    }
+}
+
+impl fmt::Display for Probing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::WithoutSessions => "without opening an encoder session",
+            Self::WithSessions => "opening one encoder session per hardware encoder",
+        })
+    }
+}
+
 /// Everything the expensive half of a probe found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EncoderObservations {
     runtimes: Vec<RuntimeObservation>,
     hardware_encoders: Vec<HardwareEncoder>,
+    limits: Vec<EncoderLimits>,
 }
 
 impl EncoderObservations {
@@ -250,6 +437,13 @@ impl EncoderObservations {
         self
     }
 
+    /// Adds what an encoder session answered about one codec.
+    #[must_use]
+    pub fn with_limits(mut self, limits: EncoderLimits) -> Self {
+        self.limits.push(limits);
+        self
+    }
+
     /// Every runtime that was tried.
     #[must_use]
     pub fn runtimes(&self) -> &[RuntimeObservation] {
@@ -260,6 +454,21 @@ impl EncoderObservations {
     #[must_use]
     pub fn hardware_encoders(&self) -> &[HardwareEncoder] {
         &self.hardware_encoders
+    }
+
+    /// What the encoder sessions answered, which is empty unless one was
+    /// opened.
+    #[must_use]
+    pub fn limits(&self) -> &[EncoderLimits] {
+        &self.limits
+    }
+
+    /// What one encoder answered about one codec, if it was asked.
+    #[must_use]
+    pub fn limits_for(&self, kind: EncoderKind, codec: Codec) -> Option<&EncoderLimits> {
+        self.limits
+            .iter()
+            .find(|limits| limits.kind() == kind && limits.codec() == codec)
     }
 }
 
@@ -312,16 +521,40 @@ pub trait SystemProbe: fmt::Debug {
     ///
     /// [`ProbeError`] when the platform APIs could not be called at all.
     fn encoders(&self) -> Result<EncoderObservations, ProbeError>;
+
+    /// Opens one encoder session per available hardware encoder and asks each
+    /// for its own limits. The half that costs a session.
+    ///
+    /// `adapters` is what [`adapters`](Self::adapters) already returned, so
+    /// that a session is opened on the adapter the report will attribute the
+    /// encoder to rather than on whichever one the runtime picks for itself.
+    ///
+    /// An encoder that will not open, or will not describe itself, contributes
+    /// nothing and is not an error: the limits then stay inferred, which is
+    /// where they were before this was called. An empty answer is therefore
+    /// ordinary.
+    ///
+    /// # Errors
+    ///
+    /// [`ProbeError`] only when the platform APIs could not be called at all.
+    fn encoder_limits(&self, adapters: &[Adapter]) -> Result<Vec<EncoderLimits>, ProbeError>;
 }
 
-/// Runs both halves of a probe.
+/// Runs a probe, opening encoder sessions only if `probing` allows it.
 ///
 /// # Errors
 ///
 /// Whatever the probe failed with.
-pub fn probe(probe: &dyn SystemProbe) -> Result<SystemFacts, ProbeError> {
+pub fn probe(probe: &dyn SystemProbe, probing: Probing) -> Result<SystemFacts, ProbeError> {
     let adapters = probe.adapters()?;
-    let encoders = probe.encoders()?;
+    let mut encoders = probe.encoders()?;
+
+    if probing.opens_sessions() {
+        for limits in probe.encoder_limits(&adapters)? {
+            encoders = encoders.with_limits(limits);
+        }
+    }
+
     Ok(SystemFacts::new(adapters, encoders))
 }
 
@@ -366,5 +599,47 @@ mod tests {
         let observations = EncoderObservations::none();
         assert!(observations.runtimes().is_empty());
         assert!(observations.hardware_encoders().is_empty());
+        assert!(observations.limits().is_empty());
+    }
+
+    #[test]
+    fn an_ordinary_probe_opens_no_encoder_session() {
+        // The default is the one that runs at start-up and underneath a game,
+        // so it is the one whose cost has to be nothing. A build that made
+        // `WithSessions` the default would take a session slot from every
+        // machine that ever asked what its GPU could do.
+        assert!(!Probing::default().opens_sessions());
+        assert!(Probing::WithSessions.opens_sessions());
+    }
+
+    #[test]
+    fn a_session_that_would_not_describe_itself_measures_nothing() {
+        let nothing = EncoderLimits::new(EncoderKind::Nvenc, Codec::Av1);
+        assert!(nothing.is_empty());
+        assert!(!nothing.with_b_frames(false).is_empty());
+    }
+
+    #[test]
+    fn limits_are_found_by_the_encoder_and_the_codec_together() {
+        // Two encoders answer about the same codec on a two-vendor machine, and
+        // handing NVENC's maximum resolution to AMD would be a measurement
+        // attributed to hardware that never gave it.
+        let observations = EncoderObservations::none()
+            .with_limits(
+                EncoderLimits::new(EncoderKind::Nvenc, Codec::H264)
+                    .with_max_resolution(Resolution::new(4096, 4096)),
+            )
+            .with_limits(
+                EncoderLimits::new(EncoderKind::Amf, Codec::H264)
+                    .with_max_resolution(Resolution::new(4096, 2160)),
+            );
+
+        assert_eq!(
+            observations
+                .limits_for(EncoderKind::Amf, Codec::H264)
+                .and_then(EncoderLimits::max_resolution),
+            Some(Resolution::new(4096, 2160))
+        );
+        assert_eq!(observations.limits_for(EncoderKind::Amf, Codec::Av1), None);
     }
 }

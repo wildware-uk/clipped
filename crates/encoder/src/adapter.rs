@@ -237,6 +237,30 @@ impl Adapter {
     }
 }
 
+/// The adapter a vendor's hardware encoder is attributed to, if any.
+///
+/// Always a guess, and worth saying so plainly: nothing this crate measures
+/// says which GPU a hardware encoder belongs to. Media Foundation documents
+/// `MFT_ENUM_ADAPTER_LUID` as an input filter for `MFTEnum2` rather than as an
+/// attribute on an activation object, and it is absent from every transform on
+/// the machine this was written on, so attribution is the vendor's own adapter,
+/// preferring the one with the most video memory of its own. That is right
+/// whenever a machine has one card per vendor, and a machine with two cards
+/// from one vendor and only one of them encoding is beyond what this can tell.
+/// The report prints which adapter it picked rather than implying it knew.
+///
+/// One function because two callers need the same answer: the report says which
+/// adapter an encoder is on, and the capability probe creates its Direct3D
+/// device on that adapter. A probe that picked differently would measure one
+/// GPU and file the answer under another.
+#[must_use]
+pub(crate) fn encoding_adapter(adapters: &[Adapter], vendor: Vendor) -> Option<&Adapter> {
+    adapters
+        .iter()
+        .filter(|adapter| adapter.vendor() == vendor && adapter.can_host_hardware_encoder())
+        .max_by_key(|adapter| adapter.dedicated_video_memory())
+}
+
 impl fmt::Display for Adapter {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} ({})", self.description, self.kind)?;

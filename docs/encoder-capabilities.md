@@ -20,7 +20,8 @@ opposite directions.
 A user who selects AV1 because a table said so, and then loses a recording
 because the driver disagrees, has been lied to. A user whose game stutters
 because Clipped opened three encoder sessions to draw a settings screen has been
-robbed. Neither is acceptable, so this crate does neither.
+robbed. Neither is acceptable, so this crate does neither by default — and when
+it does open a session, it is because the user asked it to.
 
 ## What Clipped does instead
 
@@ -34,6 +35,10 @@ Three measurements, none of which opens an encoder session:
 | Which adapters are present, from which vendor, on which driver version? | DXGI: `IDXGIFactory1::EnumAdapters1`, and `CheckInterfaceSupport` for the user-mode driver version | `src/windows/dxgi.rs` |
 | Will each vendor's encoder runtime load? | `LoadLibraryEx` with `LOAD_LIBRARY_SEARCH_SYSTEM32`, then released immediately | `src/windows/runtime.rs` |
 | Which codecs does the installed display driver register a hardware encoder for? | Media Foundation: `MFTEnumEx` over `MFT_CATEGORY_VIDEO_ENCODER`, filtered to hardware, asked once per output codec | `src/windows/media_foundation.rs` |
+
+And a fourth that does, on request only: **asking the encoder itself**, which is
+the only way to learn the numeric limits and is described in
+[its own section](#asking-the-encoder-itself) below.
 
 The third is the important one for **which codecs**. Every hardware encoder on
 Windows registers a Media Foundation transform per codec it produces, and
@@ -71,34 +76,112 @@ a machine has one card per vendor; a machine with two cards from one vendor and
 only one of them encoding is beyond what this can tell, and the report prints
 which adapter it picked rather than implying it knew.
 
-### What is inferred
+## Asking the encoder itself
 
 Maximum resolution, the framerate ceiling, B-frame support and 10-bit (HDR)
-support. These need a live encoder session to measure, so they come from
-`src/reference.rs`: vendor documentation for the resolution and feature limits,
-and the codec standards' own level limits for the framerate ceiling — H.264
-Level 6.2 (ITU-T H.264 Table A-1), HEVC Level 6.2 High tier (ITU-T H.265
-Table A.8), AV1 Level 6.3 (AOMedia AV1, Annex A).
+support cannot be answered without an encoder session. Since
+[issue #133](https://github.com/wildware-uk/clipped/issues/133) Clipped can open
+one and ask, and `clipped-recorder capabilities --refresh` is what does it.
 
-Issue #14 asked for these four to be *detected* per encoder. They are inferred
-instead, because measuring them means opening a session and a session means a
-backend; [issue #133](https://github.com/wildware-uk/clipped/issues/133) tracks
-querying them from a real encoder once one exists. Everything from the table is
-marked `(i)` until then.
+**Nothing else opens a session.** A plain `capabilities`, and anything that
+detects at start-up, ask only the three cheap questions and report the published
+limits, marked. The choice is a parameter — `Probing::WithoutSessions` or
+`Probing::WithSessions` (`src/probe.rs`) — passed by the caller rather than
+decided inside the crate, because the caller is the only one that knows whether
+a user asked. There is exactly one caller that passes `WithSessions`, and it is
+a subcommand that records nothing, which is how the promise that this never
+happens during a recording is kept.
+
+The answers are then cached like any other part of the report, so the machine
+pays for a session once per refresh rather than once per question.
+
+### What each vendor answers
+
+| | NVENC | AMF | Quick Sync |
+| --- | --- | --- | --- |
+| Codec support | `nvEncGetEncodeGUIDs` — measured, including a measured **no** | whether the encoder component can be created — measured, including a measured no | not measured |
+| Maximum resolution | `NV_ENC_CAPS_WIDTH_MAX` / `HEIGHT_MAX` | `AMFCaps::GetInputCaps` → `GetWidthRange` / `GetHeightRange` | not measured |
+| Framerate ceiling | **deliberately not measured** (below) | `MaxThroughput` / `HevcMaxThroughput`, in macroblocks a second | not measured |
+| B-frames | `NV_ENC_CAPS_NUM_MAX_BFRAMES` | `BFrames` (H.264 only; AMF's HEVC encoder has no such capability) | not measured |
+| 10-bit | `NV_ENC_CAPS_SUPPORT_10BIT_ENCODE` | `HevcMaxProfile` ≥ `Main10` (HEVC only; below) | not measured |
+
+The queries are made on a session that is never *initialised*: NVENC's
+capability queries answer from an open session, and `AMFComponent::GetCaps`
+answers before `Init`, so nothing is configured, no surface is allocated and no
+picture is coded. Each vendor is asked on the adapter the report attributes its
+encoder to, through a Direct3D 11 device created for the purpose and destroyed
+with it (`src/windows/device.rs`).
+
+Two gaps are deliberate:
+
+- **AMF and 10-bit H.264.** `AMF_VIDEO_ENCODER_PROFILE_ENUM` contains no 10-bit
+  profile at all — it ends at Constrained High — so no comparison against
+  `MaxProfile` can answer the question, and the published `no` stands. HEVC's
+  enumeration is `Main` then `Main10`, so there the comparison means what it
+  looks like it means.
+- **AMF and AV1.** This backend creates no AV1 component
+  ([#165](https://github.com/wildware-uk/clipped/issues/165)), so AMF is never
+  asked about AV1 and the row stays `unknown` rather than becoming a measured
+  no.
+
+**Quick Sync is not measured at all, and that is not an oversight.** oneVPL
+describes an implementation's limits and this project cannot run a line of that
+code: there is no Intel GPU on the machine Clipped is developed on, so a
+measurement path written for it could never have been executed, and a path
+nobody has seen return a value is a claim rather than a measurement. Every Quick
+Sync limit therefore remains inferred and marked.
+
+### Why NVENC's framerate ceiling is not published
+
+NVENC answers `NV_ENC_CAPS_MB_PER_SEC_MAX`, and the answer is not a ceiling.
+
+| | |
+| --- | --- |
+| What the driver reports | 983,040 macroblocks a second — **121 frames a second at 1080p** |
+| What the hardware does | 1280x720 at **1,034 frames a second**, which is 3.7 million macroblocks a second |
+| Measured on | GeForce RTX 4090, driver 32.0.16.1074, through this project's own NVENC backend, synchronously, release build |
+
+Publishing the driver's figure as a *measurement* would tell a user wanting to
+record at 240 frames a second that their encoder cannot, in a cell with no `(i)`
+beside it to warn them — the exact failure this crate exists to prevent, with
+the evidence pointing the other way. So the codec level's ceiling stays in its
+place, marked inferred, and is at least honest about being an upper bound.
+
+AMF's `MaxThroughput` is published, because it survives the same check: it
+reports 2.8 million macroblocks a second for H.264 on the integrated Radeon
+here, and the same measurement reaches 2.1 million — under the ceiling, where a
+ceiling belongs.
+
+### What is still inferred
+
+Everything the vendors do not answer, everything on a machine nobody has run
+`--refresh` on, and every Quick Sync row. Those come from `src/reference.rs`:
+vendor documentation for the resolution and feature limits, and the codec
+standards' own level limits for the framerate ceiling — H.264 Level 6.2 (ITU-T
+H.264 Table A-1), HEVC Level 6.2 High tier (ITU-T H.265 Table A.8), AV1 Level
+6.3 (AOMedia AV1, Annex A).
+
+The rule where the two meet is one sentence, and `src/detection.rs` has one
+function for it: **a measurement replaces the published limit and the absence of
+one leaves it alone.** A session that opened and answered two of five questions
+does not turn the other three into measurements.
 
 Every inferred number cites a source, and where there is no source there is no
-number: the software encoder's row states only that whatever issue #18 builds
-will encode H.264, and leaves its maximum resolution, B-frames and 10-bit
-`Unknown`, because there is no vendor and no chosen library to have published
-anything.
+number: the software encoder's row states only that it encodes H.264, and leaves
+its maximum resolution, B-frames and 10-bit `Unknown`, because there is no
+vendor and no published limit to infer from.
 
 Two honest caveats, which the report repeats:
 
-- A framerate ceiling is what the **codec** permits, not what the silicon can
-  sustain. HEVC Level 6.2 allows over two thousand frames a second at 1080p; no
-  encoder does that. It is an upper bound and nothing more.
-- A resolution ceiling is an upper bound too. A picture inside it is not
-  guaranteed to be accepted.
+- An **inferred** framerate ceiling is what the codec permits, not what the
+  silicon can sustain. HEVC Level 6.2 allows over two thousand frames a second
+  at 1080p; no encoder does that. A **measured** one is the encoder's own answer
+  about its throughput, which is a different and better claim — and still not a
+  promise that a recording will keep up, because the capture, the disk and the
+  machine have ceilings this knows nothing about.
+- A resolution ceiling is an upper bound whether measured or inferred. A picture
+  inside it is not guaranteed to be accepted; only opening a session at that
+  size settles that.
 
 "HDR" here means 10-bit encoding, which is the necessary condition for it. The
 colour signalling that makes a 10-bit stream an HDR one belongs to the muxer,
@@ -127,7 +210,7 @@ beside it, so printing a claim prints its qualifier:
 ```text
 codec  supported   max size         max fps at 1920x1080  B-frames   10-bit
 AV1    unknown     —                —                     —          —
-HEVC   yes         8192x4352 (i)    2063 (i)              no (i)     unknown
+HEVC   yes         8192x4352        300                   no (i)     yes
 H.264  yes         4096x2160 (i)    522 (i)               unknown    no (i)
 ```
 
@@ -135,10 +218,16 @@ H.264  yes         4096x2160 (i)    522 (i)               unknown    no (i)
 deliberately not collapsed into "no", because "we did not measure this" and
 "your GPU cannot do this" are different answers and one of them is a lie.
 
-A row whose *support* is unknown prints no limits at all. The limits are
-inferred from the encoder family's documentation, so putting `8192x4352 (i)` and
-`yes (i)` for 10-bit next to a codec that may not exist on this machine invites
-exactly the reading the whole design is trying to prevent.
+The two rows above are the AMD encoder before and after a `--refresh`: the HEVC
+limits came from the encoder itself and lost their markers, and the one beside
+`no` for B-frames stayed, because AMF's HEVC encoder has no B-frame capability
+to ask about.
+
+A row the encoder will not produce prints no limits at all, whether that is
+`unknown` or a measured `no`. The limits are inferred from the encoder family's
+documentation, so putting `8192x4352 (i)` and `yes (i)` for 10-bit next to a
+codec that may not exist on this machine invites exactly the reading the whole
+design is trying to prevent.
 
 Anything that acts on a capability, rather than printing it, should ask
 `Claim::is_measured_true`. The ranking in `src/recommendation.rs` does: it will
@@ -219,6 +308,30 @@ power cut would be choosing its own bookkeeping over the user (AGENTS.md section
 
 `clipped-recorder capabilities --refresh` ignores what is stored and replaces it.
 
+### Why measuring the limits did not change the key
+
+The stored report now depends on something outside the key — whether the run
+that wrote it opened an encoder session. That does not make the key wrong. A
+measured report and an inferred one are both true of the same machine; one
+simply says more. Everything that could make a *measurement* stale is already in
+the key, because an encoder's own limits change when the adapter or its driver
+changes and at no other time.
+
+One consequence is worth stating plainly, because it surprises: a plain
+`capabilities` run after a driver update finds the cache stale, re-probes
+without opening a session, and replaces measured limits with published ones.
+That is correct — the measurements described the previous driver — and another
+`--refresh` takes them again. The report says so itself: while an available
+hardware encoder has never been asked, the footer names the command that would
+ask it. It stops saying so once every encoder has been asked, even though some
+limits are still marked — NVENC's framerate ceiling always will be, and a
+suggestion that would produce the same page again is a session slot spent for
+nothing.
+
+`DETECTION_REVISION` went to 3 for this change, because a machine that had
+already cached would otherwise go on showing inferred numbers this build would
+have measured.
+
 ## Diagnostics
 
 Detection logs one line per adapter and one per encoder at `info`, and one per
@@ -231,8 +344,16 @@ codec at `debug`. The `encoder` field carries the standard vocabulary word —
 INFO clipped_encoder::detection: encoder detected encoder=nvenc available=true
   availability=available adapter="0000000000013516" measured_codecs="av1,hevc,h264"
 DEBUG clipped_encoder::detection: encoder codec capability encoder=nvenc codec="av1"
-  supported=true max_resolution=8192x8192 (inferred) max_framerate_1080p=2269 (inferred)
-  b_frames=false (inferred) hdr=true (inferred)
+  supported=true max_resolution=8192x8192 max_framerate_1080p=2269 (inferred)
+  b_frames=true hdr=true
+```
+
+A run that opened sessions says what that cost, at `info`, because the argument
+for caching it is an argument about a number:
+
+```text
+INFO clipped_encoder::detection: asked the encoder sessions for their own limits
+  elapsed_ms=192 codecs=5
 ```
 
 Adapter model names are logged. A GPU model is hardware, not user content, and
@@ -254,6 +375,16 @@ plainly: **the no-hardware path has been tested by injection, not on bare metal.
 The machine this was developed on has an NVIDIA RTX 4090 and an integrated AMD
 part, and neither can be removed.
 
+The half that cannot be tested by injection is the session probe, because its
+whole point is what a real driver says. Those tests live beside the backends —
+`the_capability_queries_describe_every_codec_this_card_encodes` and its AMF
+counterpart — assert properties rather than numbers, since a 4090 is not every
+card, and skip on a machine with no GPU unless `CLIPPED_REQUIRE_ENCODER=1` makes
+the skip a failure. `windows/mod.rs` holds the two that compare the probes
+against each other: that an ordinary probe opens no session at all, and that
+every claim a session did not answer is byte-for-byte the claim the cheap probe
+produced.
+
 The same goes for **Quick Sync, which is unverified on real hardware**: there is
 no Intel GPU here, so `libvpl.dll`, `libmfx64.dll` and `libmfxhw64.dll` — the
 list the backend itself loads from, shared with detection so the two cannot
@@ -263,19 +394,29 @@ NVENC and AMF take, and that is an argument, not a measurement.
 ## What this deliberately cannot tell you
 
 - Whether a given resolution, framerate and bitrate will actually be accepted.
-  Only opening a session settles that, and that belongs to the encoder backends.
-- How fast an encoder really is. Nothing here measures throughput.
-- Which codecs an encoder supports that it does not register a Media Foundation
-  transform for. Those come back as `Unknown`, never as "not supported", because
-  a driver that under-reports and a part that genuinely cannot encode look
-  identical from here. The AMD row on the development machine says `unknown` for
-  AV1, and in that particular case the conservative answer and the true one
-  coincide: the part is the integrated RDNA 2 GPU in a Ryzen desktop processor
-  (PCI `1002:13C0`), which decodes AV1 and does not encode it. Nothing in the
-  report knows that, which is the point — it declines to claim either way.
-- Whether an available encoder can actually open a session. Availability here
-  means the vendor runtime loaded, which is a necessary condition and not a
-  sufficient one.
+  The maximum size is now measured on request, and a size inside it is still not
+  a promise: only opening a session *at that size and bitrate* settles it, and
+  that belongs to the encoder backends.
+- How fast an encoder really is. AMF's own throughput figure is reported where
+  it gives one, and nothing here runs a frame through an encoder to time it —
+  the numbers in "Why NVENC's framerate ceiling is not published" were measured
+  by hand for that decision, not by anything that ships.
+- Which codecs an encoder supports that it neither registers a Media Foundation
+  transform for nor enumerates when asked. Without a `--refresh` those come back
+  as `Unknown`, never as "not supported", because a driver that under-reports
+  and a part that genuinely cannot encode look identical from here. The AMD row
+  on the development machine says `unknown` for AV1 for a second reason too: the
+  backend has no AV1 component to create, so AMF is never asked. In that
+  particular case the conservative answer and the true one coincide — the part
+  is the integrated RDNA 2 GPU in a Ryzen desktop processor (PCI `1002:13C0`),
+  which decodes AV1 and does not encode it — and nothing in the report knows
+  that, which is the point.
+- Whether an available encoder can actually open a session, on a run that did
+  not open one. Availability without `--refresh` means the vendor runtime
+  loaded, which is a necessary condition and not a sufficient one. After a
+  `--refresh` the answer is stronger for the encoders that were asked, because a
+  session did open.
+- Anything Quick Sync, beyond whether its runtime loads. No Intel GPU here.
 - Anything at all on a machine that is not Windows. The crate builds and its
   reasoning is tested there; `capabilities` reports that it cannot ask.
 
@@ -292,3 +433,5 @@ NVENC and AMF take, and that is an argument, not a measurement.
 | `src/recommendation.rs` | The ranking behind "Automatic" |
 | `src/cache.rs` | The cache and its invalidation |
 | `src/windows/` | The only code that calls a platform API |
+| `src/windows/device.rs` | The Direct3D device a capability query is asked through |
+| `src/windows/nvenc/mod.rs`, `src/windows/amf/mod.rs` | `measure_limits`, where an encoder is asked about itself |
