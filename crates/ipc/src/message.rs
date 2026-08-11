@@ -300,15 +300,35 @@ pub enum Event {
         /// What failed.
         error: ProtocolError,
     },
+    /// An event this build has never heard of, kept exactly as it arrived.
+    ///
+    /// Only ever produced by *reading*: a newer recorder may send an event that
+    /// did not exist when the client was compiled, and `docs/ipc.md` says
+    /// adding one costs no version bump. Without somewhere for it to go the
+    /// whole frame fails to parse, and a client that treats an unreadable frame
+    /// as a broken connection would lose its subscription over an event it did
+    /// not need — the outcome the compatibility policy exists to prevent.
+    ///
+    /// The catch-all is last, and the variants above it are matched on their
+    /// `event` tag first, so a known event never falls into it.
+    #[serde(untagged)]
+    Other(serde_json::Value),
 }
 
 impl Event {
-    /// Which stream this event belongs to.
+    /// Which stream this event belongs to, for routing.
+    ///
+    /// [`None`] for [`Event::Other`], which is the only honest answer: an event
+    /// this build has never heard of belongs to a stream only the build that
+    /// invented it can name. Nothing publishes one — the recorder publishes
+    /// events it constructed — so this is a reader's question, and a reader
+    /// that cannot place an event ignores it.
     #[must_use]
-    pub const fn stream(&self) -> EventStream {
+    pub const fn stream(&self) -> Option<EventStream> {
         match self {
-            Self::StatusChanged { .. } => EventStream::Status,
-            Self::RecordingFailed { .. } => EventStream::Errors,
+            Self::StatusChanged { .. } => Some(EventStream::Status),
+            Self::RecordingFailed { .. } => Some(EventStream::Errors),
+            Self::Other(_) => None,
         }
     }
 }
@@ -441,7 +461,7 @@ mod tests {
                 status: RecorderStatus::Idle
             }
             .stream(),
-            EventStream::Status
+            Some(EventStream::Status)
         );
         assert_eq!(
             Event::RecordingFailed {
@@ -449,7 +469,55 @@ mod tests {
                 error: ProtocolError::new(ErrorCode::RecordingFailed, "the encoder went away"),
             }
             .stream(),
-            EventStream::Errors
+            Some(EventStream::Errors)
+        );
+    }
+
+    #[test]
+    fn an_event_this_build_has_never_heard_of_is_read_rather_than_breaking_the_connection() {
+        // `docs/ipc.md` says adding an event does not increment the protocol
+        // version, so a client compiled against protocol 1 has to survive one it
+        // has never seen. Before the catch-all existed this frame failed to
+        // deserialise, and a subscription died over an event nobody needed.
+        let json = r#"{"type":"event","event":"disk_filling_up","free_bytes":1024}"#;
+
+        let message: ServerMessage =
+            serde_json::from_str(json).expect("an unknown event must still be a readable frame");
+
+        match &message {
+            ServerMessage::Event(event) => {
+                assert_eq!(
+                    event.stream(),
+                    None,
+                    "a build cannot know which stream an event it has never heard of belongs to"
+                );
+                match event {
+                    Event::Other(raw) => assert_eq!(raw["event"], "disk_filling_up"),
+                    other => panic!("an unknown event should be kept verbatim, got {other:?}"),
+                }
+            }
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_known_event_is_still_read_as_itself_rather_than_as_an_unknown_one() {
+        // The catch-all must not swallow the events this build does know. It is
+        // matched after the tagged variants, so an event carrying a field added
+        // later is still a `status_changed` — a `status_changed` that arrived as
+        // an opaque object would leave the UI showing nothing and reporting no
+        // error.
+        let event: Event = serde_json::from_str(
+            r#"{"event":"status_changed","status":{"state":"idle"},"invented_later":true}"#,
+        )
+        .expect("a known event with an unknown field parses");
+
+        assert_eq!(
+            event,
+            Event::StatusChanged {
+                status: RecorderStatus::Idle
+            },
+            "an unknown *field* is ignored, not a reason to fall back to the catch-all"
         );
     }
 

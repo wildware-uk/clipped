@@ -132,7 +132,13 @@ impl EventPublisher {
     /// Subscribers that have gone are forgotten, and a subscriber that is too
     /// far behind loses this event rather than making the publisher wait.
     pub fn publish(&self, event: &Event) {
-        let stream = event.stream();
+        let Some(stream) = event.stream() else {
+            // Only a *read* event can be one this build cannot place, and the
+            // recorder publishes events it constructed. Reaching here would be
+            // a bug in a caller rather than version skew.
+            tracing::warn!("an event that belongs to no stream was not published");
+            return;
+        };
         let Ok(mut subscribers) = self.subscribers.lock() else {
             // A poisoned lock means a panic somewhere in this module. Events are
             // diagnostics for the UI, not the recording, so the right response

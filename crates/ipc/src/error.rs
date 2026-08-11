@@ -18,13 +18,17 @@
 //! build (M3, issue #37)" is telling the truth; one that shows a greyed-out
 //! button with no explanation is not (AGENTS.md section 27).
 //!
-//! # Unknown codes
+//! # Unknown codes and unknown details
 //!
 //! [`ErrorCode`] deliberately has an [`ErrorCode::Other`] variant and converts
-//! from any string, so a build that meets a code added after it was compiled
-//! keeps the message and degrades to "something the recorder refused" rather
-//! than failing to parse the frame. That is the whole of the additive half of
-//! the compatibility policy in `docs/ipc.md`.
+//! from any string, and [`ErrorDetail`] has an [`ErrorDetail::Other`] variant
+//! that keeps a tag this build does not know as the JSON it arrived as. A build
+//! that meets a refusal invented after it was compiled therefore keeps the code
+//! and the message and degrades to "something the recorder refused" rather than
+//! failing to parse the frame. That is the whole of the additive half of the
+//! compatibility policy in `docs/ipc.md`, and it takes both halves: a `detail`
+//! serde cannot read fails the enclosing [`ProtocolError`] rather than only the
+//! field, so an unreadable detail would otherwise cost the message as well.
 
 use std::fmt;
 
@@ -199,9 +203,14 @@ impl From<ErrorCode> for String {
 
 /// The machine-readable particulars of the refusals that have any.
 ///
-/// Tagged by `detail`, so a client that meets a variant it does not know fails
-/// to parse only the detail — which is why [`ProtocolError::detail`] is
-/// optional and the message is not.
+/// Tagged by `detail`. A tag this build has never heard of is kept as
+/// [`Other`](ErrorDetail::Other) rather than failing to parse, because the
+/// alternative is worse than losing the detail: serde fails the *whole*
+/// [`ProtocolError`], so a refusal carrying a detail added after this build was
+/// compiled would arrive as a broken frame and take its code and its message
+/// with it. "A refusal you have not seen before" would become "the connection
+/// is broken", which is exactly what the additive half of the compatibility
+/// policy in `docs/ipc.md` promises will not happen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "detail", rename_all = "snake_case")]
 pub enum ErrorDetail {
@@ -228,6 +237,15 @@ pub enum ErrorDetail {
         /// The issue that tracks it.
         tracking_issue: u32,
     },
+    /// A detail this build has never heard of, kept exactly as it arrived.
+    ///
+    /// Not an error in itself, and not something to construct: it is how a
+    /// client compiled against an older protocol keeps a newer recorder's
+    /// refusal readable. The raw object is kept rather than discarded so that a
+    /// diagnostic can show what was not understood — the desktop application
+    /// has nothing to render from it, and renders the message instead.
+    #[serde(untagged)]
+    Other(serde_json::Value),
 }
 
 #[cfg(test)]
@@ -286,6 +304,53 @@ mod tests {
             }),
             "the UI has to be able to say which build this arrives in"
         );
+    }
+
+    #[test]
+    fn a_refusal_carrying_a_detail_this_build_has_never_heard_of_is_still_a_usable_refusal() {
+        // The whole point of the additive half of the policy. Before this
+        // parsed, `serde_json::from_str::<ProtocolError>` on exactly this frame
+        // failed with "unknown variant `disk_full`", which cost the client the
+        // code, the message and the frame — a refusal the UI had never seen
+        // arriving as a broken connection.
+        let json = r#"{"code":"recording_failed","message":"the disk the recording was being written to is full","detail":{"detail":"disk_full","free_bytes":0}}"#;
+
+        let error: ProtocolError =
+            serde_json::from_str(json).expect("an unknown detail must not cost the whole refusal");
+
+        assert_eq!(error.code, ErrorCode::RecordingFailed);
+        assert_eq!(
+            error.message, "the disk the recording was being written to is full",
+            "the message is what the user is shown, so it is the part that must survive"
+        );
+        match &error.detail {
+            Some(ErrorDetail::Other(raw)) => assert_eq!(
+                raw["detail"], "disk_full",
+                "the detail is kept for diagnostics rather than discarded: {raw}"
+            ),
+            other => panic!("an unknown detail should be kept verbatim, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &serde_json::to_string(&error).expect("it serialises back")
+            )
+            .expect("into JSON"),
+            serde_json::from_str::<serde_json::Value>(json).expect("the same JSON"),
+            "a detail this build cannot read must still be passed on unchanged"
+        );
+    }
+
+    #[test]
+    fn a_refusal_whose_code_and_detail_are_both_new_still_says_what_went_wrong() {
+        // Both halves at once, which is what a client two versions behind
+        // actually meets.
+        let error: ProtocolError = serde_json::from_str(
+            r#"{"code":"gpu_on_fire","message":"the graphics card is on fire","detail":{"detail":"gpu_on_fire","celsius":900}}"#,
+        )
+        .expect("a wholly unfamiliar refusal still parses");
+
+        assert_eq!(error.code, ErrorCode::Other("gpu_on_fire".to_owned()));
+        assert_eq!(error.message, "the graphics card is on fire");
     }
 
     #[test]
