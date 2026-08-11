@@ -313,6 +313,22 @@ the mapped input buffer" — and releasing it there is what lets `submit` promis
 that nothing derived from the texture outlives the call. The coded bitstream
 stays locked afterwards, which is what `next_packet` hands over and unlocks.
 
+The release is a guard's `Drop`, not a line at the end of `submit`.
+`Registration` borrows the session and unmaps and unregisters when it goes out
+of scope, so every way out of the call gets the texture back — the happy path,
+each error path, the mapping that succeeded registration but failed itself, and
+a panic unwinding through the middle. Releasing by hand made the guarantee true
+only for as long as nobody put something fallible between the register and the
+release, which is not what `Session::drop` claims when it says nothing derived
+from a caller's texture can be outstanding (issue #149).
+
+The output buffer the picture is coded into is the other thing in flight there,
+and it survives the same unwind for a different reason: it is left in the free
+list for the whole of the attempt and taken out only once a coded picture is
+locked in it. Taking it first and pushing it back on the error arm covers the
+errors and loses a buffer to every panic, and eight of those would leave a
+session reporting `OutputBuffersExhausted` with all eight buffers idle.
+
 Two settings exist to keep that promise true rather than usually true. B-frames
 are off, and lookahead is switched off whatever the preset returned, because the
 header is explicit that with lookahead "input frames must remain available to the
@@ -321,6 +337,26 @@ submission that carries it. If it ever answers `NV_ENC_ERR_NEED_MORE_INPUT`
 anyway, `submit` flushes that picture out, releases the texture and reports the
 failure, rather than quietly holding a registration on a surface the caller has
 been told it may reuse.
+
+Flushing ends the stream, and a session that has been sent
+`NV_ENC_PIC_FLAG_EOS` refuses every later frame with "the stream has been
+finished and cannot take more frames" — whether the end-of-stream came from
+`finish` or from that flush, which the refusal says, because a caller that never
+called `finish` should not be told it did. Without the refusal a caller that
+treated the deferred-picture error as transient and retried would be submitting
+to an encoder that had already finished; measured on driver 610.74, NVENC
+accepts those frames rather than refusing them, so nothing below this layer
+would have complained.
+
+Submitted is not accepted, and the session tracks the difference. The end of the
+stream is marked before `nvEncEncodePicture` is called with the flag, so that no
+path out of that call — including an unwind — leaves the session taking frames,
+but only the call returning `NV_ENC_SUCCESS` marks the stream *ended*. It is
+that flag which completes whatever the encoder is still holding, so a `finish`
+that returned `Ok` because an earlier flush had merely been attempted would tell
+a recorder its file was complete when it could be a flush short. `finish`
+therefore submits the end of stream again from that state and reports what the
+driver says.
 
 Registering per frame rather than caching a registration per texture is the
 simple, obviously correct version: a cache keyed on a texture pointer is only
@@ -971,8 +1007,22 @@ and 53):
   get at least as far. A failed open that kept driver-side state would show up
   as a second pass that stops earlier.
 - **Bad input is refused, not encoded.** An odd picture size, a frame of the
-  wrong size, a 10-bit surface, a timestamp that goes backwards, and use after
-  shutdown each produce an error naming what was wrong.
+  wrong size, a 10-bit surface, a timestamp that goes backwards, use after
+  shutdown, and a frame submitted after the end of the stream — from either way
+  a stream ends — each produce an error naming what was wrong.
+- **A panic mid-`submit` leaves nothing behind.** `Session::code_frame` is made
+  to panic, under `cfg(test)`, at the point where NVENC holds a registration on
+  the caller's texture and an output buffer is spoken for; the unwind is caught
+  and the session has to come out of it with no live registration, its free list
+  the length it was, and enough left to encode another frame. Removing the
+  guard's `Drop` fails it on the registration count; taking the output buffer
+  before the attempt rather than after fails it on the free list (7 of 8).
+- **A flush that failed is not reported as a finish.** The end-of-stream
+  submission is made to fail, under `cfg(test)`, because a working driver will
+  not refuse one on request. `finish` has to report that failure however many
+  times it is asked, and to end the stream for real once the injected failure is
+  cleared — a session marked as ending must not read back as "already finished,
+  nothing to do".
 
 `ffprobe` and `ffmpeg` are development tools here and nothing else: nothing in
 the recorder shells out to FFmpeg. The tests find them beside the pinned FFmpeg
