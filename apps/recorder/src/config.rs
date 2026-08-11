@@ -111,33 +111,33 @@ pub enum ConfigError {
     NoTarget,
     /// More than one target was given.
     ConflictingTargets,
-    /// A `--window` title match was empty.
+    /// The `window` title match was empty.
     EmptyWindowTitle,
-    /// A `--process` name was empty.
+    /// The `process` name was empty.
     EmptyProcessName,
-    /// A `--process` value looked like a path rather than an executable name.
+    /// The `process` value looked like a path rather than an executable name.
     ProcessNameIsAPath {
         /// What was supplied.
         value: String,
     },
-    /// `--pid 0` is not a process; on Windows it is the idle process.
+    /// `pid` 0 is not a process; on Windows it is the idle process.
     ZeroProcessId,
-    /// `--output` had no file name.
+    /// The output path had no file name.
     OutputHasNoFileName {
         /// What was supplied.
         path: PathBuf,
     },
-    /// `--output` did not end in [`OUTPUT_EXTENSION`].
+    /// The output path did not end in [`OUTPUT_EXTENSION`].
     OutputIsNotMatroska {
         /// What was supplied.
         path: PathBuf,
     },
-    /// The directory `--output` names does not exist.
+    /// The directory the output path names does not exist.
     OutputDirectoryMissing {
         /// The directory that is missing.
         directory: PathBuf,
     },
-    /// The path `--output`'s directory names is not a directory.
+    /// The path the output path's directory names is not a directory.
     OutputDirectoryIsNotADirectory {
         /// The path that is not a directory.
         directory: PathBuf,
@@ -149,7 +149,7 @@ pub enum ConfigError {
         /// Why the probe failed.
         source: io::Error,
     },
-    /// The output file already exists and `--overwrite` was not given.
+    /// The output file already exists and `overwrite` was not set.
     OutputExists {
         /// The file that is in the way.
         path: PathBuf,
@@ -159,10 +159,10 @@ pub enum ConfigError {
         /// The directory that is in the way.
         path: PathBuf,
     },
-    /// No default output directory could be worked out, and `--output` was not
+    /// No default output directory could be worked out, and no output path was
     /// given.
     NoDefaultOutputDirectory,
-    /// A relative `--output` could not be made absolute.
+    /// A relative output path could not be made absolute.
     WorkingDirectoryUnavailable {
         /// Why the current directory could not be read.
         source: io::Error,
