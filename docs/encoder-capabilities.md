@@ -100,7 +100,7 @@ pays for a session once per refresh rather than once per question.
 | | NVENC | AMF | Quick Sync |
 | --- | --- | --- | --- |
 | Codec support | `nvEncGetEncodeGUIDs` — measured, including a measured **no** | whether the encoder component can be created — measured, including a measured no | not measured |
-| Maximum resolution | `NV_ENC_CAPS_WIDTH_MAX` / `HEIGHT_MAX` | `AMFCaps::GetInputCaps` → `GetWidthRange` / `GetHeightRange` | not measured |
+| Maximum resolution | `NV_ENC_CAPS_WIDTH_MAX` / `HEIGHT_MAX` — two axis maxima, not a size | `AMFCaps::GetInputCaps` → `GetWidthRange` / `GetHeightRange` — the same, two ranges | not measured |
 | Framerate ceiling | **deliberately not measured** (below) | `MaxThroughput` / `HevcMaxThroughput`, in macroblocks a second | not measured |
 | B-frames | `NV_ENC_CAPS_NUM_MAX_BFRAMES` | `BFrames` (H.264 only; AMF's HEVC encoder has no such capability) | not measured |
 | 10-bit | `NV_ENC_CAPS_SUPPORT_10BIT_ENCODE` | `HevcMaxProfile` ≥ `Main10` (HEVC only; below) | not measured |
@@ -179,9 +179,13 @@ Two honest caveats, which the report repeats:
   about its throughput, which is a different and better claim — and still not a
   promise that a recording will keep up, because the capture, the disk and the
   machine have ceilings this knows nothing about.
-- A resolution ceiling is an upper bound whether measured or inferred. A picture
-  inside it is not guaranteed to be accepted; only opening a session at that
-  size settles that.
+- A resolution ceiling is an upper bound whether measured or inferred, and a
+  measured one is **two answers rather than one**. Both vendors report a
+  maximum width and a maximum height separately — `NV_ENC_CAPS_WIDTH_MAX` and
+  `HEIGHT_MAX`, `GetWidthRange` and `GetHeightRange` — so the size in that
+  column is the corner of a rectangle and not a picture either encoder was
+  asked about. A picture inside it is not guaranteed to be accepted; only
+  opening a session at that size settles that, and nothing here does.
 
 "HDR" here means 10-bit encoding, which is the necessary condition for it. The
 colour signalling that makes a 10-bit stream an HDR one belongs to the muxer,
@@ -207,21 +211,37 @@ Every capability is a `Claim<T>`, which is `Measured(value)`, `Inferred(value)`
 or `Unknown`. The evidence travels with the value rather than in a comment
 beside it, so printing a claim prints its qualifier:
 
+One encoder, twice — the integrated Radeon on the development machine, from
+`capabilities` and then from `capabilities --refresh`, indentation aside.
+
+Before, with nothing asked:
+
+```text
+codec  supported   max size         max fps at 1920x1080  B-frames   10-bit
+AV1    unknown     —                —                     —          —
+HEVC   yes         8192x4352 (i)    2063 (i)              no (i)     unknown
+H.264  yes         4096x2160 (i)    522 (i)               unknown    no (i)
+```
+
+After, with the encoder asked:
+
 ```text
 codec  supported   max size         max fps at 1920x1080  B-frames   10-bit
 AV1    unknown     —                —                     —          —
 HEVC   yes         8192x4352        300                   no (i)     yes
-H.264  yes         4096x2160 (i)    522 (i)               unknown    no (i)
+H.264  yes         4096x4096        346                   yes        no (i)
 ```
 
 `yes` was measured. `(i)` was inferred. `unknown` means nobody here knows —
 deliberately not collapsed into "no", because "we did not measure this" and
 "your GPU cannot do this" are different answers and one of them is a lie.
 
-The two rows above are the AMD encoder before and after a `--refresh`: the HEVC
-limits came from the encoder itself and lost their markers, and the one beside
-`no` for B-frames stayed, because AMF's HEVC encoder has no B-frame capability
-to ask about.
+What changed is what the encoder answered, and nothing else. The HEVC limits
+lost their markers; the one beside `no` for B-frames stayed, because AMF's HEVC
+encoder has no B-frame capability to ask about; the framerate ceilings dropped
+from the codec level's thousands to the throughput the hardware reports. The AV1
+row is unchanged because this backend creates no AV1 component, so AMF was never
+asked about it.
 
 A row the encoder will not produce prints no limits at all, whether that is
 `unknown` or a measured `no`. The limits are inferred from the encoder family's
@@ -308,6 +328,37 @@ power cut would be choosing its own bookkeeping over the user (AGENTS.md section
 
 `clipped-recorder capabilities --refresh` ignores what is stored and replaces it.
 
+### A cheap run never overwrites a measurement
+
+One rule sits on top of "the file is overwritten", and it exists because two
+runs on the same machine no longer produce the same report: **a run that opened
+no encoder session does not replace a stored report that did.**
+
+Without it the report is at the mercy of which run reaches the file last. A
+`--refresh` spends an encode session slot — possibly taken from a game — to
+learn the real limits; a plain `capabilities` started a moment earlier, or
+anything detecting at start-up, misses the cache, probes without opening
+anything, and would put the published table back over the measurements. Nothing
+would say so, and the only way back is another session slot. So before writing,
+a run that opened no session reads what is there and leaves it alone if it says
+more (`detect_cached`, `CapabilityCache::stored`).
+
+Three things follow, and all three are deliberate:
+
+- **Only the same machine is protected.** A stored report under a different
+  hardware signature, format or detection revision is not a measurement of what
+  this run just described, so it is replaced — which is what keeps the
+  driver-update behaviour below.
+- **`--refresh` writes whatever it found**, including a refresh that measured
+  nothing because every session slot was busy. It asked, on the user's
+  instruction, and what the encoder said this time is the answer to the question
+  they asked.
+- **The window is narrowed, not closed.** The check reads the file immediately
+  before the write, so what two processes can still lose is one file write's
+  worth of interleaving rather than a whole probe's. Closing it entirely needs a
+  lock across processes, which would be a larger mechanism than the loss it
+  prevents.
+
 ### Why measuring the limits did not change the key
 
 The stored report now depends on something outside the key — whether the run
@@ -321,7 +372,9 @@ One consequence is worth stating plainly, because it surprises: a plain
 `capabilities` run after a driver update finds the cache stale, re-probes
 without opening a session, and replaces measured limits with published ones.
 That is correct — the measurements described the previous driver — and another
-`--refresh` takes them again. The report says so itself: while an available
+`--refresh` takes them again. It is also the *only* way a run that opens no
+session takes a measurement out of the cache; on a machine that has not
+changed, it leaves them alone (above). The report says so itself: while an available
 hardware encoder has never been asked, the footer names the command that would
 ask it. It stops saying so once every encoder has been asked, even though some
 limits are still marked — NVENC's framerate ceiling always will be, and a
@@ -380,10 +433,17 @@ whole point is what a real driver says. Those tests live beside the backends —
 `the_capability_queries_describe_every_codec_this_card_encodes` and its AMF
 counterpart — assert properties rather than numbers, since a 4090 is not every
 card, and skip on a machine with no GPU unless `CLIPPED_REQUIRE_ENCODER=1` makes
-the skip a failure. `windows/mod.rs` holds the two that compare the probes
-against each other: that an ordinary probe opens no session at all, and that
-every claim a session did not answer is byte-for-byte the claim the cheap probe
-produced.
+the skip a failure. `windows/mod.rs` holds the ones that compare the probes
+against each other: that an ordinary probe opens no session at all, that every
+claim a session did not answer is byte-for-byte the claim the cheap probe
+produced, and that an encoder whose runtime will not load is never asked.
+
+Every test that takes a session — wherever it lives — holds the same two mutexes
+the backends' own tests hold, one per vendor. The number of concurrent sessions
+is a property of the machine rather than of a process, and one NVENC test fills
+the session table on purpose, so a probe running beside it without the lock
+would either fail to open anything or break that test's arithmetic (AGENTS.md
+section 25).
 
 The same goes for **Quick Sync, which is unverified on real hardware**: there is
 no Intel GPU here, so `libvpl.dll`, `libmfx64.dll` and `libmfxhw64.dll` — the

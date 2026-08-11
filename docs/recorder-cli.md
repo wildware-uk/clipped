@@ -299,11 +299,14 @@ while a game is recording cannot take a session slot from it. The numeric limits
 are then the published ones, marked `(i)`.
 
 `--refresh` is the exception, and it is deliberate: it opens one session per
-hardware encoder — a few hundred milliseconds in total — and asks each for its
+*available* hardware encoder — a few hundred milliseconds in total, and nothing
+at all on an adapter whose encoder runtime will not load — and asks each for its
 own maximum resolution, throughput, B-frame and 10-bit support, which is the
 only way those stop being inferred. The answers are cached, so the next plain
-run shows them for nothing. Do not run it mid-match; that session slot may
-belong to the game. The report itself names the command while an encoder has
+run shows them for nothing, and no later plain run takes them away again: a run
+that opens no session never overwrites a stored measurement of the same machine
+([encoder-capabilities.md](encoder-capabilities.md)). Do not run it mid-match;
+that session slot may belong to the game. The report itself names the command while an encoder has
 never been asked, and stops mentioning it once every encoder has — some limits
 stay `(i)` for ever, and being told to measure them again would waste a session
 slot.

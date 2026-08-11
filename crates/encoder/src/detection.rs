@@ -181,6 +181,21 @@ impl CodecSupport {
         self.hdr
     }
 
+    /// Which of this row's five claims are measurements.
+    ///
+    /// Positional rather than named because the only thing anything does with
+    /// it is compare one row against the same row of another report, field by
+    /// field ([`CapabilityReport::measures_anything_missing_from`]).
+    fn measurements(&self) -> [bool; 5] {
+        [
+            self.supported.is_measured(),
+            self.max_resolution.is_measured(),
+            self.max_luma_samples_per_second.is_measured(),
+            self.b_frames.is_measured(),
+            self.hdr.is_measured(),
+        ]
+    }
+
     /// The framerate ceiling at `resolution`, and what kind of ceiling it is.
     ///
     /// The two evidence values mean different things here, and the difference
@@ -347,6 +362,35 @@ impl CapabilityReport {
             .iter()
             .filter(|report| report.kind.is_hardware() && report.availability.is_available())
             .any(|report| !report.was_asked() && report.has_inferred_limit())
+    }
+
+    /// Whether this report answers something from a measurement where `other`
+    /// answers it from the published table, or not at all.
+    ///
+    /// Both reports describe the same machine, correctly; what differs is what
+    /// each run was allowed to ask. So this is not "which of these is right?" —
+    /// it is "would replacing `other` with this one throw a measurement away?",
+    /// asked the way round that keeps the answer a property of the reports
+    /// rather than of the order they arrived in. [`crate::detect_cached`] asks
+    /// it before writing the cache.
+    ///
+    /// Field by field, because a report that measured a maximum resolution and
+    /// one that measured 10-bit support have each measured something the other
+    /// has not, and a count would call them equal.
+    fn measures_anything_missing_from(&self, other: &Self) -> bool {
+        self.encoders.iter().any(|encoder| {
+            let theirs = other.encoder(encoder.kind);
+            encoder.codecs.iter().any(|support| {
+                let theirs = theirs
+                    .and_then(|report| report.codec(support.codec))
+                    .map_or([false; 5], CodecSupport::measurements);
+                support
+                    .measurements()
+                    .into_iter()
+                    .zip(theirs)
+                    .any(|(mine, theirs)| mine && !theirs)
+            })
+        })
     }
 }
 
@@ -635,7 +679,13 @@ fn measured_or<T>(measurement: Option<T>, published: Claim<T>) -> Claim<T> {
 /// A cache that cannot be read or cannot be written never fails a detection.
 /// The worst a broken cache can do is make this slow, and refusing to report
 /// capabilities because a file in `%LOCALAPPDATA%` is corrupt would be choosing
-/// the cache over the user (AGENTS.md section 17).
+/// the cache over the user (AGENTS.md section 17). Nor does a session that
+/// would not answer: the limits then stay published, which is where they were
+/// before it was asked.
+///
+/// What this run stores is decided by [`store_report`], and the rule there is
+/// the other half of the sentence above: **a run that opened no encoder session
+/// never replaces a stored report that did.**
 ///
 /// # Errors
 ///
@@ -679,7 +729,21 @@ pub fn detect_cached(
                 // nobody measures is how that argument survives being wrong
                 // (AGENTS.md section 18).
                 let session_probe = Instant::now();
-                let measured = probe.encoder_limits(&adapters)?;
+                // A probe that could not ask is a measurement that did not
+                // happen, not a failed detection — the rule every step below
+                // this one already follows (`windows::measure_on`,
+                // `nvenc::measure_limits`, `amf::measure_limits`). The report
+                // keeps the published limits it would have had anyway, and
+                // failing the whole command because a session could not be
+                // opened would take away the answer as well as the measurement.
+                let measured = probe.encoder_limits(&adapters).unwrap_or_else(|error| {
+                    tracing::warn!(
+                        %error,
+                        "the encoder sessions could not be asked for their own limits, so the \
+                         published ones stand"
+                    );
+                    Vec::new()
+                });
                 let codecs = measured.len();
                 for limits in measured {
                     observations = observations.with_limits(limits);
@@ -693,22 +757,68 @@ pub fn detect_cached(
 
             let facts = SystemFacts::new(adapters, observations);
             let report = detect(&facts);
-            if let Err(error) = cache.store(&signature, &report) {
-                // Not fatal, and not silent either (AGENTS.md section 15): the
-                // detection stands, and the next run will simply do the work
-                // again.
-                tracing::warn!(
-                    %error,
-                    "the encoder capability cache could not be written, so the next run \
-                     will probe again"
-                );
-            }
+            store_report(cache, &signature, &report, probing);
             Ok(Detection {
                 report,
                 source: DetectionSource::Probed,
                 elapsed: started.elapsed(),
             })
         }
+    }
+}
+
+/// Stores the report, unless doing so would throw a measurement away.
+///
+/// **A run that opened no encoder session never replaces a stored report that
+/// did.** Until this crate could ask an encoder about itself, two probes of one
+/// machine produced the same report and the last writer winning was harmless.
+/// They no longer do: a `--refresh` spends an encode session slot the user may
+/// have taken from a game to learn the real limits, and the plain run that
+/// misses the cache a moment later — at start-up, or from another process —
+/// would otherwise overwrite them with the table entries they replaced
+/// (AGENTS.md section 56). The measurements are then gone until somebody spends
+/// another session slot, and nothing tells them to.
+///
+/// Only the same machine is protected. A stored report whose hardware
+/// signature, format or detection revision does not match this run is not a
+/// measurement of anything this run is describing, so it is replaced as before
+/// — which is what keeps the documented behaviour after a driver update, where
+/// the measurements described the previous driver and have to go
+/// (`crate::cache::DETECTION_REVISION`).
+///
+/// A `--refresh` writes whatever it found, including a refresh that measured
+/// nothing. It asked, on the user's instruction, and what the encoder said this
+/// time is the answer to the question they asked.
+///
+/// The check reads the file immediately before the write, so the window in
+/// which two processes can still lose a measurement is one file write rather
+/// than a whole probe. Closing it entirely needs a lock across processes, which
+/// would be a larger mechanism than the loss it prevents.
+fn store_report(
+    cache: &CapabilityCache,
+    signature: &HardwareSignature,
+    report: &CapabilityReport,
+    probing: Probing,
+) {
+    if !probing.opens_sessions() {
+        if let CacheState::Fresh { report: stored, .. } = cache.stored(signature) {
+            if stored.measures_anything_missing_from(report) {
+                tracing::debug!(
+                    "the stored capability report has measurements this run did not take, so \
+                     it was left alone; `capabilities --refresh` is what replaces them"
+                );
+                return;
+            }
+        }
+    }
+
+    if let Err(error) = cache.store(signature, report) {
+        // Not fatal, and not silent either (AGENTS.md section 15): the
+        // detection stands, and the next run will simply do the work again.
+        tracing::warn!(
+            %error,
+            "the encoder capability cache could not be written, so the next run will probe again"
+        );
     }
 }
 
@@ -775,9 +885,115 @@ fn log_report(report: &CapabilityReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::AdapterKind;
+    use crate::adapter::{AdapterKind, DriverVersion};
+    use crate::cache::TestDirectory;
     use crate::codec::Vendor;
     use crate::probe::EncoderObservations;
+
+    /// A machine that answers whatever the test handed it.
+    ///
+    /// Enough of a [`SystemProbe`] to exercise [`detect_cached`], which the
+    /// pure [`detect`] tests below do not need: what is being tested here is
+    /// the cache, and for that the answers only have to be constant.
+    #[derive(Debug)]
+    struct FakeMachine {
+        adapters: Vec<Adapter>,
+        observations: EncoderObservations,
+        limits: Vec<EncoderLimits>,
+        /// A `--refresh` finishing in another process, and what it stored.
+        refresh_mid_probe: Option<(CapabilityCache, HardwareSignature, CapabilityReport)>,
+    }
+
+    impl FakeMachine {
+        fn new(adapters: Vec<Adapter>, observations: EncoderObservations) -> Self {
+            Self {
+                adapters,
+                observations,
+                limits: Vec::new(),
+                refresh_mid_probe: None,
+            }
+        }
+
+        /// What its encoder sessions answer, for a run allowed to open them.
+        fn measuring(mut self, limits: Vec<EncoderLimits>) -> Self {
+            self.limits = limits;
+            self
+        }
+
+        /// Another process's `--refresh` storing `report` while this machine is
+        /// being probed.
+        fn refreshed_mid_probe(
+            mut self,
+            cache: &CapabilityCache,
+            signature: &HardwareSignature,
+            report: &CapabilityReport,
+        ) -> Self {
+            self.refresh_mid_probe = Some((cache.clone(), signature.clone(), report.clone()));
+            self
+        }
+    }
+
+    impl SystemProbe for FakeMachine {
+        fn adapters(&self) -> Result<Vec<Adapter>, ProbeError> {
+            Ok(self.adapters.clone())
+        }
+
+        fn encoders(&self) -> Result<EncoderObservations, ProbeError> {
+            // The expensive half runs after the cache lookup and before the
+            // write, so this is precisely the window in which another process
+            // can finish a refresh — reproduced here without a second process,
+            // a sleep or an interleaving that depends on which run is quicker
+            // (AGENTS.md section 25).
+            if let Some((cache, signature, report)) = &self.refresh_mid_probe {
+                cache
+                    .store(signature, report)
+                    .expect("the refresh's report is written");
+            }
+            Ok(self.observations.clone())
+        }
+
+        fn encoder_limits(&self, _adapters: &[Adapter]) -> Result<Vec<EncoderLimits>, ProbeError> {
+            Ok(self.limits.clone())
+        }
+    }
+
+    /// The machine the cache tests below are all about: one NVIDIA card with a
+    /// working runtime, which nothing has yet asked for its own limits.
+    fn nvidia_machine() -> FakeMachine {
+        FakeMachine::new(
+            vec![nvidia_card()],
+            EncoderObservations::none().with_runtime(nvenc_runtime(RuntimeOutcome::Loaded)),
+        )
+    }
+
+    /// What an encoder session answers about HEVC, on a run that opened one.
+    fn measured_hevc() -> EncoderLimits {
+        EncoderLimits::new(EncoderKind::Nvenc, Codec::Hevc)
+            .with_supported(true)
+            .with_max_resolution(Resolution::new(8192, 8192))
+            .with_b_frames(true)
+            .with_hdr(true)
+    }
+
+    /// A report of [`nvidia_machine`], measured or not.
+    fn nvidia_report(limits: Option<EncoderLimits>) -> CapabilityReport {
+        let observations =
+            EncoderObservations::none().with_runtime(nvenc_runtime(RuntimeOutcome::Loaded));
+        detect(&SystemFacts::new(
+            vec![nvidia_card()],
+            limits.map_or(observations.clone(), |limits| {
+                observations.with_limits(limits)
+            }),
+        ))
+    }
+
+    /// What a report says about the size NVENC's HEVC encoder takes.
+    fn hevc_size(report: &CapabilityReport) -> Claim<Resolution> {
+        report
+            .encoder(EncoderKind::Nvenc)
+            .and_then(|nvenc| nvenc.codec(Codec::Hevc))
+            .map_or(Claim::Unknown, CodecSupport::max_resolution)
+    }
 
     fn nvidia_card() -> Adapter {
         Adapter::new(
@@ -1230,6 +1446,215 @@ mod tests {
         assert!(
             !asked.has_unasked_encoder(),
             "the only hardware encoder has been asked: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_report_that_was_asked_says_more_than_one_that_was_not() {
+        // The comparison the cache rule is built on, on its own. A report whose
+        // encoder was asked answers something the published one does not; the
+        // published one answers nothing the measured one does not, even though
+        // it has a value in every cell.
+        let published = nvidia_report(None);
+        let measured = nvidia_report(Some(measured_hevc()));
+
+        assert!(measured.measures_anything_missing_from(&published));
+        assert!(!published.measures_anything_missing_from(&measured));
+
+        // And it is field by field rather than a count, because two sessions
+        // that answered one question each have each measured something the
+        // other did not.
+        let size = nvidia_report(Some(
+            EncoderLimits::new(EncoderKind::Nvenc, Codec::Hevc)
+                .with_max_resolution(Resolution::new(8192, 8192)),
+        ));
+        let ten_bit = nvidia_report(Some(
+            EncoderLimits::new(EncoderKind::Nvenc, Codec::Hevc).with_hdr(true),
+        ));
+        assert!(size.measures_anything_missing_from(&ten_bit));
+        assert!(ten_bit.measures_anything_missing_from(&size));
+    }
+
+    #[test]
+    fn a_plain_run_does_not_overwrite_the_measurements_a_refresh_took() {
+        // The ordering this rule exists for. A plain run finds no cache and
+        // starts probing; a `--refresh` elsewhere finishes while it does and
+        // stores what it measured. The plain run must not put the published
+        // limits back over the top: the user spent an encode session slot on
+        // those numbers, possibly out of a game, and nothing would tell them
+        // the numbers had gone (AGENTS.md section 56).
+        let directory = TestDirectory::new("plain-run-after-refresh");
+        let cache = directory.cache();
+        let signature = HardwareSignature::of(&[nvidia_card()]);
+        let refreshed = nvidia_report(Some(measured_hevc()));
+        let machine = nvidia_machine().refreshed_mid_probe(&cache, &signature, &refreshed);
+
+        let detection =
+            detect_cached(&machine, &cache, Probing::WithoutSessions).expect("the machine answers");
+
+        assert_eq!(detection.source(), DetectionSource::Probed);
+        assert!(
+            !hevc_size(detection.report()).is_measured(),
+            "this run opened no session, so its own report must claim no measurement: {}",
+            hevc_size(detection.report())
+        );
+        match cache.load(&signature) {
+            CacheState::Fresh { report, .. } => assert_eq!(
+                report, refreshed,
+                "a run that opened no session replaced measurements it did not take"
+            ),
+            CacheState::Stale(reason) => {
+                panic!("the refreshed report should still be stored: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_refresh_replaces_what_a_plain_run_stored() {
+        // The same two runs in the other order, which has to keep working: a
+        // rule that stopped a cheap report being overwritten in both directions
+        // would make `--refresh` a command that changes nothing after the first
+        // run of any kind.
+        let directory = TestDirectory::new("refresh-after-plain-run");
+        let signature = HardwareSignature::of(&[nvidia_card()]);
+
+        let plain = detect_cached(
+            &nvidia_machine(),
+            &directory.cache(),
+            Probing::WithoutSessions,
+        )
+        .expect("the machine answers");
+        assert!(!hevc_size(plain.report()).is_measured());
+
+        let refreshed = detect_cached(
+            &nvidia_machine().measuring(vec![measured_hevc()]),
+            // What `capabilities --refresh` builds: a cache that answers
+            // nothing and is still written.
+            &directory.cache().ignoring_stored(),
+            Probing::WithSessions,
+        )
+        .expect("the machine answers");
+        assert!(hevc_size(refreshed.report()).is_measured());
+
+        match directory.cache().load(&signature) {
+            CacheState::Fresh { report, .. } => assert_eq!(
+                hevc_size(&report),
+                Claim::Measured(Resolution::new(8192, 8192)),
+                "the refresh's measurements have to reach the cache"
+            ),
+            CacheState::Stale(reason) => panic!("the refresh should have stored: {reason}"),
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_measured_nothing_still_replaces_the_stored_measurements() {
+        // The other half of the rule, and a judgement rather than an accident.
+        // The user asked for the encoders to be asked again; every session slot
+        // was busy, or a driver had just been replaced under the same version;
+        // what the machine says now is the answer to the question they asked. A
+        // refresh that quietly kept yesterday's numbers would report as
+        // measured something no session on this machine had just measured.
+        let directory = TestDirectory::new("refresh-that-measured-nothing");
+        let cache = directory.cache();
+        let signature = HardwareSignature::of(&[nvidia_card()]);
+        cache
+            .store(&signature, &nvidia_report(Some(measured_hevc())))
+            .expect("the cache is written");
+
+        let detection = detect_cached(
+            &nvidia_machine(),
+            &directory.cache().ignoring_stored(),
+            Probing::WithSessions,
+        )
+        .expect("the machine answers");
+        assert!(!hevc_size(detection.report()).is_measured());
+
+        match cache.load(&signature) {
+            CacheState::Fresh { report, .. } => assert_eq!(
+                &report,
+                detection.report(),
+                "a refresh has to store what it found, measurements or not"
+            ),
+            CacheState::Stale(reason) => panic!("the refresh should have stored: {reason}"),
+        }
+    }
+
+    #[test]
+    fn a_plain_run_after_a_driver_update_replaces_the_measurements_it_invalidated() {
+        // The exception the rule needs, and the behaviour `cache.rs` documents.
+        // An encoder's own limits change when its adapter or driver changes and
+        // at no other time, which is why both are in the cache key — so a
+        // report stored under a different key is not a measurement of the
+        // machine this run just described, and keeping it would be serving last
+        // month's answer for as long as the card stayed in the slot.
+        let directory = TestDirectory::new("plain-run-after-driver-update");
+        let cache = directory.cache();
+        let older = nvidia_card().with_driver_version(Some(DriverVersion::from_raw(1)));
+        let newer = nvidia_card().with_driver_version(Some(DriverVersion::from_raw(2)));
+        cache
+            .store(
+                &HardwareSignature::of(&[older]),
+                &nvidia_report(Some(measured_hevc())),
+            )
+            .expect("the cache is written");
+
+        let machine = FakeMachine::new(
+            vec![newer.clone()],
+            EncoderObservations::none().with_runtime(nvenc_runtime(RuntimeOutcome::Loaded)),
+        );
+        let detection =
+            detect_cached(&machine, &cache, Probing::WithoutSessions).expect("the machine answers");
+
+        match cache.load(&HardwareSignature::of(&[newer])) {
+            CacheState::Fresh { report, .. } => assert_eq!(
+                &report,
+                detection.report(),
+                "the new driver's report has to replace the old driver's measurements"
+            ),
+            CacheState::Stale(reason) => {
+                panic!("the run should have stored its own report: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_probe_that_cannot_be_asked_still_produces_a_report() {
+        // The rule every step of the session probe already follows, at the one
+        // place that used to break it: a failure to measure is a measurement
+        // that did not happen, not a failed detection. `--refresh` on a machine
+        // whose probe cannot open anything at all must still print the report
+        // it would have printed anyway.
+        #[derive(Debug)]
+        struct NoSessions(FakeMachine);
+
+        impl SystemProbe for NoSessions {
+            fn adapters(&self) -> Result<Vec<Adapter>, ProbeError> {
+                self.0.adapters()
+            }
+
+            fn encoders(&self) -> Result<EncoderObservations, ProbeError> {
+                self.0.encoders()
+            }
+
+            fn encoder_limits(
+                &self,
+                _adapters: &[Adapter],
+            ) -> Result<Vec<EncoderLimits>, ProbeError> {
+                Err(ProbeError::UnsupportedPlatform)
+            }
+        }
+
+        let directory = TestDirectory::new("session-probe-unavailable");
+        let detection = detect_cached(
+            &NoSessions(nvidia_machine()),
+            &directory.cache(),
+            Probing::WithSessions,
+        )
+        .expect("a probe that cannot open a session still reports what it knows");
+
+        assert_eq!(
+            hevc_size(detection.report()),
+            hevc_size(&nvidia_report(None))
         );
     }
 

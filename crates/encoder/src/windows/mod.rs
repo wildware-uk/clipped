@@ -104,11 +104,34 @@ impl SystemProbe for WindowsProbe {
             .iter()
             .filter_map(|(kind, vendor, measure)| {
                 let adapter = encoding_adapter(adapters, *vendor)?;
-                Some((*kind, adapter, measure))
+                // An adapter from the right vendor is not an encoder that can
+                // be asked. Checking the runtime first is what makes "one
+                // session per *available* hardware encoder" true of the code as
+                // well as of the sentence: creating a Direct3D device on an
+                // adapter is not free — on a laptop it can wake a discrete GPU
+                // that was powered down — and this is the one command whose
+                // whole argument is about not spending a user's GPU on
+                // something they did not ask for.
+                runtime_loads(*kind).then_some((*kind, adapter, measure))
             })
             .flat_map(|(kind, adapter, measure)| measure_on(kind, adapter, *measure))
             .collect())
     }
+}
+
+/// Whether an encoder family's runtime is installed and will load.
+///
+/// The same libraries [`WindowsProbe::encoders`] observes, loaded and released
+/// the same way from the same function, so a family this reports on cannot
+/// disagree with the availability the report prints. The measurement would go
+/// through that runtime, so a family whose runtime is absent has nothing to
+/// answer and nothing to open a device for.
+fn runtime_loads(kind: EncoderKind) -> bool {
+    runtime::LIBRARIES
+        .iter()
+        .filter(|(family, _)| *family == kind)
+        .flat_map(|(_, libraries)| libraries.iter())
+        .any(|library| runtime::observe(kind, library).loaded())
 }
 
 /// The encoder families whose runtime can be asked for its own limits, and the
@@ -166,6 +189,7 @@ fn measure_on(kind: EncoderKind, adapter: &Adapter, measure: Measure) -> Vec<Enc
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::sync::{Mutex, MutexGuard};
 
     use super::*;
     use crate::codec::Codec;
@@ -175,6 +199,33 @@ mod tests {
     /// The environment variable that turns "this machine has no hardware
     /// encoder" from a pass into a failure, as the backend tests use it.
     const REQUIRE_ENCODER: &str = "CLIPPED_REQUIRE_ENCODER";
+
+    /// Holds the hardware for as long as a probe that opens sessions is
+    /// running.
+    ///
+    /// [`WindowsProbe::encoder_limits`] takes a real NVENC session and a real
+    /// AMF component, which is exactly what the backends' own tests compete
+    /// for — one of them fills the NVENC session table on purpose
+    /// (`nvenc::tests::a_full_session_table_is_reported_and_leaves_nothing_behind`).
+    /// So these tests take the same two mutexes those tests take rather than a
+    /// third one of their own, which would serialise them against nothing that
+    /// matters (AGENTS.md sections 25 and 55).
+    ///
+    /// Always in this order, and nothing else ever holds both, so the pair
+    /// cannot deadlock against a test holding one.
+    fn hardware() -> (MutexGuard<'static, ()>, MutexGuard<'static, ()>) {
+        (hold(&nvenc::tests::SESSIONS), hold(&amf::tests::SESSIONS))
+    }
+
+    /// One of those mutexes, poisoned or not.
+    ///
+    /// A test that panicked while encoding poisoned the lock; the hardware is
+    /// no worse for it, and refusing to run every later test because an earlier
+    /// one failed would hide the rest of the suite behind the first failure —
+    /// which is the rule both backends' test modules already follow.
+    fn hold(sessions: &'static Mutex<()>) -> MutexGuard<'static, ()> {
+        sessions.lock().unwrap_or_else(|held| held.into_inner())
+    }
 
     /// Reports a test the machine cannot run, and fails under
     /// [`REQUIRE_ENCODER`].
@@ -230,12 +281,38 @@ mod tests {
     }
 
     #[test]
+    fn only_an_encoder_whose_runtime_loads_is_asked_for_its_limits() {
+        // The two answers to "is this encoder there?" have to agree, because
+        // they are used for different things and a disagreement is invisible in
+        // both: the cheap probe's observation decides what the report says, and
+        // this one decides whether a Direct3D device is created on the adapter
+        // at all. Nothing here opens a session, so it takes no lock.
+        let facts = probe(&WindowsProbe::new(), Probing::WithoutSessions)
+            .expect("a Windows machine can be probed");
+
+        for (kind, _, _) in MEASURABLE {
+            let observed = facts
+                .encoders()
+                .runtimes()
+                .iter()
+                .any(|observation| observation.kind() == *kind && observation.loaded());
+            assert_eq!(
+                runtime_loads(*kind),
+                observed,
+                "{kind} would be asked for its limits on a machine the report calls \
+                 unavailable, or the reverse"
+            );
+        }
+    }
+
+    #[test]
     fn asking_the_encoders_directly_measures_this_machine_s_own_limits() {
         // What issue #133 is for, checked against whatever hardware is here.
         // Nothing asserts a vendor or a number — the RTX 4090 this was written
         // against is not every machine — but every encoder that answers has to
         // answer something usable, and a measured limit has to reach the
         // report as a measurement rather than as another inferred value.
+        let _hardware = hardware();
         let facts = probe(&WindowsProbe::new(), Probing::WithSessions)
             .expect("a Windows machine can be probed");
         let report = detect(&facts);
@@ -302,6 +379,7 @@ mod tests {
         let cheap = detect(
             &probe(&WindowsProbe::new(), Probing::WithoutSessions).expect("the machine answers"),
         );
+        let _hardware = hardware();
         let facts =
             probe(&WindowsProbe::new(), Probing::WithSessions).expect("the machine answers");
         let measured = detect(&facts);

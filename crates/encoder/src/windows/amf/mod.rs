@@ -69,8 +69,10 @@ mod sys;
 mod api;
 mod settings;
 
+// Visible to the rest of `windows` for one item: the mutex that serialises
+// every test which takes an AMF encoder component (`tests::SESSIONS`).
 #[cfg(test)]
-mod tests;
+pub(in crate::windows) mod tests;
 
 use core::fmt;
 use core::ptr;
@@ -829,10 +831,14 @@ impl Session {
             .b_frames
             .and_then(|name| self.capability_number(codec, storage, name))
         {
-            // AMF reports the number of B-frames the encoder supports, so any
-            // positive answer is "yes" and zero is a genuine "no" — the answer
-            // AMD's own encoders give on the video engines without them.
-            Some(supported) => measured.with_b_frames(supported > 0),
+            // `AMF_VIDEO_ENCODER_CAP_BFRAMES` is declared a bool in
+            // `VideoEncoderVCE.h` — "// bool  is B-Frames supported" — and
+            // arrives in a variant this reads as a whole number, the way AMF
+            // delivers every capability (see `api::as_whole_number`). So a
+            // non-zero answer is "yes" and zero is a genuine "no", which is
+            // what AMD's video engines without them report. It is not a count,
+            // and nothing here may report one from it.
+            Some(supported) => measured.with_b_frames(supported != 0),
             None => measured,
         };
 
@@ -890,6 +896,18 @@ impl Session {
 
     /// The width and height ranges of the encoder's input, from its
     /// capabilities.
+    ///
+    /// The two are separate ranges — `AMFIOCaps::GetWidthRange` and
+    /// `GetHeightRange` — and the [`Resolution`] built from their maxima is the
+    /// corner of a rectangle rather than a size AMF said it would accept. On
+    /// the integrated Radeon this was written against, that corner is
+    /// 4096x4096 for H.264 where the published table says 4096x2160, and it is
+    /// worth being plain about what that does and does not contradict: the
+    /// encoder answers a wider *height* range than the documentation's example
+    /// resolution, and nothing here has opened a session at 4096x4096 to find
+    /// out whether a picture of that shape is encodable. It is an upper bound,
+    /// which is all a resolution ceiling ever is here
+    /// (`docs/encoder-capabilities.md`).
     fn maximum_input_size(&self, capabilities: *mut sys::AMFCaps) -> Option<Resolution> {
         // SAFETY: `capabilities` is the live object `maximum_size` is holding a
         // reference to for the whole of this call.

@@ -85,8 +85,10 @@ mod sys;
 mod api;
 mod settings;
 
+// Visible to the rest of `windows` for one item: the mutex that serialises
+// every test which takes an NVENC session (`tests::SESSIONS`).
 #[cfg(test)]
-mod tests;
+pub(in crate::windows) mod tests;
 
 use core::cell::Cell;
 use core::ffi::c_void;
@@ -397,11 +399,13 @@ impl VideoEncoder for NvencEncoder {
 
 /// Asks NVENC what it can do, on the device it would encode on.
 ///
-/// One session for every codec, opened and destroyed inside this call. It is
-/// never initialised: `nvEncGetEncodeCaps` answers from the session alone, so
-/// nothing is configured, no bitstream buffer is allocated and no picture is
-/// coded. What it does take is an encode session slot for the length of the
-/// query, which is why nothing calls this unless a user asked (see
+/// **One session, opened and destroyed inside this call, and asked about every
+/// codec.** That is the whole cost of a `--refresh` on an NVIDIA card: one
+/// encode session slot, for the length of the queries. (Its AMF sibling has to
+/// create a component per codec, which is why the two read differently.) The
+/// session is never initialised — `nvEncGetEncodeCaps` answers from the session
+/// alone — so nothing is configured, no bitstream buffer is allocated and no
+/// picture is coded. Nothing calls this unless a user asked (see
 /// [`crate::probe::Probing`]).
 ///
 /// A failure at any point is a measurement that did not happen, not an error: a
@@ -438,9 +442,22 @@ pub(in crate::windows) fn measure_limits(device: &GraphicsDevice) -> Vec<Encoder
         }
     };
 
+    // Which codecs the hardware lists is a property of the session, not of the
+    // codec being asked about, so it is read once for all three.
+    let guids = match session.encode_guids() {
+        Ok(guids) => guids,
+        Err(error) => {
+            tracing::debug!(
+                reason = %error.kind(),
+                "NVENC would not say which codecs it encodes, so nothing was measured"
+            );
+            return Vec::new();
+        }
+    };
+
     let measured = Codec::EFFICIENCY_ORDER
         .into_iter()
-        .map(|codec| session.limits(codec))
+        .map(|codec| session.limits(codec, &guids))
         .collect();
 
     // The session is destroyed here, by `Session::drop`, which gives the
@@ -802,6 +819,16 @@ impl Session {
 
     /// Whether the hardware lists this codec among the ones it encodes.
     fn supports_codec(&self, codec: Codec) -> Result<bool, EncodeError> {
+        Ok(lists_codec(&self.encode_guids()?, codec))
+    }
+
+    /// The codecs the hardware lists, as the GUIDs NVENC names them by.
+    ///
+    /// Asked once and read many times where more than one codec is in
+    /// question: the list is a property of the session, and enumerating it per
+    /// codec would be three round trips through the driver for one answer
+    /// ([`measure_limits`]).
+    fn encode_guids(&self) -> Result<Vec<sys::GUID>, EncodeError> {
         let count_fn = self
             .runtime
             .functions()
@@ -835,9 +862,7 @@ impl Session {
         let status = unsafe { list_fn(self.encoder, guids.as_mut_ptr(), count, &raw mut written) };
         self.check(status, "nvEncGetEncodeGUIDs")?;
         guids.truncate(written as usize);
-
-        let wanted = settings::codec_guid(codec);
-        Ok(guids.iter().any(|guid| settings::same_guid(guid, &wanted)))
+        Ok(guids)
     }
 
     /// Everything the capability queries say about one codec.
@@ -852,21 +877,11 @@ impl Session {
     /// the point: NVENC enumerating its own codecs is the encoder Clipped would
     /// record through saying it cannot produce this one, which is a measurement
     /// in a way that Windows failing to register a transform is not.
-    fn limits(&self, codec: Codec) -> EncoderLimits {
-        let measured = EncoderLimits::new(EncoderKind::Nvenc, codec);
-
-        let supported = match self.supports_codec(codec) {
-            Ok(supported) => supported,
-            Err(error) => {
-                tracing::debug!(
-                    codec = codec.log_value(),
-                    reason = %error.kind(),
-                    "NVENC would not say which codecs it encodes"
-                );
-                return measured;
-            }
-        };
-        let measured = measured.with_supported(supported);
+    ///
+    /// `guids` is what the session listed, from [`encode_guids`](Self::encode_guids).
+    fn limits(&self, codec: Codec, guids: &[sys::GUID]) -> EncoderLimits {
+        let supported = lists_codec(guids, codec);
+        let measured = EncoderLimits::new(EncoderKind::Nvenc, codec).with_supported(supported);
         if !supported {
             return measured;
         }
@@ -877,6 +892,13 @@ impl Session {
         // capability it does not implement rather than for a limit of zero. A
         // zero is therefore treated as "did not say", leaving the published
         // limit in place instead of reporting a GPU that encodes nothing.
+        //
+        // The two are independent axis maxima and the pair is not a size the
+        // driver was asked about: NVENC says how wide and how tall a picture
+        // may be, not that a picture that wide *and* that tall will be
+        // accepted. That is what makes this an upper bound rather than a
+        // promise, measured or not, and only opening a session at a size
+        // settles that size (`docs/encoder-capabilities.md`).
         let size = Resolution::new(
             self.capability_or_zero(codec, sys::NV_ENC_CAPS_WIDTH_MAX, "NV_ENC_CAPS_WIDTH_MAX"),
             self.capability_or_zero(codec, sys::NV_ENC_CAPS_HEIGHT_MAX, "NV_ENC_CAPS_HEIGHT_MAX"),
@@ -1621,6 +1643,12 @@ fn missing(context: EncodeContext, operation: &'static str) -> EncodeError {
             detail: format!("the runtime does not provide {operation}"),
         },
     )
+}
+
+/// Whether a codec is in the list the hardware gave.
+fn lists_codec(guids: &[sys::GUID], codec: Codec) -> bool {
+    let wanted = settings::codec_guid(codec);
+    guids.iter().any(|guid| settings::same_guid(guid, &wanted))
 }
 
 /// Logs a capability query the driver would not answer.

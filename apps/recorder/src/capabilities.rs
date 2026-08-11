@@ -400,9 +400,9 @@ fn measurement_lines(report: &CapabilityReport) -> String {
 
     format!(
         "Some limits above are {INFERRED_MARKER} because no encoder has been asked. \
-         `clipped-recorder\n    capabilities --refresh` asks them, which opens one encoder \
-         session per vendor\n    for a few hundred milliseconds and stores what they say. It \
-         is not done\n    automatically: that session slot may belong to a game.\n\n"
+         `clipped-recorder\n    capabilities --refresh` asks them, which opens one session per \
+         available\n    hardware encoder for a few hundred milliseconds and stores what they \
+         say. It\n    is not done automatically: that session slot may belong to a game.\n\n"
     )
 }
 

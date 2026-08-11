@@ -1246,7 +1246,12 @@ fn env_is_set(name: &str) -> bool {
 /// them fills it deliberately. libtest runs tests in parallel by default, so
 /// without this the suite would be a race whose outcome depends on which test
 /// reached the driver first (AGENTS.md section 25).
-static SESSIONS: Mutex<()> = Mutex::new(());
+///
+/// Visible to the rest of `windows` because the capability probe's own tests
+/// open NVENC sessions too, through `WindowsProbe` rather than through
+/// [`TestGpu`], and a second mutex would serialise them against a different set
+/// of tests from the one that competes with them (`crate::windows::tests`).
+pub(in crate::windows) static SESSIONS: Mutex<()> = Mutex::new(());
 
 /// A Direct3D 11 device on the NVIDIA adapter, and the textures the tests feed
 /// through it.

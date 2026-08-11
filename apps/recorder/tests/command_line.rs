@@ -254,6 +254,12 @@ fn capabilities_refreshes_and_the_cache_gives_the_same_answer_back() {
     // report it would print inferred limits where the refresh prints measured
     // ones. Comparing those two would be asserting that measuring changes
     // nothing.
+    //
+    // The other tests in this file run against the same real cache file at the
+    // same time, and that is not a race any more: a run that opens no session
+    // never overwrites a stored measurement of the same machine, so no
+    // interleaving of theirs can put published limits between these two calls
+    // (`clipped_encoder::detect_cached`, and the tests that hold that rule).
     let refreshed = recorder(&["capabilities", "--refresh"]);
     let cached = recorder(&["capabilities"]);
     assert!(refreshed.status.success() && cached.status.success());

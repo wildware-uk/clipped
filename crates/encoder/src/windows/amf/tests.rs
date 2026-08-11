@@ -1166,7 +1166,12 @@ fn env_is_set(name: &str) -> bool {
 /// it. libtest runs tests in parallel by default, so without this the suite
 /// would be a race whose outcome depends on which test reached the driver first
 /// (AGENTS.md section 25).
-static SESSIONS: Mutex<()> = Mutex::new(());
+///
+/// Visible to the rest of `windows` for the same reason NVENC's is: the
+/// capability probe's tests create AMF components through `WindowsProbe`, which
+/// competes with these for the same hardware encoder
+/// (`crate::windows::tests`).
+pub(in crate::windows) static SESSIONS: Mutex<()> = Mutex::new(());
 
 /// A Direct3D 11 device on the AMD adapter, and the textures the tests feed
 /// through it.
