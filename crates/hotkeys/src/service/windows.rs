@@ -40,7 +40,7 @@ use std::time::Instant;
 use windows::Win32::Foundation::{ERROR_HOTKEY_ALREADY_REGISTERED, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, PeekMessageW, PostThreadMessageW, MSG, PM_NOREMOVE, WM_APP, WM_HOTKEY, WM_USER,
@@ -57,13 +57,6 @@ use crate::hotkey::Hotkey;
 /// `WM_APP` and above is the range Windows documents as an application's own,
 /// so this cannot collide with a message Windows itself defines.
 const STOP: u32 = WM_APP + 1;
-
-/// `MOD_NOREPEAT`, which is not in the `MOD_*` set a user chooses from.
-///
-/// Without it, holding `Ctrl+F10` down produces a `WM_HOTKEY` at the keyboard's
-/// repeat rate — thirty saved replays for one long press. It is set on every
-/// registration and is not configurable.
-const MOD_NOREPEAT: u32 = 0x4000;
 
 /// The thread that owns every registration, and its address.
 #[derive(Debug)]
@@ -216,8 +209,16 @@ fn create_message_queue() {
 }
 
 /// Asks Windows for one combination.
+///
+/// `MOD_NOREPEAT` is not in the `MOD_*` set a user chooses from: it is set on
+/// every registration and is not configurable. Without it, holding `Ctrl+F10`
+/// down produces a `WM_HOTKEY` at the keyboard's repeat rate — thirty saved
+/// replays for one long press. It is taken from the `windows` crate rather than
+/// written as a literal, because this file is `cfg(windows)`-only, so the reason
+/// the constants in `crate::hotkey` are literals (that crate module compiles off
+/// Windows) does not apply here.
 fn register(action: HotkeyAction, hotkey: Hotkey) -> Result<(), ConflictCause> {
-    let modifiers = HOT_KEY_MODIFIERS(hotkey.modifiers().bits() | MOD_NOREPEAT);
+    let modifiers = HOT_KEY_MODIFIERS(hotkey.modifiers().bits() | MOD_NOREPEAT.0);
     let identifier = identifier(action);
 
     // SAFETY: no pointers are involved. A null window is the documented way to
