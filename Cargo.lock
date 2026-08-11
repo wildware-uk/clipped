@@ -240,6 +240,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-hotkeys"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "clipped-ipc"
 version = "0.1.0"
 dependencies = [

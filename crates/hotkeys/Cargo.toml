@@ -1,0 +1,50 @@
+[package]
+name = "clipped-hotkeys"
+description = "Global hotkeys that reach the user while a game has the foreground, and the threads that run their handlers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The logging facade. A hotkey that could not be registered, a press with
+# nothing behind it and a press dropped because a handler was still busy are all
+# invisible to the user by definition, and all three are the first thing a bug
+# report about "the hotkey does nothing" needs to show (docs/logging.md). MIT.
+tracing.workspace = true
+
+# The Windows API. Pinned in the root manifest so that every crate reaching
+# Windows sees the same types (AGENTS.md section 10). Only the namespaces listed
+# here are generated and compiled, so the feature list is the honest inventory of
+# what this crate touches:
+#
+# - Win32_Foundation               WPARAM/LPARAM, and the error code a taken
+#                                  combination fails with
+# - Win32_UI_Input_KeyboardAndMouse RegisterHotKey, UnregisterHotKey, the MOD_
+#                                  flags and the virtual-key codes
+# - Win32_UI_WindowsAndMessaging   the message loop the hotkey arrives on:
+#                                  GetMessageW, PeekMessageW, PostThreadMessageW
+# - Win32_System_Threading         GetCurrentThreadId, which is the address the
+#                                  stop message is posted to
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+
+# The tests in `tests/` press keys. Synthesising a keystroke is `SendInput`, and
+# deciding which window it went to is `GetForegroundWindow` — neither of which
+# the library calls, and neither of which it should: this crate reacts to input,
+# it does not produce any.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

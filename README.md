@@ -124,7 +124,7 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
@@ -144,6 +144,13 @@ use it. It therefore depends on no other crate in this workspace, and it holds
 no application logic — the recorder plugs its own subsystems into it, and a
 client that only wants to send commands does not link the recording engine to
 do so.
+
+`clipped-hotkeys` sits there for the same shape of reason. A global hotkey is a
+key combination plus a handler the *caller* supplies
+([docs/hotkeys.md](docs/hotkeys.md)), so the dependency points into it: the
+process that owns a recording session registers a handler, and a hotkey crate
+that reached back into the session could be linked by neither the recorder nor
+the desktop application.
 
 `clipped-media-validation` (`tests/media`) is a test-only package too, but it
 sits at the *bottom* rather than the top, and deliberately: it is what every
