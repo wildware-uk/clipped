@@ -38,11 +38,65 @@ toml = "1.1"
 # The catalogue's shapes are deserialised, and the workspace pins one serde for
 # the reason its manifest gives.
 serde = { workspace = true, features = ["derive"] }
-# The user's overlay lives in Clipped's per-user directory, beside the logs and
-# the encoder's capability cache, and `clipped_logging::application_directory`
-# is the one function that says where that is (issue #228). clipped-logging is
-# layer 0 and this crate is layer 1, so this follows the dependency direction.
+
+# The logging facade. Diagnostics go through `tracing`; `clipped-logging` only
+# decides where they end up (docs/logging.md). MIT.
+tracing.workspace = true
+
+# Two things, both of them paths. `RedactedPath` is how an executable path
+# reaches a log line without taking the account name and games library layout
+# with it (docs/logging.md), and a process watcher handles nothing but user
+# paths. `application_directory` is the one function that says where the user's
+# own catalogue overlay lives, beside the logs and the encoder's capability
+# cache (issue #228). clipped-logging is layer 0 and this crate is layer 1, so
+# this follows the dependency direction. MPL-2.0.
 clipped-logging.workspace = true
+
+# The process table and the executable behind a process identifier. This crate
+# deliberately does not open a second route to that question: `clipped-windows`
+# owns `OpenProcess` and the handle discipline around it (AGENTS.md section 55).
+# MPL-2.0.
+[target.'cfg(windows)'.dependencies]
+clipped-windows.workspace = true
+
+# WMI, its COM plumbing, and the process table. The feature list is the exact
+# set of namespaces this crate names:
+#
+# - Win32_Foundation                     HANDLE, CloseHandle, ERROR_NO_MORE_FILES
+# - Win32_System_Com                     CoCreateInstance, the proxy blanket, the
+#                                        multi-threaded apartment WMI is pumped in
+# - Win32_System_Diagnostics_ToolHelp    the process table, for the baseline and
+#                                        for the polling fallback
+# - Win32_System_Ole                     required by the VARIANT definition below
+# - Win32_System_Rpc                     the authentication service constants
+#                                        CoSetProxyBlanket takes
+# - Win32_System_Variant                 VARIANT and VariantClear: how a WMI
+#                                        property is read and released
+# - Win32_System_Wmi                     the locator, the connection, the
+#                                        notification query and its enumerator
+#
+# Target-specific so that the debounce, the vocabulary and their tests still
+# compile and run on a machine that is not Windows (AGENTS.md section 5).
+# Dual MIT/Apache-2.0.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Ole",
+    "Win32_System_Rpc",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+] }
+
+# `examples/process_watch_probe.rs` reports the processor time this process used
+# over an idle interval, which is `GetProcessTimes` and nothing else. Kept out of
+# the shipped feature list because the library measures nothing about itself:
+# the probe is how a number is taken, not something the recorder carries.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true

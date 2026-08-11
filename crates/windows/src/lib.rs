@@ -57,7 +57,7 @@
 //! caller, and [`is_window`] is the cheap check a capture loop makes.
 //!
 //! The one owned handle in the crate is the process handle behind
-//! [`process_image_name`], which is opened, read and closed inside that call
+//! [`process_image_path`], which is opened, read and closed inside that call
 //! and never escapes it (AGENTS.md section 58).
 //!
 //! # Threading
@@ -116,7 +116,7 @@ pub use geometry::{scale_percentage, PixelRect, PixelSize, DEFAULT_DPI};
 pub use monitor::{
     enumerate_monitors, monitor_for_window, monitor_info, MonitorHandle, MonitorInfo,
 };
-pub use process::process_image_name;
+pub use process::{process_image_name, process_image_path};
 pub use selection::{resolve, ResolveError, TargetSelector};
 pub use window::{
     enable_per_monitor_dpi_awareness, enumerate_windows, is_window, window_geometry, DpiAwareness,

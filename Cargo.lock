@@ -232,8 +232,11 @@ name = "clipped-game-detection"
 version = "0.1.0"
 dependencies = [
  "clipped-logging",
+ "clipped-windows",
  "serde",
  "toml",
+ "tracing",
+ "windows",
 ]
 
 [[package]]
