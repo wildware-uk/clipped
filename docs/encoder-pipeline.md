@@ -789,10 +789,13 @@ would have failed on every Intel GPU rather than on none.
 
 The Direct3D half of this **is** exercised on the development machine: the tests
 in `crates/encoder/src/windows/quicksync/allocator.rs` allocate a pool of four
-NV12 surfaces on whatever GPU the machine has, resolve every identifier back to
-a texture, free the response and check the pool is gone. What has never happened
-here is a *oneVPL runtime* calling any of it — which memory types it asks for,
-and in what order, is on
+NV12 surfaces, resolve every identifier back to a texture, free the response and
+check the pool is gone. They need a GPU that can make an NV12 decoder target —
+which is any GPU with a hardware video encoder, and so any machine this backend
+could run on — and report a skip with the format-support word in it when the
+machine cannot, which is what a CI runner with only the Basic Render Driver
+does. What has never happened here is a *oneVPL runtime* calling any of it;
+which memory types it asks for, and in what order, is on
 [#160](https://github.com/wildware-uk/clipped/issues/160).
 
 ### Submitting a frame
@@ -847,7 +850,8 @@ Checked, on the development machine, by
   surfaces is allocated, every identifier resolves back to a texture, the
   response is recognised again at `Free`, a response that was never allocated is
   refused, and a layout this backend cannot make is refused rather than guessed
-  at.
+  at. A machine whose only Direct3D device cannot make an NV12 decoder target
+  gets a skip with the reason on standard error rather than a pass.
 - Detection still reports Quick Sync as unavailable with a reason, and the
   encoders that do work are still recommended.
 

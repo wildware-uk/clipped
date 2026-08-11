@@ -35,12 +35,14 @@
 //! The paragraph above is read from Intel's header, not measured: there is no
 //! Intel GPU on the machine this was written on (issue #17), so no oneVPL
 //! runtime has ever called any of these five callbacks. What *is* measured, by
-//! the tests at the bottom of this file and on whatever Direct3D 11 hardware
-//! the machine running them has, is the part that is ordinary Direct3D: a
-//! request for *n* NV12 surfaces produces *n* textures, every surface's `MemId`
-//! resolves back to a handle pair holding one of them, the response is
-//! recognised again at `Free`, and nothing is leaked. Which of those callbacks
-//! a real runtime calls, in what order and with which memory types, is on
+//! the tests at the bottom of this file, is the part that is ordinary Direct3D:
+//! a request for *n* NV12 surfaces produces *n* textures, every surface's
+//! `MemId` resolves back to a handle pair holding one of them, the response is
+//! recognised again at `Free`, and nothing is leaked. That runs on any GPU that
+//! can make an NV12 decoder target — which is any GPU with a hardware video
+//! encoder, and so any machine this backend could run on — and says on standard
+//! error when the machine cannot. Which of these callbacks a real oneVPL
+//! runtime calls, in what order and with which memory types, is on
 //! [#160](https://github.com/wildware-uk/clipped/issues/160).
 //!
 //! # Ownership and threading
@@ -518,9 +520,10 @@ unsafe extern "C" fn get_hdl(
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+    use std::io::Write as _;
+
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        D3D11_FORMAT_SUPPORT_DECODER_OUTPUT, D3D11_FORMAT_SUPPORT_TEXTURE2D,
     };
 
     use super::*;
@@ -545,27 +548,40 @@ mod tests {
     }
 
     /// An allocator on this machine's first hardware Direct3D 11 device, or
-    /// [`None`] on a machine that has none.
+    /// [`None`] on a machine that has none — with the reason on standard error,
+    /// because a skipped test that says nothing is a test that passed for
+    /// reasons nobody knows.
+    ///
+    /// The device is the one the backend's own tests use, which excludes the
+    /// Basic Render Driver: it is a software rasteriser, no capture backend
+    /// hands the encoder a texture from one, and it cannot make the surfaces an
+    /// encoder needs.
     fn allocator_on_this_machine() -> Option<(FrameAllocator, ID3D11Device)> {
-        let mut device: Option<ID3D11Device> = None;
-        // SAFETY: the driver type is the documented one when no adapter is
-        // given, and `device` is a live out-parameter this test then owns.
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )
-        }
-        .ok()?;
+        let Some(device) = super::super::tests::any_hardware_device() else {
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIPPED (encoder, hardware): this machine has no Direct3D 11 hardware adapter"
+            );
+            return None;
+        };
 
-        let device = device?;
+        // SAFETY: the device is live and this call only asks it a question.
+        let support = unsafe { device.CheckFormatSupport(DXGI_FORMAT_NV12) }.unwrap_or(0);
+        let wanted =
+            D3D11_FORMAT_SUPPORT_TEXTURE2D.0 as u32 | D3D11_FORMAT_SUPPORT_DECODER_OUTPUT.0 as u32;
+        if support & wanted != wanted {
+            // A GPU that cannot make an NV12 decoder target cannot hold an
+            // encoder's reconstructed pictures either, so there is nothing here
+            // for this test to check. Every GPU with a hardware video encoder
+            // can — which is the only kind of machine this backend runs on.
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIPPED (encoder, hardware): this machine's Direct3D 11 device does not support \
+                 NV12 decoder targets (format support {support:#010x})"
+            );
+            return None;
+        }
+
         // SAFETY: the device is alive for as long as the returned pair is, and
         // the allocator takes a counted reference of its own.
         let allocator = unsafe { FrameAllocator::new(device.as_raw()) }.ok()?;
@@ -581,10 +597,6 @@ mod tests {
         // What a *real* oneVPL runtime asks for is issue #160; that it is
         // answered with real textures is checked here.
         let Some((mut allocator, _device)) = allocator_on_this_machine() else {
-            let _ = std::io::Write::write_all(
-                &mut std::io::stderr(),
-                b"SKIPPED (encoder, hardware): this machine has no Direct3D 11 hardware device\n",
-            );
             return;
         };
 
@@ -658,10 +670,6 @@ mod tests {
         // pool that is still in use — the textures behind it are what the
         // encoder is predicting from.
         let Some((mut allocator, _device)) = allocator_on_this_machine() else {
-            let _ = std::io::Write::write_all(
-                &mut std::io::stderr(),
-                b"SKIPPED (encoder, hardware): this machine has no Direct3D 11 hardware device\n",
-            );
             return;
         };
 
@@ -687,10 +695,6 @@ mod tests {
     #[test]
     fn a_layout_this_backend_cannot_allocate_is_refused_rather_than_guessed_at() {
         let Some((mut allocator, _device)) = allocator_on_this_machine() else {
-            let _ = std::io::Write::write_all(
-                &mut std::io::stderr(),
-                b"SKIPPED (encoder, hardware): this machine has no Direct3D 11 hardware device\n",
-            );
             return;
         };
 

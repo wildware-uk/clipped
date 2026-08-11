@@ -396,7 +396,10 @@ fn device_on_a_non_intel_adapter() -> Option<(ID3D11Device, Vendor)> {
 }
 
 /// A Direct3D 11 device on any hardware adapter.
-fn any_hardware_device() -> Option<ID3D11Device> {
+///
+/// Shared with the allocator's tests, which need a real device to create real
+/// textures on and have the same reason to skip the Basic Render Driver.
+pub(super) fn any_hardware_device() -> Option<ID3D11Device> {
     adapters()
         .into_iter()
         .find(|(_, vendor)| *vendor != Vendor::Microsoft)
