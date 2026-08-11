@@ -50,6 +50,16 @@ Work you discover mid-ticket that the acceptance criteria do not require belongs
 in a new issue, not in the current change. Substantial `TODO` comments must name
 the issue they depend on, in the form `TODO(#184): …`.
 
+### Adding a game needs no Rust
+
+The smallest useful contribution to Clipped is a game the catalogue does not
+know yet, and it is a one-file pull request: append a `[[game]]` block to
+[`crates/game-detection/data/games.toml`](crates/game-detection/data/games.toml).
+Nothing has to be registered anywhere, no Rust changes, and the file's own header
+is the field reference — [docs/game-detection.md](docs/game-detection.md) has the
+detail if you want it. A bad entry fails the build with a message naming the file
+and the entry, so it is not a change you can get quietly wrong.
+
 ## Branches and commits
 
 Branch from `main`, and name the branch after the issue:

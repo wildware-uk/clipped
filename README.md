@@ -204,7 +204,7 @@ is not responsible for, and where it sits in this stack.
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 | [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |
-| [docs/game-detection.md](docs/game-detection.md) | The game catalogue, its two files and how a process is matched |
+| [docs/game-detection.md](docs/game-detection.md) | The game catalogue, its matching rules and how to add a game |
 
 The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49 and #42
 and are listed here so those tickets do not each have to edit this table.
