@@ -389,6 +389,34 @@ button that would do nothing is worse than no button (AGENTS.md section 27).
 Clicking the *body* of a toast raises the window rather than performing the
 action, which is the platform convention and means neither click does nothing.
 
+#### Keeping the button connected to its handler
+
+There is no COM activator (see below), so the handler that performs a button's
+action lives in **this** process, attached to the `ToastNotification` object
+`Activated` is raised on. That object is reference-counted and this process holds
+the only reference it will ever have. Release it and the object is destroyed
+while its toast is still on screen or still in the Action Centre; whether Windows
+keeps a reference of its own is neither documented nor promised, and a button
+whose handler *might* have been freed is the control AGENTS.md section 27
+forbids.
+
+So `src/toast.rs` keeps every toast it shows — the last twenty, which is Windows'
+own per-application Action Centre limit and therefore every toast the user can
+still click, bounded rather than unbounded in a process that runs for days.
+
+This is the whole reason `tauri-winrt-notification` is not used. Its
+`Toast::show` builds the `ToastNotification`, attaches the handler, shows it and
+returns `Result<()>`, dropping the object on the way out and giving the caller no
+way to hold it.
+
+**What has not been verified:** that a click actually reaches the handler on a
+real desktop. Nothing short of clicking a real toast can establish it, and that
+has to be done on a machine nobody else is using. The tests assert the button
+reaches the toast's XML under the argument the handler matches on, and that a
+shown notification is retained — not that the click arrives. The button's
+presence in the XML is not evidence that it works, and this section will say so
+until somebody has clicked one.
+
 ### Switching categories off
 
 Per-category switches, in `notifications.json` in Clipped's configuration
@@ -428,20 +456,59 @@ The other place these can be switched off is Windows' own Settings →
 Notifications page, which is per-application and not per-category. It is Windows'
 switch rather than Clipped's, and Clipped does not try to reflect or override it.
 
-### Why not `tauri-plugin-notification`
+#### This file is a second configuration store, and why
 
-Its `show()` on the desktop is `let _ = notification.show()`, so a toast that
-could not be delivered is discarded without a word, and on Windows it offers
-neither a button nor an activation handler. Both are requirements here rather
-than refinements: the first is AGENTS.md section 15, the second section 45. So
-the toast is built on `tauri-winrt-notification` — the crate that plugin is
-itself built on, from the same authors — which returns a `Result`, takes
-`add_button`, and calls back into this process when one is clicked.
+Clipped has a configuration API — `crates/session/src/config`, issue #108 — with
+defaults, types, validation, layered resolution and migrations, and it writes
+`%LOCALAPPDATA%\Clipped\settings.json`. Notification switches are settings and
+belong in it. Two preference files in two directories is the duplication AGENTS.md
+section 55 forbids.
 
-A toast that cannot be shown is not lost. Its title and body go to the window
-instead, through the same `tray-notice` channel a failed tray action uses. That
-raises the window, which is more intrusive than a toast — and losing a failure
-notice silently is the one outcome that is not allowed.
+They are not in it because **the desktop application may not link the crate it
+lives in**, and that is a rule with a test behind it:
+`tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
+permits this crate exactly one member of the repository's workspace,
+`clipped-ipc`. `clipped-session` sits above capture, audio, encoding, muxing and
+replay, so naming it here would put the recording engine inside the window's
+process — the separation [ADR 0002](adr/0002-separate-recorder-process.md) exists
+to make, and the reason closing or crashing a window cannot interrupt a
+recording. Reading `settings.json` from here directly would instead be a second
+implementation of that file's versioning, migration and validation, against the
+file the user's recording settings live in, which is worse than a second file.
+
+**Issue #252** is the fix: move the configuration API to a crate at the
+protocol's layer that both ends may link, or serve it over IPC. Either makes
+these three booleans ordinary settings, migrates this file into `settings.json`
+and deletes it. That migration is why this file carries a `version`, and why a
+category's key is documented as stable above.
+
+### Why neither notification crate
+
+`tauri-plugin-notification`'s desktop `show()` is `let _ = notification.show()`,
+so a failure to hand the toast over is discarded without a word (AGENTS.md
+section 15), and on Windows it offers neither a button nor an activation handler
+— which makes the action of section 45 impossible.
+
+The crate beneath it, `tauri-winrt-notification`, offers both, and is not used
+either: its `show()` drops the `ToastNotification` the handler is attached to,
+for the reason set out above. What is left after that is about thirty lines of
+XML document building, which `src/toast.rs` holds directly against the `windows`
+crate this application already depends on — rather than a fork of a crate for the
+sake of one `Result` type.
+
+**What `Show` returning `Ok` does and does not mean.** It means the notification
+platform accepted the notification. It does **not** mean a toast was displayed:
+`tauri-winrt-notification`'s own `without_library.rs` example says so in a
+comment — "this returns success in every case, including when the toast isn't
+shown" — and the obvious case is a user who has switched Clipped off on Windows'
+Settings → Notifications page. An earlier draft of this document claimed the
+`Result` was a reason to prefer that crate over the plugin. It is not; the button
+and the handler are.
+
+A toast that could not be handed over at all is still not lost. Its title and
+body go to the window instead, through the same `tray-notice` channel a failed
+tray action uses. That raises the window, which is more intrusive than a toast —
+and losing a failure notice silently is the one outcome that is not allowed.
 
 ### The AppUserModelID
 
@@ -460,7 +527,7 @@ and then read `ToastNotificationManager::History` back:
 | --- | --- | --- |
 | An identifier registered nowhere | `Ok` | yes |
 | The same identifier with a `DisplayName` in `HKCU` | `Ok` | yes |
-| `Toast::POWERSHELL_APP_ID` | `Ok` | yes |
+| Windows PowerShell's own AppUserModelID | `Ok` | yes |
 
 So toasts are delivered either way and the registration buys the name, not the
 delivery — which is why a registration that fails is logged and carried on from
@@ -501,6 +568,30 @@ by `Out-File -Encoding utf8`, the toast arrived anyway and the console carried
 switched on until that file is corrected or deleted.` The failure was reported
 rather than swallowed, which is what that path is for — and the mark is now
 dropped, which is why the table above reads 0.
+
+**Those three runs predate `src/toast.rs`**, and were made through
+`tauri-winrt-notification`. What carries them across the rewrite is that the
+document above is composed byte for byte by the current code:
+`toast::tests::the_document_is_the_one_a_toast_was_seen_delivered_from` asserts
+exactly this string. What changed is who holds the `ToastNotification` after
+`Show` returns, not what Windows is handed — so the delivery and the
+category-switch behaviour those runs established still stand, and the button's
+*activation* remains the thing nobody has yet observed.
+
+### Still to be verified on a real desktop
+
+One thing, and it needs a machine nobody else is using, because it puts a toast
+on screen:
+
+- **Click the button on each of the three notifications and confirm the action
+  runs**: File Explorer opens with the recording selected, "Try again" restarts
+  the link and raises the window, "Open Clipped" raises the window carrying the
+  sentence. Then dismiss a toast to the Action Centre and click it there, which
+  is the case the retention in `src/toast.rs` exists for.
+
+Until that is done, acceptance criterion 3 of issue #110 — "error notifications
+lead to an action, not just a message" — is **not** met. A button in the XML is
+not an action; it is a button in the XML.
 
 ## Decisions
 

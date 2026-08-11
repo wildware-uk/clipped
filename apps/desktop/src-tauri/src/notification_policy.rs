@@ -186,6 +186,34 @@ pub(crate) struct Notification {
 /// to on, because all three are failures and a user who has not said otherwise
 /// wants to be told that nothing is being recorded.
 ///
+/// # Why this is not Clipped's configuration API
+///
+/// Clipped has one, in `crates/session/src/config` (issue #108), and settings
+/// with defaults, types and validation are exactly what it is for. This file is
+/// a second store of user preferences beside it, which is the duplication
+/// AGENTS.md section 55 forbids, and it is here because **the desktop
+/// application may not link the crate that API lives in**.
+///
+/// That is a rule with a test behind it rather than a preference:
+/// `tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
+/// allows this manifest exactly one member of the repository's workspace,
+/// `clipped-ipc`. `clipped-session` sits above capture, encoding and muxing, so
+/// naming it here would put the recording engine inside the window's process —
+/// which is the separation ADR 0002 exists to make, and the reason closing or
+/// crashing a window cannot interrupt a recording. Reading `settings.json`
+/// directly from here instead would be a second implementation of that file's
+/// versioning, migration and validation, which is worse than a second file.
+///
+/// So the switches stay here until one of two things changes, both of which are
+/// [issue #252](https://github.com/wildware-uk/clipped/issues/252): the
+/// configuration API moves to a crate at the protocol's layer that both ends may
+/// link, or the recorder serves it over IPC. At that point these three booleans
+/// become settings like any other, `notifications.json` is migrated into
+/// `settings.json` and deleted, and the Settings screen ([issue
+/// #51](https://github.com/wildware-uk/clipped/issues/51)) draws them from the
+/// same place it draws everything else. `version` is stamped into this file so
+/// that the migration can tell what it is reading.
+///
 /// `#[serde(default)]` is the whole of the compatibility policy for this file: a
 /// file written before a category existed is missing its field and gets the
 /// default, and a file written by a newer Clipped carries fields this build
