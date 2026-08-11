@@ -549,8 +549,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn nothing_is_configured_until_something_writes_it() {
-        // The property that matters most: the default state is off, and reading
-        // it does not create it.
+        // The property that matters most: the default state is off. Reading
+        // does not create the *value*, which is what `status` reports and what
+        // Windows reads at sign-in.
+        //
+        // It does create the scratch *key*: `read` goes through `open`, which
+        // uses `RegCreateKeyExW` so that `enable` needs no separate step. For
+        // the real entry that is `…\CurrentVersion\Run`, which Windows has
+        // created long before Clipped is installed; here it is
+        // `HKCU\Software\Clipped\tests\<pid>-absent`, and `Scratch`'s
+        // destructor takes it away again.
         let scratch = Scratch::new("absent");
         assert_eq!(
             platform::read(scratch.entry()).expect("the registry can be read"),

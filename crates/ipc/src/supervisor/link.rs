@@ -103,32 +103,6 @@ pub enum RecorderLinkState {
     },
 }
 
-impl RecorderLinkState {
-    /// The recorder's own state, when there is a recorder to have one.
-    ///
-    /// [`None`] in every state but [`Attached`](Self::Attached), because in the
-    /// others there is nothing this process knows about what is being recorded.
-    #[must_use]
-    pub const fn status(&self) -> Option<&RecorderStatus> {
-        match self {
-            Self::Attached { status, .. } => Some(status),
-            _ => None,
-        }
-    }
-
-    /// The recorder being talked to, when there is one.
-    #[must_use]
-    pub const fn recorder_process_id(&self) -> Option<u32> {
-        match self {
-            Self::Attached {
-                recorder_process_id,
-                ..
-            } => Some(*recorder_process_id),
-            _ => None,
-        }
-    }
-}
-
 /// Something the link noticed.
 ///
 /// Delivered on the channel [`RecorderLink::start`] returns, in the order they
@@ -594,27 +568,6 @@ fn send(sender: &Sender<RecorderLinkEvent>, event: RecorderLinkEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_an_attached_link_reports_a_recorder_status() {
-        assert_eq!(RecorderLinkState::Connecting.status(), None);
-        assert_eq!(
-            RecorderLinkState::Unavailable {
-                reason: "no recorder".to_owned()
-            }
-            .status(),
-            None,
-            "a link that cannot reach the recorder knows nothing about what it is doing"
-        );
-        assert_eq!(
-            RecorderLinkState::Attached {
-                recorder_process_id: 4_242,
-                status: RecorderStatus::Idle
-            }
-            .status(),
-            Some(&RecorderStatus::Idle)
-        );
-    }
 
     #[test]
     fn a_failure_no_retry_could_fix_is_not_retried() {
