@@ -3,15 +3,17 @@
 Clipped records games without being told to, which means it has to know what a
 game is. `clipped-game-detection` is where that knowledge lives.
 
-**Status: the game catalogue exists ([#42]) and the process watcher exists
-([#41]).** The watcher reports what started and what stopped; the catalogue can
-say which game a process is. Nothing in *this* crate joins them, deliberately —
-the layer that asks one about the other, and starts a recording, is the session
-manager in `clipped-session` ([#46], [sessions.md](sessions.md)), because
-deciding what to do about a game is not detection's business. Launcher-specific
-detection is [#43] and [#44], and the user-facing registration screen is [#45].
-This document grows a section per part as they land, and marks the rest as
-intent (AGENTS.md section 7).
+**Status: the game catalogue exists ([#42]), the process watcher exists ([#41])
+and Steam detection exists ([#43]).** The watcher reports what started and what
+stopped; the catalogue can say which game a process is; Steam can say which of
+its applications an executable belongs to, which is what the catalogue's
+strongest matching rung needs. Nothing in *this* crate joins the watcher to the
+other two, deliberately — the layer that asks one about the other, and starts a
+recording, is the session manager in `clipped-session` ([#46],
+[sessions.md](sessions.md)), because deciding what to do about a game is not
+detection's business. The other launchers are [#44], and the user-facing
+registration screen is [#45]. This document grows a section per part as they
+land, and marks the rest as intent (AGENTS.md section 7).
 
 [#41]: https://github.com/wildware-uk/clipped/issues/41
 [#42]: https://github.com/wildware-uk/clipped/issues/42
@@ -249,6 +251,211 @@ for the same reason it is separate from the seed data: it is the user's, it
 should be editable by hand, and it should be obvious where it is.
 
 [#55]: https://github.com/wildware-uk/clipped/issues/55
+
+## Launcher detection
+
+A launcher knows something no amount of looking at a process can tell you: which
+of *its* games this is. That is the catalogue's strongest matching rung
+(`LauncherIdentity`), and until [#43] nothing produced it. Launcher detection is
+provider-based — one module per shop, so support for a new one is an addition
+rather than a change to shared logic (SPEC.md section 6). Steam is the first;
+Epic, Xbox, Battle.net, EA, Ubisoft, Riot and GOG are [#44] and are deliberately
+not stubbed, because a provider that always answers "no" is a control that
+silently does nothing.
+
+There is no `trait LauncherProvider` yet either. One implementation is not
+enough to know the shape of the abstraction, and [#44]'s launchers keep their
+metadata in three different kinds of place.
+
+### Steam
+
+```text
+HKCU\Software\Valve\Steam  SteamPath        ─── absent? then Steam is not installed
+           │                                    and that is not an error
+           ▼
+<steam>\steamapps\libraryfolders.vdf        ─── every library, not just this one
+           │
+           ▼
+<library>\steamapps\appmanifest_<appid>.acf ─── app id, name, install directory
+           │
+           ▼
+Steam::candidate_for(name, path) ──▶ ProcessCandidate ──▶ Catalogue::match_process
+```
+
+Everything is read from files Steam wrote on this machine. There are no network
+calls, by the ticket and by SPEC.md section 6, which also means detection works
+offline, works while Steam is closed, and cannot be slowed down by Valve having
+a bad afternoon.
+
+#### Two libraries is the normal case
+
+A machine with games on more than one drive is ordinary. The machine this was
+developed against keeps three applications under `C:\Program Files (x86)\Steam`
+and eighty-five under `B:\SteamLibrary`, so a detector that read only the
+default library would miss almost everything on it. The library index is
+therefore the first thing read and the default library is one entry in it rather
+than a special case — and because Steam lists its own directory in that file,
+libraries are de-duplicated by normalised path, or every application in the
+default library would be reported twice.
+
+The index is read from `steamapps\libraryfolders.vdf`, falling back to
+`config\libraryfolders.vdf`, which is where it used to live; current clients
+write both, and the two files were byte-identical on the machine above.
+
+The list of applications comes from the manifests on disk rather than from the
+`apps` table inside the index, because the index's copy is a cache of what the
+directory already says.
+
+#### Where Steam says it is
+
+| Key | Value | Written by |
+| --- | --- | --- |
+| `HKEY_CURRENT_USER\Software\Valve\Steam` | `SteamPath` | the client, for this user |
+| `HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Valve\Steam` | `InstallPath` | the installer, for the machine |
+
+The per-user value first, because the client keeps it current; the machine-wide
+one after it, because a user account that has never launched Steam has no
+per-user key while the installation is plainly there. `WOW6432Node` is not a
+guess: Steam is a 32-bit application, so its installer writes under the
+redirected key, and Clipped is a 64-bit process that has to name the redirected
+key to see it.
+
+**A hard-coded `C:\Program Files (x86)\Steam` is deliberately not a fallback.**
+No registry entry means no Steam, and guessing would find the leftovers of an
+uninstall or quietly report a real installation elsewhere as "not installed".
+
+#### Missing Steam is an answer, not an error
+
+`Steam::discover()` returns `Ok(None)` when there is no registry entry, and when
+there is one naming a directory that has gone — uninstalling Steam leaves the
+entry behind. A machine with no Steam on it is a machine Clipped runs perfectly
+well on, so the caller detects nothing rather than telling the user something is
+wrong.
+
+#### One bad file does not blind the detector
+
+| What is unreadable | What happens |
+| --- | --- |
+| The library index | **Fatal.** Without it there is no coherent view of anything, and guessing at a directory layout would be inventing data. |
+| One application manifest | Collected into `Steam::problems()`, logged at `warn`, and the rest are read. |
+| A whole library | The same. The ordinary cause is a drive that is not plugged in. |
+
+The split is a trade rather than an inconsistency. Steam rewrites manifests
+while games install, so a half-written one is an ordinary state of the disk, and
+refusing to detect *any* game because of one would be the wrong answer for a
+recorder. Nothing is dropped silently either way: every problem names its file,
+and `problems()` is there so a diagnostics screen can say why one game is never
+detected instead of leaving somebody to wonder.
+
+#### Icons
+
+`SteamApp::icon()` is a **file on this machine** — whatever artwork Steam has
+already downloaded into `appcache\librarycache`, looked for by the names that
+are stable there, best first: the small application icon in the layout Steam
+used before it moved to a directory per application, then the portrait capsule,
+the header, the logo. `None` means Steam has cached nothing for that
+application, which is ordinary for a game installed but never shown in the
+library; nothing is fetched and nothing is invented.
+
+It is deliberately **not** the icon hash from `appcache\appinfo.vdf`. That file
+is binary KeyValues in an undocumented layout that changes, and the icons it
+names — `steam\games\<sha1>.ico` — cannot be tied to an application without
+reading it.
+
+#### KeyValues, and why the parser is ours
+
+Both kinds of file are in Valve's KeyValues text format: a key followed either
+by a value or by a braced table of more keys. `keyvalues-parser` and
+`steamlocate` both exist; the rule (AGENTS.md section 10) is to ask whether the
+functionality is small enough to implement safely, and here it is a tokeniser
+and a loop — three token kinds, no schema — tested against text Valve's own
+client wrote. Against that, a dependency brings a public API this crate would be
+bound to and, for `steamlocate`, a whole opinion about what an installed game is
+that the catalogue has already formed.
+
+Four things the reader does that are worth knowing:
+
+- **`\\` is one backslash.** Steam writes these files with escaping on, which is
+  why every path in one is spelled `C:\\Program Files (x86)\\Steam`. Without
+  this every library path is wrong.
+- **An escape the format does not define keeps both characters**, where Valve's
+  own reader would drop the backslash. A hand-edited `C:\Program Files` becoming
+  `C:Program Files` is a path that is silently wrong; better visibly odd.
+- **Keys are matched without regard to case**, because the format is
+  case-insensitive and Steam has changed the capitalisation of these keys
+  between client versions. A case-sensitive reader is a detector that stops
+  working after an update, for no reason visible in a diff.
+- **Parsing is iterative over an explicit stack, and nesting is capped.** A file
+  with ten thousand opening braces in it is an error naming the line, not a
+  blown stack — which on Windows is not an error at all but the end of the
+  process.
+
+Platform conditionals (`"key" "value" [$WIN32]`), `#base`, `#include` and binary
+KeyValues are all outside what this reads. They do not appear in anything Steam
+writes for itself, and a conditional is reported as a syntax error naming the
+line rather than half-understood.
+
+#### Matching an executable to an application
+
+An executable belongs to an application when its path is **inside** the
+application's installation directory, compared as whole directory names by the
+same code the catalogue uses for `path_contains` — so `common\Portal` is not
+found in `common\Portal 2`, and the installation directory itself is not a
+program in it. Where two applications' directories nest, the innermost answers,
+so a tool installed inside another game's directory is not reported as that
+game.
+
+`Steam::candidate_for` returns the `ProcessCandidate` the catalogue consumes,
+with the launcher identity attached when Steam claims the path and left off when
+it does not. Leaving it off is what makes the catalogue fall back to its path
+and name rungs, so a game Steam has never heard of matches exactly as well as it
+did before.
+
+#### Testing it
+
+| What | Where | Needs |
+| --- | --- | --- |
+| The KeyValues reader: escapes, comments, bare tokens, repeated keys, every way a file can be malformed | `src/launcher/keyvalues.rs` | nothing |
+| That a missing registry value is not an error, and that a real one comes back whole | `src/launcher/steam/registry.rs` | Windows |
+| That neither shape of "Steam is not installed" is an error | `src/launcher/steam/mod.rs` | Windows |
+| Two libraries, the game in the second one, its name and icon, the catalogue answering by launcher identity, and every failure path | `tests/steam.rs` | nothing |
+
+The fixtures under `tests/fixtures/steam/` are **files Steam wrote**, copied off
+a real client with two libraries and scrubbed of the account identifier; their
+README says exactly what was copied and what was changed. That is the point of
+them: a KeyValues fixture written by hand agrees with the parser that reads it by
+construction, and would prove nothing about Valve's tabs, Valve's escaping, or
+the four nested tables at the bottom of every manifest. The only edit any test
+makes is to substitute the two absolute library paths for temporary directories,
+because a fixture cannot name `B:\SteamLibrary` on a machine that has no B
+drive — and the substitution is asserted, so a fixture edited until those paths
+no longer appear fails the test rather than quietly leaving it with no libraries
+to find.
+
+What no test does is read the developer's own Steam (AGENTS.md section 25).
+That check is a probe, run by hand:
+
+```powershell
+cargo run -p clipped-game-detection --example steam_probe
+cargo run -p clipped-game-detection --example steam_probe -- cs2.exe "B:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe"
+```
+
+#### Assumptions and limits
+
+- **A manifest is not a promise that a game is installed.** Steam writes one
+  when a download *starts*, so an installation directory may not exist yet.
+  Nothing here filters on `StateFlags`, because reading a flag nobody has
+  verified the meaning of would be guessing about somebody's library.
+- **Applications are not games.** Steam manages redistributables, tools,
+  soundtracks and playtests with the same file. `Steam::apps()` reports what
+  Steam says is installed and leaves deciding what is worth recording to the
+  catalogue.
+- **Paths are compared as text.** Two spellings of one directory — a substituted
+  drive, a junction, a short 8.3 name — are two directories to this code, as
+  they are to the catalogue's `path_contains`.
+- **Nothing watches for changes.** An installation is read once; a caller that
+  wants to notice a game installed since start-up reads it again, which is a few
+  dozen small files.
 
 ## The process watcher
 
