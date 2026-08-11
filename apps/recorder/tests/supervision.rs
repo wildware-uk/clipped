@@ -91,6 +91,15 @@ struct SupervisorFixture {
     /// `attached` state" means the next one rather than the one already
     /// asserted about.
     cursor: usize,
+    /// Recorders this fixture started, to be ended when it is.
+    ///
+    /// They are held *here* rather than in the test because the order matters
+    /// and a panicking test does not get to choose it: a supervisor that is
+    /// still watching when its recorder is terminated does exactly what it is
+    /// built to do and starts a replacement, and that replacement is nobody's
+    /// child and nothing else would ever end it. Ending the fixture first, in
+    /// one destructor, is the only ordering that holds however a test finishes.
+    recorders: Vec<u32>,
 }
 
 impl SupervisorFixture {
@@ -109,7 +118,14 @@ impl SupervisorFixture {
             lines: read_lines(stdout),
             seen: Vec::new(),
             cursor: 0,
+            recorders: Vec::new(),
         }
+    }
+
+    /// Records a recorder for this fixture to end when it does, and returns it.
+    fn owns_recorder(&mut self, process_id: u32) -> u32 {
+        self.recorders.push(process_id);
+        process_id
     }
 
     /// Waits for the next line, from the cursor onwards, that `wanted` accepts.
@@ -216,12 +232,18 @@ impl SupervisorFixture {
 }
 
 impl Drop for SupervisorFixture {
-    /// A supervisor must not outlive the test that started it, whether that
-    /// test passed, failed or panicked part way through.
+    /// Neither a supervisor nor a recorder may outlive the test that started
+    /// it, whether that test passed, failed or panicked part way through.
+    ///
+    /// The supervisor goes first, for the reason `recorders` gives.
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+
+        for recorder in &self.recorders {
+            terminate(*recorder);
         }
     }
 }
@@ -240,19 +262,6 @@ fn read_lines(stdout: ChildStdout) -> Receiver<String> {
         })
         .expect("a thread can be started to read the fixture's output");
     receiver
-}
-
-/// A recorder nothing else will clean up, ended when the test finishes.
-///
-/// A detached recorder is nobody's child, so nothing tidies it away when a test
-/// panics — which is precisely the property being tested, and precisely why the
-/// tests have to tidy up after themselves.
-struct RecorderProcess(u32);
-
-impl Drop for RecorderProcess {
-    fn drop(&mut self) {
-        terminate(self.0);
-    }
 }
 
 /// An endpoint or instance name no other test, and nothing anybody is using,
@@ -308,7 +317,7 @@ fn a_recorder_outlives_the_process_that_started_it() {
         started.starts_with("started "),
         "nothing was listening, so the supervisor should have started a recorder: {started}"
     );
-    let recorder = RecorderProcess(recorder_process_id(&started));
+    let recorder = supervisor.owns_recorder(recorder_process_id(&started));
     supervisor.wait_for("ready");
 
     supervisor.kill();
@@ -327,11 +336,11 @@ fn a_recorder_outlives_the_process_that_started_it() {
         surviving
             .recorder_process_id()
             .expect("the pipe names its server"),
-        recorder.0,
+        recorder,
         "it should be the same recorder, not a replacement"
     );
     assert!(
-        is_running(recorder.0),
+        is_running(recorder),
         "the recorder should still be running after its supervisor was killed"
     );
 }
@@ -349,7 +358,7 @@ fn a_second_launch_attaches_to_the_running_recorder_rather_than_starting_another
     let mut first = SupervisorFixture::start(&["--endpoint", &name, "--recorder", &recorder_path]);
     let started = first.wait_for("recorder=");
     assert!(started.starts_with("started "), "{started}");
-    let recorder = RecorderProcess(recorder_process_id(&started));
+    let recorder = first.owns_recorder(recorder_process_id(&started));
     first.wait_for("ready");
 
     let mut second = SupervisorFixture::start(&["--endpoint", &name, "--recorder", &recorder_path]);
@@ -362,7 +371,7 @@ fn a_second_launch_attaches_to_the_running_recorder_rather_than_starting_another
     );
     assert_eq!(
         recorder_process_id(&attached),
-        recorder.0,
+        recorder,
         "both supervisors should be talking to the same recorder"
     );
 }
@@ -387,7 +396,8 @@ fn a_second_launch_holding_the_same_instance_name_starts_no_recorder_at_all() {
         &instance,
     ]);
     first.wait_for("instance=claimed");
-    let recorder = RecorderProcess(recorder_process_id(&first.wait_for("recorder=")));
+    let started = recorder_process_id(&first.wait_for("recorder="));
+    let recorder = first.owns_recorder(started);
     first.wait_for("ready");
 
     let mut second = SupervisorFixture::start(&[
@@ -423,7 +433,7 @@ fn a_second_launch_holding_the_same_instance_name_starts_no_recorder_at_all() {
         client(&endpoint)
             .recorder_process_id()
             .expect("the pipe names its server"),
-        recorder.0
+        recorder
     );
 }
 
@@ -444,30 +454,32 @@ fn a_recorder_that_is_killed_is_reported_and_replaced_rather_than_silently_missi
         "200",
     ]);
 
-    let first = RecorderProcess(recorder_process_id(&supervisor.wait_for("recorder=")));
+    let started = recorder_process_id(&supervisor.wait_for("recorder="));
+    let first = supervisor.owns_recorder(started);
     supervisor.wait_for("ready");
     let attached = supervisor.wait_for_containing(r#""attached""#);
     assert_eq!(
         attached_recorder(&attached),
-        Some(first.0),
+        Some(first),
         "the supervisor should be attached to the recorder it started: {attached}"
     );
 
-    terminate(first.0);
+    terminate(first);
 
     let reconnecting = supervisor.wait_for_containing(r#""reconnecting""#);
     assert!(
-        reconnecting.contains(&first.0.to_string()),
+        reconnecting.contains(&first.to_string()),
         "the reason should name the recorder that went: {reconnecting}"
     );
 
-    let replacement = RecorderProcess(supervisor.wait_for_a_recorder_other_than(first.0));
+    let replacement = supervisor.wait_for_a_recorder_other_than(first);
+    supervisor.owns_recorder(replacement);
     assert_ne!(
-        replacement.0, first.0,
+        replacement, first,
         "a replacement is a different process, and the state has to show that"
     );
     assert!(
-        is_running(replacement.0),
+        is_running(replacement),
         "the replacement should be a recorder that is actually running"
     );
 }
@@ -593,7 +605,8 @@ fn killing_the_supervisor_leaves_the_recording_running_and_its_file_playable() {
         &output.to_string_lossy(),
     ]);
 
-    let recorder = RecorderProcess(recorder_process_id(&supervisor.wait_for("recorder=")));
+    let started = recorder_process_id(&supervisor.wait_for("recorder="));
+    supervisor.owns_recorder(started);
     let recording_id = supervisor
         .wait_for("recording=")
         .split_whitespace()
@@ -663,8 +676,6 @@ fn killing_the_supervisor_leaves_the_recording_running_and_its_file_playable() {
         )
         .monotonic_timestamps()
         .assert_valid();
-
-    drop(recorder);
 }
 
 #[test]
@@ -700,7 +711,8 @@ fn killing_the_recorder_leaves_a_playable_file_and_the_supervisor_names_it() {
         "0",
     ]);
 
-    let recorder = recorder_process_id(&supervisor.wait_for("recorder="));
+    let started = recorder_process_id(&supervisor.wait_for("recorder="));
+    let recorder = supervisor.owns_recorder(started);
     supervisor.wait_for("recording=");
     supervisor.wait_for("ready");
     supervisor.wait_for_containing(r#""state":"recording""#);
