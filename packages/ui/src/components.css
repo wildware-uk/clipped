@@ -13,13 +13,14 @@
  * `contrast.test.ts` measures every pairing of words and ground the classes
  * below draw.
  *
- * Three things are done differently from the reference pages, and all three are
+ * Four things are done differently from the reference pages, and all four are
  * because the reference value does not clear WCAG 2.1. They are marked at the
  * point of use and explained against the token they reach for instead:
  * `--color-accent-solid` under words, `--color-accent-text` for accent words,
- * and `--color-control-edge` for the edge that identifies a control. The type
- * sizes the pages draw between the seven steps of the scale snap to the nearest
- * step; `tokens.css` says why.
+ * `--color-control-edge` for the edge that identifies a control, and the halo
+ * inside the segmented option's focus ring, which the accent alone measures
+ * 1.71:1 against on the selected option. The type sizes the pages draw between
+ * the seven steps of the scale snap to the nearest step; `tokens.css` says why.
  *
  * Classes are `clipped-block__element--modifier`, following the shell rather
  * than the reference pages' bare `.btn` / `.card`. `docs/desktop-ui.md` carries
@@ -268,11 +269,25 @@ textarea.clipped-input {
   background: var(--tint-hover);
 }
 
-/* Inward, because the control clips its children and an outward ring on the
-   first or last option would be cut off by `overflow: hidden`. */
+/*
+ * The ring is inward, because the control clips its children and an outward
+ * ring on the first or last option would be cut off by `overflow: hidden`.
+ *
+ * A ring inside the border box is drawn over the option's own fill, and on the
+ * *selected* option that fill is `--color-accent-solid`, against which the
+ * accent measures 1.71:1 - far below the 3:1 WCAG 2.1 1.4.11 asks of a focus
+ * indicator, and the selected option is exactly the one a keyboard user lands
+ * on when tabbing into the control. So the indicator is two-tone: the accent
+ * ring, and the window ground immediately inside it, the same halo the checked
+ * radio already draws. The accent measures 3.76:1 against that halo and the
+ * halo 6.41:1 against the fill, so the ring has an edge it clears 3:1 against
+ * on every option, selected or not. `contrast.test.ts` measures both, and
+ * fails if the halo is dropped rather than passing over its absence.
+ */
 .clipped-segment__option:has(input:focus-visible) {
   outline: var(--rule-weight) solid var(--color-accent);
   outline-offset: calc(var(--rule-weight) * -1);
+  box-shadow: inset 0 0 0 calc(var(--rule-weight) * 2) var(--color-bg);
 }
 
 /* — cards — */
