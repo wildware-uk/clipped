@@ -116,6 +116,10 @@ fn main() -> ExitCode {
         // Ignored by a fullscreen presentation, which takes the display's size.
         size: Options::default().size,
         stop_on_stdin_end: !arguments.ignore_stdin,
+        // This application takes over a display; it does not also take over the
+        // speakers. The sounded subject is `video-pattern --tone`, which is
+        // what the absolute A/V offset measurement runs (docs/av-sync.md).
+        tone: false,
     };
 
     match clipped_video_pattern::run(options) {

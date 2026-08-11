@@ -28,17 +28,56 @@
 //! number that decides whether a two-hour recording *ends* as well aligned as it
 //! started.
 //!
+//! # The second measurement: the absolute offset
+//!
+//! The drift measurement above cannot see a *constant* offset, for the reason
+//! in the next section, so this file holds a second test that can:
+//! [`the_absolute_av_offset_of_a_synchronised_subject_is_within_tolerance`]. It
+//! runs the same subject with `--tone`, which places a short sound at the
+//! moment a named frame is presented, and then finds both halves of that one
+//! event in what was captured — the tone by its frequency in the samples, the
+//! frame by its counter in the pixels.
+//!
+//! What it reports is
+//!
+//! ```text
+//! offset = (audio in the recording − audio at the source)
+//!        − (video in the recording − video at the source)
+//! ```
+//!
+//! which is a number the drift measurement cannot produce at any size, because
+//! it has no source to compare against. Both source moments come from the
+//! application (`test-apps/video-pattern/src/tone.rs`) and neither is assumed to
+//! be the other: the skew between them is announced per tone and subtracted.
+//!
+//! **What that number contains that is not the recorder's.** Two Windows
+//! latencies, and they are the reason the tolerance is what it is rather than
+//! zero:
+//!
+//! - the compositor's, between the application handing over a frame and the
+//!   frame being composed and stamped, which is up to a display refresh;
+//! - the audio engine's, between the moment `IAudioClock` says a sample is
+//!   played at the endpoint and the moment the loopback tap reports for the
+//!   same sample.
+//!
+//! Neither is Clipped's to remove, and neither can be separated from the
+//! recorder's own constant error by this measurement — what it bounds is their
+//! sum. `docs/av-sync.md` records the measured value and says which part is
+//! whose.
+//!
 //! # What it cannot measure
 //!
-//! Three things, and the printed result means much less without them.
+//! Three things, and the printed result of the drift measurement means much
+//! less without them.
 //!
-//! **A constant offset.** The measurement is relative. `clipped-audio` anchors
+//! **A constant offset.** That measurement is relative. `clipped-audio` anchors
 //! its track on the first packet's own device position, so the first observation
 //! of a run is zero by construction, and everything after it is measured from
 //! there. An error that was already present when the capture started — the
 //! endpoint's own reporting bias, or a session that starts the audio at a
-//! different moment from the video — is invisible here at any size. What is
-//! measured is the change.
+//! different moment from the video — is invisible in it at any size. What it
+//! measures is the change. The absolute test above is what sees the constant,
+//! and it is a different run with a different subject.
 //!
 //! **What a file ends up containing.** Nothing here writes one. `clipped-muxer`
 //! rescales media times to 1 ms container ticks and clamps any timestamp before
@@ -84,6 +123,11 @@
 //! evidence should run it. A green run without that variable set is not on its
 //! own evidence that an offset was measured; the printed lines are.
 //!
+//! The absolute test does make a sound, because a subject that makes none is
+//! exactly what it exists to fix. It is a [`TONE_LENGTH`] tone at about
+//! −28 dBFS, once every five seconds of the run — quiet and brief on purpose,
+//! since this runs on a machine somebody is using.
+//!
 //! ```text
 //! # The default: about ninety seconds.
 //! cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1
@@ -92,6 +136,11 @@
 //! # read by the same test.
 //! CLIPPED_AV_SYNC_SECONDS=1800 cargo test -p clipped-video-pattern --test av_sync \
 //!     -- --ignored --nocapture --test-threads=1 av_offset
+//!
+//! # The absolute offset, which plays a tone. CLIPPED_AV_SYNC_TONE_SECONDS
+//! # lengthens it.
+//! cargo test -p clipped-video-pattern --test av_sync \
+//!     -- --ignored --nocapture --test-threads=1 absolute
 //! ```
 
 #![cfg(windows)]
@@ -113,7 +162,8 @@ use clipped_capture::{
     SourceClock, SyncState, SyncTolerance, TargetHandle, TargetKind, TargetProperties,
     DEFAULT_DISCONTINUITY_STEP,
 };
-use clipped_video_pattern::harness::TestApp;
+use clipped_media_validation::AudioContent;
+use clipped_video_pattern::harness::{TestApp, Tone, ToneEvent, TonePlan};
 use clipped_video_pattern::pattern::{self, Surface};
 
 use readback::FrameReader;
@@ -136,6 +186,103 @@ const DEFAULT_RUN: Duration = Duration::from_secs(90);
 
 /// The environment variable that lengthens a run, in seconds.
 const RUN_SECONDS: &str = "CLIPPED_AV_SYNC_SECONDS";
+
+/// How long the absolute measurement runs for unless
+/// [`TONE_RUN_SECONDS`] says otherwise.
+///
+/// Ninety seconds is seventeen tones at the subject's five-second spacing,
+/// which is enough independent readings for the spread of them to mean
+/// something. It is deliberately not the thirty-minute figure: this run keeps
+/// every sample it captures so that a tone can be found in them, and half an
+/// hour of that is nearly a gigabyte for no gain — a constant offset does not
+/// take longer to see than a variable one.
+const DEFAULT_TONE_RUN: Duration = Duration::from_secs(90);
+
+/// The environment variable that lengthens the absolute measurement, in
+/// seconds.
+const TONE_RUN_SECONDS: &str = "CLIPPED_AV_SYNC_TONE_SECONDS";
+
+/// How long a tone lasts, as the subject renders it
+/// (`test-apps/video-pattern/src/tone.rs`).
+///
+/// Named here as well because the detector checks the burst it found is this
+/// long: a burst of a wildly different length is something else that happened
+/// to be playing, not the subject's tone.
+const TONE_LENGTH: Duration = Duration::from_millis(30);
+
+/// How far either side of a tone's announced moment the detector looks.
+///
+/// It has to be wider than any offset that could plausibly be there — a quarter
+/// of a second is four times the tolerance's own lag limit — and narrower than
+/// half the spacing between tones, so that a search for one cannot find its
+/// neighbour.
+const SEARCH: Duration = Duration::from_millis(250);
+
+/// The window each point of the envelope is measured over.
+///
+/// Two milliseconds is two cycles of the tone, which is enough for a Goertzel
+/// filter to separate it from anything else in the room, and short enough that
+/// the envelope follows a one-millisecond attack rather than smearing it. The
+/// window is centred on the point it reports, so a symmetric attack's
+/// half-amplitude point lands where the smoothed envelope crosses half its
+/// plateau — which is the moment the subject announces (AGENTS.md section 26).
+const ENVELOPE_WINDOW: Duration = Duration::from_micros(2_000);
+
+/// How far apart the points of the envelope are.
+///
+/// A quarter of a millisecond, which is the detector's own resolution before
+/// the interpolation between two points, and a fortieth of the smallest offset
+/// worth reporting.
+const ENVELOPE_HOP: Duration = Duration::from_micros(250);
+
+/// How much louder than the noise floor a burst has to be to be the tone.
+///
+/// Six, the same margin `crates/audio/tests/system_audio.rs` settled on for the
+/// same reason: the machine this runs on is a desktop somebody is using, and
+/// whatever is already playing has some energy at 997 Hz. The burst's length is
+/// checked as well, which background audio does not reproduce.
+const MINIMUM_RATIO: f64 = 6.0;
+
+/// How strong the tone's frequency has to be for a burst to be the tone.
+///
+/// The subject plays at about −28 dBFS, which measures 0.04 on the harness's
+/// normalised scale where a full-scale sine is 1.0. A quarter of that is well
+/// below anything the endpoint's own mixing could take off it and far above the
+/// numerical noise a window of digital silence produces.
+const MINIMUM_MAGNITUDE: f64 = 0.01;
+
+/// How many tones have to be found for the absolute measurement to mean
+/// anything.
+///
+/// The number quoted is a mean over the tones of a run, and the run's own
+/// spread is what says whether the mean is a measurement or a coincidence. Five
+/// is the fewest that gives a spread worth printing.
+const MINIMUM_TONES: usize = 5;
+
+/// How far a run's tones may scatter about their mean before the mean stops
+/// being a measurement, in nanoseconds.
+///
+/// The offset each tone gives is a constant plus two Windows latencies, and one
+/// of those — the compositor's present-to-compose — varies by a display refresh
+/// or so from frame to frame: measured here it spread six to twenty-eight
+/// milliseconds about a mean of eighteen, for a standard deviation of six.
+/// Fifteen milliseconds is more than twice that and still a quarter of the
+/// tolerance the mean is judged against, so a run whose readings scatter more
+/// than this is measuring something other than a constant and says so rather
+/// than averaging it away.
+///
+/// A standard deviation rather than the full range, because the range of a
+/// dozen readings is decided by the two most extreme of them: one late compose
+/// in a run should widen the error bar, not fail the test.
+const MAXIMUM_DEVIATION: f64 = 15e6;
+
+/// The most seconds of audio the absolute run keeps for analysis.
+///
+/// It keeps one channel of every frame so that a tone can be found in it, which
+/// is 192 kB a second. Ten minutes of that is 115 MB and is far more than the
+/// measurement needs; a longer run than this is a mistake at the command line
+/// rather than a request, and the cap says so rather than filling memory.
+const MAXIMUM_KEPT_SECONDS: u64 = 600;
 
 /// The environment variable that turns "this machine has no audio endpoint"
 /// from a skip into a failure.
@@ -210,20 +357,20 @@ fn note(message: &str) {
     let _ = writeln!(std::io::stderr(), "[av-sync] {message}");
 }
 
-fn run_length() -> Duration {
-    match std::env::var(RUN_SECONDS).ok().and_then(|value| {
+fn run_length(variable: &str, default: Duration) -> Duration {
+    match std::env::var(variable).ok().and_then(|value| {
         let seconds: u64 = value.trim().parse().ok()?;
         (seconds > 0).then(|| Duration::from_secs(seconds))
     }) {
         Some(length) => length,
-        None => DEFAULT_RUN,
+        None => default,
     }
 }
 
 #[test]
 #[ignore = "needs a GPU, a display, an audio endpoint and minutes of wall-clock time"]
 fn av_offset_stays_within_tolerance_while_video_and_audio_are_captured_together() {
-    let run = run_length();
+    let run = run_length(RUN_SECONDS, DEFAULT_RUN);
 
     let keeper = match SilenceKeeper::start() {
         Ok(keeper) => Some(keeper),
@@ -236,9 +383,9 @@ fn av_offset_stays_within_tolerance_while_video_and_audio_are_captured_together(
         }
     };
 
-    let mut audio = AudioRun::start();
+    let mut audio = AudioRun::start(Keep::Nothing);
 
-    let video = capture_video(run);
+    let video = capture_video(run, Subject::Silent);
 
     let audio = audio.finish();
     drop(keeper);
@@ -246,6 +393,48 @@ fn av_offset_stays_within_tolerance_while_video_and_audio_are_captured_together(
     let report = Report::build(&video, &audio);
     report.print();
     report.assert_healthy(run);
+}
+
+/// The absolute offset: how far a recording puts a sound from the picture it
+/// was simultaneous with at the source.
+///
+/// This is what the drift measurement above cannot do, and the difference is
+/// entirely in the subject. It is started with `--tone`, so it places a short
+/// sound at the moment it presents a named frame and announces both moments;
+/// the recording is then searched for the tone by its frequency and for the
+/// frame by its counter, and the two are compared against the two the
+/// application announced.
+///
+/// It makes a sound — quietly, briefly, and every five seconds rather than
+/// continuously. A measurement of where a recording puts a sound needs a sound.
+#[test]
+#[ignore = "needs a GPU, a display and an audio endpoint, and plays a quiet tone"]
+fn the_absolute_av_offset_of_a_synchronised_subject_is_within_tolerance() {
+    let run = run_length(TONE_RUN_SECONDS, DEFAULT_TONE_RUN);
+
+    // No `SilenceKeeper` here: the subject holds a render stream open for its
+    // whole run, which is what keeps the endpoint's clock going and loopback
+    // delivering, and a second stream feeding silence would add nothing.
+    let mut audio = AudioRun::start(Keep::Samples);
+    let video = capture_video(run, Subject::Sounded);
+    let audio = audio.finish();
+
+    if let Some(reason) = &video.silent_subject {
+        skipped(reason);
+        return;
+    }
+
+    // The same health checks the drift measurement makes — the capture found
+    // its subject, covered the run, and the two accounts of the audio's
+    // position are independent — because an absolute offset measured over a
+    // capture that was not working is not a measurement.
+    let report = Report::build(&video, &audio);
+    report.print();
+    report.assert_healthy(run);
+
+    let absolute = Absolute::measure(&video, &audio);
+    absolute.print();
+    absolute.assert_within(&SyncTolerance::default());
 }
 
 /// What the video side of a run produced.
@@ -277,6 +466,74 @@ struct VideoRun {
     monitor: String,
     /// What ended the subject's own run, in its words.
     stopped: Option<String>,
+    /// Every tone the subjects announced, paired with the capture timestamp of
+    /// the frame it belonged to where that frame was captured and decoded.
+    tones: Vec<ToneObservation>,
+    /// Tones the subject announced whose frame never arrived in the capture, or
+    /// arrived and did not decode.
+    tones_without_a_frame: usize,
+    /// Tones the subject announced and did not play, because it could not put
+    /// them at the moment it wanted.
+    tones_unplayed: usize,
+    /// Set when a sounded run was asked for and the machine could not play a
+    /// tone. The run is then a skip rather than a failure: no endpoint is not a
+    /// fault in the code under test.
+    silent_subject: Option<String>,
+}
+
+/// One announced tone, with everything needed to place both halves of it.
+#[derive(Debug, Clone, Copy)]
+struct ToneObservation {
+    /// The counter of the frame the tone belongs to.
+    frame: u32,
+    /// Where the endpoint's clock put the tone's half-amplitude point, at the
+    /// source.
+    onset_nanos: u64,
+    /// The counter of the frame the video half is actually measured from.
+    ///
+    /// Usually the tone's own frame. It is allowed to be a near neighbour
+    /// because the compositor does not compose every frame an application
+    /// presents — on a display it is not showing it composes a small fraction
+    /// of them — and the video path latency is a property of the pipeline
+    /// rather than of one frame, so the frame nearest the tone measures it just
+    /// as well. How far away it was is reported.
+    matched_frame: u32,
+    /// The moment the source presented [`matched_frame`](Self::matched_frame).
+    ///
+    /// The announced present of the tone's own frame, moved by the source's
+    /// frame interval for each frame between the two. The subject paces
+    /// presents against a fixed schedule, so that interval is exact to within
+    /// the sub-millisecond jitter it announces per tone.
+    matched_present_nanos: u64,
+    /// What the capture backend stamped
+    /// [`matched_frame`](Self::matched_frame) with.
+    captured_nanos: u64,
+    /// The frequency the subject said it was playing, which is the one the
+    /// detector looks for. Taken from the announcement rather than from a
+    /// constant here, so that the two cannot drift apart.
+    hertz: f64,
+}
+
+/// Whether the subject is asked to make a sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Subject {
+    /// The window and nothing else, which is what the drift measurement wants.
+    Silent,
+    /// `--tone`: a short sound at the moment a named frame is presented.
+    Sounded,
+}
+
+/// Whether a run keeps the samples it captures.
+///
+/// Only the absolute measurement needs them — it has to find a tone in what was
+/// recorded — and keeping them costs 192 kB a second, which over the drift
+/// measurement's half hour would be a third of a gigabyte nothing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// Timestamps only.
+    Nothing,
+    /// One channel of every frame, and where each buffer starts in it.
+    Samples,
 }
 
 /// What the audio side of a run produced.
@@ -285,6 +542,16 @@ struct AudioRun {
     /// `(endpoint position, track position)` in nanoseconds on the performance
     /// counter, one pair per buffer the endpoint delivered.
     observations: Vec<(u64, u64)>,
+    /// The first channel of every frame handed over, in order, when the run was
+    /// asked to keep them.
+    mono: Vec<f32>,
+    /// Where each buffer starts in [`mono`](Self::mono), and both accounts of
+    /// when its first frame was heard.
+    blocks: Vec<Block>,
+    /// Set when [`MAXIMUM_KEPT_SECONDS`] was reached and the run stopped
+    /// keeping samples, so that a measurement over the tail knows the samples
+    /// are missing rather than the tone.
+    truncated: bool,
     /// Frames of silence this crate synthesised because the endpoint said
     /// nothing.
     synthesised_frames: u64,
@@ -312,12 +579,31 @@ struct AudioThread {
     thread: Option<JoinHandle<AudioRun>>,
 }
 
+/// One buffer's place in [`AudioRun::mono`], and both accounts of when its
+/// first frame was heard.
+///
+/// Both, because they answer different questions. The track's timestamp is
+/// where the *recorder* puts the samples, which is what a writer is handed and
+/// therefore what a finished recording would contain; the endpoint's is where
+/// the device said they belong. The absolute measurement reports the offset
+/// from the first and prints the second beside it, and the difference between
+/// the two is the drift the other test in this file measures.
+#[derive(Debug, Clone, Copy)]
+struct Block {
+    /// Where this buffer's first frame is in [`AudioRun::mono`].
+    start: usize,
+    /// The track's timestamp for that frame, in nanoseconds.
+    track_nanos: u64,
+    /// The endpoint's own position for it, when it had one.
+    device_nanos: Option<u64>,
+}
+
 impl AudioRun {
-    fn start() -> AudioThread {
+    fn start(keep: Keep) -> AudioThread {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = std::thread::spawn({
             let stop = Arc::clone(&stop);
-            move || Self::run(&stop)
+            move || Self::run(&stop, keep)
         });
         AudioThread {
             stop,
@@ -325,7 +611,45 @@ impl AudioRun {
         }
     }
 
-    fn run(stop: &AtomicBool) -> Self {
+    /// The moment in the recording of the sample at `index` of
+    /// [`mono`](Self::mono), by the track's account and by the endpoint's.
+    ///
+    /// The track is contiguous by construction, so a sample's moment is its
+    /// buffer's timestamp plus its offset into that buffer — no interpolation
+    /// between buffers and no assumption that the buffers are the same length.
+    fn moment_of(&self, index: f64) -> Option<(f64, Option<f64>)> {
+        let block = match self
+            .blocks
+            .binary_search_by_key(&(index as usize), |block| block.start)
+        {
+            Ok(exact) => self.blocks[exact],
+            Err(0) => return None,
+            Err(after) => self.blocks[after - 1],
+        };
+        let into = (index - block.start as f64) * 1e9 / f64::from(self.sample_rate.max(1));
+        Some((
+            block.track_nanos as f64 + into,
+            block.device_nanos.map(|device| device as f64 + into),
+        ))
+    }
+
+    /// The index into [`mono`](Self::mono) of the sample the track puts at
+    /// `nanos`.
+    fn index_of(&self, nanos: u64) -> Option<f64> {
+        let block = match self
+            .blocks
+            .binary_search_by_key(&nanos, |block| block.track_nanos)
+        {
+            Ok(exact) => self.blocks[exact],
+            Err(0) => return None,
+            Err(after) => self.blocks[after - 1],
+        };
+        let into = (nanos - block.track_nanos) as f64 * f64::from(self.sample_rate.max(1)) / 1e9;
+        let index = block.start as f64 + into;
+        (index < self.mono.len() as f64).then_some(index)
+    }
+
+    fn run(stop: &AtomicBool, keep: Keep) -> Self {
         let mut run = Self::default();
 
         let mut capture = match SystemAudioCapture::open() {
@@ -354,6 +678,24 @@ impl AudioRun {
                     if let Some(device) = samples.device_timestamp() {
                         run.observations
                             .push((device.as_nanos(), samples.timestamp().as_nanos()));
+                    }
+                    if keep == Keep::Samples {
+                        let kept = u64::from(run.sample_rate) * MAXIMUM_KEPT_SECONDS;
+                        if run.mono.len() as u64 >= kept {
+                            run.truncated = true;
+                        } else {
+                            run.blocks.push(Block {
+                                start: run.mono.len(),
+                                track_nanos: samples.timestamp().as_nanos(),
+                                device_nanos: samples.device_timestamp().map(|at| at.as_nanos()),
+                            });
+                            // One channel: the subject writes the same value to
+                            // every channel of a frame, and a detector looking
+                            // for one frequency has no use for the others.
+                            let channels = usize::from(samples.format().channels().get());
+                            run.mono
+                                .extend(samples.samples().iter().step_by(channels.max(1)));
+                        }
                     }
                 }
                 Ok(Capture::Idle) => {}
@@ -426,17 +768,22 @@ impl Drop for AudioThread {
 ///
 /// It still stops when this test closes its standard input, and `TestApp::drop`
 /// kills it if it does not, so the margin costs nothing.
-fn start_subject(remaining: Duration) -> Result<TestApp, String> {
+fn start_subject(remaining: Duration, subject: Subject) -> Result<TestApp, String> {
+    let mut arguments = vec![
+        "--fps".to_owned(),
+        PATTERN_FPS.to_string(),
+        "--seconds".to_owned(),
+        (remaining.as_secs() + 120).to_string(),
+        "--mode".to_owned(),
+        "borderless".to_owned(),
+    ];
+    if subject == Subject::Sounded {
+        arguments.push("--tone".to_owned());
+    }
+
     TestApp::start(
         env!("CARGO_BIN_EXE_video-pattern"),
-        [
-            "--fps".to_owned(),
-            PATTERN_FPS.to_string(),
-            "--seconds".to_owned(),
-            (remaining.as_secs() + 120).to_string(),
-            "--mode".to_owned(),
-            "borderless".to_owned(),
-        ],
+        arguments,
         Duration::from_secs(20),
     )
     .map_err(|error| error.to_string())
@@ -452,7 +799,7 @@ fn start_subject(remaining: Duration) -> Result<TestApp, String> {
 /// [`MAX_SUBJECT_RESTARTS`] times, after which the video side gives up and the
 /// audio side, which is where the offset is actually measured, carries on to the
 /// deadline.
-fn capture_video(run: Duration) -> VideoRun {
+fn capture_video(run: Duration, subject: Subject) -> VideoRun {
     let mut video = VideoRun::default();
     let deadline = Instant::now() + run;
     let mut method = None;
@@ -463,7 +810,7 @@ fn capture_video(run: Duration) -> VideoRun {
             break;
         }
 
-        let app = match start_subject(remaining) {
+        let mut app = match start_subject(remaining, subject) {
             Ok(app) => app,
             Err(reason) => {
                 note(&format!("the subject could not be started: {reason}"));
@@ -471,6 +818,31 @@ fn capture_video(run: Duration) -> VideoRun {
             }
         };
         video.monitor = app.monitor().to_owned();
+
+        // The plan is per subject, because a restarted subject counts its
+        // frames from zero again and announces a plan of its own.
+        let plan = match (subject, app.tone()) {
+            (Subject::Sounded, Tone::Playing(plan)) => Some(plan),
+            (Subject::Sounded, unavailable) => {
+                video.silent_subject = Some(format!(
+                    "the subject could not play a tone on this machine ({unavailable:?}), so \
+                     there is no event whose sound and picture are simultaneous to measure; \
+                     it says why on its standard error"
+                ));
+                return video;
+            }
+            (Subject::Silent, _) => None,
+        };
+        if let Some(plan) = plan {
+            note(&format!(
+                "the subject is playing a {:.0} Hz tone of {} ms at frame {} and every {} \
+                 frames after it",
+                plan.frequency,
+                plan.length.as_millis(),
+                plan.first_frame,
+                plan.frame_interval,
+            ));
+        }
 
         let (width, height) = app.client_size();
         let size = FrameSize::new(width, height).expect("the application announced a real size");
@@ -520,6 +892,7 @@ fn capture_video(run: Duration) -> VideoRun {
         // it covered can be added up separately from the gap before the next
         // one starts.
         let first_of_this_subject = video.timestamps.len();
+        let mut hunt = ToneHunt::new(plan);
         let lost = loop {
             if Instant::now() >= deadline {
                 break false;
@@ -528,11 +901,15 @@ fn capture_video(run: Duration) -> VideoRun {
                 Ok(Acquisition::Frame(frame)) => {
                     let timestamp = frame.timestamp();
                     video.timestamps.push(timestamp);
-                    if let Some(missed) = frame.frames_missed() {
-                        video.backend_missed += u64::from(missed);
-                    }
+                    let missed = frame.frames_missed().unwrap_or(0);
+                    video.backend_missed += u64::from(missed);
+                    hunt.arrived(missed);
 
-                    if video.timestamps.len() as u64 % DECODE_EVERY != 0 {
+                    // One frame a second is enough to prove the frames being
+                    // timed are the subject's; a frame carrying a tone has to
+                    // be decoded whenever it arrives, because it is half of the
+                    // event being measured and there is no second chance at it.
+                    if video.timestamps.len() as u64 % DECODE_EVERY != 0 && !hunt.closing_in() {
                         continue;
                     }
 
@@ -560,6 +937,7 @@ fn capture_video(run: Duration) -> VideoRun {
                         Ok(decoded) => {
                             video.decoded_total += 1;
                             decoded_here.push((decoded.index(), timestamp));
+                            hunt.saw(decoded.index());
                         }
                         Err(_) => video.undecodable += 1,
                     }
@@ -573,6 +951,15 @@ fn capture_video(run: Duration) -> VideoRun {
                 Err(error) => panic!("the capture failed during the run: {error}"),
             }
         };
+
+        // Read before the subject is stopped or dropped, because the
+        // announcements are on the pipe this is about to close.
+        if let Some(plan) = plan {
+            let announced = app.tones().unwrap_or_else(|error| {
+                panic!("the subject announced a tone this test could not read: {error}")
+            });
+            pair_tones(&mut video, plan, &announced, &decoded_here);
+        }
 
         if decoded_here.len() > video.decoded.len() {
             video.decoded = decoded_here;
@@ -954,6 +1341,522 @@ impl Report {
             );
         }
     }
+}
+
+/// How far from a tone's own frame the frame measuring the video half may be.
+///
+/// Fifteen frames is half a second at [`PATTERN_FPS`], which is far enough to
+/// find a composed frame on a display the compositor is throttling and close
+/// enough that the video path it measures is the same pipeline's, at the same
+/// moment of the run, as the audio path it is subtracted from.
+const NEAREST_FRAME: u32 = PATTERN_FPS / 2;
+
+/// The nanoseconds between the source's frames at [`PATTERN_FPS`].
+///
+/// Exactly what the subject computes — `Duration::from_secs(1) / fps`, which
+/// truncates — because it is used to move an announced present from one frame
+/// to its neighbour, and a different rounding would put the two apart by a
+/// microsecond per frame.
+const SOURCE_FRAME_NANOS: i64 = 1_000_000_000 / PATTERN_FPS as i64;
+
+/// How close to a tone's frame the run decodes every frame it is given.
+///
+/// Six frames either side is two hundred milliseconds at [`PATTERN_FPS`], which
+/// is enough to land on the tone's own frame when the compositor is composing
+/// them all and to find a near neighbour when it is not — while costing about a
+/// dozen readbacks a tone rather than the thirty a second decoding everything
+/// would.
+const NEAR_TONE: u32 = 6;
+
+/// Decides which frames have to be decoded so that a tone's frame, or one of
+/// its neighbours, is always among them.
+///
+/// Decoding every frame is thirty readbacks a second competing with the capture
+/// and with the subject's own presenting, which measures the readback rather
+/// than the capture ([`DECODE_EVERY`]) — a run that did it dropped the subject
+/// from 30 to 28.6 frames a second. Decoding one a second misses the frame a
+/// tone belongs to twenty-nine times in thirty.
+///
+/// So the counter is *followed* rather than read: a decode says exactly which
+/// frame arrived, and every frame after it advances the count by one plus
+/// however many the backend says went missing. That prediction decides when to
+/// look, and the decode that follows confirms what actually arrived — nothing
+/// here trusts the prediction for a measurement.
+#[derive(Debug)]
+struct ToneHunt {
+    plan: Option<TonePlan>,
+    /// The counter of the last frame decoded.
+    last_seen: Option<u32>,
+    /// How far the counter has moved since that decode: one per delivered
+    /// frame, plus the frames the backend reported it never delivered.
+    since: u32,
+    /// The next frame carrying a tone that has not gone by yet.
+    next: Option<u32>,
+}
+
+impl ToneHunt {
+    fn new(plan: Option<TonePlan>) -> Self {
+        Self {
+            plan,
+            last_seen: None,
+            since: 0,
+            next: plan.map(|plan| plan.first_frame),
+        }
+    }
+
+    /// Records that a frame arrived, with however many the backend says were
+    /// missed before it.
+    fn arrived(&mut self, missed: u32) {
+        self.since = self.since.saturating_add(1).saturating_add(missed);
+    }
+
+    /// Which counter the frame that has just arrived is expected to carry.
+    fn expected(&self) -> Option<u32> {
+        Some(self.last_seen?.saturating_add(self.since))
+    }
+
+    /// Whether the frame that has just arrived has to be decoded whatever the
+    /// sampling says.
+    fn closing_in(&self) -> bool {
+        matches!(
+            (self.expected(), self.next),
+            (Some(here), Some(next)) if here.abs_diff(next) <= NEAR_TONE
+        )
+    }
+
+    /// Records a decoded counter, so that the hunt knows where the subject's
+    /// own count really is and which tone it is now waiting for.
+    fn saw(&mut self, counter: u32) {
+        let Some(plan) = self.plan else {
+            return;
+        };
+        self.last_seen = Some(counter);
+        self.since = 0;
+
+        let Some(next) = self.next else {
+            return;
+        };
+        // Only once the frame is far enough past that its neighbours are no
+        // longer worth decoding: the video half may be measured on a frame
+        // after the tone's as readily as on one before it.
+        if counter < next + NEAR_TONE {
+            return;
+        }
+
+        let mut following = next;
+        while following + NEAR_TONE <= counter {
+            following = following.saturating_add(plan.frame_interval.max(1));
+        }
+        self.next = Some(following);
+    }
+}
+
+/// Pairs what the subject announced with what the capture caught.
+///
+/// A tone with no frame and a frame with no tone are both counted rather than
+/// dropped: the number of tones a run measured has to be accountable against
+/// the number it played.
+fn pair_tones(
+    video: &mut VideoRun,
+    plan: TonePlan,
+    announced: &[ToneEvent],
+    decoded: &[(u32, CaptureTimestamp)],
+) {
+    for tone in announced {
+        let Some(onset_nanos) = tone.onset_nanos else {
+            video.tones_unplayed += 1;
+            continue;
+        };
+
+        // The nearest decoded frame, which is the tone's own whenever the
+        // compositor composed it.
+        let nearest = decoded
+            .iter()
+            .filter(|(frame, _)| frame.abs_diff(tone.frame) <= NEAREST_FRAME)
+            .min_by_key(|(frame, _)| frame.abs_diff(tone.frame));
+
+        let Some((matched_frame, captured)) = nearest else {
+            video.tones_without_a_frame += 1;
+            continue;
+        };
+
+        let away = i64::from(*matched_frame) - i64::from(tone.frame);
+        video.tones.push(ToneObservation {
+            frame: tone.frame,
+            onset_nanos,
+            matched_frame: *matched_frame,
+            matched_present_nanos: (tone.present_nanos as i64 + away * SOURCE_FRAME_NANOS) as u64,
+            captured_nanos: captured.as_nanos(),
+            hertz: f64::from(plan.frequency),
+        });
+    }
+}
+
+/// The absolute offset a run measured, tone by tone.
+#[derive(Debug)]
+struct Absolute {
+    measured: Vec<Measured>,
+    /// Tones the subject announced but did not play, because it could not put
+    /// them at the moment it wanted.
+    unplayed: usize,
+    /// Tones whose frame never arrived in the capture.
+    frameless: usize,
+    /// Tones that were played and whose frame arrived, but which could not be
+    /// found in the captured audio.
+    unheard: Vec<u32>,
+    /// Whether the run stopped keeping samples before the end.
+    truncated: bool,
+}
+
+/// One tone's worth of the measurement.
+#[derive(Debug, Clone, Copy)]
+struct Measured {
+    /// The frame the tone belongs to.
+    frame: u32,
+    /// How many frames from that one the video half was measured on: zero when
+    /// the compositor composed the tone's own frame.
+    frames_away: i64,
+    /// How far apart the two halves of the event were at the source: the
+    /// present minus the endpoint's moment.
+    source_skew_nanos: i64,
+    /// Where the recording puts the sound, minus where the endpoint's clock
+    /// said it was played.
+    audio_path_nanos: i64,
+    /// Where the recording puts the picture, minus the moment the frame was
+    /// handed to the compositor.
+    video_path_nanos: i64,
+    /// The absolute A/V offset this tone gives: the audio path minus the video
+    /// path. Positive is sound behind picture.
+    offset_nanos: i64,
+    /// The same offset worked out from the endpoint's own reported positions
+    /// rather than from the track the recorder built.
+    device_offset_nanos: Option<i64>,
+    /// How long the burst found in the audio was, which is a check that what
+    /// was found is the subject's tone.
+    burst: Duration,
+    /// The strongest the tone's frequency was inside the search window. A
+    /// full-scale sine measures about 1.0, so the subject's −28 dBFS tone
+    /// measures about 0.04.
+    peak: f64,
+    /// The median of the same window, which is what the rest of the machine was
+    /// playing at that frequency. Zero on a quiet endpoint, because loopback
+    /// silence is exactly zero.
+    floor: f64,
+}
+
+impl Absolute {
+    fn measure(video: &VideoRun, audio: &AudioRun) -> Self {
+        let mut measured = Vec::new();
+        let mut unheard = Vec::new();
+
+        for tone in &video.tones {
+            let Some(heard) = hear(audio, tone.onset_nanos, tone.hertz) else {
+                unheard.push(tone.frame);
+                continue;
+            };
+
+            // The video path is worked out from the timestamps as integers;
+            // the audio path from a sample position, which is fractional.
+            let video_path_nanos = tone.captured_nanos as i64 - tone.matched_present_nanos as i64;
+            let audio_path = |at: f64| (at - tone.onset_nanos as f64).round() as i64;
+
+            measured.push(Measured {
+                frame: tone.frame,
+                frames_away: i64::from(tone.matched_frame) - i64::from(tone.frame),
+                source_skew_nanos: tone.matched_present_nanos as i64 - tone.onset_nanos as i64,
+                audio_path_nanos: audio_path(heard.track_nanos),
+                video_path_nanos,
+                offset_nanos: audio_path(heard.track_nanos) - video_path_nanos,
+                device_offset_nanos: heard
+                    .device_nanos
+                    .map(|at| audio_path(at) - video_path_nanos),
+                burst: heard.burst,
+                peak: heard.peak,
+                floor: heard.floor,
+            });
+        }
+
+        Self {
+            measured,
+            unplayed: video.tones_unplayed,
+            frameless: video.tones_without_a_frame,
+            unheard,
+            truncated: audio.truncated,
+        }
+    }
+
+    /// The mean offset over the run's tones, in nanoseconds.
+    fn mean_nanos(&self) -> Option<i64> {
+        (!self.measured.is_empty()).then(|| {
+            self.measured
+                .iter()
+                .map(|tone| tone.offset_nanos)
+                .sum::<i64>()
+                / self.measured.len() as i64
+        })
+    }
+
+    /// The smallest and largest offset any one tone gave.
+    fn extremes_nanos(&self) -> Option<(i64, i64)> {
+        let mut offsets = self.measured.iter().map(|tone| tone.offset_nanos);
+        let first = offsets.next()?;
+        Some(offsets.fold((first, first), |(low, high), offset| {
+            (low.min(offset), high.max(offset))
+        }))
+    }
+
+    /// The sample standard deviation of the offsets, in nanoseconds.
+    fn deviation_nanos(&self) -> Option<f64> {
+        if self.measured.len() < 2 {
+            return None;
+        }
+        let mean = self.mean_nanos()? as f64;
+        let sum: f64 = self
+            .measured
+            .iter()
+            .map(|tone| (tone.offset_nanos as f64 - mean).powi(2))
+            .sum();
+        Some((sum / (self.measured.len() - 1) as f64).sqrt())
+    }
+
+    fn print(&self) {
+        let millis = |nanos: i64| nanos as f64 / 1e6;
+
+        note(&format!(
+            "absolute: {} tone(s) measured, {} announced but not played, {} whose frame the \
+             capture never delivered, {} played but not found in the audio{}",
+            self.measured.len(),
+            self.unplayed,
+            self.frameless,
+            self.unheard.len(),
+            if self.truncated {
+                " (the run stopped keeping samples before the end)"
+            } else {
+                ""
+            },
+        ));
+
+        for tone in &self.measured {
+            note(&format!(
+                "absolute: frame {:>6} (video {:+} frames away): audio path {:+.3} ms, video \
+                 path {:+.3} ms, offset {:+.3} ms (endpoint's own positions {}), source skew \
+                 {:+.3} ms, burst {:.1} ms at {:.4} against a floor of {:.6}",
+                tone.frame,
+                tone.frames_away,
+                millis(tone.audio_path_nanos),
+                millis(tone.video_path_nanos),
+                millis(tone.offset_nanos),
+                tone.device_offset_nanos.map_or_else(
+                    || "none".to_owned(),
+                    |offset| format!("{:+.3} ms", millis(offset))
+                ),
+                millis(tone.source_skew_nanos),
+                tone.burst.as_secs_f64() * 1e3,
+                tone.peak,
+                tone.floor,
+            ));
+        }
+
+        match (
+            self.mean_nanos(),
+            self.extremes_nanos(),
+            self.deviation_nanos(),
+        ) {
+            (Some(mean), Some((low, high)), deviation) => {
+                note(&format!(
+                    "absolute: A/V offset {:+.3} ms (mean of {}), from {:+.3} to {:+.3} ms, \
+                     standard deviation {}",
+                    millis(mean),
+                    self.measured.len(),
+                    millis(low),
+                    millis(high),
+                    deviation.map_or_else(
+                        || "unknown".to_owned(),
+                        |deviation| format!("{:.3} ms", deviation / 1e6)
+                    ),
+                ));
+                let mean_of = |path: fn(&Measured) -> i64| {
+                    self.measured.iter().map(path).sum::<i64>() / self.measured.len() as i64
+                };
+                note(&format!(
+                    "absolute: of which the video path averaged {:+.3} ms (the compositor's) \
+                     and the audio path {:+.3} ms (the audio engine's)",
+                    millis(mean_of(|tone| tone.video_path_nanos)),
+                    millis(mean_of(|tone| tone.audio_path_nanos)),
+                ));
+                note(
+                    "absolute: positive is sound behind picture. This includes the \
+                     compositor's present-to-compose latency and the audio engine's \
+                     render-to-loopback latency, both of which are Windows' and neither of \
+                     which this measurement can separate from the recorder's own constant \
+                     offset (docs/av-sync.md)",
+                );
+            }
+            _ => note("absolute: no tone was both played and found, so there is no offset"),
+        }
+    }
+
+    fn assert_within(&self, tolerance: &SyncTolerance) {
+        assert!(
+            self.measured.len() >= MINIMUM_TONES,
+            "only {} of the subject's tones could be measured ({} not played, {} with no \
+             frame, {} not found in the audio), which is too few to call the mean of them a \
+             measurement",
+            self.measured.len(),
+            self.unplayed,
+            self.frameless,
+            self.unheard.len(),
+        );
+
+        // Every burst found has to be the subject's tone rather than something
+        // else that was playing. The length is the check background audio does
+        // not reproduce: it is a 30 ms burst, and a run that found a
+        // half-second of music at 997 Hz should say so rather than average it
+        // in.
+        for tone in &self.measured {
+            let difference = tone.burst.as_secs_f64() - TONE_LENGTH.as_secs_f64();
+            assert!(
+                difference.abs() < TONE_LENGTH.as_secs_f64() / 2.0,
+                "the burst found for frame {} lasted {:.1} ms and the subject plays {:.1} ms \
+                 tones, so what was found is not the tone",
+                tone.frame,
+                tone.burst.as_secs_f64() * 1e3,
+                TONE_LENGTH.as_secs_f64() * 1e3,
+            );
+        }
+
+        let (low, high) = self
+            .extremes_nanos()
+            .expect("a run with tones measured has extremes");
+        let deviation = self
+            .deviation_nanos()
+            .expect("a run with at least five tones has a deviation");
+        assert!(
+            deviation <= MAXIMUM_DEVIATION,
+            "the tones of this run scatter by {:.3} ms about their mean, from {:+.3} to \
+             {:+.3} ms, which is more than a constant offset plus a frame of compositor \
+             latency can account for — so the mean of them is not a measurement of a \
+             constant",
+            deviation / 1e6,
+            low as f64 / 1e6,
+            high as f64 / 1e6,
+        );
+
+        let mean = self
+            .mean_nanos()
+            .expect("a run with tones measured has a mean");
+        assert_eq!(
+            tolerance.classify(mean),
+            SyncState::InTolerance,
+            "the recording puts the sound {:+.3} ms from the picture it was simultaneous \
+             with at the source, which is outside {}",
+            mean as f64 / 1e6,
+            tolerance,
+        );
+    }
+}
+
+/// Where one tone turned up in the captured audio.
+#[derive(Debug, Clone, Copy)]
+struct Heard {
+    /// The track's timestamp for the tone's half-amplitude point, in
+    /// nanoseconds: where the *recorder* puts the sound.
+    track_nanos: f64,
+    /// The same point from the endpoint's own reported positions.
+    device_nanos: Option<f64>,
+    /// How long the burst stayed above half its own peak.
+    burst: Duration,
+    /// How strong the tone's frequency was at the peak of the burst.
+    peak: f64,
+    /// The median strength of the same frequency across the search window,
+    /// which is what else was playing.
+    floor: f64,
+}
+
+/// Finds the tone announced at `onset_nanos` in what was captured.
+///
+/// The envelope of the tone's own frequency is measured every [`ENVELOPE_HOP`]
+/// over a window of [`ENVELOPE_WINDOW`] centred on the point it describes, and
+/// the moment reported is where that envelope crosses **half its peak** on the
+/// way up, interpolated between the two points either side of the crossing.
+///
+/// Half, because that is the moment the subject announces: it shapes the tone
+/// with a symmetric one-millisecond attack and names its midpoint, which is
+/// where the attack passes half amplitude
+/// (`test-apps/video-pattern/src/tone.rs`). A detector that took the first
+/// sample above some absolute threshold instead would report a moment that
+/// moved with the volume.
+///
+/// [`None`] when nothing in the search window is [`MINIMUM_RATIO`] above the
+/// noise floor around it, which is a tone that was not captured rather than one
+/// that was captured late.
+fn hear(audio: &AudioRun, onset_nanos: u64, hertz: f64) -> Option<Heard> {
+    let rate = f64::from(audio.sample_rate.max(1));
+    let window = (ENVELOPE_WINDOW.as_secs_f64() * rate) as usize;
+    let hop = ((ENVELOPE_HOP.as_secs_f64() * rate) as usize).max(1);
+    let search = (SEARCH.as_secs_f64() * rate) as usize;
+
+    let centre = audio.index_of(onset_nanos)? as usize;
+    let from = centre.saturating_sub(search).max(window / 2);
+    let to = (centre + search).min(audio.mono.len().saturating_sub(window / 2 + 1));
+    if to <= from || window == 0 {
+        return None;
+    }
+
+    // The envelope: how much of the tone's frequency is in the window centred
+    // on each point.
+    let mut envelope = Vec::with_capacity((to - from) / hop + 1);
+    let mut at = from;
+    while at < to {
+        let content = AudioContent::from_samples(
+            audio.mono[at - window / 2..at + window / 2].to_vec(),
+            audio.sample_rate,
+        );
+        envelope.push((at, content.magnitude_at(hertz)));
+        at += hop;
+    }
+
+    let peak = envelope
+        .iter()
+        .fold(0.0f64, |peak, (_, magnitude)| peak.max(*magnitude));
+    // The floor is the median of the whole span. The burst is thirty
+    // milliseconds of a five-hundred-millisecond window, so the middle value is
+    // a value from outside it whatever else the machine was playing.
+    let mut sorted: Vec<f64> = envelope.iter().map(|(_, magnitude)| *magnitude).collect();
+    sorted.sort_by(f64::total_cmp);
+    let floor = sorted[sorted.len() / 2];
+
+    // Two conditions, because either alone lets something through. A ratio
+    // alone passes numerical noise on a silent endpoint, where the floor is
+    // exactly zero because loopback silence is exactly zero samples. An
+    // absolute level alone passes a machine that happens to be playing
+    // something loud at the same frequency.
+    if peak <= floor * MINIMUM_RATIO || peak < MINIMUM_MAGNITUDE {
+        return None;
+    }
+
+    let half = peak / 2.0;
+    let crossing = envelope
+        .windows(2)
+        .find(|pair| pair[0].1 < half && pair[1].1 >= half)?;
+    let (before, after) = (crossing[0], crossing[1]);
+    let fraction = (half - before.1) / (after.1 - before.1);
+    let index = before.0 as f64 + fraction * (after.0 - before.0) as f64;
+
+    let last_above = envelope
+        .iter()
+        .rev()
+        .find(|(_, magnitude)| *magnitude >= half)?;
+    let burst = Duration::from_secs_f64((last_above.0 as f64 - index).max(0.0) / rate);
+
+    let (track_nanos, device_nanos) = audio.moment_of(index)?;
+    Some(Heard {
+        track_nanos,
+        device_nanos,
+        burst,
+        peak,
+        floor,
+    })
 }
 
 /// The mean interval between the source's own frames, in nanoseconds, measured

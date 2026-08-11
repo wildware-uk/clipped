@@ -27,12 +27,14 @@ path = "src/main.rs"
 name = "wgc_video_pattern"
 path = "../../tests/capture/wgc_video_pattern.rs"
 
-# The audio/video synchronisation measurement, which captures this application
-# and the system audio endpoint at the same time and reports how far they drift
-# apart (issue #22, docs/av-sync.md). It belongs to this package for the same
-# reason the test above does — it starts this binary — and it is the only place
-# in the workspace where `clipped-capture` and `clipped-audio` are held at once,
-# which is what measuring the offset between them requires.
+# The audio/video synchronisation measurements, which capture this application
+# and the system audio endpoint at the same time: how far the two clocks drift
+# apart (issue #22), and — against a run of this application started with
+# `--tone` — the absolute offset between the sound and the picture of one event
+# (issue #173). Both are docs/av-sync.md. They belong to this package for the
+# same reason the test above does — they start this binary — and it is the only
+# place in the workspace where `clipped-capture` and `clipped-audio` are held at
+# once, which is what measuring the offset between them requires.
 [[test]]
 name = "av_sync"
 path = "../../tests/capture/av_sync.rs"
@@ -51,15 +53,22 @@ clap.workspace = true
 clipped-windows.workspace = true
 
 # The window, the Direct3D 11 device and the swap chain the pattern is presented
-# through. The feature list is the honest inventory of what src/render.rs and
-# src/app.rs name:
+# through, and — for `--tone` only — the render stream the sound half of the
+# subject is played through. The feature list is the honest inventory of what
+# src/render.rs, src/app.rs and src/tone.rs name:
 #
 # - Win32_Foundation               HWND, RECT, BOOL
 # - Win32_Graphics_Direct3D        the driver type and feature level
 # - Win32_Graphics_Direct3D11      the device, the staging texture, Map/Unmap
 # - Win32_Graphics_Dxgi(_Common)   the swap chain, the format, fullscreen
+# - Win32_Media_Audio              IAudioClient, IAudioRenderClient, IAudioClock
+# - Win32_Media_Multimedia         the IEEE-float subformat a mix format names
+# - Win32_System_Com               CoCreateInstance and the multi-threaded apartment
+# - Win32_System_Com_StructuredStorage  the PROPVARIANT IMMDevice::Activate takes
 # - Win32_System_Console           the Ctrl-C handler that gives a display back
 # - Win32_System_LibraryLoader     the module handle a window class needs
+# - Win32_System_Performance       the performance counter a tone is placed on
+# - Win32_System_Variant           the activation parameter IMMDevice::Activate takes
 # - Win32_UI_WindowsAndMessaging   the window, its class and its messages
 #
 # Dual MIT/Apache-2.0.
@@ -69,8 +78,14 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_Variant",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
@@ -85,11 +100,25 @@ windows = { workspace = true, features = [
 clipped-capture.workspace = true
 clipped-audio.workspace = true
 
-# `av_sync.rs` opens a WASAPI render stream of its own and hands the audio engine
-# buffers marked silent, so that the endpoint's clock keeps running for the
-# length of the run — loopback capture delivers nothing at all while the endpoint
-# is idle, and a period the device never described has no position to measure
-# against. That needs two namespaces the application itself does not:
+# The tone analysis the absolute A/V offset measurement in tests/capture/av_sync.rs
+# is built on. `AudioContent::magnitude_at` is the media harness's own Goertzel
+# filter over samples already in hand, which is exactly the question the
+# detector asks of every two-millisecond window of a capture: how much of the
+# subject's tone is in this one. Reused rather than written a third time
+# (AGENTS.md section 55) - `crates/audio/tests/system_audio.rs` has the second
+# copy, and folding that one in is issue #152. Nothing here runs ffprobe: this
+# is the sample-analysis half of the harness, which needs no tools at all.
+clipped-media-validation.workspace = true
+
+# `av_sync.rs`'s drift measurement opens a WASAPI render stream of its own and
+# hands the audio engine buffers marked silent, so that the endpoint's clock
+# keeps running for the length of the run — loopback capture delivers nothing at
+# all while the endpoint is idle, and a period the device never described has no
+# position to measure against. (Its absolute measurement needs no such thing: the
+# subject's own `--tone` render stream keeps the endpoint awake.) It names the
+# same two namespaces `src/tone.rs` does, and declares them here rather than
+# leaning on that: a test target's dependencies are the ones its own source
+# names, and the day the tone output is removed this test still needs them.
 #
 # - Win32_Media_Audio   IAudioClient, IAudioRenderClient, the endpoint enumerator
 # - Win32_System_Com    CoCreateInstance and the multi-threaded apartment

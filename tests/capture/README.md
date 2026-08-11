@@ -8,7 +8,7 @@ reproducible on any machine (AGENTS.md sections 25 and 26).
 | --- | --- |
 | `wgc_video_pattern.rs` | Captures `test-apps/video-pattern` through the Windows Graphics Capture backend, borderless and bordered, and accounts for every frame the source presented |
 | `wgc_fullscreen_dx11.rs` | Captures `test-apps/fullscreen-dx11`, which takes a whole display exclusively, and checks the display is given back |
-| `av_sync.rs` | Captures `test-apps/video-pattern` and the system audio endpoint at the same time and measures how far the two clocks drift apart ([docs/av-sync.md](../../docs/av-sync.md)) |
+| `av_sync.rs` | Captures `test-apps/video-pattern` and the system audio endpoint at the same time: how far the two clocks drift apart, and — against a subject playing a tone at the moment it presents a named frame — the absolute A/V offset ([docs/av-sync.md](../../docs/av-sync.md)) |
 | `readback.rs` | Shared helper: copies a captured GPU texture into system memory so a test can read the pattern out of it |
 
 The tests belong to the packages that own the applications they start — Cargo
@@ -22,7 +22,8 @@ part of the pull-request CI job: they are `#[ignore]`d, and
 ```text
 cargo test -p clipped-video-pattern --test wgc_video_pattern -- --ignored --nocapture --test-threads=1
 cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --nocapture
-cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1
+cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1 av_offset_stays
+cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1 the_absolute
 ```
 
 is how they are run.
@@ -113,13 +114,17 @@ Without it, a run Windows refused prints `NOT EXERCISED` and still passes — wh
 is the correct default for somebody who just ran the suite, and useless as
 evidence. With it, that run fails and says why.
 
-`av_sync.rs` also needs an audio endpoint, and takes about ninety seconds by
-default. `CLIPPED_AV_SYNC_SECONDS` lengthens the run — the drift figures in
-[docs/av-sync.md](../../docs/av-sync.md) come from `CLIPPED_AV_SYNC_SECONDS=1800`
-— because a drift of a few parts per million is not visible in ninety seconds
-and is exactly what the model has to be right about. Set `CLIPPED_REQUIRE_AUDIO`
-with it: without that variable a machine whose endpoint delivers no packets
-prints `SKIPPED (av-sync): …` and still passes, and a run whose numbers are being
+`av_sync.rs` also needs an audio endpoint, and holds two tests of about ninety
+seconds each — so name the one you want rather than running both. The drift one
+(`av_offset_stays`) makes no sound and takes `CLIPPED_AV_SYNC_SECONDS`; the
+figures in [docs/av-sync.md](../../docs/av-sync.md) come from
+`CLIPPED_AV_SYNC_SECONDS=1800`, because a drift of a few parts per million is not
+visible in ninety seconds and is exactly what the model has to be right about.
+The absolute one (`the_absolute`) starts the subject with `--tone`, so it does
+make a sound — a 30 ms tone at about −28 dBFS every five seconds — and takes
+`CLIPPED_AV_SYNC_TONE_SECONDS`. Set `CLIPPED_REQUIRE_AUDIO` with either: without
+that variable a machine whose endpoint delivers no packets prints
+`SKIPPED (av-sync): …` and still passes, and a run whose numbers are being
 recorded should fail instead.
 
 `wgc_video_pattern.rs` also holds tests of its own frame accounting — that a

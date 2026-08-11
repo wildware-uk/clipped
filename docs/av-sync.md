@@ -194,7 +194,7 @@ Both halves are on every buffer `clipped-audio` hands over —
 is the endpoint's — and `clipped_capture::DriftEstimator` turns a stream of the
 pairs into a rate.
 
-### The measurement
+### The measurement: how far they move apart
 
 `tests/capture/av_sync.rs` captures the `video-pattern` test application through
 the real Windows Graphics Capture backend and the system audio endpoint through
@@ -227,7 +227,8 @@ period away from the samples they describe, or a session that starts the audio
 at a different moment from the video — does not appear in these numbers at any
 size. What is measured is the change. Measuring the constant needs a subject
 whose sound and picture are known to be simultaneous at the source, which is
-[issue #173](https://github.com/wildware-uk/clipped/issues/173).
+[the second measurement](#the-absolute-offset-what-the-drift-measurement-cannot-see)
+below and is a different run with a different subject.
 
 **No file is written.** These are the timestamps the pipeline produces, which is
 what a writer is handed, not what a writer wrote. `clipped-muxer` rescales media
@@ -314,6 +315,122 @@ asserted. (The ninety-second run printed 33.3336 ms for the same quantity: a fit
 over eighty-nine sampled frames of an application's own timer, rather than a
 measurement of the reference clock.)
 
+## The absolute offset: what the drift measurement cannot see
+
+Everything above is a *change*. It has to be, because the subject it is measured
+against makes no sound: there is no moment in a capture of it whose audio and
+video halves are known to have happened together, so there is nothing to measure
+a constant against, and the first observation of a run is zero by construction.
+An endpoint whose reported positions sit a fixed period from the samples they
+describe, or a pipeline that stamps a frame with a present time where it meant a
+compose time, would be invisible above at any size.
+
+So the subject was given a sound. `video-pattern --tone` plays a 997 Hz tone of
+30 ms at about −28 dBFS — quiet, and once every five seconds rather than
+continuously — placed at the moment it presents a *named* frame, and announces
+both halves of that event on standard output:
+
+```text
+tone index=0 frame=60 onset=31415926535 present=31415928111 skew=1576
+```
+
+`onset` is where the endpoint's own clock (`IAudioClock`) puts the tone's
+half-amplitude point, `present` is the performance counter immediately after
+that frame was handed to the compositor, and `skew` is the difference: how far
+apart the two halves were **at the source**. It is announced rather than assumed
+to be zero, because nothing makes a thread present a frame at exactly the moment
+an endpoint plays a sample. Measured over the runs below it stays inside a
+millisecond, which is what asking for each tone six frames ahead of the frame it
+belongs to — against the moment that frame is actually about to be presented —
+buys over a schedule laid down at the start of a run.
+`test-apps/video-pattern/src/tone.rs` is how a sample is placed at a moment, and
+why the moment named is the attack's midpoint.
+
+`tests/capture/av_sync.rs` then finds both halves in what was captured — the tone
+by its frequency, in a Goertzel envelope measured every 0.25 ms over 2 ms
+windows, and the frame by the counter in its pixels — and reports
+
+```text
+offset = (audio in the recording − audio at the source)
+       − (video in the recording − video at the source)
+```
+
+so that the source skew cancels rather than being ignored. Positive is sound
+behind picture.
+
+### What that number contains
+
+Three things, and only one of them is Clipped's:
+
+| Term | Whose | Measured here |
+| --- | --- | --- |
+| The compositor's present-to-compose latency: an application hands over a frame, and DWM composes and stamps it some time later | Windows' | +12 to +14 ms on average, and 6 to 21 ms frame to frame |
+| The audio engine's render-to-loopback latency: the gap between where `IAudioClock` says a sample is played at the endpoint and where the loopback tap reports the same sample | Windows' | −2.3 ms, and remarkably steady — under 0.5 ms of spread across a run |
+| Any constant error of the recorder's own | **Clipped's** | Not separable from the two above by this measurement. What is bounded is their sum |
+
+The last row is the honest limit of the method: a recording of a subject on
+Windows contains those two latencies whatever the recorder does, and separating
+them from the recorder's own constant would need a second, independent account
+of when the frame was composed and when the sample was played. What this
+measurement bounds is the total, and the total is what a viewer of the recording
+gets.
+
+### The numbers
+
+Measured on the development machine (Windows 11 build 26200, the same Razer
+BlackShark V2 Pro 2.4 GHz wireless headset as the default endpoint at 48 kHz,
+a 1280×720 30 fps pattern window on a non-primary display), two 90-second runs:
+
+| Run | Tones measured | Mean A/V offset | Range | Standard deviation | Video path | Audio path |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 18 of 18 | **−15.939 ms** | −23.196 to −8.856 ms | 4.771 ms | +13.679 ms | −2.260 ms |
+| 2 | 19 of 19 | **−14.473 ms** | −22.081 to −8.823 ms | 4.869 ms | +12.177 ms | −2.295 ms |
+
+Sound **ahead** of picture by about 15 ms, and the reason is in the last two
+columns: the compositor holds a frame for a few milliseconds longer than the
+audio engine holds a sample. The two runs agree to 1.5 ms, which is the useful
+precision of the figure; the scatter within a run is the compositor's, and the
+detector's own resolution — a quarter of a millisecond, on a burst whose peak is
+0.0401 against a floor of zero — is nowhere near it.
+
+That is well inside `SyncTolerance::default()`, and the tolerance is the right
+one to judge it by even though most of what it is spending is Windows': a
+recording is watched, not audited, and 15 ms of lead is 15 ms of lead however it
+got there. The test therefore asserts the mean against 40 ms of lead and 60 ms of
+lag, and separately asserts that the tones of a run agree with each other to
+within 15 ms — because a mean of readings that disagree is not a measurement of a
+constant.
+
+### What it found
+
+**The track this recorder builds sits about 3.6 ms ahead of the endpoint's own
+positions for the same samples.** The test reports each tone twice: once against
+`CapturedAudio::timestamp`, the track `clipped-audio` builds by counting samples,
+and once against `CapturedAudio::device_timestamp`, the position WASAPI attached
+to the packet. Run 1's means were −15.939 ms and −12.334 ms — a constant 3.6 ms
+between the two accounts, present from the first tone two seconds into the run
+rather than accumulated, so it is not the drift measured above (which is a
+thousand times smaller over that period).
+
+It is a small fraction of the tolerance and it is *inside* the audio path figure
+quoted in the table, not on top of it. It is recorded here because it is exactly
+the class of thing the relative measurement was blind to — a constant introduced
+where a track is anchored — and because a number nobody has explained should be
+written down rather than rounded off. Whether it is the anchor, the position
+WASAPI reports for a packet, or the endpoint's own buffering is
+[issue #188](https://github.com/wildware-uk/clipped/issues/188).
+
+### What it still does not do
+
+- **No file is written.** As with the drift measurement, these are the timestamps
+  the pipeline produces, not what a writer wrote.
+- **It is not physical synchronisation.** Whether the sound leaving the speakers
+  and the light leaving the panel are simultaneous still needs a microphone and a
+  photodiode; the endpoint's own output latency — which for a wireless headset is
+  tens of milliseconds — is downstream of everything measured here and is not in
+  these numbers.
+- **It cannot attribute what it measures.** See the table above.
+
 ## Tolerance: how far out is too far
 
 `SyncTolerance` holds two limits, and they are deliberately asymmetric, because
@@ -388,18 +505,16 @@ resampling against the reference clock, which is issue #30.
   audio endpoint's output latency and the display's, and measuring it needs a
   microphone and a photodiode. The recorder's responsibility is the timestamp
   domain: to place each source at the moment its own hardware said it happened.
-- **It does not measure a constant offset, and it does not measure a file.** The
-  numbers above are a *change* in the gap between two clocks, taken from
-  timestamps: the first observation of a run is zero by construction, and no
-  recording is written or read back.
+- **It does not measure a file.** Both measurements are of the timestamps the
+  pipeline produces, which is what a writer is handed; no recording is written or
+  read back.
   [What the measurement can and cannot see](#what-the-measurement-can-and-cannot-see)
-  is the full statement, and the two things it cannot see have issues of their
-  own —
-  [issue #173](https://github.com/wildware-uk/clipped/issues/173) for a subject
-  whose sound and picture are simultaneous at the source, and
-  [issue #174](https://github.com/wildware-uk/clipped/issues/174) for applying
-  the start-time alignment rule. Anything quoting a figure from this document is
-  quoting a drift rate, not a verdict on a recording.
+  is the full statement for the drift figures, and the drift measurement's other
+  blind spot — a constant offset — is what
+  [the absolute measurement](#the-absolute-offset-what-the-drift-measurement-cannot-see)
+  exists for. Anything quoting the *rate* from this document is quoting a drift,
+  not a verdict on a recording; the offset a recording contains is the second
+  measurement's figure.
 - **It does not apply the start-time alignment rule.** The rule is stated
   [above](#start-time-alignment-what-happens-to-audio-before-the-epoch); the
   component that would apply it, `clipped-session`, records video with no audio
@@ -414,22 +529,39 @@ resampling against the reference clock, which is issue #30.
 
 ## Running the measurement
 
-```text
-# About ninety seconds.
-CLIPPED_REQUIRE_AUDIO=1 cargo test -p clipped-video-pattern --test av_sync \
-    -- --ignored --nocapture --test-threads=1
+There are two tests in `tests/capture/av_sync.rs` and they are separate runs, so
+each command below names the one it wants.
 
-# The long run: thirty minutes.
+```text
+# The drift: about ninety seconds, and silent.
+CLIPPED_REQUIRE_AUDIO=1 cargo test -p clipped-video-pattern --test av_sync \
+    -- --ignored --nocapture --test-threads=1 av_offset_stays
+
+# The long drift run: thirty minutes, and silent.
 CLIPPED_AV_SYNC_SECONDS=1800 CLIPPED_REQUIRE_AUDIO=1 \
     cargo test -p clipped-video-pattern --test av_sync \
-    -- --ignored --nocapture --test-threads=1
+    -- --ignored --nocapture --test-threads=1 av_offset_stays
+
+# The absolute offset: about ninety seconds, and it plays a tone.
+# CLIPPED_AV_SYNC_TONE_SECONDS lengthens it.
+CLIPPED_REQUIRE_AUDIO=1 cargo test -p clipped-video-pattern --test av_sync \
+    -- --ignored --nocapture --test-threads=1 the_absolute
 ```
 
-It needs a GPU, a display and an audio endpoint, so it is `#[ignore]`d and is not
-part of the pull-request CI job. It puts a borderless window on a non-primary
-display for the length of the run and makes no sound.
+Both need a GPU, a display and an audio endpoint, so both are `#[ignore]`d and
+neither is part of the pull-request CI job. Both put a borderless window on a
+non-primary display for the length of the run.
 
-`CLIPPED_REQUIRE_AUDIO` is in both commands deliberately. Without it, a machine
+**The drift run makes no sound**: it holds a render stream open so that the
+endpoint's clock keeps running, and every buffer it hands the audio engine is
+marked `AUDCLNT_BUFFERFLAGS_SILENT`. **The absolute run does make a sound**,
+because a measurement of where a recording puts a sound needs one — a 30 ms tone
+at about −28 dBFS every five seconds, played by the subject rather than by the
+test. Neither run needs the machine to be quiet: the detector looks for 997 Hz,
+which is the frequency digital audio has used for this for decades because no
+instrument plays it.
+
+`CLIPPED_REQUIRE_AUDIO` is in all of the commands deliberately. Without it, a machine
 whose default endpoint refuses a render stream, or which delivers no packets at
 all, prints `SKIPPED (av-sync): …` and the run still passes — the code under test
 is not at fault for either. With it, both become failures. Anybody collecting
@@ -456,11 +588,20 @@ the last, so that time with nothing being captured cannot pass for coverage. The
 first thirty-minute attempt at this measurement was lost exactly that way, twelve
 minutes in, which is why the restart is there.
 
+The restart matters to the absolute run as well, and for a reason worth stating:
+each subject announces the frames its own tones belong to, so a run that has to
+start a second one picks up that subject's plan rather than carrying the dead
+one's. The second of the two runs recorded above lost its window 42 seconds in
+and still measured all nineteen of its tones.
+
 The pure arithmetic underneath it — the epoch conversion, the rate fit, what a
 discontinuity does, what an empty estimator reports — is unit-tested in
 `crates/capture/src/time.rs` and runs everywhere, including on a machine with no
 hardware at all. The per-buffer plumbing is asserted against a real endpoint in
-`crates/audio/tests/system_audio.rs`.
+`crates/audio/tests/system_audio.rs`, and the arithmetic that places a tone at a
+moment — the stream-index conversion, what the announced moment means, and what
+happens to a tone that cannot be placed at the moment it was asked for — is
+unit-tested in `test-apps/video-pattern/src/tone.rs` and needs no sound card.
 
 ## Assumptions
 

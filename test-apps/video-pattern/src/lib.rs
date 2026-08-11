@@ -17,18 +17,22 @@
 //! and which it saw twice — programmatically, with no person watching
 //! ([`pattern`]).
 //!
-//! # The three pieces
+//! # The pieces
 //!
 //! | Module | What it is | Where it runs |
 //! | --- | --- | --- |
 //! | [`pattern`] | The pattern: how a frame is drawn and how one is read back | Anywhere. It is pixel arithmetic, and its tests need no GPU |
 //! | [`harness`] | Starting the application from a test and stopping it afterwards | Anywhere |
 //! | The renderer and the run loop | A Direct3D 11 window presenting the pattern at a fixed rate | Windows |
+//! | The tone output | `--tone` only: a short sound placed at the moment a named frame is presented, so that a recording of this application has an event whose sound and picture are simultaneous at the source | Windows |
 //!
-//! Only the last of those is platform code, and it is compiled only on Windows
+//! Only the last two are platform code, and they are compiled only on Windows
 //! (AGENTS.md section 5). Everything the pattern promises can therefore be
 //! tested on any machine, which is what stops the pattern and the decoder
 //! drifting apart between capture runs.
+//!
+//! **It is silent unless `--tone` is passed.** Every existing test that starts
+//! this application gets the window and nothing else.
 //!
 //! # How it is used
 //!
@@ -57,6 +61,8 @@ pub mod pattern;
 mod app;
 #[cfg(windows)]
 mod render;
+#[cfg(windows)]
+mod tone;
 
 #[cfg(windows)]
 pub use app::{AppError, MonitorChoice, Options, Presentation, StopReason, Summary};

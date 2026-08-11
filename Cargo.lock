@@ -300,6 +300,7 @@ dependencies = [
  "clap",
  "clipped-audio",
  "clipped-capture",
+ "clipped-media-validation",
  "clipped-windows",
  "windows",
 ]
