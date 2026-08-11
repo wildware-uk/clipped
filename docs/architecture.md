@@ -123,7 +123,7 @@ surrounding responsibility.
 | --- | --- | --- |
 | Game Detector | `clipped-game-detection` | M4 |
 | Session Manager, Capture Coordinator | `clipped-session` | M1 onwards |
-| Replay Buffer | `clipped-session` with segment writing in `clipped-muxer` | M3 |
+| Replay Buffer | `clipped-replay`, attached to a recording by `clipped-session` | M3 |
 | Audio Router | `clipped-audio` | M1–M2 |
 | Encoder Manager | `clipped-encoder` | M1 |
 | Event/Highlight Engine | `clipped-events` (vocabulary), `clipped-session` (rules) | M8–M10 |
@@ -137,10 +137,15 @@ surrounding responsibility.
 | Media Muxer | `clipped-muxer` | M1 |
 | Platform APIs | `clipped-windows` | M1 |
 
-Some cells deserve explanation. The Replay Buffer and the Session Manager are
-not separate crates because the buffer is a mode of a recording session rather
-than an independent subsystem: it needs the same capture, encode and mux
-pipeline and differs only in what it keeps (SPEC.md section 16). The Export
+Some cells deserve explanation. The Replay Buffer is its own crate but not its
+own pipeline: it is a *second consumer of the encoder's packets*, so
+`clipped-session` drains each packet into the Matroska writer and into the
+buffer, and a recording with a replay buffer running encodes once (SPEC.md
+section 16, [replay-buffer.md](replay-buffer.md)). It is a crate rather than a
+module of `clipped-session` because retention, range selection and holding
+segments against eviction are self-contained logic with no need of capture, and
+because `clipped-session` is the top layer — nothing else could reuse it there.
+The Export
 Engine has no crate yet because nothing exports; creating an empty crate for it
 now would be speculative structure, and the M11 issues that build it will place
 it. Storage policy — quotas, retention, favourite protection — is listed as
@@ -202,8 +207,12 @@ large:
   share the calling thread, because a captured texture may not outlive the
   acquisition that produced it, and only encoded packets cross a bounded queue
   to the thread that writes the file — which is what keeps the capture thread
-  off the filesystem (AGENTS.md section 20). Per-game settings, game detection
-  and the replay buffer are later milestones and are not there.
+  off the filesystem (AGENTS.md section 20). `record_with_replay` additionally
+  copies each packet into a `clipped-replay` buffer, so a rolling window of the
+  last few minutes is there to save from; nothing saves from one yet
+  ([#37](https://github.com/wildware-uk/clipped/issues/37)) and no command turns
+  one on ([#38](https://github.com/wildware-uk/clipped/issues/38)). Per-game
+  settings and game detection are later milestones and are not there.
 - `apps/desktop` is the application shell, and the supervision behind it: a
   Tauri 2 window hosting a React interface, with its layout, navigation, design
   tokens and accessibility baseline, drawn from `packages/ui` and typed by

@@ -103,6 +103,7 @@ clipped-library = { path = "crates/library", version = "0.1.0" }
 clipped-logging = { path = "crates/logging", version = "0.1.0" }
 clipped-muxer = { path = "crates/muxer", version = "0.1.0" }
 clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
+clipped-replay = { path = "crates/replay", version = "0.1.0" }
 clipped-session = { path = "crates/session", version = "0.1.0" }
 clipped-storage = { path = "crates/storage", version = "0.1.0" }
 clipped-windows = { path = "crates/windows", version = "0.1.0" }

@@ -15,6 +15,12 @@ authors.workspace = true
 clipped-capture.workspace = true
 clipped-encoder.workspace = true
 clipped-muxer.workspace = true
+# The rolling window of encoded segments a replay save is built from
+# (docs/replay-buffer.md). This crate is where it attaches, because this is
+# where the encoder's packets are drained: the buffer is a second consumer of
+# those packets, so a recording and a replay buffer running together encode
+# once.
+clipped-replay.workspace = true
 # The standard session context — `session_id`, `capture_backend`, `encoder` —
 # so that every line a recording produces is searchable by the same fields
 # (docs/logging.md). `RedactedPath` keeps the output path out of the logs.
@@ -33,6 +39,12 @@ tracing.workspace = true
 # MIT/Apache-2.0.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Graphics_Direct3D11"] }
+
+[dev-dependencies]
+# `examples/replay_probe.rs` takes command-line arguments, and every executable
+# in this workspace presents the same argument syntax and the same usage errors
+# (the root manifest says why).
+clap.workspace = true
 
 [lints]
 workspace = true

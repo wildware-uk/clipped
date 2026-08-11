@@ -67,8 +67,13 @@ const LAYERS: &[&[&str]] = &[
         "clipped-game-detection",
         "clipped-plugins",
     ],
-    // Media writing, which consumes encoded output.
-    &["clipped-muxer"],
+    // Consumers of encoded output. `clipped-muxer` writes it to a container;
+    // `clipped-replay` holds a rolling window of it in memory so that a hotkey
+    // pressed after something interesting can still save it
+    // (docs/replay-buffer.md). They are peers rather than a stack: a replay
+    // buffer keeps packets and does not write files, and the muxer does not
+    // know a buffer exists.
+    &["clipped-muxer", "clipped-replay"],
     // Application logic that coordinates every subsystem above.
     &["clipped-session"],
     // Executables and test-only packages.
