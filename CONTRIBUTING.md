@@ -105,6 +105,12 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+Some of those tests play a quiet tone through your speakers, because measuring
+a real capture needs a real reference signal. If that is unwelcome right now,
+`CLIPPED_SKIP_AUDIO=1 cargo test --workspace` skips every test that touches an
+audio device, reporting each skip on stderr. See
+[docs/testing.md](docs/testing.md#running-the-suite-without-making-a-noise).
+
 Beyond that, a change is done when it is implemented, builds, is covered by
 tests where tests are meaningful, has had its behaviour actually verified,
 handles its failure cases, updates the documentation it invalidates, and
