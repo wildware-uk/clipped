@@ -11,14 +11,15 @@
 //! one "Automatic" should choose (SPEC.md section 9).
 //!
 //! **Encoding** turns captured GPU frames into coded packets. The interface is
-//! [`VideoEncoder`], and one backend implements it: NVENC
+//! [`VideoEncoder`], and two backends implement it on Windows: NVENC
 //! ([#15](https://github.com/wildware-uk/clipped/issues/15)), through
-//! [`NvencEncoder`] on Windows. AMF
-//! ([#16](https://github.com/wildware-uk/clipped/issues/16)), Quick Sync
+//! [`NvencEncoder`], for H.264, HEVC and AV1; and AMF
+//! ([#16](https://github.com/wildware-uk/clipped/issues/16)), through
+//! [`AmfEncoder`], for H.264 and HEVC. Quick Sync
 //! ([#17](https://github.com/wildware-uk/clipped/issues/17)) and the software
 //! fallback ([#18](https://github.com/wildware-uk/clipped/issues/18)) are not
-//! implemented, so a machine with no NVIDIA GPU can still be told what it could
-//! do and cannot yet be recorded from.
+//! implemented, so a machine with only an Intel GPU can still be told what it
+//! could do and cannot yet be recorded from.
 //!
 //! `docs/encoder-pipeline.md` describes the encoding half; the detection half
 //! is `docs/encoder-capabilities.md`.
@@ -31,7 +32,7 @@
 //! - Ranking encoders for "Automatic": [`recommend`].
 //! - Remembering the answer between runs: [`CapabilityCache`].
 //! - Describing a stream to be produced: [`EncoderConfig`].
-//! - Producing it: [`VideoEncoder`], [`NvencEncoder`].
+//! - Producing it: [`VideoEncoder`], [`NvencEncoder`], [`AmfEncoder`].
 //!
 //! # Not responsible for
 //!
@@ -127,4 +128,4 @@ pub use probe::{
 pub use recommendation::{measured_codecs, recommend, ChoiceReason, Recommendation};
 
 #[cfg(windows)]
-pub use windows::{NvencEncoder, WindowsProbe};
+pub use windows::{AmfEncoder, NvencEncoder, WindowsProbe};
