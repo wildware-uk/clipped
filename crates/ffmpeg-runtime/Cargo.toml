@@ -1,0 +1,17 @@
+[package]
+name = "clipped-ffmpeg-runtime"
+description = "Build-script support that puts the pinned FFmpeg runtime libraries beside built binaries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# No dependencies on purpose. This is called from build scripts, so anything it
+# pulls in has to be compiled before any crate that links FFmpeg can start
+# building.
+
+[lints]
+workspace = true
