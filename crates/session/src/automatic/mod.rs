@@ -699,9 +699,22 @@ impl SessionManager {
     }
 
     /// A process the watcher reported as gone.
+    ///
+    /// Every process this manager is tracking hears about the exit, not only
+    /// the ones belonging to the session that happens to be open. A process
+    /// exits once and is reported once, so a deferred game's helper that is not
+    /// accounted for here can never be accounted for at all: it would be
+    /// promoted with the game, hours later, as a live child that is already
+    /// dead and can never be seen to die. The session it belonged to would then
+    /// never reach its grace period, never end, and — because a session that
+    /// never ends defers every game after it — the recorder would silently stop
+    /// recording anything for the rest of its run.
     fn exited(&mut self, exit: &ProcessExit, now: SystemTime, actions: &mut Vec<SessionAction>) {
         let pid = exit.process.pid;
         self.deferred.retain(|waiting| waiting.pid != pid);
+        for waiting in &mut self.deferred {
+            waiting.child_pids.remove(&pid);
+        }
 
         let mut stop = None;
         if let Some(active) = self.active.as_mut() {

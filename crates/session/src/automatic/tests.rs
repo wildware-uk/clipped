@@ -521,6 +521,71 @@ fn a_second_game_that_has_since_exited_is_not_recorded_afterwards() {
 }
 
 #[test]
+fn a_deferred_games_helper_that_exits_while_it_waits_is_still_accounted_for() {
+    // The worst thing this manager can do. A process is reported as exiting
+    // exactly once, so a deferred game's helper that is not accounted for while
+    // it waits can never be accounted for afterwards: it is promoted with the
+    // game as a live child that is already dead. Its session then never runs
+    // out of live processes, never starts its grace period and never ends — and
+    // a session that never ends defers every game launched after it. The
+    // recorder goes on running, says nothing is wrong, and records nothing ever
+    // again.
+    let mut harness = Harness::new("deferred-child-exit");
+
+    // A session of a game with no helpers of its own, so that the only children
+    // in play belong to the game that is made to wait.
+    let first = one_start(&harness.observe(&launch(&[(20, "other-game.exe")]), t(0)))
+        .recording
+        .clone();
+
+    harness.observe(
+        &launch(&[(11, "test-game.exe"), (12, "test-helper.exe")]),
+        t(30),
+    );
+    // The helper quits while its game is still waiting its turn. This is the
+    // only time the watcher will ever mention pid 12.
+    harness.observe(&exit(12, "test-helper.exe"), t(40));
+
+    harness.observe(&exit(20, "other-game.exe"), t(60));
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
+        t(61),
+    );
+
+    let promoted = harness.poll(t(95));
+    assert!(ended_session(&promoted).is_some(), "{promoted:?}");
+    assert_eq!(one_start(&promoted).process_id, 11);
+    let second = one_start(&promoted).recording.clone();
+
+    // The promoted game quits, and nothing it was launched with is left.
+    harness.observe(&exit(11, "test-game.exe"), t(120));
+    harness.finished(
+        &second,
+        recorded(Path::new("two.mkv"), EndReason::TargetLost),
+        t(121),
+    );
+
+    let closed = harness.poll(t(200));
+    assert!(
+        ended_session(&closed).is_some(),
+        "the promoted session must end: its game has exited and the helper it was launched with \
+         exited before it was promoted, so nothing of it is running: {closed:?}"
+    );
+    assert!(harness.manager.active_session().is_none());
+
+    // And the consequence that makes this worse than a crash, asserted rather
+    // than reasoned about: a session that never ends silently swallows every
+    // game after it.
+    let afterwards = harness.observe(&launch(&[(30, "other-game.exe")]), t(210));
+    assert_eq!(
+        one_start(&afterwards).process_id,
+        30,
+        "the next game to launch must still be recorded: {afterwards:?}"
+    );
+}
+
+#[test]
 fn a_tie_in_the_catalogue_is_recorded_and_left_unattributed() {
     // The catalogue refuses to guess between two entries that claim the same
     // executable equally well. Refusing to record would lose footage; guessing
