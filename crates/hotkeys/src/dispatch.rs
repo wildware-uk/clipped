@@ -698,10 +698,19 @@ mod tests {
         let (release, blocked) = mpsc::channel::<()>();
         let (dispatcher, events) =
             Dispatcher::start(Handlers::new().on(HotkeyAction::SaveReplay, move |_| {
-                entered.send(()).expect("the test is listening");
-                // Blocks until the test drops `release`, at which point this
-                // and every later press return immediately.
-                let _ = blocked.recv();
+                // Not `expect`: once the test has returned nobody is listening,
+                // and a handler thread panicking during shutdown would be noise
+                // that means nothing.
+                let _ = entered.send(());
+                // Waits until the test drops `release` — but never longer than
+                // `SLOW`. A plain `recv()` would read more tidily and would
+                // hang the suite instead of failing it: dropping the
+                // `Dispatcher` joins this thread, and on a failing assertion
+                // that drop runs before `release` is dropped, so the join would
+                // wait on a handler waiting on a sender nothing will drop. A
+                // test that deadlocks when it should fail is no better than one
+                // that cannot fail.
+                let _ = blocked.recv_timeout(SLOW);
             }));
 
         assert_eq!(
