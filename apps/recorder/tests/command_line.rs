@@ -465,7 +465,11 @@ fn an_existing_recording_is_not_overwritten_without_being_asked() {
     assert_eq!(output.status.code(), Some(EXIT_USAGE));
     let message = stderr(&output);
     assert!(message.contains("already exists"), "{message}");
-    assert!(message.contains("--overwrite"), "{message}");
+    // The setting, not the flag: this message is also the `invalid_parameters`
+    // refusal a window is shown over IPC, where `--overwrite` is not something
+    // anybody can pass (AGENTS.md section 45). The command-line spelling is in
+    // `--help`, which the next assertion is about.
+    assert!(message.contains("overwrite"), "{message}");
     assert!(
         message.contains("try 'clipped-recorder record --help'"),
         "a usage error should point at the help: {message}"

@@ -8,14 +8,16 @@
 //!
 //! # Adding a subcommand
 //!
-//! Add a variant to [`Command`] and a match arm to [`crate::run`]. Two
-//! subcommands that were previously specified here as absent are now both
+//! Add a variant to [`Command`] and a match arm to [`crate::run`]. Three
+//! subcommands that were previously specified here as absent are now all
 //! declared below:
 //!
 //! - `list-windows` — enumerate capturable windows
 //!   ([issue #10](https://github.com/wildware-uk/clipped/issues/10)).
 //! - `capabilities` — report detected encoders and codecs
 //!   ([issue #14](https://github.com/wildware-uk/clipped/issues/14)).
+//! - `serve` — the recorder as the service the desktop application drives
+//!   ([issue #49](https://github.com/wildware-uk/clipped/issues/49)).
 //!
 //! Nothing is currently specified without being declared here. A subcommand
 //! that parses arguments and then does nothing is a control that silently
@@ -83,6 +85,36 @@ pub enum Command {
     /// published limits, because acting on the second kind is how a recording
     /// fails at the encoder rather than in the settings screen.
     Capabilities(CapabilitiesArgs),
+
+    /// Listen for the desktop application and do what it asks.
+    ///
+    /// This is the shape the recorder runs in outside a terminal: a process
+    /// with its own lifetime that the user interface connects to, sends
+    /// commands to and receives status from (ADR 0002, docs/ipc.md). Ctrl+C
+    /// stops it, finishing any recording first.
+    Serve(ServeArgs),
+}
+
+/// Arguments to `clipped-recorder serve`.
+#[derive(Debug, Default, Args)]
+pub struct ServeArgs {
+    /// Listen on a named pipe of this name rather than the default.
+    ///
+    /// The default is `clipped-recorder.<session>`, where the session is the
+    /// Windows sign-in session this process belongs to — which is what keeps
+    /// two signed-in users' recorders apart. Name one yourself to run a second
+    /// recorder beside it, for development or for a test that must not reach
+    /// the recorder somebody is using. [default: clipped-recorder.<session>]
+    ///
+    /// A name, not a path: letters, digits, `-`, `_` and `.`. The `\.\pipe\`
+    /// prefix is added for you, so an endpoint can never be pointed at another
+    /// machine.
+    //
+    // The default is stated in the summary rather than through a `default_value`
+    // because it is resolved from the operating system, and `-h` should still
+    // show what it will be.
+    #[arg(long, value_name = "NAME")]
+    pub endpoint: Option<String>,
 }
 
 /// The mutually exclusive ways of naming one window to `list-windows`.

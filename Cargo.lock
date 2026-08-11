@@ -232,6 +232,16 @@ name = "clipped-game-detection"
 version = "0.1.0"
 
 [[package]]
+name = "clipped-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "clipped-library"
 version = "0.1.0"
 
@@ -273,11 +283,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clipped-encoder",
+ "clipped-ipc",
  "clipped-logging",
  "clipped-media-validation",
  "clipped-session",
  "clipped-windows",
  "ctrlc",
+ "serde_json",
  "time",
  "tracing",
  "windows-sys",

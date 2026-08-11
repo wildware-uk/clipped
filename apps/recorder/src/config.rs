@@ -93,39 +93,51 @@ pub struct RecordingConfig {
 /// Every variant carries what is needed to say which value was wrong and what
 /// to do instead, because a user cannot act on "invalid configuration"
 /// (AGENTS.md section 15).
+///
+/// # Two audiences, one set of rules
+///
+/// These messages are read in two places. On the command line they are printed
+/// beside a pointer to `--help`; over IPC they become the `invalid_parameters`
+/// refusal the desktop application renders (`docs/ipc.md`). One set of
+/// validation rules serving both is deliberate (AGENTS.md section 55) — a second
+/// copy reachable only over IPC would be a second set of answers to the same
+/// question — so the messages name the *setting* that was wrong, under the name
+/// it has in both interfaces, rather than the command-line spelling of it.
+/// Telling somebody in a window to pass `--pid <PID>` is not an action they can
+/// take (AGENTS.md section 45), and the flag spelling is what `--help` is for.
 #[derive(Debug)]
 pub enum ConfigError {
     /// No target was given.
     NoTarget,
     /// More than one target was given.
     ConflictingTargets,
-    /// A `--window` title match was empty.
+    /// The `window` title match was empty.
     EmptyWindowTitle,
-    /// A `--process` name was empty.
+    /// The `process` name was empty.
     EmptyProcessName,
-    /// A `--process` value looked like a path rather than an executable name.
+    /// The `process` value looked like a path rather than an executable name.
     ProcessNameIsAPath {
         /// What was supplied.
         value: String,
     },
-    /// `--pid 0` is not a process; on Windows it is the idle process.
+    /// `pid` 0 is not a process; on Windows it is the idle process.
     ZeroProcessId,
-    /// `--output` had no file name.
+    /// The output path had no file name.
     OutputHasNoFileName {
         /// What was supplied.
         path: PathBuf,
     },
-    /// `--output` did not end in [`OUTPUT_EXTENSION`].
+    /// The output path did not end in [`OUTPUT_EXTENSION`].
     OutputIsNotMatroska {
         /// What was supplied.
         path: PathBuf,
     },
-    /// The directory `--output` names does not exist.
+    /// The directory the output path names does not exist.
     OutputDirectoryMissing {
         /// The directory that is missing.
         directory: PathBuf,
     },
-    /// The path `--output`'s directory names is not a directory.
+    /// The path the output path's directory names is not a directory.
     OutputDirectoryIsNotADirectory {
         /// The path that is not a directory.
         directory: PathBuf,
@@ -137,7 +149,7 @@ pub enum ConfigError {
         /// Why the probe failed.
         source: io::Error,
     },
-    /// The output file already exists and `--overwrite` was not given.
+    /// The output file already exists and `overwrite` was not set.
     OutputExists {
         /// The file that is in the way.
         path: PathBuf,
@@ -147,10 +159,10 @@ pub enum ConfigError {
         /// The directory that is in the way.
         path: PathBuf,
     },
-    /// No default output directory could be worked out, and `--output` was not
+    /// No default output directory could be worked out, and no output path was
     /// given.
     NoDefaultOutputDirectory,
-    /// A relative `--output` could not be made absolute.
+    /// A relative output path could not be made absolute.
     WorkingDirectoryUnavailable {
         /// Why the current directory could not be read.
         source: io::Error,
@@ -160,43 +172,42 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoTarget => formatter.write_str(
-                "no capture target: pass one of --window <TITLE>, --process <NAME> \
-                 or --pid <PID>",
-            ),
+            Self::NoTarget => formatter
+                .write_str("no capture target: choose exactly one of `window`, `process` or `pid`"),
             Self::ConflictingTargets => formatter.write_str(
-                "more than one capture target: pass exactly one of --window, --process or --pid",
+                "more than one capture target: choose exactly one of `window`, `process` \
+                 or `pid`",
             ),
             Self::EmptyWindowTitle => formatter.write_str(
-                "--window needs some text to match a window title against; \
+                "`window` needs some text to match a window title against; \
                  an empty value would match every window",
             ),
             Self::EmptyProcessName => {
-                formatter.write_str("--process needs an executable name, such as cs2.exe")
+                formatter.write_str("`process` needs an executable name, such as cs2.exe")
             }
             Self::ProcessNameIsAPath { value } => write!(
                 formatter,
-                "--process takes an executable name such as cs2.exe, not a path; \
+                "`process` takes an executable name such as cs2.exe, not a path; \
                  `{value}` contains a path separator"
             ),
             Self::ZeroProcessId => formatter.write_str(
-                "--pid 0 is not a process to record: on Windows 0 is the system idle process",
+                "`pid` 0 is not a process to record: on Windows 0 is the system idle process",
             ),
             Self::OutputHasNoFileName { path } => write!(
                 formatter,
-                "--output {} does not name a file",
+                "the output path {} does not name a file",
                 path.display()
             ),
             Self::OutputIsNotMatroska { path } => write!(
                 formatter,
-                "--output {} must end in .{OUTPUT_EXTENSION}: the recorder writes Matroska, \
-                 which survives an interrupted recording (ADR 0001). Converting to MP4 is a \
-                 remux afterwards, not a recording setting",
+                "the output path {} must end in .{OUTPUT_EXTENSION}: the recorder writes \
+                 Matroska, which survives an interrupted recording (ADR 0001). Converting to \
+                 MP4 is a remux afterwards, not a recording setting",
                 path.display()
             ),
             Self::OutputDirectoryMissing { directory } => write!(
                 formatter,
-                "the directory {} does not exist; create it, or pass an --output path \
+                "the directory {} does not exist; create it, or choose an output path \
                  inside a directory that does",
                 directory.display()
             ),
@@ -213,20 +224,20 @@ impl fmt::Display for ConfigError {
             Self::OutputExists { path } => write!(
                 formatter,
                 "{} already exists. Recordings are not replaced silently; \
-                 choose another --output, or pass --overwrite if you meant to replace it",
+                 choose another output path, or set `overwrite` if you meant to replace it",
                 path.display()
             ),
             Self::OutputIsADirectory { path } => write!(
                 formatter,
-                "--output {} is an existing directory, not a file",
+                "the output path {} is an existing directory, not a file",
                 path.display()
             ),
             Self::NoDefaultOutputDirectory => formatter.write_str(
-                "there is no home directory to put recordings in, so --output is required",
+                "there is no home directory to put recordings in, so an output path is required",
             ),
             Self::WorkingDirectoryUnavailable { source } => write!(
                 formatter,
-                "--output is relative and the current directory could not be read: {source}"
+                "the output path is relative and the current directory could not be read: {source}"
             ),
         }
     }
@@ -562,7 +573,7 @@ mod tests {
         let error = resolve_target(&RecordArgs::default()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "no capture target: pass one of --window <TITLE>, --process <NAME> or --pid <PID>"
+            "no capture target: choose exactly one of `window`, `process` or `pid`"
         );
     }
 
@@ -576,7 +587,7 @@ mod tests {
         let error = resolve_target(&args).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "more than one capture target: pass exactly one of --window, --process or --pid"
+            "more than one capture target: choose exactly one of `window`, `process` or `pid`"
         );
     }
 
@@ -585,7 +596,7 @@ mod tests {
         let error = resolve_target(&args_for("   ")).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "--window needs some text to match a window title against; \
+            "`window` needs some text to match a window title against; \
              an empty value would match every window"
         );
     }
@@ -599,7 +610,7 @@ mod tests {
         let error = resolve_target(&args).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "--process takes an executable name such as cs2.exe, not a path; \
+            "`process` takes an executable name such as cs2.exe, not a path; \
              `C:\\Games\\cs2.exe` contains a path separator"
         );
     }
@@ -613,7 +624,7 @@ mod tests {
         let error = resolve_target(&args).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "--pid 0 is not a process to record: on Windows 0 is the system idle process"
+            "`pid` 0 is not a process to record: on Windows 0 is the system idle process"
         );
     }
 
@@ -689,7 +700,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "the directory {} does not exist; create it, or pass an --output path \
+                "the directory {} does not exist; create it, or choose an output path \
                  inside a directory that does",
                 missing.display()
             )
@@ -725,9 +736,9 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "--output {} must end in .mkv: the recorder writes Matroska, which survives \
-                 an interrupted recording (ADR 0001). Converting to MP4 is a remux afterwards, \
-                 not a recording setting",
+                "the output path {} must end in .mkv: the recorder writes Matroska, which \
+                 survives an interrupted recording (ADR 0001). Converting to MP4 is a remux \
+                 afterwards, not a recording setting",
                 requested.display()
             )
         );
@@ -751,12 +762,12 @@ mod tests {
             error.to_string(),
             format!(
                 "{} already exists. Recordings are not replaced silently; choose another \
-                 --output, or pass --overwrite if you meant to replace it",
+                 output path, or set `overwrite` if you meant to replace it",
                 existing.display()
             )
         );
 
-        check_output_is_free(&existing, true).expect("--overwrite permits replacing it");
+        check_output_is_free(&existing, true).expect("overwrite permits replacing it");
     }
 
     #[test]
@@ -769,7 +780,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "--output {} is an existing directory, not a file",
+                "the output path {} is an existing directory, not a file",
                 in_the_way.display()
             )
         );

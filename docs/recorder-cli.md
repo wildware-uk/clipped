@@ -2,9 +2,11 @@
 
 `clipped-recorder` is the process that owns recordings. It runs independently of
 the desktop application ([ADR 0002](adr/0002-separate-recorder-process.md)), and
-until the IPC protocol arrives in M5 the command line is the only way to drive
-it. It is also how capture is tested without a UI, which is a reason to keep it
-good rather than a reason to treat it as scaffolding.
+it can be driven two ways: from this command line, or over the control protocol
+in [ipc.md](ipc.md), which `serve` speaks. The command line is how capture is
+tested without a UI and how a recording is made on a machine with no window
+open, which is a reason to keep it good rather than a reason to treat it as
+scaffolding.
 
 ## Status
 
@@ -13,9 +15,10 @@ good rather than a reason to treat it as scaffolding.
 device they are already on, writes them into a Matroska file as they arrive, and
 finishes the file when it is asked to stop
 ([#126](https://github.com/wildware-uk/clipped/issues/126)). The coordination
-lives in `clipped-session`; this command line is a front end over it, so the
-desktop application gets the same recording over IPC in M5 rather than a second
-implementation ([ADR 0002](adr/0002-separate-recorder-process.md)).
+lives in `clipped-session`; this command line is a front end over it, and so is
+`serve`, so a recording started over IPC is the same recording made by the same
+call rather than a second implementation
+([ADR 0002](adr/0002-separate-recorder-process.md)).
 
 Two things a recording does **not** have yet, stated here rather than left to be
 discovered in a file:
@@ -38,8 +41,8 @@ file is finished at that point and says so; what a session should do instead is
 [#184](https://github.com/wildware-uk/clipped/issues/184).
 
 Everything else is here: the argument surface, `list-windows`, `capabilities`,
-and a shutdown path that is now exercised against a real recording rather than
-only a fixture.
+`serve`, and a shutdown path that is now exercised against a real recording
+rather than only a fixture.
 
 ## Commands
 
@@ -47,11 +50,13 @@ only a fixture.
 clipped-recorder record --window <TITLE>
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
+clipped-recorder serve [--endpoint <NAME>]
 ```
 
 Nothing is currently specified without being declared: `record`,
-`list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)) and
-`capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)) are
+`list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)),
+`capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)) and
+`serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)) are
 all implemented below (AGENTS.md section 27).
 
 Adding one is a variant on `Command` in `apps/recorder/src/cli.rs` and an arm in
@@ -332,6 +337,60 @@ claiming no encoder was implemented through two of them landing
 own doc comment is where "counts" is defined precisely — proven on real
 hardware, not merely compiling — and why Quick Sync fails it today.
 
+## `serve`
+
+`record` makes one recording and exits. `serve` is the shape the recorder
+actually runs in beside a user interface: it listens on a named pipe and takes
+its instructions over the control protocol, for as long as it is left running.
+
+```text
+clipped-recorder serve [--endpoint <NAME>]
+```
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `--endpoint <NAME>` | `clipped-recorder.<session>` | A name, never a path |
+
+[ipc.md](ipc.md) is the protocol itself — the framing, the handshake, the
+compatibility policy, every command and event, and what the transport does and
+does not promise about who can reach it. What belongs here is only the command
+line around it.
+
+**It prints one line to standard output and then serves:**
+
+```text
+ready endpoint=\\.\pipe\clipped-recorder.1
+```
+
+That line is the hook for whatever started the recorder — a supervisor
+([#106](https://github.com/wildware-uk/clipped/issues/106)), or a test — and it
+is the only thing this subcommand writes to standard output. Everything else is
+a diagnostic and goes to standard error, as it does for every other subcommand.
+
+`<session>` in the default name is the Windows sign-in session the process is
+running in. The pipe namespace is machine-wide, so without it two people signed
+in at once — one at the keyboard and one over Remote Desktop — would be racing
+for a single name. `--endpoint` is for running a second recorder beside the one
+somebody is using: a development build, or a test. A name may contain ASCII
+letters, digits, `-`, `_` and `.`, and the `\\.\pipe\` prefix is added for you,
+so an endpoint can never be pointed at another machine.
+
+**One recorder owns an endpoint.** A second `serve` on a name already taken
+fails immediately, saying another recorder is already listening, rather than
+half-serving it. That is the transport refusing to share, not the whole
+single-instance story, which is
+[#106](https://github.com/wildware-uk/clipped/issues/106).
+
+**Ctrl+C stops it the way it stops `record`.** The listener stops first, so
+nothing new arrives, and then any recording is stopped and its file finished
+before the process exits — the recording is the only thing here that has to end
+correctly. Connection threads own nothing and go with the process.
+
+Exit codes are the ordinary ones: 0 when it was stopped, 1 if the endpoint could
+not be taken or serving failed. A recording that fails while it is being served
+does not stop the recorder; it is reported to whoever is connected, on the
+`errors` stream.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -452,6 +511,12 @@ file nor, when it is left to work out the default path, a recordings directory.
 The recording itself is `tests/record_end_to_end.rs`, described under
 [stopping a recording](#how-that-is-verified). Nothing in `tests/command_line.rs`
 starts a capture, which is why that file still runs on a machine with no GPU.
+
+`serve` has a test file of its own, `tests/ipc_protocol.rs`, which starts the
+built binary, talks to it over the real named pipe and stops it with a real
+Ctrl+C. It needs no GPU either — a pipe and a child process are all a recorder
+needs to answer `ping` — so it runs in CI. [ipc.md](ipc.md) lists what it
+covers.
 
 Two of those tests read the command definition rather than a copy of it: they
 walk `record`'s arguments and require every one of them but the capture target
