@@ -3,16 +3,20 @@
 Clipped records games without being told to, which means it has to know what a
 game is. `clipped-game-detection` is where that knowledge lives.
 
-**Status: the game catalogue exists (issue #42). Nothing watches processes
-yet.** Watching for process start and exit is [#41], launcher-specific
-detection is [#43] and [#44], and the user-facing registration screen is [#45].
-This document grows a section per part as they land; everything below is about
-the catalogue.
+**Status: the game catalogue exists ([#42]) and the process watcher exists
+([#41]). Nothing joins them yet.** The watcher reports what started and what
+stopped; the catalogue can say which game a process is; the layer that asks one
+about the other, and starts a recording, is [#46]. Launcher-specific detection
+is [#43] and [#44], and the user-facing registration screen is [#45]. This
+document grows a section per part as they land, and marks the rest as intent
+(AGENTS.md section 7).
 
 [#41]: https://github.com/wildware-uk/clipped/issues/41
+[#42]: https://github.com/wildware-uk/clipped/issues/42
 [#43]: https://github.com/wildware-uk/clipped/issues/43
 [#44]: https://github.com/wildware-uk/clipped/issues/44
 [#45]: https://github.com/wildware-uk/clipped/issues/45
+[#46]: https://github.com/wildware-uk/clipped/issues/46
 
 ## The game catalogue
 
@@ -243,3 +247,302 @@ for the same reason it is separate from the seed data: it is the user's, it
 should be editable by hand, and it should be obvious where it is.
 
 [#55]: https://github.com/wildware-uk/clipped/issues/55
+
+## The process watcher
+
+### What it does
+
+```text
+Windows ──▶ process started / exited ──▶ debounce ──▶ one launch, or one exit
+```
+
+The watcher reports two things, and deliberately not a third:
+
+- **A launch**: every process the debounce collected into it, oldest first, with
+  the executable path, the process identifier and the parent identifier of each.
+- **An exit**: a process it had previously reported is gone, carrying what it
+  was reported with.
+
+It does not report *games*. It has no idea what a game is, and it does not
+consult the catalogue above: the layer that puts the two together, and decides
+that a launch is worth recording, is [#46]. Keeping them apart is what lets the
+debounce be tested against process trees written down in a test, and the
+matching rules against paths written down in a test, neither needing the other.
+
+### Why it exists in this shape
+
+#### The watcher does not poll
+
+SPEC.md section 6 asks for automatic detection, which means something has to be
+watching all the time, on a machine that is also running a game. A loop that
+enumerates every process every few hundred milliseconds is precisely what
+AGENTS.md section 18 forbids, so the primary source is a subscription: this
+process blocks inside `IEnumWbemClassObject::Next` and Windows wakes it.
+
+Windows offers three ways to be told, and only one of them is available to an
+application running as an ordinary user:
+
+| Mechanism | Latency | Standing cost | Requires |
+| --- | --- | --- | --- |
+| WMI `__InstanceCreationEvent` / `__InstanceDeletionEvent` `WITHIN n` over `Win32_Process` | up to `n` seconds | the WMI service compares the process table with itself once per `n` seconds, per subscription | nothing |
+| `Win32_ProcessStartTrace` / `Win32_ProcessStopTrace` (WMI over ETW) | milliseconds | none until something happens | administrator |
+| An ETW kernel session | milliseconds | none until something happens | administrator, and a session other tools compete for |
+
+Clipped runs unelevated, because a recorder that demands administrator rights is
+a recorder people run once. That rules the second and third rows out as the
+primary source — a mechanism that works only for some users is not a detection
+strategy — and leaves the first, which works for everybody at the cost of a
+bounded delay and of work done in a service rather than here. What that cost
+actually is, measured, is [below](#what-it-costs).
+
+#### The fallback, and what triggers it
+
+WMI is a service, and services stop. Its repository can be corrupted, group
+policy can refuse the connection, and `winmgmt` can be restarted underneath a
+working subscription. Every one of those ends with no events arriving, which for
+a recorder means silently never recording again, so the failure is handled
+rather than hoped against (AGENTS.md section 16):
+
+```text
+                 ┌─ established ──▶ WMI notifications ─── lost ──┐
+start ──▶ try WMI┤                                               ├──▶ snapshot polling
+                 └─ refused, or no answer within 10 seconds ─────┘         │
+                                                                       lost │
+                                                                            ▼
+                                                             WatchEvent::Stopped
+```
+
+The fallback is `CreateToolhelp32Snapshot` on a timer, diffed against the
+previous pass. It polls, which is the thing the design is trying to avoid, and
+it is still worth having: the alternative when WMI is unavailable is no
+detection at all. It is the only mechanism left that needs neither WMI nor
+elevation.
+
+Two things make the change visible rather than silent. `WatchEvent::SourceChanged`
+is delivered to the caller with the reason, and `ProcessWatcher::declined_source`
+reports why the preferred source was not used, so a diagnostics screen can say
+"this machine is on the fallback, because …" instead of leaving somebody to
+wonder why detection feels slow. If the fallback is lost too, the watcher
+reports `WatchEvent::Stopped` and goes quiet — it never pretends to be watching.
+
+The end of the stream is a distinct answer rather than an absence. `next_event`
+returns `Next::Idle` when nothing happened in the timeout, which is the normal
+state of a machine nobody is playing anything on, and `Next::Finished` once
+every source is gone, which is not normal and means the user has to be told that
+automatic detection has stopped. Spelling both as "no event" would leave a
+consumer looping forever on the one that never changes, so they are different
+values, and `Next` is deliberately not `#[non_exhaustive]`: a wildcard arm is
+exactly the mistake the type exists to prevent. A finished watcher still waits
+out its timeout, so that a loop which ignores the answer idles rather than
+occupying a processor for the rest of the session.
+
+#### A game launch is not one process
+
+Steam starts a launcher, the launcher starts the game, an anti-cheat wrapper may
+sit between them, and some titles re-execute themselves once. Reporting each of
+those separately would have the session layer start and abandon three recordings
+in two seconds, so starts are collected into a *launch* by following the parent
+chain — which is why every event carries a parent — and reported once the chain
+goes quiet.
+
+The rules, in full:
+
+1. A process that starts joins the launch its parent belongs to, if that launch
+   is still being collected; otherwise it opens a new one.
+2. A launch stays open until nothing has joined it for `launch_quiet_period`, up
+   to `max_launch_window` from its first member. The cap is what stops a
+   launcher that starts a helper every second from deferring its own launch
+   indefinitely.
+3. A process that exits before its launch is reported is removed from it, and
+   neither its start nor its exit is ever reported. **This is what makes a
+   launcher that hands over to the game and disappears invisible.** A launch that
+   loses every member is dropped entirely.
+4. A process that exits after its launch was reported is reported gone, with the
+   executable and parent it was reported with. Nothing looks it up at that
+   point, because there is nothing left to look up.
+5. Exits are gathered for `exit_settle_period` and reported children first, so a
+   parent and a child dying together arrive in an order that means something.
+6. A process identifier that starts again while the watcher still believes it is
+   alive means Windows reused it; the old one is reported gone first.
+
+`LaunchGroup::newest` is the best single guess at "the thing that was actually
+launched", and it is a guess with a proof behind it rather than a heuristic: a
+process cannot start before its parent, so the last member to start has no
+descendants inside the group.
+
+### What it costs
+
+All figures measured on:
+
+| | |
+| --- | --- |
+| Machine | AMD Ryzen 9 9950X3D, 16 cores / 32 logical processors, Windows 11 Pro 26200 |
+| Processes running | 370–390 |
+| Build | `--release` |
+| Window | 180 seconds per idle measurement; 20 runs for latency and for start-up |
+| Method | cumulative `\Process V2(…)\% Processor Time` raw counters for the `Winmgmt` service host and every `WmiPrvSE.exe`, sampled before and after; `GetProcessTimes` for the watcher's own process (`examples/process_watch_probe.rs`) |
+
+The machine was in ordinary use during these runs rather than quiescent — the
+watcher saw 79 real process events in the 180-second window at the default
+settings — so the control row is what the numbers are read against.
+
+#### Starting the watcher
+
+Paid once, and it is the most expensive thing the watcher ever does in its own
+process: the baseline opens every process on the machine to ask what it is
+running, because a game that was already running when Clipped opened still needs
+a name to report when it exits.
+
+| | min | median | max |
+| --- | --- | --- | --- |
+| `ProcessWatcher::start`, 20 runs | 167.6 ms | 240.6 ms | 305.5 ms |
+
+370 processes were running. Windows gave up an executable path for 222 of them
+and refused the other 148, which is the ordinary outcome rather than a fault: an
+unelevated application cannot open a protected or higher-integrity process at
+all. The figure includes establishing both WMI subscriptions as well as the
+snapshot, so it is an upper bound on the baseline rather than the baseline
+alone.
+
+A quarter of a second, once, while the application is starting anyway. Measured
+because the code claimed it was cheap, and a claim in a comment is not a
+measurement (AGENTS.md section 7).
+
+#### Idle cost
+
+"Idle" here means the watcher is running and no game is being launched. It is
+not a quiet machine: Windows starts and stops background processes constantly,
+and that is the load the WMI comparison is doing work about.
+
+| Configuration | WMI side, % of one core | Attributable to Clipped | Watcher process, % of one core |
+| --- | --- | --- | --- |
+| No watcher (control, two runs) | 2.47, 2.37 | — | — |
+| `WITHIN 1` | 25.73 | +23.3 | 0.069 |
+| **`WITHIN 2` (the default)** | **13.78** | **+11.4** | **0.017** |
+| `WITHIN 4` | 7.51 | +5.1 | below the 15.6 ms clock granularity |
+
+A second run of the same method, taken independently during review of
+[#231](https://github.com/wildware-uk/clipped/pull/231), gave 2.08% for the
+control and 14.43% at the default: +12.4 rather than +11.4. Read the default row
+as *twelve per cent of one core, give or take one*. The shape either side of it
+— roughly inverse in the interval — is what the sweep is for, and both runs
+agree about that.
+
+Read the two halves of the table separately, because they are not the same kind
+of cost.
+
+**The watcher's own process is close to free**: 31 ms of processor time in 180
+seconds at the default settings, 0.017% of one core, or 0.0005% of a
+32-processor machine. That is the point of not polling — the thread is asleep
+except when something happens.
+
+**The cost is in the WMI service, not here.** It lands in `Winmgmt` and
+`WmiPrvSE.exe`, because the service compares the whole `Win32_Process` table with
+itself once per interval, per subscription, and this watcher opens two. That is
+work done on Clipped's behalf and it counts against Clipped, but no profile of
+Clipped's own process will ever show it, which is exactly why it is measured with
+performance counters here rather than assumed to be small.
+
+**At the shipped default it is most of the recorder's entire idle CPU budget.**
+SPEC.md section 38 allows the recorder 3% of the machine. Eleven to twelve per
+cent of one core is 0.36% of this 32-processor machine, but about **2.9% of a
+four-core machine** — spent while idle, before a game has been detected, before
+anything is being recorded, and on top of whatever recording then costs. Two
+seconds is already double the interval that would give the best latency, and it
+is still not a comfortable number.
+
+**[Issue #230](https://github.com/wildware-uk/clipped/issues/230) is what closes
+the gap**, and it is a design change rather than a tuning one: exit detection
+moves off the second subscription and onto waiting on process handles, which
+removes half of this standing cost outright and takes exit latency from two
+seconds to milliseconds at the same time. Until that lands, a machine with few
+cores pays measurably for detection it may not be using. Whether the interim
+default should be four seconds instead — 5.1% of one core, about 1.3% of a
+four-core machine, for two more seconds of worst-case launch latency — is argued
+on that issue rather than settled here, because it is a product decision about
+latency and not a fact about the measurement.
+
+Reporting this rather than a flattering summary is deliberate (AGENTS.md
+section 19). "Negligible" would have been wrong by an order of magnitude.
+
+#### Detection latency
+
+Twenty runs at the default settings, with a `cmd.exe` started and ended by the
+probe so that both moments are known exactly:
+
+| | min | median | max |
+| --- | --- | --- | --- |
+| Process started → `WatchEvent::Launched` | 4.112 s | 4.142 s | 4.612 s |
+| Process exited → `WatchEvent::Exited` | 2.134 s | 2.158 s | 2.282 s |
+
+The launch figure includes the 2.5-second debounce; the source itself delivered
+the creation event a median of 1.64 seconds after the process started. At a
+one-second interval with a 1.5-second quiet period, the same twenty runs gave a
+median launch latency of 2.330 s and exit latency of 1.004 s — one and a bit
+seconds faster, for twice the standing cost.
+
+Four seconds to notice a launch is comfortable for what this is for: a game
+takes tens of seconds to reach anything worth recording, and the session layer
+has only to be recording by then.
+
+#### Taking the measurements again
+
+```powershell
+cargo run --release -p clipped-game-detection --example process_watch_probe -- latency 20
+cargo run --release -p clipped-game-detection --example process_watch_probe -- idle 180
+cargo run --release -p clipped-game-detection --example process_watch_probe -- start 20
+# and, for the WMI side, the counters named in the table above
+```
+
+A third argument overrides the notification interval in seconds, which is how
+the sweep was taken. The counter samples are taken either side of the `idle` run
+and divided by its wall time; there is no sampling loop, so the measurement does
+not pay for itself.
+
+### Testing it
+
+| What | Where | Needs |
+| --- | --- | --- |
+| The debounce rules — launcher and game, re-exec, two games at once, a process that comes and goes inside the window, exit ordering, identifier reuse | `src/process_watcher/debounce.rs` | nothing; constructed process trees and an explicit clock |
+| The process table, the executable name, the stop latch | `src/process_watcher/windows/` | Windows |
+| That WMI answers at all, that the fallback poller really reports a process starting and exiting, and that it honours the one-second floor rather than the interval it was handed | `src/process_watcher/windows/{wmi,mod}.rs` | Windows, and a working WMI service for the first |
+| What a watcher that has lost every source answers, and that it waits rather than spins | `src/process_watcher/watcher.rs` | Windows |
+| The whole watcher against a real process | `tests/process_watcher.rs` | Windows |
+
+The split matters. "What did Windows say?" can only be answered by Windows and
+has almost no logic in it; "is that one launch or three?" is all logic and needs
+no machine at all, so it is a state machine over `(event, now)` and is tested
+against process trees written down in the test rather than against whatever
+happened to be running (AGENTS.md section 25).
+
+The subject for the tests that do need a real process is `cmd.exe` with its
+standard input piped and nothing else attached: it is on every Windows machine,
+it starts immediately, and it exits when its input closes — so the test knows
+the exact moment the process began and the exact moment it ended.
+
+### Assumptions and limits
+
+- **A process that starts in the gap between the baseline snapshot and the
+  subscription is invisible** for the life of that watcher. The gap is tens of
+  milliseconds. The other ordering was considered and is worse: it produces a
+  spurious exit for a process that is still running.
+- **Processes already running when the watcher starts are not launches.** They
+  are remembered, so their exits are reported, and they are available through
+  `ProcessWatcher::already_running`.
+- **Executable paths are not always available.** Protected and higher-integrity
+  processes — the anti-cheat services that sit alongside games, most system ones
+  — refuse to be opened, and WMI reports a null `ExecutablePath` for them. The
+  file name is always present.
+- **An executable path is a user path.** It carries the account name and the
+  shape of somebody's games library, so it reaches a log line only through
+  `RedactedPath` (docs/logging.md).
+- **Shutdown waits for the notification interval.** A thread blocked inside a
+  COM call cannot be interrupted, so dropping the watcher takes up to
+  `notification_interval` while that call returns.
+- **The notification interval has a floor of one second, on both paths.**
+  `WatchConfig` is public and so are its fields, so a consumer can ask for fifty
+  milliseconds; it will get one second. The WQL `WITHIN` clause and the fallback
+  poller's sleep are both derived from the same clamped value, because a floor
+  that held only for the subscription would leave the poller enumerating every
+  process on the machine twenty times a second — the thing this design exists to
+  avoid.

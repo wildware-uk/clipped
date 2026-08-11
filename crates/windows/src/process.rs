@@ -12,7 +12,7 @@
 //! (AGENTS.md section 58).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -98,6 +98,24 @@ impl Drop for ProcessHandle {
     }
 }
 
+/// The full path of the executable `process_id` is running, such as
+/// `C:\Program Files\Steam\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe`.
+///
+/// [`None`] when the process cannot be opened or has exited. That is common
+/// enough to be unremarkable — see [`ProcessHandle::open`] — so callers report
+/// it as an unknown executable rather than as a failure.
+///
+/// # Privacy
+///
+/// The answer is a user path and can carry an account name and a library
+/// layout. It is fine to *match* on, and it must not reach a log line without
+/// going through `clipped_logging::RedactedPath` first (docs/logging.md).
+#[must_use]
+pub fn process_image_path(process_id: u32) -> Option<PathBuf> {
+    let path = ProcessHandle::open(process_id)?.image_path()?;
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
 /// The file name of the executable `process_id` is running, such as `cs2.exe`.
 ///
 /// [`None`] when the process cannot be opened or has exited. That is common
@@ -105,7 +123,7 @@ impl Drop for ProcessHandle {
 /// it as an unknown name rather than as a failure.
 #[must_use]
 pub fn process_image_name(process_id: u32) -> Option<String> {
-    let path = ProcessHandle::open(process_id)?.image_path()?;
+    let path = process_image_path(process_id)?;
     let name = Path::new(&path).file_name()?.to_string_lossy().into_owned();
     (!name.is_empty()).then_some(name)
 }
@@ -147,6 +165,42 @@ mod tests {
             name.to_lowercase().ends_with(".exe"),
             "expected a Windows executable name, got {name}"
         );
+    }
+
+    #[test]
+    fn the_name_is_the_final_component_of_the_path() {
+        let process = std::process::id();
+        let path = process_image_path(process).expect("a process can always open and name itself");
+        let name = process_image_name(process).expect("and can therefore name its executable");
+
+        assert!(
+            path.is_absolute(),
+            "expected an absolute image path, got {}",
+            path.display()
+        );
+        // Checked against what the process itself says it is running, not only
+        // for internal consistency: a path that had lost or gained a component
+        // would agree with the name derived from it and still be wrong.
+        let expected = std::env::current_exe().expect("a process knows its own executable");
+        assert_eq!(
+            path.file_name(),
+            expected.file_name(),
+            "expected the running executable, got {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            Some(name),
+            "the name must be the path's final component and nothing else"
+        );
+    }
+
+    #[test]
+    fn a_process_identifier_that_cannot_exist_has_no_path() {
+        // 0 is the system idle process; see the test below for why it is the
+        // one identifier that answers the same way on every machine.
+        assert_eq!(process_image_path(0), None);
     }
 
     #[test]
