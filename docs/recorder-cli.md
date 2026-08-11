@@ -473,6 +473,11 @@ to describe the desktop at all.
 report, not a failure — and 1 only when the adapters could not be enumerated at
 all.
 
+`start-at-login` exits 0 for all three actions, including `disable` when nothing
+was configured: that is the state being asked for, and treating it as a failure
+would make "turn it off" fail for everybody who never turned it on. It exits 1
+when the registry refused, and 2 for an action that is not one of the three.
+
 ## Diagnostics
 
 The recorder uses `clipped-logging`, so log files are under
