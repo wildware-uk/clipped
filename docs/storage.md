@@ -39,8 +39,20 @@ last month.
 `crates/storage/tests/recordings_are_never_touched.rs` puts a recording file in
 the same directory as the database and provokes every failure the crate has —
 a foreign database, one from a newer build, a corrupt file, a failing write, and
-finally deleting the database outright — asserting after each that the
-recording's bytes and modification time are exactly what they were.
+finally deleting the database outright — checking after each that the crate
+refused, and that the recording's bytes and modification time are exactly what
+they were.
+
+Be exact about what that second check is worth, because it is easy to overstate.
+The only files `clipped-storage` opens are the database, the copy taken beside it
+before a migration, and the directory those live in; it never opens a media file,
+so no change to the crate as it stands can move those bytes. The comparison holds
+against every implementation the crate has today, and breaking a refusal fails
+the check on the error rather than the comparison. It is a tripwire for the
+change that *would* touch a file — a thumbnail cache, a "reclaim space" sweep, a
+repair path that renames a recording it cannot find — and a tripwire nothing has
+trodden on is doing its job. What has teeth today is the second test, which walks
+`PRAGMA table_info` over every table and fails if any column is a `BLOB`.
 
 ## Where the file is
 

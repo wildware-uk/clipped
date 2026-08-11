@@ -10,6 +10,24 @@
 //! tested is whether anything touches it at all, and a byte comparison answers
 //! that more sharply than a container check: a file that has been opened for
 //! writing and closed again is still a valid MKV.
+//!
+//! # What the byte comparison proves, and what it does not
+//!
+//! Be exact about this, because it is easy to read the file as stronger than it
+//! is. The only files `clipped-storage` opens are the database, the copy taken
+//! beside it before a migration, and the directory those live in — **it never
+//! opens a media file** — so no change to the crate as it stands can move the
+//! recording's bytes or its modification time. Every comparison below therefore
+//! holds against every implementation this crate has today. They are not what
+//! gives the steps below their teeth: that is the match on each error, and
+//! breaking a refusal fails the match rather than the comparison.
+//!
+//! The comparisons earn their place as the guard for the change that *would*
+//! touch a file: a thumbnail cache, a "reclaim space" sweep, a repair path that
+//! renames a recording it cannot find. Each is a plausible future addition to
+//! this crate, each would be written by somebody who had not read AGENTS.md
+//! section 17, and this is the test that would stop it. It is a tripwire, and a
+//! tripwire nothing has trodden on is doing its job.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,6 +71,13 @@ fn write_recording(directory: &Path) -> PathBuf {
     path
 }
 
+/// Every failure the crate has, provoked in turn beside a recording.
+///
+/// What each step asserts today is the refusal itself — that the crate stops,
+/// and says which failure it is, rather than carrying on. The recording
+/// comparison after each is the tripwire described at the top of this file: it
+/// cannot fail against this crate as it stands, and it is here for the change
+/// that would make it able to.
 #[test]
 fn no_database_failure_touches_the_recording_beside_it() {
     let directory = scratch_directory("failures");
@@ -109,7 +134,7 @@ fn no_database_failure_touches_the_recording_beside_it() {
     let corrupt = directory.join("corrupt.db");
     fs::write(
         &corrupt,
-        b"this is not an SQLite file, it is a hundred and one bytes of nothing",
+        b"this is not an SQLite file, it is bytes of nothing",
     )
     .expect("the corrupt file can be written");
     assert!(
@@ -224,11 +249,16 @@ fn a_recording_is_a_path_and_facts_about_it_and_nothing_more() {
         );
     }
 
-    // And the database is a small fraction of the media it indexes, which is
-    // the observable consequence of that.
+    // And what came back out of the row is the path, which is the observable
+    // consequence of that: the way to the media is a reference, so the media
+    // itself was never in the database to be lost with it.
     let indexed: String = database
         .connection()
         .query_row("SELECT path FROM recordings", [], |row| row.get(0))
         .expect("the row can be read");
     assert_eq!(Path::new(&indexed), recording);
+    assert_eq!(
+        fs::read(&indexed).expect("the path in the row leads to the recording"),
+        RECORDING
+    );
 }
