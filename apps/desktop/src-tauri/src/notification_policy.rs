@@ -375,11 +375,11 @@ impl NotificationPolicy {
             // room for the whole refusal and is where Clipped is driven from.
             None => Notification {
                 category: NotificationCategory::RecordingFailed,
-                title: title.clone(),
-                body: said.clone(),
                 action: NotificationAction::OpenClipped {
                     notice: format!("{title}. {said}"),
                 },
+                title,
+                body: said,
             },
         }
     }
@@ -449,10 +449,13 @@ fn as_sentence(message: &str) -> String {
     }
 
     let mut characters = trimmed.chars();
-    let mut sentence: String = characters
-        .next()
-        .map(|first| first.to_uppercase().to_string())
-        .unwrap_or_default();
+    // `trimmed` is not empty, so there is a first character; `.next()` is
+    // unwrapped through the loop rather than through a default that could only
+    // ever produce the empty string already returned above.
+    let mut sentence = String::new();
+    for first in characters.by_ref().take(1) {
+        sentence.extend(first.to_uppercase());
+    }
     sentence.push_str(characters.as_str());
 
     if !sentence.ends_with(['.', '!', '?']) {
@@ -800,23 +803,73 @@ mod tests {
     }
 
     #[test]
-    fn every_notification_carries_something_to_do() {
+    fn every_notification_carries_an_action_with_what_performing_it_needs() {
         // Acceptance criterion: an error notification leads to an action rather
         // than only a message.
-        for event in every_notifiable_event() {
-            let mut policy = policy();
-            policy.decide(&RecorderLinkEvent::State(recording("r-1")));
+        //
+        // The previous version of this test asserted `action.label()` was not
+        // empty, which proved nothing twice over. A label is a compile-time
+        // constant, so the assertion could not fail; and every case it ran
+        // resolved to `ShowFile` or `RetryRecorder`, so it never reached
+        // `OpenClipped` at all — setting that variant's label to `""` left all
+        // of these tests passing. Both faults are fixed here: the matrix reaches
+        // all three variants and says so at the end, and what is asserted is
+        // whether the action arrives carrying the thing
+        // `crate::notifications::perform` needs to act on. An action without
+        // that is a button that does nothing (AGENTS.md section 27).
+        let mut reached = Vec::new();
 
-            let notification = policy
-                .decide(&event)
-                .unwrap_or_else(|| panic!("{event:?} should notify"));
+        for can_retry in [true, false] {
+            for known_recording in [true, false] {
+                for event in every_notifiable_event() {
+                    let mut policy = NotificationPolicy::new(
+                        NotificationSettings::default(),
+                        can_retry,
+                        &RecorderLinkState::Connecting,
+                    );
+                    if known_recording {
+                        policy.decide(&RecorderLinkEvent::State(recording("r-1")));
+                    }
 
+                    let notification = policy
+                        .decide(&event)
+                        .unwrap_or_else(|| panic!("{event:?} should notify"));
+
+                    assert!(!notification.title.is_empty(), "{event:?} has no title");
+                    assert!(!notification.body.is_empty(), "{event:?} says nothing");
+
+                    match &notification.action {
+                        NotificationAction::ShowFile { path } => assert!(
+                            notification.body.contains(path.as_str()) && !path.is_empty(),
+                            "Show the file has no file to show, or one the notification never \
+                             named: {notification:?}"
+                        ),
+                        NotificationAction::RetryRecorder => assert!(
+                            can_retry,
+                            "Try again was offered to a link `retry` would do nothing to: \
+                             {notification:?}"
+                        ),
+                        NotificationAction::OpenClipped { notice } => assert!(
+                            notice.contains(&notification.title) && notice.len() > 1,
+                            "Open Clipped would raise the window carrying nothing that says what \
+                             happened: {notification:?}"
+                        ),
+                    }
+
+                    reached.push(notification.action.label());
+                }
+            }
+        }
+
+        // The half that the old test was missing. Without it a variant can stop
+        // being produced, or stop having a label, and every assertion above
+        // still passes because nothing ever reaches it.
+        for label in ["Show the file", "Try again", "Open Clipped"] {
             assert!(
-                !notification.action.label().is_empty(),
-                "{event:?} offers nothing to do"
+                reached.contains(&label),
+                "no case in this test produces {label}, so nothing here says whether it works: \
+                 {reached:?}"
             );
-            assert!(!notification.title.is_empty(), "{event:?} has no title");
-            assert!(!notification.body.is_empty(), "{event:?} says nothing");
         }
     }
 
