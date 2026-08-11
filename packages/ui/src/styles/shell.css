@@ -1,0 +1,259 @@
+/* The application shell: title bar, sidebar and content region.
+ *
+ * These are Clipped's own classes rather than design-system ones, because the
+ * design system has no "application chrome" component - the deck draws the
+ * shell directly. Every value below is a token; the only literals are the two
+ * fixed chrome dimensions the deck specifies, and they are named here so that
+ * the same number is not typed twice.
+ */
+
+.app-shell {
+  --title-bar-height: 36px;
+  --sidebar-width: 210px;
+
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Keyboard users reach the screen without tabbing through the whole sidebar.
+   Off-screen until focused, then it lands on the content region's heading. */
+.app-skip-link {
+  position: absolute;
+  left: var(--space-2);
+  top: calc(var(--title-bar-height) + var(--space-2));
+  z-index: 2;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 13px;
+  text-decoration: none;
+  transform: translateY(calc(-200% - var(--title-bar-height)));
+}
+
+.app-skip-link:focus-visible {
+  transform: none;
+}
+
+/* — title bar — */
+
+.app-title-bar {
+  height: var(--title-bar-height);
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  background: var(--color-neutral-900);
+  color: var(--color-neutral-200);
+  user-select: none;
+}
+
+.app-title-bar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  flex: 1;
+  min-width: 0;
+}
+
+.app-title-bar-mark {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  background: var(--color-accent);
+}
+
+.app-title-bar-name {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+}
+
+.app-title-bar-tagline {
+  font-size: 12px;
+  color: var(--color-neutral-500);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-window-controls {
+  display: flex;
+  flex: none;
+}
+
+.app-window-control {
+  width: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-neutral-300);
+  cursor: default;
+}
+
+.app-window-control:hover {
+  background: var(--color-neutral-800);
+  color: var(--color-neutral-100);
+}
+
+.app-window-control:active {
+  background: var(--color-neutral-700);
+}
+
+.app-window-control-close:hover,
+.app-window-control-close:active {
+  background: var(--color-accent);
+  color: var(--color-bg);
+}
+
+.app-window-control:focus-visible {
+  outline-offset: -2px;
+}
+
+.app-window-control svg {
+  display: block;
+}
+
+/* — body — */
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* — sidebar — */
+
+.app-sidebar {
+  width: var(--sidebar-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-neutral-200);
+  border-right: 2px solid var(--color-divider);
+  overflow-y: auto;
+}
+
+.app-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.app-nav-list-primary {
+  padding: var(--space-3) 0 var(--space-2);
+}
+
+.app-nav-list-utility {
+  padding: var(--space-1) 0;
+}
+
+.app-nav-divider {
+  height: 2px;
+  flex: none;
+  margin: 0 var(--space-4);
+  background: var(--color-divider);
+}
+
+.app-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  border-left: 3px solid transparent;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+
+.app-nav-list-utility .app-nav-item {
+  padding-block: 7px;
+  font-size: 13px;
+}
+
+.app-nav-item:hover {
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  color: var(--color-text);
+}
+
+.app-nav-item:active {
+  background: color-mix(in srgb, var(--color-text) 12%, transparent);
+}
+
+.app-nav-item:focus-visible {
+  outline-offset: -2px;
+}
+
+/* The current screen is marked three ways, not one: the accent bar, the
+   heavier weight and `aria-current`. Colour alone would fail AGENTS.md
+   section 46, and the bar alone would be invisible to a screen reader. */
+.app-nav-item[aria-current='page'] {
+  border-left-color: var(--color-accent);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.app-sidebar-spacer {
+  flex: 1;
+}
+
+.app-sidebar-footer {
+  flex: none;
+  border-top: 2px solid var(--color-divider);
+  padding: var(--space-3) var(--space-4);
+}
+
+/* — content — */
+
+.app-main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-6) var(--space-8) var(--space-8);
+}
+
+.app-main:focus-visible {
+  outline-offset: -2px;
+}
+
+.app-screen-heading {
+  font-size: 26px;
+  margin: 0 0 var(--space-4);
+}
+
+/* — the notice an unbuilt screen shows — */
+
+.app-unbuilt {
+  max-width: 62ch;
+  border-left: 3px solid var(--color-accent);
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
+}
+
+.app-unbuilt-title {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 15px;
+}
+
+.app-unbuilt p {
+  margin: var(--space-2) 0 0;
+  font-size: 13px;
+}
+
+.app-unbuilt-tracking {
+  margin-top: var(--space-3);
+  font-size: 13px;
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
