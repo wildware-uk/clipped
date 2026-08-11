@@ -188,8 +188,16 @@ during a game.
 Two timestamps can only be subtracted when they name the same clock;
 `duration_since` returns `None` otherwise, and also when the source reports time
 going backwards, because that is a fault to report rather than a negative
-duration to average away. The audio/video synchronisation model that consumes
-all this is [issue #22](https://github.com/wildware-uk/clipped/issues/22).
+duration to average away.
+
+`CaptureClock` is what turns those readings into a recording: it names the one
+clock the whole recording is timed against and the moment it started, and
+converts every source's timestamps — video frames directly, audio positions
+through `media_time_on` — into a `MediaTime`, which is signed nanoseconds from
+the start of the file. [av-sync.md](av-sync.md) is the model in full: which clock
+is authoritative and why, where a conversion is allowed to happen, what is done
+about a dropped frame, an audio gap or a clock that steps, and how far the audio
+device's own clock was measured to drift against the reference over a long run.
 
 ## Choosing a backend
 

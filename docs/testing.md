@@ -180,6 +180,7 @@ applications:
 | --- | --- |
 | `wgc_video_pattern.rs` | That a borderless window and an ordinary bordered window are both captured frame for frame: dropped, duplicated, out-of-order and torn frames are counted *and* asserted on, and the checker that does it is itself tested without a GPU |
 | `wgc_fullscreen_dx11.rs` | That an application covering a whole display is captured, that every frame that arrives is the pattern, and that the display is the shape it was afterwards |
+| `av_sync.rs` | That video and system audio captured at the same time stay within a documented tolerance of each other, and by how much per minute they drift ([av-sync.md](av-sync.md)) |
 | `readback.rs` | Not a test: the helper that copies a captured GPU texture into system memory so the others can look at it |
 
 ### How a test drives an application
@@ -231,7 +232,16 @@ has (`tests/capture/README.md`, and the `Test` step in
 ```text
 cargo test -p clipped-video-pattern --test wgc_video_pattern -- --ignored --nocapture --test-threads=1
 cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --nocapture
+cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1
 ```
+
+`av_sync.rs` additionally needs an audio endpoint, runs for about ninety seconds
+by default, and takes `CLIPPED_AV_SYNC_SECONDS` for the long runs the drift
+figures in [av-sync.md](av-sync.md) come from. Set `CLIPPED_REQUIRE_AUDIO` when
+the numbers are being recorded, so that a machine which delivers no endpoint
+packets fails rather than printing `SKIPPED (av-sync): …` and passing. It makes
+no sound: it holds a render stream open so the endpoint's clock keeps running,
+and every buffer it hands the audio engine is marked silent.
 
 `--nocapture` is worth typing: each test prints its frame accounting, which is
 the evidence AGENTS.md section 53 asks to be recorded on the issue. A run on

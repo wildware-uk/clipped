@@ -42,6 +42,7 @@ pub struct CapturedAudio<'a> {
     samples: &'a [f32],
     format: AudioFormat,
     timestamp: AudioTimestamp,
+    device_timestamp: Option<AudioTimestamp>,
     origin: SampleOrigin,
 }
 
@@ -78,8 +79,20 @@ impl<'a> CapturedAudio<'a> {
             samples,
             format,
             timestamp,
+            device_timestamp: None,
             origin,
         }
+    }
+
+    /// Records the position the endpoint itself reported for these samples.
+    ///
+    /// See [`device_timestamp`](Self::device_timestamp) for what it is for.
+    /// Only [`SampleOrigin::Endpoint`] buffers have one, because synthesised
+    /// silence covers a period the device never described.
+    #[must_use]
+    pub const fn with_device_timestamp(mut self, device: AudioTimestamp) -> Self {
+        self.device_timestamp = Some(device);
+        self
     }
 
     /// The interleaved samples, `channels()` of them per frame.
@@ -103,6 +116,38 @@ impl<'a> CapturedAudio<'a> {
     #[must_use]
     pub const fn timestamp(&self) -> AudioTimestamp {
         self.timestamp
+    }
+
+    /// Where the *endpoint* said this buffer's first frame belongs, as opposed
+    /// to where the track puts it.
+    ///
+    /// [`timestamp`](Self::timestamp) counts samples: it is the track's anchor
+    /// plus every frame emitted since, so consecutive buffers are exactly
+    /// contiguous and the track is the length of the recording. This is the
+    /// other account of the same moment — the performance-counter position
+    /// WASAPI attached to the packet the samples came from, adjusted for any
+    /// frames trimmed off its front.
+    ///
+    /// **The difference between the two is how far the track has slid against
+    /// the reference clock**, in nanoseconds, at that moment. The sample count
+    /// advances at the endpoint's own rate and the counter position advances at
+    /// the reference clock's, and video timestamps are readings of that same
+    /// counter, so the way that gap grows is the way the audio moves against the
+    /// picture. It is a difference rather than an absolute: it says nothing
+    /// about any constant offset the two accounts already had when the capture
+    /// started. Nothing else in the pipeline can see even that much — by the
+    /// time the samples reach a muxer the two accounts have been reconciled into
+    /// one timestamp. Feeding the pair to `clipped_capture::DriftEstimator` is
+    /// what turns "the recording sounded fine" into a number; `docs/av-sync.md`
+    /// is the model, and is honest about what the number does and does not
+    /// cover.
+    ///
+    /// [`None`] for [`SampleOrigin::SynthesisedSilence`], which covers a period
+    /// the endpoint never described and therefore has no position of its own to
+    /// disagree with.
+    #[must_use]
+    pub const fn device_timestamp(&self) -> Option<AudioTimestamp> {
+        self.device_timestamp
     }
 
     /// Whether these samples were captured or synthesised.

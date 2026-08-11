@@ -18,6 +18,9 @@
 //!   over the backends this build has: [`registered_backends`].
 //! - The vocabulary frames arrive in: [`CapturedFrame`], [`FrameFormat`],
 //!   [`CaptureTimestamp`].
+//! - The clock a whole recording is timed against, and how far its tracks have
+//!   slid apart: [`CaptureClock`], [`MediaTime`], [`DriftEstimator`],
+//!   [`SyncTolerance`].
 //! - Capturing, on Windows: [`windows::WindowsGraphicsCapture`] and
 //!   [`windows::DesktopDuplication`].
 //!
@@ -89,6 +92,16 @@
 //! shaped so that the wrong version is not the convenient one. The reasoning is
 //! on [`CaptureTimestamp`] itself.
 //!
+//! [`CaptureClock`] is what turns those readings into a recording. It names the
+//! one clock the recording is timed against and the moment it started, and
+//! converts every source's timestamps — video frames here, audio positions
+//! through [`CaptureClock::media_time_on`] — into [`MediaTime`]: nanoseconds
+//! from the start of the file. [`DriftEstimator`] measures what is left over,
+//! because two sources timed against one clock still slide apart, and a
+//! recording that is a second out by its end looked perfect for its first
+//! minute. `docs/av-sync.md` is the whole model, including what it deliberately
+//! does not do.
+//!
 //! # Example
 //!
 //! Choosing a backend from the ones this build has, and reporting it the way
@@ -144,4 +157,7 @@ pub use method::{CaptureMethod, CaptureMethodSetting};
 pub use registry::{registered_backend, registered_backends, registered_declarations};
 pub use selection::{select, Considered, Outcome, Rejection, Selection, SelectionError};
 pub use target::{CaptureTarget, TargetHandle, TargetKind, TargetProperties};
-pub use time::{CaptureTimestamp, SourceClock};
+pub use time::{
+    CaptureClock, CaptureTimestamp, ClockMismatch, DriftEstimator, DriftRate, MediaTime,
+    SourceClock, SyncState, SyncTolerance, DEFAULT_DISCONTINUITY_STEP,
+};

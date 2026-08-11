@@ -103,7 +103,14 @@ from its predecessor.
 **The zero point.** The first packet written establishes the file's origin, and
 every timestamp is stored relative to it. That is what lets a caller pass raw
 performance-counter readings — nanoseconds since the machine booted — without
-the recording starting several years in.
+the recording starting several years in. A caller that has already rebased its
+timestamps onto the recording's own epoch — `clipped_capture::MediaTime`, which
+is what [av-sync.md](av-sync.md) says every source is converted to — passes those
+instead, and the writer's origin then coincides with the recording's.
+
+Which clock those nanoseconds count on, how each source is put on it, and what
+is done when two sources disagree, is [av-sync.md](av-sync.md). The muxer takes
+that as given: all it can do with two timestamps is subtract them.
 
 **Monotonicity is enforced on decode timestamps, per track.** A container
 requires that a track's decode timestamps increase; it does not require that its
@@ -114,7 +121,7 @@ reordered presentation timestamps are left alone, and the writer corrects:
 | What arrived | What is written | Why |
 | --- | --- | --- |
 | A decode timestamp at or before the previous one on that track | One tick past its predecessor | FFmpeg refuses the packet outright — `av_interleaved_write_frame` returns `EINVAL` — so writing it unchanged would end the recording. Dropping it would lose picture. |
-| A timestamp before the start of the file | Clamped to the start | Happens when tracks begin at slightly different moments and the later-starting one is written first. |
+| A timestamp before the start of the file | Clamped to the start | Happens when tracks begin at slightly different moments and the later-starting one is written first. It is a last resort rather than a policy: audio that genuinely precedes the recording is meant to have been trimmed at the epoch before it ever reaches a writer ([av-sync.md](av-sync.md)), because clamping stacks every such packet on the first instant of the file. A summary reporting many of these means that trim was not applied upstream. |
 | A presentation timestamp before its own decode timestamp | Raised to match | Only reachable after one of the corrections above; no decoder can present a frame it has not decoded. |
 
 Nothing is ever dropped and no correction is silent. Each kind is counted in
