@@ -67,7 +67,10 @@ tauri = { version = "2", features = [] }
 # prevent, of the one surface where the two halves disagreeing is a user-visible
 # bug.
 #
-# It is a path dependency rather than a version one because this crate is not
-# published and the two move together in one repository. MPL-2.0, like the rest
+# The path is what cargo resolves — this crate is not published, and the two
+# move together in one repository — and the version is stated beside it because
+# deny.toml sets `wildcards = "deny"`: a dependency with no version requirement
+# is a dependency nobody can tell the age of from a manifest. Every internal
+# dependency in the root workspace carries the same pair. MPL-2.0, like the rest
 # of Clipped.
-clipped-ipc = { path = "../../../crates/ipc" }
+clipped-ipc = { path = "../../../crates/ipc", version = "0.1.0" }

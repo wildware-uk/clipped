@@ -51,12 +51,14 @@ clipped-recorder record --window <TITLE>
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
 clipped-recorder serve [--endpoint <NAME>]
+clipped-recorder start-at-login <enable|disable|status>
 ```
 
 Nothing is currently specified without being declared: `record`,
 `list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)),
-`capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)) and
-`serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)) are
+`capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)),
+`serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)) and
+`start-at-login` ([#106](https://github.com/wildware-uk/clipped/issues/106)) are
 all implemented below (AGENTS.md section 27).
 
 Adding one is a variant on `Command` in `apps/recorder/src/cli.rs` and an arm in
@@ -362,10 +364,17 @@ line around it.
 ready endpoint=\\.\pipe\clipped-recorder.1
 ```
 
-That line is the hook for whatever started the recorder — a supervisor
-([#106](https://github.com/wildware-uk/clipped/issues/106)), or a test — and it
-is the only thing this subcommand writes to standard output. Everything else is
-a diagnostic and goes to standard error, as it does for every other subcommand.
+That line is the hook for whatever started the recorder, and it is the only
+thing this subcommand writes to standard output; everything else is a diagnostic
+and goes to standard error, as it does for every other subcommand.
+
+The supervisor in the desktop application does **not** read it. It starts the
+recorder detached, with standard output pointed at nothing, and decides the
+recorder is up by connecting to the endpoint — because a recorder holding a pipe
+of the window's would fail its next write when the window closed, which is the
+one thing the arrangement exists to prevent
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). The tests in
+`apps/recorder/tests/ipc_protocol.rs` do read it, which is what it is for.
 
 `<session>` in the default name is the Windows sign-in session the process is
 running in. The pipe namespace is machine-wide, so without it two people signed
@@ -377,9 +386,15 @@ so an endpoint can never be pointed at another machine.
 
 **One recorder owns an endpoint.** A second `serve` on a name already taken
 fails immediately, saying another recorder is already listening, rather than
-half-serving it. That is the transport refusing to share, not the whole
-single-instance story, which is
-[#106](https://github.com/wildware-uk/clipped/issues/106).
+half-serving it. That *is* the recorder's single-instance story: the supervisor
+builds on it rather than adding a second mechanism, and two applications
+starting at the same instant produce one serving recorder and one that exits
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
+
+**Nothing asks it to exit.** Ctrl+C is the only way to stop `serve`, and a
+recorder started detached by the desktop application has no console to receive
+one — so it can only be killed. A `shutdown` command is
+[#220](https://github.com/wildware-uk/clipped/issues/220).
 
 **Ctrl+C stops it the way it stops `record`.** The listener stops first, so
 nothing new arrives, and then any recording is stopped and its file finished
@@ -390,6 +405,48 @@ Exit codes are the ordinary ones: 0 when it was stopped, 1 if the endpoint could
 not be taken or serving failed. A recording that fails while it is being served
 does not stop the recorder; it is reported to whoever is connected, on the
 `errors` stream.
+
+## `start-at-login`
+
+Asks Windows to run `clipped-recorder serve` when this user signs in. It is the
+mechanism behind "the recorder starts at login" in SPEC.md section 5, and it is
+**opt-in and reversible**: nothing in Clipped writes this value except `enable`,
+and `disable` removes it.
+
+```text
+clipped-recorder start-at-login enable
+clipped-recorder start-at-login disable
+clipped-recorder start-at-login status
+```
+
+It writes exactly one value, under this account only:
+
+```text
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
+    "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve
+```
+
+`HKEY_CURRENT_USER` rather than `HKEY_LOCAL_MACHINE`, so it needs no elevation
+and applies to one person on a shared machine — and so the recorder runs in the
+sign-in session whose windows it has to capture. A `Run` value rather than a
+Startup-folder shortcut because Windows lists a `Run` value in **Settings > Apps
+> Startup** and in Task Manager's Startup tab, each with a switch, so it can be
+turned off without finding this subcommand.
+[ADR 0006](adr/0006-recorder-lifetime-and-supervision.md) has the alternatives.
+
+`status` prints the command that is configured, and says so plainly when the
+executable it names no longer exists — which is what a moved or reinstalled
+Clipped leaves behind. It reports that rather than repairing it: silently
+rewriting somebody's startup entry because a status command was run is exactly
+the surprising behaviour this subcommand avoids. Run `enable` from the
+installation you want.
+
+**A recorder started this way cannot currently be stopped except by killing it**
+([#220](https://github.com/wildware-uk/clipped/issues/220)). That is worth
+knowing before turning it on.
+
+There is no setting for this in the desktop application yet; the settings screen
+is [#108](https://github.com/wildware-uk/clipped/issues/108).
 
 ## Exit codes
 
@@ -517,6 +574,20 @@ built binary, talks to it over the real named pipe and stops it with a real
 Ctrl+C. It needs no GPU either — a pipe and a child process are all a recorder
 needs to answer `ping` — so it runs in CI. [ipc.md](ipc.md) lists what it
 covers.
+
+`tests/supervision.rs` is the other side of the same subcommand: a real
+supervisor process (`examples/supervised_ui_fixture.rs`) starting a real
+detached recorder, and both of them ended with a real `TerminateProcess`. Six of
+its tests need no GPU and run in CI — a recorder outliving the process that
+started it, a second launch attaching rather than competing, a second launch
+holding the instance name starting nothing at all, a killed recorder reported
+and replaced, and a restart policy that gives up — and two are `#[ignore]`d
+because they record a window and read the file back.
+
+`start-at-login`'s registry calls are exercised for real, against a scratch key
+of this account's rather than the `Run` key: a test that wrote there would
+arrange for the machine running it to start a recorder at every sign-in
+afterwards. The scratch key is removed when the test finishes.
 
 Two of those tests read the command definition rather than a copy of it: they
 walk `record`'s arguments and require every one of them but the capture target

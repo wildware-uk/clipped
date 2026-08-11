@@ -13,7 +13,9 @@ is the map from one to the other.
 
 **Status.** The transport, the framing, the handshake, the compatibility policy
 and the command and event vocabulary are implemented and tested.
-`clipped-recorder serve` speaks it. Four of the commands belong to subsystems
+`clipped-recorder serve` speaks it, and the desktop application drives it —
+starting a recorder if none is listening and following its status
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). Four of the commands belong to subsystems
 that do not exist yet and are refused with a typed "not in this build" error;
 they are listed, with the issue that builds each, in
 [Commands this build cannot perform](#commands-this-build-cannot-perform). No
@@ -22,7 +24,8 @@ TypeScript client exists yet — see
 
 Related: SPEC.md section 5, AGENTS.md sections 5, 27, 43 and 44,
 [privacy.md](privacy.md), [ADR 0002](adr/0002-separate-recorder-process.md),
-[ADR 0005](adr/0005-named-pipe-control-protocol.md).
+[ADR 0005](adr/0005-named-pipe-control-protocol.md),
+[ADR 0006](adr/0006-recorder-lifetime-and-supervision.md).
 
 ## Contents
 
@@ -128,6 +131,12 @@ so the genuine recorder finds the name taken and exits saying another recorder i
 already listening rather than half-serving it. A client has nothing equivalent:
 there is no authentication in either direction, by design, because the operating
 system's access control is the authentication.
+
+`Client::recorder_process_id` — `GetNamedPipeServerProcessId` — says *which*
+process is serving the connection, and is not an exception to any of that. It is
+what a supervisor uses to tell a recorder it started from one that was already
+there, and it reports a squatter's identifier as readily as the genuine
+recorder's. It answers "who am I talking to", not "is this the right one".
 
 **Under the threat model this transport is built for, that costs nothing.** The
 threat is another *user* on the machine, and the DACL keeps them out. A process
@@ -331,9 +340,11 @@ nothing is attempted.
 That gives both directions a usable answer:
 
 - **Newer UI, older recorder.** The UI sees `supported: [1]` against its own
-  `2`, knows the recorder is behind, and can say so — and can offer to restart
-  the recorder, which is the action that fixes it ([issue #106](https://github.com/wildware-uk/clipped/issues/106)
-  owns that behaviour).
+  `2`, knows the recorder is behind, and can say so. It deliberately does *not*
+  restart the recorder to fix it: the recorder that is too old may be recording,
+  and the only way to replace it is to kill it. `clipped_ipc::supervisor` treats
+  a refused version as a failure no retry can fix and reports it at once, with
+  the recorder's own message ([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
 - **Older UI, newer recorder.** The recorder was updated and restarted while an
   old UI was running. `supported: [2]` against its own `1` tells the UI it is
   the one that is behind, and the message names the recorder's version so the
@@ -601,8 +612,9 @@ else about it.
 **The recorder is not running.** `CreateFile` on the endpoint fails at once with
 "no recorder is listening on `\\.\pipe\…`". The desktop application must render
 that state honestly rather than falling back to plausible-looking defaults
-([ADR 0002](adr/0002-separate-recorder-process.md)); starting one is
-[issue #106](https://github.com/wildware-uk/clipped/issues/106).
+([ADR 0002](adr/0002-separate-recorder-process.md)), and starts one — detached,
+so it outlives the window — through `clipped_ipc::supervisor`
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
 
 **The recorder dies mid-request.** The client's read fails with a broken pipe,
 which `clipped-ipc` reports as a disconnection rather than an error, because it
@@ -624,9 +636,13 @@ which returns it rather than "nothing is being recorded", so a UI that was not
 subscribed still finds out.
 
 **Two recorders on one endpoint.** The second fails to bind and exits with a
-message saying another recorder is already listening. The full single-instance
-story is [issue #106](https://github.com/wildware-uk/clipped/issues/106); what
-the transport guarantees is that they cannot both serve.
+message saying another recorder is already listening. That is the whole of the
+recorder's single-instance story, and `clipped_ipc::supervisor` builds on it
+rather than adding a second mechanism: two supervisors that decide at the same
+instant that nothing is running produce one serving recorder and one that exits,
+and the one that lost reports having lost. Keeping the *desktop application* to
+one is a separate problem with a separate answer, a session-local named mutex
+([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)).
 
 **The recorder is shutting down.** Ctrl+C stops the listener first, then stops
 any recording and waits for its file to be finished, then exits. Connection
@@ -695,6 +711,7 @@ Being able to do that at all is one of the reasons the format is JSON.
 | `crates/ipc/src/*.rs` unit tests | Message round trips, the frozen handshake shape, unknown versions, unknown fields, unknown codes, unknown error details, unknown events, framing including a hostile length prefix, dispatch, event routing |
 | `crates/ipc/src/transport/windows.rs` tests | A real pipe: a round trip, endpoint exclusivity, connecting to nothing, stopping a blocked listener |
 | `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, and Ctrl+C |
+| `apps/recorder/tests/supervision.rs` | Supervision against real processes that are really killed: a recorder outliving the process that started it, a second launch attaching rather than competing, a killed recorder reported and replaced, and a bounded restart policy |
 
 The rejection tests each end by asserting that the *next* client is still
 served. The interesting half of "a bad client is refused" is that a bad client
@@ -722,10 +739,15 @@ cargo test -p clipped-recorder --test ipc_protocol -- --ignored --nocapture --te
 - **Preview frames, waveforms and thumbnails.** High-bandwidth data does not go
   through a JSON control channel; it gets its own transport decision when
   something needs it.
-- **Starting or supervising the recorder.** Deciding that no recorder is running
-  and doing something about it belongs to
-  [issue #106](https://github.com/wildware-uk/clipped/issues/106). This protocol
-  only reports the fact.
+- **Asking the recorder to exit.** There is no `shutdown` command, and a
+  recorder started detached has no console to receive Ctrl+C, so today the only
+  way to end one is to kill it. That is a gap rather than a design property and
+  it is [issue #220](https://github.com/wildware-uk/clipped/issues/220).
+  Supervision itself is no longer missing: `clipped_ipc::supervisor` starts a
+  recorder, watches it and decides whether to replace it
+  ([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). It is in this
+  crate rather than beside it because it is expressed entirely in endpoints,
+  clients and events, and both ends of the boundary need it.
 - **Authentication.** There is none, and there should be none: the operating
   system's access control is the authentication, and a token would be a second,
   weaker copy of it. That reasoning holds only while the transport is a named

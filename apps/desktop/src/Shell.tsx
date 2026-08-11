@@ -68,7 +68,7 @@ export function Shell(): ReactNode {
          * (AGENTS.md section 27, issue #106).
          *
          * There are still no controls: a "Try again" control for a link that
-         * has given up is issue #212, and a Start Recording button belongs with
+         * has given up is issue #221, and a Start Recording button belongs with
          * the screens that have somewhere to put it.
          */
         <RecorderStatus state={recorder.state} detail={recorder.detail} />
