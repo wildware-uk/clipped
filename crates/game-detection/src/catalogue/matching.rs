@@ -10,9 +10,9 @@
 //!    not consulted, because it does not matter: this is the rung that
 //!    identifies a game whose process is called `launcher.exe`.
 //! 2. **[`MatchStrength::QualifiedPath`]** — the file name matches *and* the
-//!    image path contains the fragment the entry demands. This is what tells
-//!    Half-Life 2 from Team Fortress 2, which are two games with one executable
-//!    name.
+//!    image path contains the fragment the entry demands, as whole directory
+//!    names. This is what tells Half-Life 2 from Team Fortress 2, which are two
+//!    games with one executable name.
 //! 3. **[`MatchStrength::ExecutableName`]** — the file name matches and the
 //!    entry asked for nothing else.
 //!
@@ -33,6 +33,18 @@
 //! that guessed would file somebody's session under the wrong game, and the
 //! caller is in a far better position to ask, to log, or to wait for the
 //! window title (issue #41).
+//!
+//! # A path qualifier names directories, not characters
+//!
+//! `path_contains` is compared segment by segment rather than as a substring,
+//! and that is a correctness rule rather than a nicety. `steamapps/common/
+//! Half-Life 2` is a substring of `steamapps/common/Half-Life 2 Deathmatch`,
+//! which is a different Steam application running the same `hl2.exe` — so a
+//! substring test answers "Half-Life 2" about a game that is not Half-Life 2,
+//! confidently, at the second-strongest rung, and without reporting anything as
+//! ambiguous. Whole-segment matching is what makes rung 2 mean what the rest of
+//! this file claims it means. The same applies at the front of a fragment:
+//! `common/Portal` must not be found inside `.../uncommon/Portal/...`.
 //!
 //! # What is deliberately not a match key
 //!
@@ -215,7 +227,7 @@ fn strength(entry: &Entry, candidate: &ProcessCandidate<'_>) -> Option<MatchStre
             // the name alone is not enough to be sure.
             Some(fragment) => path
                 .as_deref()
-                .filter(|path| path.contains(&normalise_path(fragment)))
+                .filter(|path| covers_segments(path, &normalise_path(fragment)))
                 .map(|_| MatchStrength::QualifiedPath),
         })
         .max()
@@ -231,11 +243,39 @@ fn equal_names(left: &str, right: &str) -> bool {
     left.len() == right.len() && left.to_lowercase() == right.to_lowercase()
 }
 
+/// Whether `path` contains `fragment` as a run of whole path segments.
+///
+/// Both arguments must already have been through [`normalise_path`]. A fragment
+/// of no segments — `"/"`, which validation cannot tell from a real one because
+/// it is not empty — matches nothing rather than everything: an entry that
+/// claimed every process on the machine is the failure this rung prevents, not
+/// a licence to widen the entry.
+fn covers_segments(path: &str, fragment: &str) -> bool {
+    let path: Vec<&str> = segments(path).collect();
+    let wanted: Vec<&str> = segments(fragment).collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    // `windows` panics on zero, which the guard above has already excluded, and
+    // yields nothing when the fragment is longer than the path.
+    path.windows(wanted.len())
+        .any(|window| window == wanted.as_slice())
+}
+
+/// The non-empty segments of a normalised path.
+///
+/// Empty ones are dropped so that a leading, trailing or doubled separator in
+/// either the fragment or the path changes nothing about what matches.
+fn segments(normalised: &str) -> impl Iterator<Item = &str> {
+    normalised.split('/').filter(|segment| !segment.is_empty())
+}
+
 /// Puts a path in the one form both sides of a comparison use.
 ///
 /// Lower-cased, and with backslashes turned into forward slashes so that a
-/// catalogue entry may be written with either. Trailing separators are left
-/// alone; this is a containment test, not a path resolution.
+/// catalogue entry may be written with either. Separators are not otherwise
+/// touched; [`covers_segments`] is what decides where one segment ends, and it
+/// is indifferent to how many separators there were.
 pub(crate) fn normalise_path(value: &str) -> String {
     value.replace('\\', "/").to_lowercase()
 }
@@ -361,6 +401,93 @@ name = "launcher.exe"
                 .with_path(r"D:\Steam\steamapps\common\Portal\hl2.exe"),
         );
         assert_eq!(outcome, Match::None);
+    }
+
+    #[test]
+    fn a_path_qualifier_names_a_directory_rather_than_a_prefix_of_one() {
+        // `steamapps/common/Half-Life 2` is a substring of
+        // `steamapps/common/Half-Life 2 Deathmatch`, which is a different Steam
+        // application running the same `hl2.exe`. A substring test answers
+        // "Half-Life 2" here, wrongly, at the second-strongest rung and without
+        // reporting anything as ambiguous.
+        let catalogue = seed(SHARED_NAME);
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("hl2.exe")
+                .with_path(r"D:\Steam\steamapps\common\Half-Life 2 Deathmatch\hl2.exe"),
+        );
+        assert_eq!(outcome, Match::None, "got {outcome:?}");
+    }
+
+    #[test]
+    fn a_path_qualifier_must_begin_at_a_directory_boundary_too() {
+        let catalogue = seed(
+            r#"
+[[game]]
+game_id = "portal"
+name = "Portal"
+[[game.executables]]
+name = "portal.exe"
+path_contains = "common/Portal"
+"#,
+        );
+
+        // The fragment's first segment is a whole directory name as well, so a
+        // library folder called `uncommon` is not a `common` one.
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("portal.exe")
+                .with_path(r"D:\Steam\steamapps\uncommon\Portal\portal.exe"),
+        );
+        assert_eq!(outcome, Match::None, "got {outcome:?}");
+
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("portal.exe")
+                .with_path(r"D:\Steam\steamapps\common\Portal\portal.exe"),
+        );
+        assert_eq!(matched_id(&outcome), "portal");
+    }
+
+    #[test]
+    fn a_path_qualifier_written_with_stray_separators_names_the_same_directories() {
+        // Segments are what is compared, so a fragment somebody wrote with a
+        // leading, trailing or doubled separator still means what they meant.
+        let catalogue = seed(
+            r#"
+[[game]]
+game_id = "portal"
+name = "Portal"
+[[game.executables]]
+name = "portal.exe"
+path_contains = "/steamapps//common/Portal/"
+"#,
+        );
+
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("portal.exe")
+                .with_path(r"D:\Steam\steamapps\common\Portal\portal.exe"),
+        );
+        assert_eq!(matched_id(&outcome), "portal");
+    }
+
+    #[test]
+    fn a_path_qualifier_of_separators_alone_claims_nothing_rather_than_everything() {
+        // `"/"` is not empty, so validation cannot tell it from a real
+        // qualifier, and it names no directory at all. The safe reading of "no
+        // directories" is that the entry claims nothing: an entry claiming every
+        // process on the machine is what this rung exists to prevent.
+        let catalogue = seed(
+            r#"
+[[game]]
+game_id = "over-broad"
+name = "Over-broad"
+[[game.executables]]
+name = "game.exe"
+path_contains = "/"
+"#,
+        );
+
+        let outcome = catalogue
+            .match_process(&ProcessCandidate::new("game.exe").with_path(r"C:\Anything\game.exe"));
+        assert_eq!(outcome, Match::None, "got {outcome:?}");
     }
 
     #[test]

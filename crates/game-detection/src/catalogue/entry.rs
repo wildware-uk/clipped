@@ -118,6 +118,11 @@ impl fmt::Display for GameId {
 /// the given fragment, which is the only thing that separates two games
 /// shipping the same binary name — `hl2.exe` is Half-Life 2 and Team Fortress 2
 /// and several more.
+///
+/// The fragment names whole directories rather than characters:
+/// `steamapps/common/Half-Life 2` matches that directory and not
+/// `steamapps/common/Half-Life 2 Deathmatch`, which is a different game running
+/// the same executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutableRule {
     name: String,
@@ -147,6 +152,8 @@ impl ExecutableRule {
     }
 
     /// The path fragment an image path must contain, if the rule is qualified.
+    ///
+    /// Contained as whole path segments, not as a substring.
     #[must_use]
     pub fn path_contains(&self) -> Option<&str> {
         self.path_contains.as_deref()

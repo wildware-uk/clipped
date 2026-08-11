@@ -98,7 +98,7 @@ that matches at all matches at one of three strengths:
 | Rung | Strength | What matched |
 | --- | --- | --- |
 | 1 (strongest) | `LauncherIdentity` | The launcher's own identifier for the game. The executable is not consulted. |
-| 2 | `QualifiedPath` | The file name matched **and** the image path contains the entry's `path_contains` fragment. |
+| 2 | `QualifiedPath` | The file name matched **and** the image path contains the entry's `path_contains` fragment, as whole directory names. |
 | 3 | `ExecutableName` | The file name matched an entry that asked for nothing else. |
 
 The order in full:
@@ -134,6 +134,28 @@ Two details that follow from the rungs:
 Comparison follows Windows: executable names and path fragments are matched
 case-insensitively, and a `path_contains` fragment may be written with either
 kind of slash.
+
+#### A path qualifier names directories, not characters
+
+The fragment is compared segment by segment, and it has to line up with
+directory boundaries at both ends. This is a correctness rule rather than
+tidiness. `steamapps/common/Half-Life 2` is a *substring* of
+`steamapps/common/Half-Life 2 Deathmatch`, which is a different Steam
+application — 320 rather than 220 — that installs beside Half-Life 2 and runs
+the same `hl2.exe`. Half-Life 2: Lost Coast and both episodes are the same
+shape. Matched as characters, the shipped Half-Life 2 entry claims all of them:
+a confident wrong answer at rung 2, with nothing reported as ambiguous, which is
+precisely the outcome the ambiguity rule above exists to avoid.
+
+The same applies at the front of a fragment, so `common/Portal` is not found
+inside `.../uncommon/Portal/...`.
+
+Leading, trailing and doubled separators in a fragment change nothing, because
+what is compared is the list of directory names either side of them. A fragment
+that names no directory at all — `"/"` — matches nothing rather than everything;
+validation cannot tell it from a real qualifier, since it is not empty, and an
+entry that claimed every process on the machine is the failure this rung exists
+to prevent.
 
 ### Fields for subsystems that do not exist yet
 

@@ -69,12 +69,33 @@ fn the_shipped_catalogue_tells_two_source_games_apart_by_their_install_path() {
     );
     assert_eq!(matched(&outcome), "half-life-2");
 
-    // And the property that makes those two answers mean anything: a third
+    // And the property that makes those two answers mean anything: another
     // Source game running the same binary is claimed by neither. If either
     // entry were left unqualified it would answer here, wrongly and silently.
     let outcome = catalogue.match_process(
         &ProcessCandidate::new("hl2.exe")
             .with_path(r"D:\SteamLibrary\steamapps\common\Day of Defeat Source\hl2.exe"),
+    );
+    assert_eq!(outcome, Match::None, "got {outcome:?}");
+
+    // Half-Life 2 Deathmatch is the case a directory name that merely does not
+    // collide would not have caught. It is Steam application 320, a different
+    // game from Half-Life 2, it runs the same `hl2.exe`, and its install
+    // directory has the shipped `half-life-2` qualifier as a *prefix*. A
+    // substring test claims it as Half-Life 2 — confidently, at the second
+    // strongest rung, with nothing reported as ambiguous.
+    let outcome = catalogue.match_process(
+        &ProcessCandidate::new("hl2.exe")
+            .with_path(r"D:\SteamLibrary\steamapps\common\Half-Life 2 Deathmatch\hl2.exe"),
+    );
+    assert_eq!(outcome, Match::None, "got {outcome:?}");
+
+    // Episode One, Episode Two and Lost Coast are the same shape, and the same
+    // rule answers for all of them: the fragment names a directory, so it
+    // matches that directory and not one it is a prefix of.
+    let outcome = catalogue.match_process(
+        &ProcessCandidate::new("hl2.exe")
+            .with_path(r"D:\SteamLibrary\steamapps\common\Half-Life 2 Episode One\hl2.exe"),
     );
     assert_eq!(outcome, Match::None, "got {outcome:?}");
 }

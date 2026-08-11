@@ -41,6 +41,12 @@
 #    entry beats an unqualified one, so adding a qualified entry never makes an
 #    existing bare-name entry worse.
 #
+#    It names whole directories, not characters. `steamapps/common/Half-Life 2`
+#    matches that directory and not `steamapps/common/Half-Life 2 Deathmatch`,
+#    which is a different game running the same executable. Write the fragment
+#    as the directories it is, with either kind of slash, and case does not
+#    matter.
+#
 # 2. `compatibility` is a record of what somebody actually verified, not a
 #    guess. Every entry here says `unknown`, because nobody has yet run a
 #    capture against these games and written down what happened (AGENTS.md
@@ -117,6 +123,11 @@ game_id = "half-life-2"
 name = "Half-Life 2"
 
 [[game.executables]]
+# The qualifier is the directory name in full. Half-Life 2 Deathmatch, Lost
+# Coast and both episodes are separate Steam applications that install beside
+# this one, with directory names this one is a prefix of, and all of them run
+# `hl2.exe` — so a fragment matched as characters rather than as directories
+# would claim them as Half-Life 2.
 name = "hl2.exe"
 path_contains = "steamapps/common/Half-Life 2"
 
