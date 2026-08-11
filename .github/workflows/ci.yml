@@ -416,14 +416,17 @@ jobs:
       - name: Build
         run: npm run build:app
 
-      # The same licence and advisory policy the workspace is held to, applied
-      # to the dependency tree the desktop shell brings in. `--config` points at
-      # the repository's one deny.toml: the policy is a decision about the
-      # project, not about a directory in it.
-      - name: Check the Tauri crate's dependency licences and advisories
+      # Pinned to the same cargo-deny version the `deny` job uses, for the same
+      # reason: one tool interpreting one deny.toml.
+      - name: Install cargo-deny
         uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-deny@0.20.2
 
-      - name: Check dependency licences and advisories
+      # The same licence and advisory policy the workspace is held to, applied
+      # to the dependency tree the desktop shell brings in - which the `deny`
+      # job cannot see, because this crate is not a workspace member. `--config`
+      # points at the repository's one deny.toml: the policy is a decision about
+      # the project, not about a directory in it.
+      - name: Check the Tauri crate's dependency licences and advisories
         run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml --all-features check
