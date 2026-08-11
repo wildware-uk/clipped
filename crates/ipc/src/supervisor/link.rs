@@ -133,7 +133,8 @@ impl RecorderLinkState {
 ///
 /// Delivered on the channel [`RecorderLink::start`] returns, in the order they
 /// happened.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum RecorderLinkEvent {
     /// The link's state changed. Carries the whole state rather than a delta,
     /// so a consumer that missed one recovers on the next.
@@ -186,6 +187,27 @@ impl RecorderLink {
             .name("clipped-recorder-link".to_owned())
             .spawn(move || supervise(&settings, &watching, &sender))
             .expect("a thread can be started to watch the recorder");
+
+        (Self { shared }, receiver)
+    }
+
+    /// A link that watches nothing, because there was nothing to watch.
+    ///
+    /// For a caller that could not describe a recorder at all — no endpoint, no
+    /// executable — and still has a window to draw. The state is
+    /// [`RecorderLinkState::Unavailable`] from the start and never changes,
+    /// which is the honest shape of "this application cannot reach a recorder
+    /// and here is why" (AGENTS.md section 27). No thread is started.
+    #[must_use]
+    pub fn started_unavailable(reason: String) -> (Self, Receiver<RecorderLinkEvent>) {
+        let (sender, receiver) = mpsc::channel();
+        let shared = Arc::new(Shared::new());
+        let state = RecorderLinkState::Unavailable { reason };
+
+        shared.set_state(state.clone());
+        // The receiver is live, so this cannot fail; it is sent rather than only
+        // stored so that a window which listens before it asks still hears.
+        let _ = sender.send(RecorderLinkEvent::State(state));
 
         (Self { shared }, receiver)
     }
@@ -610,6 +632,68 @@ mod tests {
             waited: Duration::from_secs(1),
             exit: Some(1)
         }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_link_that_gave_up_says_so_and_tries_again_when_asked() {
+        // The state a window shows when the recorder cannot be started, and the
+        // way out of it. Nothing external is needed: the endpoint is a name
+        // nothing is listening on and the executable is a path that does not
+        // exist, which is the failure `worth_trying_again` refuses to retry — so
+        // the link reaches `Unavailable` at once and stays there until told.
+        let settings = SupervisorSettings {
+            restart: crate::supervisor::RestartPolicy::NEVER,
+            ..SupervisorSettings::new(
+                crate::transport::Endpoint::named(&format!(
+                    "clipped-link-test.{}",
+                    std::process::id()
+                ))
+                .expect("the generated name is valid"),
+                std::env::temp_dir().join("clipped-no-such-recorder.exe"),
+                crate::message::PeerIdentity {
+                    name: "clipped-ipc-test".to_owned(),
+                    version: "0.0.0".to_owned(),
+                },
+            )
+        };
+
+        let (link, events) = RecorderLink::start(settings);
+        let reason = wait_for_unavailable(&events);
+        assert!(
+            reason.contains("clipped-no-such-recorder.exe"),
+            "the state a window shows has to say what went wrong: {reason}"
+        );
+
+        link.retry();
+        assert!(
+            matches!(
+                events
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the link answers a retry"),
+                RecorderLinkEvent::State(RecorderLinkState::Connecting)
+            ),
+            "a retry should start the link looking again, not leave it where it was"
+        );
+        // And it gives up again rather than looping, because nothing changed.
+        wait_for_unavailable(&events);
+    }
+
+    /// Reads events until the link reports it has given up, and returns why.
+    #[cfg(windows)]
+    fn wait_for_unavailable(events: &Receiver<RecorderLinkEvent>) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("the link publishes a state within the timeout")
+            {
+                RecorderLinkEvent::State(RecorderLinkState::Unavailable { reason }) => {
+                    return reason
+                }
+                _ => continue,
+            }
+        }
     }
 
     #[test]

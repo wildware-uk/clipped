@@ -322,12 +322,32 @@ fn no_crate_depends_on_the_desktop_application() {
     );
 }
 
+/// The only crate of this workspace the desktop application may link.
+///
+/// `clipped-ipc` is the protocol boundary, and the layer table above already
+/// says it "has to be usable from both ends". Something has to open the named
+/// pipe, and a webview cannot: the Tauri host is the client, so it either uses
+/// this crate or contains a second implementation of the handshake, the framing
+/// and the compatibility policy — which is the duplication AGENTS.md section 55
+/// exists to prevent, of the one surface where the two halves disagreeing is a
+/// user-visible bug.
+///
+/// The rule the test still enforces is the one ADR 0002 actually cares about:
+/// **no capture, no encoding, no muxing and no session state inside the
+/// window's process.** `clipped-ipc` depends on no other crate in this
+/// workspace, which is what makes an exception for it an exception for the
+/// messages alone; the moment it grew a dependency on `clipped-session`, this
+/// entry would be letting the recording engine in through the back door, and
+/// `every_dependency_points_down_the_stack` is what would report that.
+const DESKTOP_MAY_LINK: &[&str] = &["clipped-ipc"];
+
 #[test]
-fn the_desktop_application_links_no_crate_of_this_workspace() {
+fn the_desktop_application_links_nothing_of_this_workspace_but_the_protocol() {
     // The other direction, and the one apps/desktop/README.md claims: the window
     // "talks to the recorder process over the IPC boundary rather than linking
-    // the recording crates directly". Linking one would put capture or encoding
-    // inside the window's process, which is the whole thing ADR 0002 separates.
+    // the recording crates directly". Linking a recording crate would put
+    // capture or encoding inside the window's process, which is the whole thing
+    // ADR 0002 separates.
     //
     // Its manifest is read through `cargo metadata` like any other, rather than
     // by searching the file for a string, so a dependency renamed with `package
@@ -341,7 +361,10 @@ fn the_desktop_application_links_no_crate_of_this_workspace() {
         .flat_map(|(crate_name, dependencies)| {
             dependencies
                 .into_iter()
-                .filter(|dependency| members.contains(&dependency.name))
+                .filter(|dependency| {
+                    members.contains(&dependency.name)
+                        && !DESKTOP_MAY_LINK.contains(&dependency.name.as_str())
+                })
                 .map(move |dependency| format!("{crate_name} names {}", dependency.name))
                 .collect::<Vec<_>>()
         })
@@ -351,6 +374,33 @@ fn the_desktop_application_links_no_crate_of_this_workspace() {
     assert!(
         violations.is_empty(),
         "the desktop application must reach the recorder over IPC rather than by \
-         linking it (docs/architecture.md, apps/desktop/README.md): {violations:#?}"
+         linking it; only {DESKTOP_MAY_LINK:?} may be named (docs/architecture.md, \
+         apps/desktop/README.md, ADR 0006): {violations:#?}"
     );
+}
+
+#[test]
+fn the_crate_the_desktop_application_may_link_drags_nothing_else_in() {
+    // The exception above is only sound while `clipped-ipc` names no other crate
+    // of this workspace. If it ever did, the allowance would be linking that
+    // crate into the window as well, transitively and invisibly — so the
+    // property is asserted here rather than left to the comment beside the
+    // constant.
+    let dependencies = workspace_dependencies();
+
+    for allowed in DESKTOP_MAY_LINK {
+        let named: Vec<String> = dependencies
+            .get(*allowed)
+            .unwrap_or_else(|| panic!("{allowed} is a member of this workspace"))
+            .iter()
+            .filter(|dependency| !dependency.is_dev())
+            .map(|dependency| dependency.name.clone())
+            .collect();
+
+        assert!(
+            named.is_empty(),
+            "{allowed} may be linked by the desktop application, so it must depend on no \
+             other crate of this workspace: {named:?}"
+        );
+    }
 }

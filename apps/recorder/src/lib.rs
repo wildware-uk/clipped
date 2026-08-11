@@ -36,6 +36,7 @@
 //! | [`list_windows`] | The `list-windows` subcommand |
 //! | [`capabilities`] | The `capabilities` subcommand |
 //! | [`serve`] | The `serve` subcommand, and the recorder behind the IPC protocol |
+//! | [`start_at_login`] | The `start-at-login` subcommand: the opt-in registry value |
 //! | [`shutdown`] | Ctrl+C, and the finalisation seam a recording ends through |
 
 pub mod capabilities;
@@ -46,6 +47,7 @@ pub mod options;
 pub mod record;
 pub mod serve;
 pub mod shutdown;
+pub mod start_at_login;
 
 use std::error::Error;
 use std::fmt;
@@ -86,6 +88,8 @@ pub enum RunError {
     Capabilities(capabilities::CapabilitiesError),
     /// `serve` failed.
     Serve(serve::ServeError),
+    /// `start-at-login` failed.
+    StartAtLogin(start_at_login::StartAtLoginError),
 }
 
 impl RunError {
@@ -123,6 +127,10 @@ impl RunError {
             // rather than a command line to fix: the endpoint is not something
             // the user chose, and `--endpoint` would be the wrong advice.
             Self::Serve(_) => EXIT_FAILURE,
+            // Including "this is not a Windows build": starting at login is a
+            // Windows arrangement, and a build without one has not met a
+            // command line to fix.
+            Self::StartAtLogin(_) => EXIT_FAILURE,
         }
     }
 
@@ -146,6 +154,7 @@ impl fmt::Display for RunError {
             Self::ListWindows(error) => write!(formatter, "{error}"),
             Self::Capabilities(error) => write!(formatter, "{error}"),
             Self::Serve(error) => write!(formatter, "{error}"),
+            Self::StartAtLogin(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -157,6 +166,7 @@ impl Error for RunError {
             Self::ListWindows(error) => Some(error),
             Self::Capabilities(error) => Some(error),
             Self::Serve(error) => Some(error),
+            Self::StartAtLogin(error) => Some(error),
         }
     }
 }
@@ -185,6 +195,12 @@ impl From<serve::ServeError> for RunError {
     }
 }
 
+impl From<start_at_login::StartAtLoginError> for RunError {
+    fn from(error: start_at_login::StartAtLoginError) -> Self {
+        Self::StartAtLogin(error)
+    }
+}
+
 /// Runs the subcommand the command line selected.
 ///
 /// A new subcommand is a variant on [`Command`] and an arm here.
@@ -199,6 +215,7 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::ListWindows(args) => list_windows::run(args).map_err(RunError::from),
         Command::Capabilities(args) => capabilities::run(args).map_err(RunError::from),
         Command::Serve(args) => serve::run(args).map_err(RunError::from),
+        Command::StartAtLogin(args) => start_at_login::run(args).map_err(RunError::from),
     }
 }
 

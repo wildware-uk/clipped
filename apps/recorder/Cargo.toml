@@ -63,10 +63,16 @@ time = { version = "0.3", default-features = false, features = [
 # no pointer in it, in the module that owns the shutdown behaviour, which is
 # where AGENTS.md section 5 allows platform code to live when it belongs to the
 # crate rather than to the platform layer. Dual MIT/Apache-2.0.
+#
+# `Win32_System_Registry` is the other one: `start-at-login` writes a single
+# value under HKEY_CURRENT_USER, and the six registry calls that read, write and
+# remove it live in `start_at_login::platform` rather than being spread about
+# (AGENTS.md section 5).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
+    "Win32_System_Registry",
 ] }
 
 # `tests/ctrl_c.rs` delivers a real Ctrl+C to a real child process, which needs

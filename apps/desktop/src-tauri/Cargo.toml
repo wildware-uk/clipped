@@ -53,3 +53,21 @@ tauri-build = { version = "2", features = [] }
 # The window, the WebView2 host and the asset protocol that serves the built
 # interface. Dual MIT/Apache-2.0.
 tauri = { version = "2", features = [] }
+# The recorder control protocol and the supervision built on it: the named pipe,
+# the handshake, and deciding whether a recorder is running
+# (docs/ipc.md, docs/adr/0006-recorder-lifetime-and-supervision.md).
+#
+# This is the one crate of the repository's workspace this manifest may name,
+# and `tests/integration/tests/workspace_layering.rs` enforces both halves of
+# that: nothing else here, and `clipped-ipc` itself depending on no other crate
+# of that workspace. A webview cannot open a named pipe, so the Tauri host has
+# to be the protocol's client — and the alternative to linking this is a second
+# implementation of the handshake, the framing and the compatibility policy
+# inside the window, which is the duplication AGENTS.md section 55 exists to
+# prevent, of the one surface where the two halves disagreeing is a user-visible
+# bug.
+#
+# It is a path dependency rather than a version one because this crate is not
+# published and the two move together in one repository. MPL-2.0, like the rest
+# of Clipped.
+clipped-ipc = { path = "../../../crates/ipc" }
