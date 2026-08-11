@@ -244,12 +244,12 @@ Detection does not open an encoder session, so running this while a game is
 recording cannot take a session slot from it.
 
 **A supported codec is not a recording.** The footer separates the two. NVENC
-([#15](https://github.com/wildware-uk/clipped/issues/15)) and the software
+([#15](https://github.com/wildware-uk/clipped/issues/15)), AMF
+([#16](https://github.com/wildware-uk/clipped/issues/16)) and the software
 fallback on the CPU ([#18](https://github.com/wildware-uk/clipped/issues/18))
-have backends in this build; AMF
-([#16](https://github.com/wildware-uk/clipped/issues/16)) and Quick Sync
-([#17](https://github.com/wildware-uk/clipped/issues/17)) are detected and not
-used, so a machine whose best encoder is one of those would encode on the CPU.
+have backends in this build; Quick Sync
+([#17](https://github.com/wildware-uk/clipped/issues/17)) is detected and not
+used, so a machine whose best encoder is that one would encode on the CPU.
 And nothing records yet whichever encoder is chosen, because no session connects
 a capture to an encoder and on to a file — `record` still exits 3.
 

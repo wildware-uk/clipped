@@ -116,24 +116,25 @@ impl EncoderKind {
     /// encoder was implemented for two of them
     /// ([#167](https://github.com/wildware-uk/clipped/issues/167)).
     ///
-    /// NVENC is implemented, in [`NvencEncoder`](crate::NvencEncoder), and so
-    /// is the software fallback, in [`SoftwareEncoder`](crate::SoftwareEncoder)
-    /// (`docs/encoder-pipeline.md`). AMF and Quick Sync are not, so a machine
-    /// with one of those GPUs and no NVIDIA card encodes on the CPU. This says
-    /// nothing about *recording*: nothing yet connects any backend to a capture
-    /// or a container, so no build records anything.
+    /// NVENC is implemented, in [`NvencEncoder`](crate::NvencEncoder); so is
+    /// AMF, in [`AmfEncoder`](crate::AmfEncoder); and so is the software
+    /// fallback, in [`SoftwareEncoder`](crate::SoftwareEncoder)
+    /// (`docs/encoder-pipeline.md`). Quick Sync is not, so a machine with only
+    /// an Intel GPU encodes on the CPU. This says nothing about *recording*:
+    /// nothing yet connects any backend to a capture or a container, so no
+    /// build records anything.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         match self {
-            Self::Nvenc | Self::Software => true,
-            Self::Amf | Self::QuickSync => false,
+            Self::Nvenc | Self::Amf | Self::Software => true,
+            Self::QuickSync => false,
         }
     }
 
     /// The issue that implements this encoder.
     ///
     /// For a family [`is_implemented`](Self::is_implemented) rejects, this is
-    /// where the work is tracked; for the other two it is where it was done.
+    /// where the work is tracked; for the other three it is where it was done.
     /// The report prints the first kind so that "your GPU can do AV1, and
     /// Clipped cannot yet" is one sentence with a link in it, rather than a
     /// silence the reader has to interpret (AGENTS.md section 27).
@@ -326,17 +327,20 @@ mod tests {
     /// as implementations of [`VideoEncoder`](crate::backend::VideoEncoder)
     /// means a backend removed or renamed fails to build here rather than
     /// leaving the capability report telling a user this build can encode with
-    /// something it cannot. The other direction — that AMF and Quick Sync have
-    /// no backend — is the absence of a type, which nothing can assert.
+    /// something it cannot. The other direction — that Quick Sync has no
+    /// backend — is the absence of a type, which nothing can assert.
     #[cfg(windows)]
     #[test]
     fn an_encoder_that_claims_a_backend_has_one() {
         const fn implements_the_trait<E: crate::backend::VideoEncoder>() {}
         implements_the_trait::<crate::windows::NvencEncoder>();
+        implements_the_trait::<crate::windows::AmfEncoder>();
         implements_the_trait::<crate::software::SoftwareEncoder>();
 
         assert!(EncoderKind::Nvenc.is_implemented());
+        assert!(EncoderKind::Amf.is_implemented());
         assert!(EncoderKind::Software.is_implemented());
+        assert!(!EncoderKind::QuickSync.is_implemented());
     }
 
     #[test]
