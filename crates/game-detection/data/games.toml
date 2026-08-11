@@ -1,0 +1,233 @@
+# Clipped's game catalogue — the seed data shipped with the application.
+#
+# ADDING A GAME NEEDS NO CODE. Append a `[[game]]` block to the end of this
+# file and open a pull request; nothing in `crates/game-detection/src` has to
+# change, and nothing has to be registered anywhere else. If your entry does
+# not parse or does not validate, the build fails with a message naming this
+# file and your entry — it is never skipped quietly.
+#
+# The full field reference, the matching rules and the precedence order are in
+# docs/game-detection.md. The short version, and the whole schema:
+#
+#   [[game]]
+#   game_id = "some-game"                # required, unique, [a-z0-9-]
+#   name = "Some Game"                   # required, what a person calls it
+#   icon = "some-game"                   # optional, an icon asset name
+#   child_processes = ["helper.exe"]     # optional, processes the game spawns
+#   highlight_providers = ["some-game"]  # optional, M9 highlight provider ids
+#
+#   [[game.executables]]                 # at least one required
+#   name = "somegame.exe"                # a bare file name, never a path
+#   path_contains = "steamapps/common/Some Game"  # optional qualifier
+#
+#   [game.launcher]                      # optional
+#   kind = "steam"                       # steam, epic, xbox, battle-net, ea,
+#                                        # ubisoft, riot, gog or other
+#   app_id = "12345"                     # optional, the launcher's own id
+#
+#   [game.capture]                       # optional, defaults to "unknown"
+#   compatibility = "unknown"            # unknown, graphics-capture,
+#                                        # desktop-duplication or unsupported
+#   note = "why, if it is not unknown"
+#
+#   [game.default_settings]              # optional, M7 decides what these mean
+#   fps = 120
+#
+# THREE RULES WORTH KNOWING BEFORE YOU EDIT.
+#
+# 1. `path_contains` is how two games that ship the same executable name are
+#    told apart, and `hl2.exe` below is the real case: Half-Life 2 and Team
+#    Fortress 2 are different games running the same binary name. A qualified
+#    entry beats an unqualified one, so adding a qualified entry never makes an
+#    existing bare-name entry worse.
+#
+# 2. `compatibility` is a record of what somebody actually verified, not a
+#    guess. Every entry here says `unknown`, because nobody has yet run a
+#    capture against these games and written down what happened (AGENTS.md
+#    section 18). Change one only alongside the evidence, in the pull request
+#    that changes it.
+#
+# 3. An empty or absent field means "nobody has recorded this", not "there is
+#    none". `child_processes = []` does not assert that a game spawns nothing.
+#
+# The schema version below is the format's, not the application's. It changes
+# only when the shape of an entry changes, and docs/game-detection.md documents
+# what an older or newer file does.
+schema_version = 1
+
+# --- Valve ------------------------------------------------------------------
+#
+# Every Source and Source 2 title is launched by Steam, and the Source 1 ones
+# share one executable name between them, so they are the clearest illustration
+# of why an executable name alone is not an identity.
+
+[[game]]
+game_id = "counter-strike-2"
+name = "Counter-Strike 2"
+
+[[game.executables]]
+name = "cs2.exe"
+# Counter-Strike 2 replaced Counter-Strike: Global Offensive in place, so it
+# still installs into the directory named after the game it replaced.
+path_contains = "steamapps/common/Counter-Strike Global Offensive"
+
+[game.launcher]
+kind = "steam"
+app_id = "730"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "dota-2"
+name = "Dota 2"
+
+[[game.executables]]
+name = "dota2.exe"
+path_contains = "steamapps/common/dota 2 beta"
+
+[game.launcher]
+kind = "steam"
+app_id = "570"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "team-fortress-2"
+name = "Team Fortress 2"
+
+[[game.executables]]
+# Not a typo. Team Fortress 2 is a Source 1 game and its process is `hl2.exe`,
+# exactly like Half-Life 2 below. The install directory is the only thing that
+# separates them, which is why both entries are path-qualified: an unqualified
+# `hl2.exe` entry here would claim every Source 1 game on the machine.
+name = "hl2.exe"
+path_contains = "steamapps/common/Team Fortress 2"
+
+[game.launcher]
+kind = "steam"
+app_id = "440"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "half-life-2"
+name = "Half-Life 2"
+
+[[game.executables]]
+name = "hl2.exe"
+path_contains = "steamapps/common/Half-Life 2"
+
+[game.launcher]
+kind = "steam"
+app_id = "220"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "portal-2"
+name = "Portal 2"
+
+[[game.executables]]
+name = "portal2.exe"
+path_contains = "steamapps/common/Portal 2"
+
+[game.launcher]
+kind = "steam"
+app_id = "620"
+
+[game.capture]
+compatibility = "unknown"
+
+# --- Riot Games -------------------------------------------------------------
+
+[[game]]
+game_id = "league-of-legends"
+name = "League of Legends"
+
+[[game.executables]]
+# The game itself, not `LeagueClient.exe`: the client is a separate process
+# that is running long before and after a match, and recording it would produce
+# a session of somebody reading the shop.
+name = "League of Legends.exe"
+
+[game.launcher]
+kind = "riot"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "valorant"
+name = "VALORANT"
+
+[[game.executables]]
+name = "VALORANT-Win64-Shipping.exe"
+
+[game.launcher]
+kind = "riot"
+
+[game.capture]
+compatibility = "unknown"
+
+# --- Epic Games -------------------------------------------------------------
+
+[[game]]
+game_id = "fortnite"
+name = "Fortnite"
+
+[[game.executables]]
+name = "FortniteClient-Win64-Shipping.exe"
+
+[game.launcher]
+kind = "epic"
+
+[game.capture]
+compatibility = "unknown"
+
+[[game]]
+game_id = "rocket-league"
+name = "Rocket League"
+
+[[game.executables]]
+name = "RocketLeague.exe"
+
+[game.launcher]
+kind = "epic"
+
+[game.capture]
+compatibility = "unknown"
+
+# --- Blizzard ---------------------------------------------------------------
+
+[[game]]
+game_id = "overwatch-2"
+name = "Overwatch 2"
+
+[[game.executables]]
+# Overwatch 2 replaced Overwatch in place and kept the executable name.
+name = "Overwatch.exe"
+
+[game.launcher]
+kind = "battle-net"
+
+[game.capture]
+compatibility = "unknown"
+
+# --- Microsoft Store --------------------------------------------------------
+
+[[game]]
+game_id = "minecraft-bedrock"
+name = "Minecraft: Bedrock Edition"
+
+[[game.executables]]
+name = "Minecraft.Windows.exe"
+
+[game.launcher]
+kind = "xbox"
+
+[game.capture]
+compatibility = "unknown"
