@@ -286,16 +286,25 @@ Two behaviours protect what is already on disk:
 ## Validating output
 
 Media is validated by inspecting it, never by the absence of an error
-(AGENTS.md section 22). The tests run `ffprobe` **from the pinned FFmpeg build**
-in `third-party/ffmpeg/current/bin`, not whichever is on `PATH`: the pinned build
+(AGENTS.md section 22). The inspecting is
+[`clipped-media-validation`](../tests/media), the workspace's media harness,
+which every crate that writes a file uses and which is itself tested against
+truncated files, files with a track missing and files whose timestamps go
+backwards ([docs/testing.md](testing.md#validating-produced-media)). This crate
+had its own `ffprobe` wrapper until issue #24; it does not any more, and a
+second one should not appear here.
+
+The harness runs `ffprobe` **from the pinned FFmpeg build** in
+`third-party/ffmpeg/current/bin` before falling back to `PATH`: the pinned build
 is fetched by `scripts/fetch-ffmpeg.ps1` on every machine that builds this
-workspace, including CI, so the tests run everywhere the crate compiles instead
-of passing, failing or skipping depending on what somebody happened to install.
+workspace, including CI, so these tests run everywhere the crate compiles
+instead of passing, failing or skipping depending on what somebody happened to
+install.
 
 | Test | What it proves |
 | --- | --- |
 | `tests/mkv_writing.rs` | Track names, languages, default flags, channel counts and codec metadata land in the file; packets go to the track they were addressed to; out-of-order and unrebased timestamps come out monotonic and from zero; an existing file is never overwritten. |
-| `tests/synthetic_recording.rs` | A whole recording — real H.264 and two PCM tracks — opens, decodes frame by frame, has a plausible duration, and carries the right codec metadata. |
+| `tests/synthetic_recording.rs` | A whole recording — real H.264 and two PCM tracks — opens, decodes frame by frame, has a plausible duration, carries the right codec metadata, and has tracks that start and end together. |
 | `tests/abrupt_termination.rs` | A killed recorder leaves a playable file, reaching to within the bound above. |
 | `tests/ffmpeg_linkage.rs` | The FFmpeg actually loaded is the pinned, LGPL-only build and contains what the pipeline needs. |
 

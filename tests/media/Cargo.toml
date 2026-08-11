@@ -1,0 +1,22 @@
+[package]
+name = "clipped-media-validation"
+description = "Test-only harness that asserts a produced recording is really valid media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Test machinery, not a product crate. It is never published and never linked
+# into the recorder; it exists so that every crate which produces media checks
+# it the same way (AGENTS.md section 22, docs/testing.md).
+publish = false
+
+[dependencies]
+# `ffprobe` reports in JSON, and every assertion here is about what it said.
+# Parsing that by hand would make a media test fail for reasons that have
+# nothing to do with the recording.
+serde_json.workspace = true
+
+[lints]
+workspace = true

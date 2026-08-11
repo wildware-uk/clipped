@@ -235,6 +235,7 @@ are split:
 | --- | --- | --- |
 | Unit tests, in each crate | Isolated logic: replay ranges, cleanup rules, configuration resolution, game matching | yes |
 | `tests/integration` | Workspace-wide invariants and subsystem interaction: encoder + muxer, session + database | yes |
+| `tests/media` | The harness every media-producing crate validates its output with, and its own tests against media that is broken | yes |
 | `tests/capture` | Real capture against controlled test applications | no — needs GPU and display |
 | `tests/audio` | Recording known tone generators and asserting the tracks stay isolated | no — needs audio hardware |
 | `tests/performance` | Benchmarks and soak tests against the SPEC.md section 38 targets | no — long-running |
@@ -242,9 +243,10 @@ are split:
 Two rules that matter more here than in most projects. Media output is not
 trusted because the encoder and muxer returned success: generated files are
 inspected — container opens, expected streams present, timestamps monotonic,
-A/V drift acceptable — and `ffprobe` is fair game in tests (AGENTS.md section
-22). And audio isolation is proved with generated tones at known frequencies
-rather than by playing Spotify and listening, because the assertion has to be
+A/V drift acceptable — by `tests/media`, the one harness every crate that writes
+a file uses, and `ffprobe` is fair game in tests (AGENTS.md section 22). And
+audio isolation is proved with generated tones at known frequencies rather than
+by playing Spotify and listening, because the assertion has to be
 machine-checkable and repeatable (AGENTS.md section 26).
 
 ## Assumptions

@@ -13,7 +13,7 @@
 //! as a *process*:
 //!
 //! - `tests/synthetic_recording.rs` runs it to completion and takes the file
-//!   apart with `ffprobe`.
+//!   apart with the workspace's media harness (`tests/media`).
 //! - `tests/abrupt_termination.rs` kills it in the middle and checks what
 //!   survived, which is the claim ADR 0001 rests on and cannot be tested
 //!   in-process: a Rust panic unwinds and runs destructors, and destructors are

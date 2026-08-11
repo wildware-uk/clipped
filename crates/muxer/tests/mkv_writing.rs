@@ -1,24 +1,27 @@
 //! What the writer puts in the file, and what it refuses to do.
 //!
 //! These tests write real recordings through the public API and then take them
-//! apart with `ffprobe`, because a muxer that returns `Ok` has not proved
-//! anything (AGENTS.md section 22). The audio is uncompressed PCM, which needs
-//! no encoder and is therefore genuinely decodable rather than a plausible
-//! shape of bytes; the video track is declared and left empty, since what these
-//! tests are about is the container's description of the recording. Real
-//! encoded video goes through `tests/synthetic_recording.rs`.
+//! apart again, because a muxer that returns `Ok` has not proved anything
+//! (AGENTS.md section 22). The audio is uncompressed PCM, which needs no
+//! encoder and is therefore genuinely decodable rather than a plausible shape
+//! of bytes; the video track is declared and left empty, since what these tests
+//! are about is the container's description of the recording. Real encoded
+//! video goes through `tests/synthetic_recording.rs`.
+//!
+//! Taking them apart is `clipped-media-validation` (`tests/media`), the
+//! workspace's media harness, which reports every failed expectation at once
+//! and is itself tested against files that are broken.
 
 mod support;
 
 use std::time::Duration;
 
+use clipped_media_validation::{
+    require_media_tools, AudioStream, Media, TemporaryDirectory, VideoStream,
+};
 use clipped_muxer::{
     AudioCodec, AudioTrack, EncodedPacket, Language, MkvWriter, MuxError, PacketTimestamp,
     RecordingLayout, TrackId, VideoCodec, VideoTrack,
-};
-use support::{
-    assert_decode_timestamps_increase, field, is_default, number, packets, tag, Probe,
-    TemporaryDirectory,
 };
 
 /// 48 kHz stereo, which is what Windows shared-mode audio runs at.
@@ -104,7 +107,10 @@ fn write_silence(writer: &mut MkvWriter, packet_count: u32) {
 
 #[test]
 fn audio_tracks_keep_their_names_languages_and_default_flag() {
-    let directory = TemporaryDirectory::new("named-tracks");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-named-tracks");
     let path = directory.file("recording.mkv");
 
     let mut writer =
@@ -115,59 +121,57 @@ fn audio_tracks_keep_their_names_languages_and_default_flag() {
     assert_eq!(summary.packets, 150);
     assert_eq!(summary.timestamps_corrected(), 0);
 
-    let probe = Probe::of(&path);
+    let media = Media::open(&path).expect("a finished recording opens");
     assert!(
-        probe.diagnostics.is_empty(),
+        media.diagnostics().is_empty(),
         "ffprobe reported: {}",
-        probe.diagnostics
+        media.diagnostics()
     );
 
-    // One video track, declared even though nothing was written to it, and
-    // three audio tracks in the order they were declared.
-    let video = probe.streams_of("video");
-    assert_eq!(video.len(), 1, "streams: {:#?}", probe.streams);
-    assert_eq!(field(video[0], "codec_name"), Some("h264"));
-    assert_eq!(number(video[0], "width"), Some(f64::from(WIDTH)));
-    assert_eq!(number(video[0], "height"), Some(f64::from(HEIGHT)));
-
-    let audio = probe.streams_of("audio");
-    assert_eq!(audio.len(), 3, "streams: {:#?}", probe.streams);
-
-    let names: Vec<_> = audio.iter().map(|stream| tag(stream, "title")).collect();
-    assert_eq!(
-        names,
-        [Some("Compatibility Mix"), Some("Game"), Some("Microphone"),],
-        "the track names are what an editor shows instead of `Audio 2` (ADR 0001)"
-    );
-
-    for stream in &audio {
-        assert_eq!(field(stream, "codec_name"), Some("pcm_s16le"));
-        assert_eq!(number(stream, "sample_rate"), Some(48_000.0));
-    }
-    assert_eq!(number(audio[0], "channels"), Some(2.0));
-    assert_eq!(
-        number(audio[2], "channels"),
-        Some(1.0),
-        "the microphone track was declared as mono and has to stay mono"
-    );
+    media
+        .validate()
+        // One video track, declared even though nothing was written to it, and
+        // three audio tracks in the order they were declared. The names are
+        // what an editor shows instead of `Audio 2` (ADR 0001), and the
+        // compatibility mix is the track a player should choose on its own
+        // (SPEC.md section 13).
+        .video(VideoStream::codec("h264").resolution(WIDTH, HEIGHT))
+        .audio_stream_count(3)
+        .audio(
+            0,
+            AudioStream::codec("pcm_s16le")
+                .sample_rate(SAMPLE_RATE)
+                .channels(CHANNELS)
+                .title("Compatibility Mix")
+                .default_track(true),
+        )
+        .audio(
+            1,
+            AudioStream::codec("pcm_s16le")
+                .sample_rate(SAMPLE_RATE)
+                .channels(CHANNELS)
+                .title("Game")
+                .default_track(false),
+        )
+        .audio(
+            2,
+            AudioStream::codec("pcm_s16le")
+                .sample_rate(SAMPLE_RATE)
+                // The microphone track was declared as mono and has to stay
+                // mono.
+                .channels(1)
+                .title("Microphone")
+                .language("eng")
+                .default_track(false),
+        )
+        // A second of media, give or take the last packet's length: fifty 20 ms
+        // packets.
+        .duration_seconds(1.015, 0.035)
+        .assert_valid();
 
     // Matroska omits the language element when it is `und`, which is why only
-    // the microphone track carries one here.
-    assert_eq!(tag(audio[2], "language"), Some("eng"));
-    assert_eq!(tag(audio[0], "language"), None);
-
-    // The compatibility mix is the track a player should choose on its own
-    // (SPEC.md section 13).
-    assert!(is_default(audio[0]));
-    assert!(!is_default(audio[1]));
-    assert!(!is_default(audio[2]));
-
-    // A second of media, give or take the last packet's length.
-    let duration = probe.duration_seconds().expect("a finished file has one");
-    assert!(
-        (0.98..=1.05).contains(&duration),
-        "fifty 20 ms packets should be about a second, not {duration}"
-    );
+    // the microphone track carries one.
+    assert_eq!(media.audio_streams()[0].tag("language"), None);
 }
 
 #[test]
@@ -175,7 +179,10 @@ fn every_track_gets_its_own_packets() {
     // A writer that sent every packet to the first stream would satisfy every
     // assertion about names and codecs above, and produce a recording with one
     // usable track. The packet counts are what catch it.
-    let directory = TemporaryDirectory::new("packet-routing");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-packet-routing");
     let path = directory.file("recording.mkv");
 
     let mut writer =
@@ -183,13 +190,13 @@ fn every_track_gets_its_own_packets() {
     write_silence(&mut writer, 25);
     writer.finish().expect("the recording can be finished");
 
-    let probe = Probe::of(&path);
-    let counts: Vec<_> = probe
-        .streams_of("audio")
-        .iter()
-        .map(|stream| number(stream, "nb_read_packets"))
-        .collect();
-    assert_eq!(counts, [Some(25.0), Some(25.0), Some(25.0)]);
+    Media::open(&path)
+        .expect("a finished recording opens")
+        .validate()
+        .audio(0, AudioStream::codec("pcm_s16le").packets(25))
+        .audio(1, AudioStream::codec("pcm_s16le").packets(25))
+        .audio(2, AudioStream::codec("pcm_s16le").packets(25))
+        .assert_valid();
 }
 
 #[test]
@@ -197,7 +204,10 @@ fn packets_that_arrive_out_of_order_are_still_written_in_order() {
     // A clock that steps, or a queue that reorders. The recording must survive
     // it: dropping the packet loses audio and refusing the write loses the
     // session (AGENTS.md section 17).
-    let directory = TemporaryDirectory::new("out-of-order");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-out-of-order");
     let path = directory.file("recording.mkv");
 
     let layout = RecordingLayout::new(video_track()).with_audio_track(AudioTrack::new(
@@ -230,9 +240,11 @@ fn packets_that_arrive_out_of_order_are_still_written_in_order() {
         "exactly one packet needed correcting, and the summary has to say so"
     );
 
-    let written = packets(&path);
+    let media = Media::open(&path).expect("a finished recording opens");
+    media.validate().monotonic_timestamps().assert_valid();
+
+    let written = media.packets();
     assert_eq!(written.len(), 5);
-    assert_decode_timestamps_increase(&written);
     // The corrected packet is one millisecond past its predecessor, so the
     // packet after it is unaffected.
     let times: Vec<_> = written
@@ -248,7 +260,10 @@ fn the_container_stores_the_header_in_the_form_matroska_wants() {
     // produces; Matroska stores an `avcC` record and length-prefixed NAL units.
     // If that conversion did not happen the file would still open, and no
     // player would decode it.
-    let directory = TemporaryDirectory::new("codec-private");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-codec-private");
     let path = directory.file("recording.mkv");
 
     let mut writer =
@@ -256,17 +271,20 @@ fn the_container_stores_the_header_in_the_form_matroska_wants() {
     write_silence(&mut writer, 5);
     writer.finish().expect("the recording can be finished");
 
-    let probe = Probe::of(&path);
-    let video = probe.streams_of("video");
+    // Read from the stream directly rather than through an expectation: how a
+    // codec header is stored is a question about H.264 in Matroska, and the
+    // harness has no opinion about it.
+    let media = Media::open(&path).expect("a finished recording opens");
+    let video = media.video_streams();
     assert_eq!(
-        field(video[0], "is_avc"),
+        video[0].field("is_avc"),
         Some("true"),
         "the header was stored as-is instead of being converted to an avcC record"
     );
-    assert_eq!(field(video[0], "nal_length_size"), Some("4"));
+    assert_eq!(video[0].field("nal_length_size"), Some("4"));
     // 27 bytes of Annex B become a 30-byte avcC record: two start codes are
     // replaced by the record's own header and two length fields.
-    assert_eq!(number(video[0], "extradata_size"), Some(30.0));
+    assert_eq!(video[0].number("extradata_size"), Some(30.0));
 }
 
 #[test]
@@ -274,7 +292,7 @@ fn a_video_track_without_its_out_of_band_header_is_refused() {
     // FFmpeg refuses this too, but only from `avformat_write_header`, with
     // `Invalid data found when processing input` and a file already created.
     // The caller is told what is missing instead (AGENTS.md section 15).
-    let directory = TemporaryDirectory::new("no-video-header");
+    let directory = TemporaryDirectory::new("muxer-no-video-header");
     let path = directory.file("recording.mkv");
 
     let layout = RecordingLayout::new(VideoTrack::new(VideoCodec::H264, WIDTH, HEIGHT));
@@ -297,7 +315,7 @@ fn a_video_track_without_its_out_of_band_header_is_refused() {
 fn an_audio_track_without_the_header_its_codec_needs_is_refused() {
     // Opus stores its identification header in the track entry. PCM has none to
     // store, which is why the tracks above need nothing.
-    let directory = TemporaryDirectory::new("no-audio-header");
+    let directory = TemporaryDirectory::new("muxer-no-audio-header");
     let path = directory.file("recording.mkv");
 
     let layout = RecordingLayout::new(video_track())
@@ -321,7 +339,7 @@ fn a_recording_is_never_written_over_an_existing_file() {
     // The failure this prevents is a session pointed at the name of a recording
     // that already exists. Opening for writing would truncate it, and the
     // footage is not recoverable (AGENTS.md section 56).
-    let directory = TemporaryDirectory::new("no-overwrite");
+    let directory = TemporaryDirectory::new("muxer-no-overwrite");
     let path = directory.file("recording.mkv");
     std::fs::write(&path, b"an irreplaceable recording").expect("the file can be created");
 
@@ -351,7 +369,7 @@ fn a_recording_that_fails_to_start_leaves_no_file_behind() {
     // The failure used is a codec header the muxer accepts as present and
     // FFmpeg then rejects while writing the header: four bytes that are neither
     // Annex B parameter sets nor an `avcC` record.
-    let directory = TemporaryDirectory::new("failed-start");
+    let directory = TemporaryDirectory::new("muxer-failed-start");
     let path = directory.file("recording.mkv");
 
     let layout = RecordingLayout::new(
@@ -373,7 +391,7 @@ fn a_recording_that_fails_to_start_leaves_no_file_behind() {
 
 #[test]
 fn a_packet_for_a_track_the_recording_does_not_have_is_refused() {
-    let directory = TemporaryDirectory::new("unknown-track");
+    let directory = TemporaryDirectory::new("muxer-unknown-track");
     let path = directory.file("recording.mkv");
 
     let layout = RecordingLayout::new(video_track()).with_audio_track(AudioTrack::new(
@@ -406,7 +424,7 @@ fn a_packet_for_a_track_the_recording_does_not_have_is_refused() {
 
 #[test]
 fn a_packet_with_no_data_is_refused() {
-    let directory = TemporaryDirectory::new("empty-packet");
+    let directory = TemporaryDirectory::new("muxer-empty-packet");
     let path = directory.file("recording.mkv");
 
     let layout = RecordingLayout::new(video_track()).with_audio_track(AudioTrack::new(
@@ -435,7 +453,10 @@ fn a_writer_dropped_without_being_finished_still_finishes_the_file() {
     // A session that fails or panics drops its writer without calling `finish`.
     // The recording that was being made is still the user's, so the trailer is
     // written on the way out and the file arrives complete.
-    let directory = TemporaryDirectory::new("dropped");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-dropped");
     let path = directory.file("recording.mkv");
 
     {
@@ -444,15 +465,13 @@ fn a_writer_dropped_without_being_finished_still_finishes_the_file() {
         write_silence(&mut writer, 25);
     }
 
-    let probe = Probe::of(&path);
-    assert_eq!(probe.streams_of("audio").len(), 3);
-    let duration = probe
-        .duration_seconds()
-        .expect("a file whose trailer was written has a duration");
-    assert!(
-        (0.48..=0.55).contains(&duration),
-        "twenty-five 20 ms packets should be about half a second, not {duration}"
-    );
+    Media::open(&path)
+        .expect("a file whose trailer was written opens")
+        .validate()
+        .audio_stream_count(3)
+        // Twenty-five 20 ms packets: about half a second.
+        .duration_seconds(0.515, 0.035)
+        .assert_valid();
 }
 
 #[test]
@@ -460,7 +479,10 @@ fn timestamps_are_relative_to_the_first_packet_of_the_recording() {
     // Callers pass performance counter readings, which count from when the
     // machine booted. A recording that started them at their face value would
     // be a file whose first frame is days in.
-    let directory = TemporaryDirectory::new("rebased");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-rebased");
     let path = directory.file("recording.mkv");
 
     let layout = RecordingLayout::new(video_track()).with_audio_track(AudioTrack::new(
@@ -488,7 +510,8 @@ fn timestamps_are_relative_to_the_first_packet_of_the_recording() {
     }
     writer.finish().expect("the recording can be finished");
 
-    let written = packets(&path);
+    let media = Media::open(&path).expect("a finished recording opens");
+    let written = media.packets();
     assert_eq!(written.len(), 10);
     assert_eq!(written[0].decode_seconds, 0.0);
     assert!(

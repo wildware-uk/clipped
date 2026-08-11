@@ -21,21 +21,25 @@ tracing.workspace = true
 # is layer 2, so this follows the dependency direction.
 clipped-logging.workspace = true
 
-# The muxer's own tests write real recordings and then take them apart again:
-# the synthetic-recording example encodes video with the pinned build's
-# software encoder, and `crates/muxer/tests/support` reads finished files back
-# with the demuxer to check what was written. Both need the FFI directly, and an
-# integration test can only reach a dependency the manifest lists for it.
+# The synthetic-recording example encodes real video with the pinned build's
+# software encoder before handing it to the muxer, so it needs the FFI directly.
+# It is the only test target here that does: reading finished files back is
+# `clipped-media-validation`'s job now, and `crates/muxer/tests/support` only
+# starts the example and collects its output. Cargo builds examples with the
+# dev-dependencies, which is why the FFI is listed twice.
 [dev-dependencies]
 rusty_ffmpeg.workspace = true
 # The synthetic-recording example takes command-line arguments, and every
 # executable in this workspace presents the same argument syntax and the same
 # usage errors (the root manifest says why).
 clap.workspace = true
-# `ffprobe` reports in JSON, and the media tests assert on what it says
-# (AGENTS.md section 22). Parsing it by hand would make a test fail for reasons
-# that have nothing to do with the recording.
-serde_json.workspace = true
+# What the recordings this crate writes are checked with: the container opens,
+# the streams are the ones that were declared, the duration is plausible, the
+# timestamps increase and the tracks are in sync (AGENTS.md section 22). It is
+# the workspace's one media validator rather than this crate's — every crate
+# that produces media uses it, and it is tested against files that are broken as
+# well as files that are not (tests/media, docs/testing.md).
+clipped-media-validation.workspace = true
 
 [lints]
 workspace = true

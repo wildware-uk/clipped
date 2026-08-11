@@ -190,10 +190,17 @@ the above. It is a *test* tool: media tests assert on finished files with it
 link necessary. It is not linked into anything, and nothing in the recorder
 shells out to it.
 
-The muxer's media tests run the `ffprobe.exe` that ships inside the pinned build,
-in `third-party/ffmpeg/current/bin`, rather than whichever one is on `PATH`. The
-fetch script installs it on every machine that builds this workspace, CI
-included, so those tests run everywhere the crate compiles instead of passing,
-failing or quietly skipping depending on what somebody happened to install. An
-`ffprobe` on your `PATH` is still useful for looking at a file by hand, and
-`docs/prerequisites.md` still suggests having one; it is not what the tests use.
+The media harness (`tests/media`, [docs/testing.md](testing.md)) is what runs
+it, on behalf of every crate that writes a file, and it prefers the
+`ffprobe.exe` that ships inside the pinned build in
+`third-party/ffmpeg/current/bin` over whichever one is on `PATH`. The fetch
+script installs it on every machine that builds this workspace, CI included, so
+those tests run everywhere the crate compiles instead of passing, failing or
+quietly skipping depending on what somebody happened to install. An `ffprobe` on
+your `PATH` is still useful for looking at a file by hand, and
+`docs/prerequisites.md` still suggests having one.
+
+The same is true of `ffmpeg.exe`, which the harness uses for one thing:
+decoding an audio track to samples, so that a test can assert a track carries
+its own tone and none of another source's. It is a test tool on exactly the same
+terms — nothing in the recorder shells out to it, and nothing ever should.

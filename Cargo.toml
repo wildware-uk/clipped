@@ -6,7 +6,13 @@ resolver = "2"
 # --workspace --all-targets` and `cargo build --workspace` cover them: a test
 # application nobody compiles is a capture test that stops running, and finding
 # that out during a capture investigation is the worst possible moment.
-members = ["apps/recorder", "crates/*", "test-apps/*", "tests/integration"]
+members = [
+    "apps/recorder",
+    "crates/*",
+    "test-apps/*",
+    "tests/integration",
+    "tests/media",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -97,6 +103,13 @@ clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
 clipped-session = { path = "crates/session", version = "0.1.0" }
 clipped-storage = { path = "crates/storage", version = "0.1.0" }
 clipped-windows = { path = "crates/windows", version = "0.1.0" }
+
+# The media validation harness (tests/media, docs/testing.md). It is listed
+# here with the product crates rather than beside the test applications below
+# because the crates that *produce* media take it as a dev-dependency, so it has
+# to sit underneath all of them — it depends on nothing in this workspace, and
+# nothing but a `[dev-dependencies]` entry may name it.
+clipped-media-validation = { path = "tests/media", version = "0.1.0" }
 
 # The controlled test applications (AGENTS.md section 26, docs/testing.md). They
 # are listed here for the same reason the crates above are — one place to change

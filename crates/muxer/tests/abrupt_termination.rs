@@ -32,7 +32,8 @@
 
 mod support;
 
-use support::{packets, Probe, RunningRecorder, TemporaryDirectory};
+use clipped_media_validation::{require_media_tools, Media, TemporaryDirectory, VideoStream};
+use support::RunningRecorder;
 
 /// How far into the recording the process is killed.
 const KILL_AFTER_SECONDS: f64 = 3.0;
@@ -62,7 +63,10 @@ const ACCEPTABLE_LOSS_SECONDS: f64 = 1.1;
 
 #[test]
 fn a_killed_recording_still_plays_up_to_nearly_the_moment_it_died() {
-    let directory = TemporaryDirectory::new("killed");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-killed");
     let path = directory.file("recording.mkv");
 
     let interrupted = record_and_kill(&path, 1.0);
@@ -85,7 +89,10 @@ fn what_is_lost_is_bounded_by_the_muxer_rather_than_by_the_keyframe_interval() {
     // leaves an 823-byte file that ffprobe reports `End of file` for and finds
     // no streams in. The muxer's cluster time limit is what keeps the loss
     // where the test above put it, whatever the encoder was tuned for.
-    let directory = TemporaryDirectory::new("killed-long-gop");
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-killed-long-gop");
     let path = directory.file("recording.mkv");
 
     let interrupted = record_and_kill(&path, 5.0);
@@ -148,39 +155,48 @@ fn record_and_kill(path: &std::path::Path, keyframe_seconds: f64) -> Interrupted
     // everything in front of it perfectly well. The question this test asks is
     // not whether the truncation is invisible; it is whether what precedes it
     // plays. So the assertions below are about content, and a file FFmpeg
-    // genuinely cannot open fails them: it reports no streams at all.
-    let probe = Probe::of(path);
+    // genuinely cannot open fails them: `Media::open` refuses a file it finds
+    // no streams in, which is exactly what a recording killed before its first
+    // cluster closed leaves behind.
+    let media = Media::open(path).unwrap_or_else(|error| {
+        panic!("the interrupted recording is not usable at all: {error}");
+    });
 
-    // Every track is still described: the header was written when the file was
-    // created, not when it was finished.
-    assert_eq!(
-        probe.streams.len(),
-        3,
-        "the interrupted recording lost a track. ffprobe said: {}",
-        probe.diagnostics
-    );
-    let video = probe.streams_of("video");
-    assert_eq!(video.len(), 1);
+    // Every track is still described — the header was written when the file was
+    // created, not when it was finished — and the video decodes, frame by
+    // frame, rather than merely being listed.
+    let video = media.video_streams();
+    let decoded = video
+        .first()
+        .and_then(|stream| stream.number("nb_read_frames"))
+        .unwrap_or_default();
+    let parsed = video
+        .first()
+        .and_then(|stream| stream.number("nb_read_packets"))
+        .unwrap_or_default();
 
-    // And the video decodes, frame by frame, rather than merely being listed.
-    let decoded = support::number(video[0], "nb_read_frames").unwrap_or_default();
-    let parsed = support::number(video[0], "nb_read_packets").unwrap_or_default();
-    assert!(
-        decoded > 0.0,
-        "no frame of the interrupted recording could be decoded. ffprobe said: {}",
-        probe.diagnostics
-    );
-    assert!(
-        decoded >= parsed - 1.0,
-        "{parsed} packets survived but only {decoded} of them decoded; at most the final \
-         one, which the kill may have cut in half, should be unusable"
-    );
+    media
+        .validate()
+        .stream_count(3)
+        .video(VideoStream::codec("h264"))
+        .that(decoded > 0.0, || {
+            format!(
+                "no frame of the interrupted recording could be decoded out of the {parsed} \
+                 packets that survived"
+            )
+        })
+        .that(decoded >= parsed - 1.0, || {
+            format!(
+                "{parsed} packets survived but only {decoded} of them decoded; at most the \
+                 final one, which the kill may have cut in half, should be unusable"
+            )
+        })
+        // The timestamps that survived are still monotonic, per track.
+        .monotonic_timestamps()
+        .assert_valid();
 
-    // The timestamps that survived are still monotonic, per track.
-    let written = packets(path);
-    support::assert_decode_timestamps_increase(&written);
-
-    let last_video_packet = written
+    let last_video_packet = media
+        .packets()
         .iter()
         .filter(|packet| packet.stream_index == 0)
         .map(|packet| packet.decode_seconds)

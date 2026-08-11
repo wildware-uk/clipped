@@ -20,11 +20,21 @@ use serde_json::Value;
 /// added without being placed here.
 const LAYERS: &[&[&str]] = &[
     // Platform primitives and shared vocabulary, which depend on nothing else.
+    //
+    // `clipped-media-validation` is here rather than with the test-only
+    // packages further up for one reason: every crate that *produces* media
+    // takes it as a dev-dependency to check its output (AGENTS.md section 22,
+    // docs/testing.md), so it has to sit below all of them. It depends on
+    // nothing in this workspace, which is what makes that placement sound.
+    // Layering alone would let any crate name it under `[dependencies]`, so
+    // `test_only_packages_are_never_linked_into_the_product` is what holds it
+    // to a `[dev-dependencies]` entry.
     &[
         "clipped-windows",
         "clipped-events",
         "clipped-storage",
         "clipped-logging",
+        "clipped-media-validation",
     ],
     // Subsystems built directly on a platform or persistence layer.
     &[
@@ -63,8 +73,24 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// One package's dependency on another package of this workspace.
+struct WorkspaceDependency {
+    name: String,
+    /// What `cargo metadata` calls the dependency's kind: `dev`, `build`, or
+    /// nothing at all for a normal `[dependencies]` entry. The distinction is
+    /// the whole of the "test-only" in "test-only package": a dev-dependency is
+    /// never linked into the shipping recorder, and a normal one always is.
+    kind: Option<String>,
+}
+
+impl WorkspaceDependency {
+    fn is_dev(&self) -> bool {
+        self.kind.as_deref() == Some("dev")
+    }
+}
+
 /// Reads the workspace's own packages and their intra-workspace dependencies.
-fn workspace_dependencies() -> HashMap<String, Vec<String>> {
+fn workspace_dependencies() -> HashMap<String, Vec<WorkspaceDependency>> {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(workspace_root())
@@ -103,9 +129,16 @@ fn workspace_dependencies() -> HashMap<String, Vec<String>> {
                 .as_array()
                 .expect("package has a dependencies array")
                 .iter()
-                .filter_map(|dependency| dependency["name"].as_str())
-                .filter(|dependency| member_names.iter().any(|member| member == dependency))
-                .map(str::to_owned)
+                .filter_map(|dependency| {
+                    let name = dependency["name"].as_str()?;
+                    member_names
+                        .iter()
+                        .any(|member| member == name)
+                        .then(|| WorkspaceDependency {
+                            name: name.to_owned(),
+                            kind: dependency["kind"].as_str().map(str::to_owned),
+                        })
+                })
                 .collect();
             (name, dependencies)
         })
@@ -141,13 +174,14 @@ fn every_dependency_points_down_the_stack() {
             continue;
         };
         for dependency in dependencies {
-            let Some(dependency_layer) = layer_of(&dependency) else {
+            let Some(dependency_layer) = layer_of(&dependency.name) else {
                 continue;
             };
             if dependency_layer >= crate_layer {
                 violations.push(format!(
-                    "{crate_name} (layer {crate_layer}) depends on {dependency} \
-                     (layer {dependency_layer})"
+                    "{crate_name} (layer {crate_layer}) depends on {} \
+                     (layer {dependency_layer})",
+                    dependency.name
                 ));
             }
         }
@@ -157,6 +191,41 @@ fn every_dependency_points_down_the_stack() {
     assert!(
         violations.is_empty(),
         "dependencies must point at a strictly lower layer: {violations:#?}"
+    );
+}
+
+/// Test-only packages that must never be linked into a shipping binary, and
+/// which may therefore only ever appear under `[dev-dependencies]`.
+///
+/// Being at a low layer is not enough on its own. `clipped-media-validation`
+/// sits at layer 0 so that every crate which *produces* media can check its
+/// output with it, which means the layering test above is satisfied by a normal
+/// `[dependencies]` entry from anywhere in the stack — and a normal entry would
+/// put a test harness, and `serde_json`, inside the recorder.
+const TEST_ONLY_PACKAGES: &[&str] = &["clipped-media-validation"];
+
+#[test]
+fn test_only_packages_are_never_linked_into_the_product() {
+    let mut violations = Vec::new();
+
+    for (crate_name, dependencies) in workspace_dependencies() {
+        for dependency in dependencies {
+            if TEST_ONLY_PACKAGES.contains(&dependency.name.as_str()) && !dependency.is_dev() {
+                violations.push(format!(
+                    "{crate_name} names {} as a {} dependency",
+                    dependency.name,
+                    dependency.kind.as_deref().unwrap_or("normal")
+                ));
+            }
+        }
+    }
+    violations.sort();
+
+    assert!(
+        violations.is_empty(),
+        "these packages exist only to test other packages and must appear under \
+         [dev-dependencies] so that nothing links them into a shipping binary \
+         (README.md, docs/testing.md): {violations:#?}"
     );
 }
 
