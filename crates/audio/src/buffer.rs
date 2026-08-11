@@ -128,14 +128,19 @@ impl<'a> CapturedAudio<'a> {
     /// WASAPI attached to the packet the samples came from, adjusted for any
     /// frames trimmed off its front.
     ///
-    /// **The difference between the two is the audio/video offset.** The sample
-    /// count advances at the endpoint's own rate and the counter position
-    /// advances at the reference clock's, so the gap between them is exactly how
-    /// far the audio track has slid against the video, in nanoseconds, at that
-    /// moment. Nothing else in the pipeline can see it: by the time the samples
-    /// reach a muxer the two accounts have been reconciled into one timestamp.
-    /// Feeding the pair to `clipped_capture::DriftEstimator` is what turns "the
-    /// recording sounded fine" into a number; `docs/av-sync.md` is the model.
+    /// **The difference between the two is how far the track has slid against
+    /// the reference clock**, in nanoseconds, at that moment. The sample count
+    /// advances at the endpoint's own rate and the counter position advances at
+    /// the reference clock's, and video timestamps are readings of that same
+    /// counter, so the way that gap grows is the way the audio moves against the
+    /// picture. It is a difference rather than an absolute: it says nothing
+    /// about any constant offset the two accounts already had when the capture
+    /// started. Nothing else in the pipeline can see even that much — by the
+    /// time the samples reach a muxer the two accounts have been reconciled into
+    /// one timestamp. Feeding the pair to `clipped_capture::DriftEstimator` is
+    /// what turns "the recording sounded fine" into a number; `docs/av-sync.md`
+    /// is the model, and is honest about what the number does and does not
+    /// cover.
     ///
     /// [`None`] for [`SampleOrigin::SynthesisedSilence`], which covers a period
     /// the endpoint never described and therefore has no position of its own to

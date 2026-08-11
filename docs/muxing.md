@@ -121,7 +121,7 @@ reordered presentation timestamps are left alone, and the writer corrects:
 | What arrived | What is written | Why |
 | --- | --- | --- |
 | A decode timestamp at or before the previous one on that track | One tick past its predecessor | FFmpeg refuses the packet outright — `av_interleaved_write_frame` returns `EINVAL` — so writing it unchanged would end the recording. Dropping it would lose picture. |
-| A timestamp before the start of the file | Clamped to the start | Happens when tracks begin at slightly different moments and the later-starting one is written first. |
+| A timestamp before the start of the file | Clamped to the start | Happens when tracks begin at slightly different moments and the later-starting one is written first. It is a last resort rather than a policy: audio that genuinely precedes the recording is meant to have been trimmed at the epoch before it ever reaches a writer ([av-sync.md](av-sync.md)), because clamping stacks every such packet on the first instant of the file. A summary reporting many of these means that trim was not applied upstream. |
 | A presentation timestamp before its own decode timestamp | Raised to match | Only reachable after one of the corrections above; no decoder can present a frame it has not decoded. |
 
 Nothing is ever dropped and no correction is silent. Each kind is counted in

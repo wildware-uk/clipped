@@ -21,21 +21,41 @@
 //!   performance-counter position, which is the same clock the video frames
 //!   arriving on the other thread are stamped with.
 //!
-//! Their difference is the audio/video offset, in nanoseconds, at that moment.
-//! It is not a proxy for it or an estimate of it: video timestamps *are*
-//! performance-counter readings, so the gap between the counter and where the
-//! audio track has got to is precisely how far the audio in the finished file
-//! sits from the picture. The slope of that gap over the run is the drift rate,
-//! and it is the number that decides whether a two-hour recording ends in sync.
+//! Their difference is how far the track has moved against the performance
+//! counter, in nanoseconds, at that moment. Video timestamps are readings of
+//! that same counter, so the way that difference grows over the run is the way
+//! the audio moves against the picture, and its slope is the drift rate — the
+//! number that decides whether a two-hour recording *ends* as well aligned as it
+//! started.
 //!
 //! # What it cannot measure
 //!
-//! *Physical* synchronisation — whether the sound leaving the speakers and the
+//! Three things, and the printed result means much less without them.
+//!
+//! **A constant offset.** The measurement is relative. `clipped-audio` anchors
+//! its track on the first packet's own device position, so the first observation
+//! of a run is zero by construction, and everything after it is measured from
+//! there. An error that was already present when the capture started — the
+//! endpoint's own reporting bias, or a session that starts the audio at a
+//! different moment from the video — is invisible here at any size. What is
+//! measured is the change.
+//!
+//! **What a file ends up containing.** Nothing here writes one. `clipped-muxer`
+//! rescales media times to 1 ms container ticks and clamps any timestamp before
+//! the file's origin to the start of it (`docs/muxing.md`), and both of those
+//! alter the offset a finished recording has in it. This measures the
+//! timestamps the pipeline produces, which is what a writer is given, not what
+//! it wrote.
+//!
+//! **Physical synchronisation** — whether the sound leaving the speakers and the
 //! light leaving the panel are simultaneous. That needs a microphone and a
 //! photodiode, and it would be measuring Windows' output latency rather than
-//! this recorder. What is in scope here is the timestamp domain: the recorder is
-//! responsible for placing each source at the moment its own hardware said it
-//! happened, and that is what is asserted.
+//! this recorder.
+//!
+//! What is in scope is the timestamp domain: the recorder is responsible for
+//! placing each source at the moment its own hardware said it happened, and that
+//! is what is asserted. The fitted rate is printed with its standard error, so
+//! that the part of it which is scatter rather than crystal is on the same line.
 //!
 //! # Why the endpoint is kept awake
 //!
@@ -51,9 +71,18 @@
 //! # Why it is `#[ignore]`d
 //!
 //! It needs a GPU, a display, an audio endpoint and minutes of wall-clock time,
-//! and it puts a window on a display. Being ignored rather than skipping itself
-//! is deliberate: a test that decides for itself that it could not run reads as
-//! a pass.
+//! and it puts a window on a display. Being `#[ignore]`d rather than deciding at
+//! run time whether it applies is deliberate: what runs it is a person or a job
+//! that meant to, rather than a filter inside the test.
+//!
+//! It does report two conditions and carry on rather than failing — the default
+//! output device refusing a render stream, and an endpoint that delivered no
+//! packets at all — because both mean the machine could not present the
+//! measurement with anything to measure, and neither is a fault in the code
+//! under test. Both print `SKIPPED (av-sync): …`, and both fail the run outright
+//! when `CLIPPED_REQUIRE_AUDIO` is set, which is how CI and anybody collecting
+//! evidence should run it. A green run without that variable set is not on its
+//! own evidence that an offset was measured; the printed lines are.
 //!
 //! ```text
 //! # The default: about ninety seconds.
@@ -93,7 +122,9 @@ use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoIncrementMTAUsage, CLSCTX_ALL};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoIncrementMTAUsage, CoTaskMemFree, CLSCTX_ALL,
+};
 
 /// How long a run lasts unless [`RUN_SECONDS`] says otherwise.
 ///
@@ -156,7 +187,12 @@ const MAX_SUBJECT_RESTARTS: u32 = 3;
 /// reference clock, and that continues whatever happens to the window, so a
 /// subject that dies late does not invalidate the measurement. What it does
 /// invalidate is the claim that video and audio were captured *together*, so
-/// there is a floor: half the run, which no single restart can breach.
+/// there is a floor: half the run.
+///
+/// Coverage, not the interval from the first frame to the last. Those are the
+/// same number until a subject has to be restarted, and after that the interval
+/// includes the time nothing was being captured — which is exactly the case the
+/// floor exists to catch.
 const MINIMUM_VIDEO_COVERAGE: f64 = 0.5;
 
 /// Reports that the test could not run here.
@@ -217,6 +253,13 @@ fn av_offset_stays_within_tolerance_while_video_and_audio_are_captured_together(
 struct VideoRun {
     /// Every delivered frame's source timestamp, in arrival order.
     timestamps: Vec<CaptureTimestamp>,
+    /// How much of the run the capture actually had frames for: the sum of each
+    /// subject's own first-to-last span, so that the downtime between a subject
+    /// dying and the next one starting is not counted as covered.
+    covered: Duration,
+    /// How many subjects delivered at least one frame, which is how many pieces
+    /// [`covered`](Self::covered) is the sum of.
+    pieces: u32,
     /// `(pattern counter, source timestamp)` for the sampled frames of the
     /// longest single run of the subject. Only one run's worth, because the
     /// counter restarts at zero with the subject and a fit spanning a restart
@@ -248,7 +291,12 @@ struct AudioRun {
     /// Frames handed over in total, real and synthesised.
     frames: u64,
     sample_rate: u32,
-    endpoint: String,
+    /// Every endpoint the capture was on, in the order it was on them. More
+    /// than one means the default output device changed under the run.
+    endpoints: Vec<String>,
+    /// How many times the capture reported that it could not follow the new
+    /// default endpoint and continued as silence.
+    format_changes: u64,
     failed: Option<String>,
 }
 
@@ -287,8 +335,14 @@ impl AudioRun {
                 return run;
             }
         };
+        // The track's format, not the endpoint's. `clipped-audio` never changes
+        // the shape of what it hands over mid-capture: an endpoint it cannot
+        // follow becomes silence in this format and is reported as
+        // `FormatChanged` (`crates/audio/src/error.rs`). So this rate stays the
+        // right divisor for the frame count for the whole run.
         run.sample_rate = capture.format().sample_rate().get();
-        run.endpoint = capture.endpoint_name().unwrap_or("<none>").to_owned();
+        let mut endpoint = capture.endpoint_name().unwrap_or("<none>").to_owned();
+        run.endpoints.push(endpoint.clone());
 
         while !stop.load(Ordering::Relaxed) {
             match capture.read(Duration::from_millis(100)) {
@@ -304,16 +358,38 @@ impl AudioRun {
                 }
                 Ok(Capture::Idle) => {}
                 Ok(Capture::FormatChanged(format)) => {
-                    // The default endpoint moved under the recording. The
-                    // capture survives it and so does this measurement, but the
-                    // clock being measured is a different crystal from here on,
-                    // so it is worth saying.
-                    note(&format!("the output device changed to {format} mid-run"));
+                    // The default endpoint moved to one this capture cannot
+                    // follow, so the track continues as silence in the original
+                    // format. There are no more device positions to compare
+                    // against from here on, which is worth saying loudly: the
+                    // rest of the run measures nothing.
+                    run.format_changes += 1;
+                    note(&format!(
+                        "the default output device changed to {format}, which this capture \
+                         cannot follow; the track continues as silence and no further A/V \
+                         offset can be observed"
+                    ));
                 }
                 Err(error) => {
                     run.failed = Some(format!("the audio capture failed mid-run: {error}"));
                     break;
                 }
+            }
+
+            // Read after the match, because the borrow the samples held on the
+            // capture has ended by here. An endpoint can also be replaced by an
+            // *interchangeable* one — same rate, same channels — which the
+            // capture follows silently and reports through no event at all. It
+            // is still a different crystal, so the report has to name every
+            // device it was on rather than the one it opened with.
+            let current = capture.endpoint_name().unwrap_or("<none>");
+            if current != endpoint {
+                note(&format!(
+                    "the endpoint changed from {endpoint:?} to {current:?} mid-run; the \
+                     drift measured before the change is a different crystal's"
+                ));
+                endpoint = current.to_owned();
+                run.endpoints.push(endpoint.clone());
             }
         }
 
@@ -440,6 +516,10 @@ fn capture_video(run: Duration) -> VideoRun {
         // `DXGI_ERROR_DEVICE_REMOVED` several frames later — so the reader is
         // built beside the backend it reads from and dies with it.
         let mut reader = FrameReader::default();
+        // Where this subject's timestamps start in the run's list, so that what
+        // it covered can be added up separately from the gap before the next
+        // one starts.
+        let first_of_this_subject = video.timestamps.len();
         let lost = loop {
             if Instant::now() >= deadline {
                 break false;
@@ -496,6 +576,12 @@ fn capture_video(run: Duration) -> VideoRun {
 
         if decoded_here.len() > video.decoded.len() {
             video.decoded = decoded_here;
+        }
+
+        let this_subject = &video.timestamps[first_of_this_subject..];
+        if let (Some(first), Some(last)) = (this_subject.first(), this_subject.last()) {
+            video.covered += last.duration_since(*first).unwrap_or_default();
+            video.pieces += 1;
         }
 
         if !lost {
@@ -559,7 +645,14 @@ fn capture_video(run: Duration) -> VideoRun {
 struct Report {
     clock: CaptureClock,
     video_frames: usize,
+    /// First frame to last, downtime between subjects included.
     video_span: Duration,
+    /// The sum of each subject's own first-to-last span: how much of the run
+    /// the capture had frames for. Equal to [`Self::video_span`] unless the
+    /// subject had to be restarted.
+    video_covered: Duration,
+    /// How many pieces [`Self::video_covered`] is the sum of.
+    video_pieces: u32,
     video_timeouts: u64,
     video_missed: u64,
     video_undecodable: u64,
@@ -575,7 +668,8 @@ struct Report {
 
 #[derive(Debug)]
 struct AudioSummary {
-    endpoint: String,
+    endpoints: Vec<String>,
+    format_changes: u64,
     sample_rate: u32,
     frames: u64,
     synthesised_frames: u64,
@@ -620,6 +714,8 @@ impl Report {
             clock,
             video_frames: video.timestamps.len(),
             video_span: last.duration_since(first).unwrap_or_default(),
+            video_covered: video.covered,
+            video_pieces: video.pieces,
             video_timeouts: video.timeouts,
             video_missed: video.backend_missed,
             video_undecodable: video.undecodable,
@@ -629,7 +725,8 @@ impl Report {
             decoded: video.decoded_total,
             source_interval_nanos: source_interval(&video.decoded),
             audio: AudioSummary {
-                endpoint: audio.endpoint.clone(),
+                endpoints: audio.endpoints.clone(),
+                format_changes: audio.format_changes,
                 sample_rate: audio.sample_rate,
                 frames: audio.frames,
                 synthesised_frames: audio.synthesised_frames,
@@ -656,15 +753,25 @@ impl Report {
                 .unwrap_or("it did not report a clean stop"),
         ));
         note(&format!(
-            "video: {} frames over {:.3} s, {} acquisition timeouts, {} frames missed, \
-             {} of {} sampled frames undecodable",
+            "video: {} frames covering {:.3} s of the run, {} acquisition timeouts, \
+             {} frames missed, {} of {} sampled frames undecodable",
             self.video_frames,
-            self.video_span.as_secs_f64(),
+            self.video_covered.as_secs_f64(),
             self.video_timeouts,
             self.video_missed,
             self.video_undecodable,
             self.decoded + self.video_undecodable,
         ));
+        if self.video_restarts > 0 {
+            note(&format!(
+                "video: the first frame to the last spans {:.3} s, so {:.3} s of that was \
+                 downtime between subjects and is not counted as covered",
+                self.video_span.as_secs_f64(),
+                self.video_span
+                    .saturating_sub(self.video_covered)
+                    .as_secs_f64(),
+            ));
+        }
         if let Some(interval) = self.source_interval_nanos {
             note(&format!(
                 "video: the source presented a frame every {:.4} ms measured against the \
@@ -674,15 +781,31 @@ impl Report {
             ));
         }
         note(&format!(
-            "audio: endpoint {:?} at {} Hz, {} frames ({:.3} s), {} synthesised, \
+            "audio: endpoint {} at {} Hz, {} frames ({:.3} s), {} synthesised, \
              {} endpoint buffers",
-            self.audio.endpoint,
+            if self.audio.endpoints.is_empty() {
+                "<none>".to_owned()
+            } else {
+                self.audio
+                    .endpoints
+                    .iter()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", then ")
+            },
             self.audio.sample_rate,
             self.audio.frames,
             self.audio.frames as f64 / f64::from(self.audio.sample_rate.max(1)),
             self.audio.synthesised_frames,
             self.audio.endpoint_buffers,
         ));
+        if self.audio.format_changes > 0 {
+            note(&format!(
+                "audio: {} format change(s), after each of which the track is synthesised \
+                 silence with no device position of its own and contributes no observations",
+                self.audio.format_changes,
+            ));
+        }
         if let (Some(first), Some(last)) = (self.audio.first_media, self.audio.last_media) {
             note(&format!(
                 "audio: track media time runs from {:.3} ms to {:.3} ms",
@@ -691,6 +814,13 @@ impl Report {
             ));
         }
 
+        // Printed beside the numbers rather than left to the document, because
+        // the numbers are what gets quoted.
+        note(
+            "A/V offset: the track's position minus the endpoint's, anchored on the first \
+             buffer — so these are the change over the run, and any constant offset the \
+             two already had is not in them",
+        );
         match (self.estimator.first(), self.estimator.latest()) {
             (Some(first), Some(latest)) => note(&format!(
                 "A/V offset: first {:+.3} ms, last {:+.3} ms, peak {:+.3} ms, {} \
@@ -709,16 +839,33 @@ impl Report {
         }
 
         match self.estimator.rate() {
-            Some(rate) => note(&format!(
-                "drift: {rate} over {:.1} s of correction-free capture; at that rate the \
-                 tolerance ({} ms of lag) is reached after {}",
-                self.estimator.segment_span_nanos() as f64 / 1e9,
-                self.tolerance.behind().as_millis(),
-                rate.time_to(self.tolerance.behind()).map_or_else(
-                    || "never".to_owned(),
-                    |budget| format!("{:.1} minutes", budget.as_secs_f64() / 60.0)
-                ),
-            )),
+            Some(rate) => {
+                // The budget is the limit the offset is moving *towards*. A
+                // negative rate is a track stamping events early, so it spends
+                // the lead allowance; a positive one spends the lag allowance.
+                // They differ by half, so reporting the wrong one overstates
+                // the headroom by 50% (EBU R37: 40 ms of lead, 60 ms of lag).
+                let (limit, direction) = if rate.as_ratio() < 0.0 {
+                    (self.tolerance.ahead(), "lead")
+                } else {
+                    (self.tolerance.behind(), "lag")
+                };
+                note(&format!(
+                    "drift: {rate}, standard error {} over {:.1} s of correction-free \
+                     capture; at that rate the tolerance ({} ms of {direction}) is reached \
+                     after {} of recording",
+                    self.estimator.rate_standard_error().map_or_else(
+                        || "unknown".to_owned(),
+                        |error| format!("{:.4} ppm", error.parts_per_million())
+                    ),
+                    self.estimator.segment_span_nanos() as f64 / 1e9,
+                    limit.as_millis(),
+                    rate.time_to(limit).map_or_else(
+                        || "never".to_owned(),
+                        |budget| format!("{:.1} minutes", budget.as_secs_f64() / 60.0)
+                    ),
+                ));
+            }
             None => note("drift: not enough of a correction-free segment to fit a rate to"),
         }
     }
@@ -744,15 +891,20 @@ impl Report {
              found its subject"
         );
 
-        // The video timestamps have to span the run. If they stopped early, the
-        // offsets measured after that point are being compared against a clock
-        // nothing is reading.
+        // The video capture has to have covered the run. Summed per subject,
+        // not first frame to last: a subject that dies at 5 s and comes back at
+        // 60 s of a 70 s run spans 65 s while covering 15, and this assertion
+        // is the only thing tying the offset measurement to the claim that
+        // video and audio were captured together.
         assert!(
-            self.video_span.as_secs_f64() > run.as_secs_f64() * MINIMUM_VIDEO_COVERAGE,
-            "the video timestamps span {:.1} s of a {:.1} s run, after {} subject              restart(s), which is too little of it to claim video and audio were              captured together",
-            self.video_span.as_secs_f64(),
+            self.video_covered.as_secs_f64() > run.as_secs_f64() * MINIMUM_VIDEO_COVERAGE,
+            "the video capture covered {:.1} s of a {:.1} s run, in {} piece(s) spanning \
+             {:.1} s, which is too little of it to claim video and audio were captured \
+             together",
+            self.video_covered.as_secs_f64(),
             run.as_secs_f64(),
-            self.video_restarts,
+            self.video_pieces,
+            self.video_span.as_secs_f64(),
         );
 
         let Some(state) = self.estimator.state(&self.tolerance) else {
@@ -915,15 +1067,21 @@ fn keep_awake(running: &AtomicBool, ready: &std::sync::mpsc::Sender<Result<(), S
         // SAFETY: `device` is live; the interface is fixed by the return type.
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
         // SAFETY: `client` is live and uninitialised, which is when
-        // `GetMixFormat` is valid. The allocation it returns is owned here; it
-        // is leaked deliberately rather than freed with `CoTaskMemFree`,
-        // because this is a test process whose exit reclaims it and the
-        // alternative is a second unsafe block for no benefit.
+        // `GetMixFormat` is valid. The `WAVEFORMATEX` it returns is a
+        // `CoTaskMemAlloc` allocation this code now owns, and it is given back
+        // below (AGENTS.md section 58).
         let mix = unsafe { client.GetMixFormat() }?;
         // SAFETY: `mix` is the format Windows just reported for this endpoint,
         // so it is a format the endpoint accepts, and shared mode never takes
-        // the device away from anything else.
-        unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2_000_000, 0, mix, None) }?;
+        // the device away from anything else. `Initialize` copies what it needs
+        // out of the format, so the allocation is released straight afterwards
+        // whether or not it succeeded.
+        let initialised =
+            unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2_000_000, 0, mix, None) };
+        // SAFETY: `mix` came from `GetMixFormat`, has not been freed, and is
+        // not used again after this point.
+        unsafe { CoTaskMemFree(Some(mix.cast())) };
+        initialised?;
         // SAFETY: `client` is initialised, which is when `GetService` is valid.
         let render: IAudioRenderClient = unsafe { client.GetService() }?;
         // SAFETY: `client` is initialised.

@@ -117,14 +117,17 @@ It is the same clock a captured video frame is stamped on, so audio and video
 timestamps can be subtracted from one another directly.
 
 Every buffer carries **two** accounts of the same moment, and the difference
-between them is the audio/video offset. `CapturedAudio::timestamp` is where the
-*track* puts it — the anchor plus every frame emitted since, so the track is
-contiguous and as long as the recording — and `CapturedAudio::device_timestamp`
-is where the *endpoint* said it belongs, adjusted for any frames trimmed off the
-front of the packet. The first advances at the endpoint's sample rate and the
-second at the performance counter's, so the gap between them is exactly how far
-the audio has slid against the picture. Synthesised silence has no
-`device_timestamp`, because it covers a period the device never described.
+between them is how far the track has slid against the reference clock.
+`CapturedAudio::timestamp` is where the *track* puts it — the anchor plus every
+frame emitted since, so the track is contiguous and as long as the recording —
+and `CapturedAudio::device_timestamp` is where the *endpoint* said it belongs,
+adjusted for any frames trimmed off the front of the packet. The first advances
+at the endpoint's sample rate and the second at the performance counter's, so
+the way the gap between them grows is the way the audio slides against the
+picture. It is a difference and not an absolute: the track is anchored on the
+first packet's own device position, so it says nothing about any constant offset
+the two accounts already had. Synthesised silence has no `device_timestamp`,
+because it covers a period the device never described.
 
 [av-sync.md](av-sync.md) is the model that consumes this: which clock a
 recording is timed against, where the conversion to a media time happens, what

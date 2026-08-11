@@ -237,9 +237,11 @@ cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --te
 
 `av_sync.rs` additionally needs an audio endpoint, runs for about ninety seconds
 by default, and takes `CLIPPED_AV_SYNC_SECONDS` for the long runs the drift
-figures in [av-sync.md](av-sync.md) come from. It makes no sound: it holds a
-render stream open so the endpoint's clock keeps running, and every buffer it
-hands the audio engine is marked silent.
+figures in [av-sync.md](av-sync.md) come from. Set `CLIPPED_REQUIRE_AUDIO` when
+the numbers are being recorded, so that a machine which delivers no endpoint
+packets fails rather than printing `SKIPPED (av-sync): …` and passing. It makes
+no sound: it holds a render stream open so the endpoint's clock keeps running,
+and every buffer it hands the audio engine is marked silent.
 
 `--nocapture` is worth typing: each test prints its frame accounting, which is
 the evidence AGENTS.md section 53 asks to be recorded on the issue. A run on

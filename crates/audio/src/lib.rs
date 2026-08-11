@@ -65,8 +65,9 @@
 //! check. Every buffer carries two accounts of the same moment:
 //! [`CapturedAudio::timestamp`] is where the track puts it, counting samples,
 //! and [`CapturedAudio::device_timestamp`] is where the endpoint said it
-//! belongs. The gap between them is the audio/video offset, and
-//! `docs/av-sync.md` is what measures it.
+//! belongs. The way the gap between them grows is the way the audio slides
+//! against the picture; `docs/av-sync.md` is what measures it, and is exact
+//! about what such a measurement does and does not cover.
 //!
 //! **A recording outlives its audio device.** The default endpoint changing,
 //! being unplugged, or not existing at all does not end a capture; the track

@@ -449,9 +449,12 @@ impl fmt::Display for SyncTolerance {
 /// Where a track sits relative to the recording's reference clock.
 ///
 /// Three states rather than two, because "out of tolerance" on its own does not
-/// say which way, and which way is most of the diagnosis: a track running ahead
-/// of the clock has been given too many samples, and one running behind has
-/// been given too few.
+/// say which way, and which way is most of the diagnosis. A track's timestamps
+/// are its anchor plus its frame count, so a track that is [`Ahead`](Self::Ahead)
+/// — sound before picture — has been given *fewer* frames than the elapsed real
+/// time accounts for, and one that is [`Behind`](Self::Behind) has been given
+/// more. Those have different causes: a slow endpoint crystal or lost packets on
+/// one side, a fast crystal or over-synthesised silence on the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncState {
     /// Within the tolerance, in both directions.
@@ -480,6 +483,21 @@ impl fmt::Display for SyncState {
 /// and read out in whichever of the two units the reader wants: parts per
 /// million, which is how a crystal's accuracy is specified, and milliseconds per
 /// minute, which is how the symptom is described.
+///
+/// # The sign
+///
+/// The rate is the slope of the offset, and the offset is the track's position
+/// minus the reference clock's ([`DriftEstimator::observe`]). So a **positive**
+/// rate is a track whose clock runs fast — an endpoint delivering more than its
+/// nominal frames per real second — stamping each event later than it happened,
+/// which plays back as sound **lagging** the picture ([`SyncState::Behind`]). A
+/// **negative** rate is a slow track clock, stamping events early, which
+/// **leads** the picture ([`SyncState::Ahead`]).
+///
+/// Worth being exact about, because a corrector reading this backwards
+/// (issue #30) would resample in the direction that doubles the error: a
+/// positive rate is removed by making the track shorter, a negative one by
+/// making it longer.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct DriftRate(f64);
 
@@ -512,6 +530,13 @@ impl DriftRate {
 
     /// How long a recording may run before this rate produces `budget` of
     /// error.
+    ///
+    /// The magnitude of the rate is used, so `budget` has to be the limit in
+    /// the direction the rate is actually heading — [`SyncTolerance::ahead`]
+    /// for a negative rate and [`SyncTolerance::behind`] for a positive one.
+    /// Passing the other one answers a question about a limit this recording is
+    /// moving away from, and since the two limits differ by half, the answer is
+    /// wrong by half.
     ///
     /// [`None`] when it never will — a rate of exactly zero — and when the
     /// answer is longer than a [`Duration`] can hold, which a rate small enough
@@ -561,8 +586,15 @@ pub const DEFAULT_DISCONTINUITY_STEP: Duration = Duration::from_millis(1);
 /// says it happened, and where the track being measured places it. For system
 /// audio those are the performance-counter position the endpoint reported for a
 /// packet, and the media time the audio timeline assigned to that packet's first
-/// frame. Their difference is the A/V offset a viewer would see, in nanoseconds,
-/// and its slope is the drift.
+/// frame. Their difference is how far the track has moved against the reference
+/// clock, in nanoseconds, and its slope is the drift.
+///
+/// That difference is *relative*: the first observation of a segment is
+/// whatever the two sources happened to disagree by when it started, and every
+/// later one is measured from the same pair of origins. So the estimator
+/// measures change, and a constant offset between the two sources — one that
+/// was already there at the first observation — is not something it can see.
+/// `docs/av-sync.md` says what that means for a recording.
 ///
 /// # What it does with a discontinuity
 ///
@@ -575,7 +607,7 @@ pub const DEFAULT_DISCONTINUITY_STEP: Duration = Duration::from_millis(1);
 ///
 /// # Cost
 ///
-/// Four integer accumulators and no allocation, so a capture thread may call
+/// Five integer accumulators and no allocation, so a capture thread may call
 /// [`observe`](Self::observe) per packet (AGENTS.md sections 18 and 20).
 #[derive(Debug, Clone)]
 pub struct DriftEstimator {
@@ -602,6 +634,7 @@ struct Segment {
     sum_y: i128,
     sum_xy: i128,
     sum_xx: i128,
+    sum_yy: i128,
 }
 
 impl Segment {
@@ -618,6 +651,7 @@ impl Segment {
         self.sum_y += y;
         self.sum_xy += x * y;
         self.sum_xx += x * x;
+        self.sum_yy += y * y;
     }
 
     /// The least-squares slope, in nanoseconds of offset per millisecond of
@@ -632,6 +666,30 @@ impl Segment {
             return None;
         }
         Some(numerator as f64 / denominator as f64)
+    }
+
+    /// The standard error of [`slope_ppm`](Self::slope_ppm), in the same units.
+    ///
+    /// Ordinary least squares: `sqrt(residual sum of squares / ((n − 2) ×
+    /// Sxx))`, rewritten in terms of the same accumulated sums the slope uses,
+    /// so that it needs no second pass over observations this type does not
+    /// keep. [`None`] before there are three observations, because two points
+    /// fit a line exactly and an exact fit is not evidence.
+    fn slope_standard_error_ppm(&self) -> Option<f64> {
+        if self.count < 3 {
+            return None;
+        }
+        let sxx = (self.count * self.sum_xx - self.sum_x * self.sum_x) as f64;
+        let sxy = (self.count * self.sum_xy - self.sum_x * self.sum_y) as f64;
+        let syy = (self.count * self.sum_yy - self.sum_y * self.sum_y) as f64;
+        if sxx <= 0.0 {
+            return None;
+        }
+        // Clamped at zero because a segment that lies exactly on its line has a
+        // residual of zero, and computing it as a difference of two numbers
+        // around 10^25 can land a little either side of it.
+        let residual = (syy * sxx - sxy * sxy).max(0.0);
+        Some((residual / ((self.count - 2) as f64)).sqrt() / sxx)
     }
 }
 
@@ -728,6 +786,26 @@ impl DriftEstimator {
         // per million; the ratio this type holds is a millionth of that.
         self.segment
             .slope_ppm()
+            .map(|ppm| DriftRate::from_ratio(ppm / 1e6))
+    }
+
+    /// The standard error of [`rate`](Self::rate): how much of the fitted rate
+    /// is the crystal and how much is the scatter of the observations.
+    ///
+    /// A rate quoted without one is a number with no claim attached to it. This
+    /// is the ordinary least-squares standard error of the slope, so roughly:
+    /// the true rate of this segment is within about twice this of the fitted
+    /// one, *if* the only thing wrong with the observations is random scatter.
+    /// It says nothing about anything systematic — a bias in what the endpoint
+    /// reports is not scatter, and no number of observations reveals it.
+    ///
+    /// [`None`] when [`rate`](Self::rate) is, and when the segment holds fewer
+    /// than three observations: two points fit a line exactly, and an exact fit
+    /// is not evidence.
+    #[must_use]
+    pub fn rate_standard_error(&self) -> Option<DriftRate> {
+        self.segment
+            .slope_standard_error_ppm()
             .map(|ppm| DriftRate::from_ratio(ppm / 1e6))
     }
 
@@ -942,8 +1020,19 @@ mod tests {
         );
     }
 
-    /// Feeds `packets` observations of a track running `ppm` faster than the
-    /// reference clock, one every 10 ms, and returns the estimator.
+    /// Feeds `packets` observations of a track whose timeline gains `ppm` parts
+    /// per million against the reference clock, one every 10 ms, and returns
+    /// the estimator.
+    ///
+    /// The sign convention is the one [`DriftEstimator::observe`] uses, and it
+    /// is worth stating because there are two clocks and "fast" means the
+    /// opposite thing about each. A **positive** `ppm` is a track whose own
+    /// clock runs fast — an endpoint delivering slightly more than its nominal
+    /// frames per real second — so it stamps each event slightly *later* than
+    /// the moment it happened, the offset grows positive, and the sound ends up
+    /// **lagging** the picture ([`SyncState::Behind`]). A **negative** `ppm` is
+    /// a slow track clock, which stamps events early and **leads** the picture
+    /// ([`SyncState::Ahead`]).
     fn run_at(ppm: f64, packets: i64) -> DriftEstimator {
         let mut estimator = DriftEstimator::new(DEFAULT_DISCONTINUITY_STEP);
         for packet in 0..packets {
@@ -973,10 +1062,11 @@ mod tests {
     }
 
     #[test]
-    fn the_rate_of_a_slow_track_is_recovered_from_its_offsets() {
+    fn the_rate_of_a_lagging_track_is_recovered_from_its_offsets() {
         // The measurement this whole module exists to make: ten minutes of a
-        // track running 50 ppm behind the reference clock, which is 3 ms per
-        // minute and 30 ms by the end.
+        // track whose clock runs 50 ppm fast, so it stamps every event late and
+        // the sound falls behind the picture by 3 ms per minute — 30 ms by the
+        // end.
         let estimator = run_at(50.0, 60_000);
         let rate = estimator.rate().expect("ten minutes of observations fit");
 
@@ -996,20 +1086,77 @@ mod tests {
 
     #[test]
     fn the_sign_of_the_rate_says_which_way_the_track_is_going() {
-        let fast = run_at(-25.0, 60_000);
-        let rate = fast.rate().expect("ten minutes of observations fit");
+        // The other direction: a track clock running 25 ppm slow, which stamps
+        // every event early, so the sound leads the picture.
+        let leading = run_at(-25.0, 60_000);
+        let rate = leading.rate().expect("ten minutes of observations fit");
         assert!(
             (rate.parts_per_million() + 25.0).abs() < 0.1,
             "expected about -25 ppm, measured {rate}"
         );
         assert!(
-            fast.peak() < 0,
-            "a track running ahead has negative offsets"
+            leading.peak() < 0,
+            "a track that leads the picture has negative offsets"
         );
         assert_eq!(
-            fast.state(&SyncTolerance::default()),
+            leading.state(&SyncTolerance::default()),
             Some(SyncState::InTolerance)
         );
+    }
+
+    #[test]
+    fn a_fitted_rate_carries_the_scatter_it_was_fitted_through() {
+        // A rate quoted without an error bar is a number with no claim attached
+        // to it, and `docs/av-sync.md` quotes one. Two segments with the same
+        // slope and very different scatter must not report the same confidence
+        // in it.
+        let clean = run_at(50.0, 60_000);
+        let clean_error = clean
+            .rate_standard_error()
+            .expect("ten minutes of observations fit");
+        assert!(
+            clean_error.parts_per_million() < 1e-6,
+            "a segment that lies on its line has nothing to be uncertain about, \
+             not {clean_error}"
+        );
+
+        // The same 50 ppm, seen through 50 microseconds of packet jitter.
+        let jitter = [37_000_i64, -52_000, 11_000, -80_000, 64_000, -9_000];
+        let mut noisy = DriftEstimator::new(DEFAULT_DISCONTINUITY_STEP);
+        for packet in 0..60_000_i64 {
+            let reference = packet * 10_000_000;
+            let offset = reference / 20_000 + jitter[packet as usize % jitter.len()];
+            noisy.observe(
+                MediaTime::from_nanos(reference),
+                MediaTime::from_nanos(reference + offset),
+            );
+        }
+        let noisy_rate = noisy.rate().expect("ten minutes of observations fit");
+        let noisy_error = noisy
+            .rate_standard_error()
+            .expect("ten minutes of observations fit");
+
+        assert!(
+            noisy_error.parts_per_million() > 100.0 * clean_error.parts_per_million(),
+            "jitter has to widen the error bar, but it read {noisy_error} against \
+             {clean_error}"
+        );
+        assert!(
+            (noisy_rate.parts_per_million() - 50.0).abs() < 2.0 * noisy_error.parts_per_million(),
+            "the fit should sit within two standard errors of the truth: {noisy_rate} \
+             ± {noisy_error}"
+        );
+
+        // Two points fit a line exactly, and an exact fit through two points is
+        // not evidence of anything.
+        let mut pair = DriftEstimator::new(DEFAULT_DISCONTINUITY_STEP);
+        pair.observe(MediaTime::from_nanos(0), MediaTime::from_nanos(0));
+        pair.observe(
+            MediaTime::from_nanos(10_000_000),
+            MediaTime::from_nanos(10_000_100),
+        );
+        assert!(pair.rate().is_some());
+        assert_eq!(pair.rate_standard_error(), None);
     }
 
     #[test]

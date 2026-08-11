@@ -31,7 +31,10 @@ is how they are run.
 default. `CLIPPED_AV_SYNC_SECONDS` lengthens the run — the drift figures in
 [docs/av-sync.md](../../docs/av-sync.md) come from `CLIPPED_AV_SYNC_SECONDS=1800`
 — because a drift of a few parts per million is not visible in ninety seconds
-and is exactly what the model has to be right about.
+and is exactly what the model has to be right about. Set `CLIPPED_REQUIRE_AUDIO`
+with it: without that variable a machine whose endpoint delivers no packets
+prints `SKIPPED (av-sync): …` and still passes, and a run whose numbers are being
+recorded should fail instead.
 
 `wgc_video_pattern.rs` also holds tests of its own frame accounting — that a
 counter arriving twice is counted as a duplicate and fails the run, that a run
