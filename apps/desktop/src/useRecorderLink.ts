@@ -1,4 +1,4 @@
-import { type RecorderStatus } from '@clipped/shared';
+import { type RecorderStatus, type RecordingStatus } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState } from 'react';
@@ -31,11 +31,40 @@ export type RecorderLinkState =
     }
   | { readonly link: 'unavailable'; readonly reason: string };
 
+/**
+ * The recording a recorder was writing when it died: `ActiveRecording` in
+ * `crates/ipc`.
+ *
+ * Derived from the protocol's own `RecordingStatus` rather than written out a
+ * second time (AGENTS.md section 55). The two are the same fields; the `state`
+ * tag is what a *status* carries and an interruption does not, because the
+ * recorder that would have had a state is gone.
+ */
+export type InterruptedRecording = Omit<RecordingStatus, 'state'>;
+
 /** Everything the Rust side sends on the `recorder-link` event. */
 type RecorderLinkEvent =
   | { readonly event: 'state'; readonly [key: string]: unknown }
-  | { readonly event: 'recording_interrupted'; readonly [key: string]: unknown }
+  | ({ readonly event: 'recording_interrupted' } & InterruptedRecording)
   | { readonly event: 'recording_failed'; readonly [key: string]: unknown };
+
+/**
+ * Everything the window knows about the recorder.
+ *
+ * Two fields rather than one because they answer different questions and have
+ * different lifetimes. `link` is where the connection stands *now*; `interrupted`
+ * is something that happened, stays true afterwards, and is the whole of what
+ * [ADR 0006](../../../docs/adr/0006-recorder-lifetime-and-supervision.md)'s
+ * recovery produces — "recovery names the file; it does not resume the
+ * recording". Folding it into `link` would lose it at the next state change,
+ * which for a killed recorder is about a second later.
+ */
+export interface RecorderLinkView {
+  /** Where the link with the recorder stands, or `null` outside the window. */
+  readonly link: RecorderLinkState | null;
+  /** The most recent recording a recorder died in the middle of, if any. */
+  readonly interrupted: InterruptedRecording | null;
+}
 
 /** The name the Rust side emits under. */
 const LINK_EVENT = 'recorder-link';
@@ -46,10 +75,10 @@ const LINK_EVENT = 'recorder-link';
  * The Rust side tags the event with `event: "state"` and flattens the state
  * beside it, so the state is the payload without that one field.
  */
-function withoutTag(payload: RecorderLinkEvent): RecorderLinkState {
+function withoutTag<T>(payload: RecorderLinkEvent): T {
   const copy: Record<string, unknown> = { ...payload };
   delete copy.event;
-  return copy as unknown as RecorderLinkState;
+  return copy as unknown as T;
 }
 
 /**
@@ -67,17 +96,20 @@ function inTauriWindow(): boolean {
 /**
  * Follows the recorder link, or reports that there is none to follow.
  *
- * `null` means this interface is not running inside the Clipped window, which is
- * a different thing from the recorder being unreachable and is rendered
- * differently.
+ * A `link` of `null` means this interface is not running inside the Clipped
+ * window, which is a different thing from the recorder being unreachable and is
+ * rendered differently.
  *
  * The window asks once and then follows the event, because both carry the whole
  * state rather than a delta: a window that missed an event recovers on the next
- * one, and the first answer is never raced by a subscription that started after
- * it.
+ * one. The two are independent round trips, so the answer to the question can
+ * arrive *after* an event that supersedes it; `superseded` is what stops that
+ * answer overwriting newer state, because a snapshot from before the last event
+ * is exactly the stale reading AGENTS.md section 27 is about.
  */
-export function useRecorderLink(): RecorderLinkState | null {
+export function useRecorderLink(): RecorderLinkView {
   const [state, setState] = useState<RecorderLinkState | null>(null);
+  const [interrupted, setInterrupted] = useState<InterruptedRecording | null>(null);
 
   useEffect(() => {
     if (!inTauriWindow()) {
@@ -85,10 +117,11 @@ export function useRecorderLink(): RecorderLinkState | null {
     }
 
     let current = true;
+    let superseded = false;
 
     invoke<RecorderLinkState>('recorder_link_state')
       .then((answer) => {
-        if (current) {
+        if (current && !superseded) {
           setState(answer);
         }
       })
@@ -96,18 +129,34 @@ export function useRecorderLink(): RecorderLinkState | null {
         // The command exists in every build that has this window, so a failure
         // here is a bug rather than a state. Reporting it as "unavailable" with
         // the reason is better than an interface that shows nothing at all.
-        if (current) {
+        if (current && !superseded) {
           setState({ link: 'unavailable', reason: String(error) });
         }
       });
 
     const subscription = listen<RecorderLinkEvent>(LINK_EVENT, ({ payload }) => {
-      // Only the state; the interruption and failure events are what a
-      // notification would render (issues #110 and #53), and this block has
-      // nowhere to put them.
-      if (current && payload.event === 'state') {
-        setState(withoutTag(payload));
+      if (!current) {
+        return;
       }
+
+      if (payload.event === 'state') {
+        superseded = true;
+        setState(withoutTag<RecorderLinkState>(payload));
+        return;
+      }
+
+      if (payload.event === 'recording_interrupted') {
+        // The one piece of information the recovery design exists to produce:
+        // a recorder died mid-recording and left a playable file at a path
+        // nobody else will ever tell the user about (ADR 0006). Kept until the
+        // window closes, because it stays true — nothing later makes that file
+        // any less real.
+        setInterrupted(withoutTag<InterruptedRecording>(payload));
+      }
+
+      // `recording_failed` is a recording that failed while the recorder stayed
+      // up, which the state that follows it already describes. Giving it a
+      // notice of its own is issue #53.
     }).catch((error: unknown) => {
       // Subscribing needs `core:event:allow-listen` in
       // `src-tauri/capabilities/default.json`; without it Tauri rejects this
@@ -127,16 +176,19 @@ export function useRecorderLink(): RecorderLinkState | null {
     return () => {
       current = false;
       subscription
-        .then((unlisten) => {
-          unlisten?.();
-        })
+        // Tauri types `UnlistenFn` as returning nothing, and it returns a
+        // promise: unsubscribing is a round trip to the Rust side like any
+        // other. Wrapped so that the round trip is part of this chain, because
+        // a bare call leaves its rejection unhandled, and an unhandled
+        // rejection in a webview is a console error nobody reads.
+        .then((unlisten) => Promise.resolve<void>(unlisten?.()))
         .catch(() => {
           // Nothing to do: the listener is going away with the window.
         });
     };
   }, []);
 
-  return state;
+  return { link: state, interrupted };
 }
 
 /** The two or three words shown as the recorder's state, and one sentence. */
@@ -182,4 +234,26 @@ export function describeRecorderLink(link: RecorderLinkState | null): RecorderSt
     case 'unavailable':
       return { state: 'Not available', detail: link.reason };
   }
+}
+
+/**
+ * What to say about a recording a recorder died in the middle of.
+ *
+ * Three things, and only those three, because they are what
+ * [ADR 0006](../../../docs/adr/0006-recorder-lifetime-and-supervision.md)
+ * settled recovery *is*: that a recording was interrupted, where the file it
+ * left is, and that it was not resumed. Resuming is not something Clipped can
+ * do honestly — a replacement recorder cannot go on writing a container another
+ * process opened — so saying where the file is, is the whole of what can be
+ * offered, and a user who is not told is a user who never finds it.
+ *
+ * The path is named in full and never abbreviated: it is the only thing here
+ * that anybody can act on (AGENTS.md sections 28 and 45).
+ */
+export function describeInterruption(interrupted: InterruptedRecording | null): string | undefined {
+  if (interrupted === null) {
+    return undefined;
+  }
+
+  return `Recording interrupted. Not resumed. The file is at ${interrupted.output}.`;
 }

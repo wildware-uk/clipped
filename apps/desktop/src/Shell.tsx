@@ -4,7 +4,7 @@ import { useCallback, type ReactNode } from 'react';
 import { Route, Routes, useLocation, useNavigate } from 'react-router';
 
 import { UnknownScreen } from './UnknownScreen';
-import { describeRecorderLink, useRecorderLink } from './useRecorderLink';
+import { describeInterruption, describeRecorderLink, useRecorderLink } from './useRecorderLink';
 import { useWindowTitle } from './useWindowTitle';
 
 const hrefFor = (screen: Screen): string => `#${screen.path}`;
@@ -22,7 +22,8 @@ export function Shell(): ReactNode {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const screen = screenFor(pathname);
-  const recorder = describeRecorderLink(useRecorderLink());
+  const { link, interrupted } = useRecorderLink();
+  const recorder = describeRecorderLink(link);
 
   // The window title is what a person reads in the taskbar, in Alt+Tab and in
   // the window switcher, so it says which screen is open rather than only which
@@ -67,11 +68,21 @@ export function Shell(): ReactNode {
          * nothing here can show a state the application does not have
          * (AGENTS.md section 27, issue #106).
          *
+         * The notice is the other half, and the only part of this block that is
+         * not a state: when a recorder is killed mid-recording the supervisor
+         * names the file it left, and ADR 0006 settled that naming it is the
+         * whole of what recovery means. Dropping that here would leave the
+         * window showing "Idle" and the user with a recording they cannot find.
+         *
          * There are still no controls: a "Try again" control for a link that
          * has given up is issue #221, and a Start Recording button belongs with
          * the screens that have somewhere to put it.
          */
-        <RecorderStatus state={recorder.state} detail={recorder.detail} />
+        <RecorderStatus
+          state={recorder.state}
+          detail={recorder.detail}
+          notice={describeInterruption(interrupted)}
+        />
       }
     >
       <Routes>

@@ -1,10 +1,11 @@
 import { SCREENS } from '@clipped/shared';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { StrictMode } from 'react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
+import { stubRecorderLinkRuntime } from './test/recorderLinkRuntime';
 
 /**
  * The shell's contract, as tests.
@@ -55,6 +56,7 @@ describe('the application shell', () => {
     // Testing Library only registers its own teardown when Vitest's globals are
     // on, and they are off here: an assertion should say where it came from.
     cleanup();
+    vi.unstubAllGlobals();
     window.location.hash = '';
   });
 
@@ -95,6 +97,44 @@ describe('the application shell', () => {
     expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
       'Skip to content',
     ]);
+  });
+
+  it('names the file a killed recorder left, rather than only saying "Idle"', async () => {
+    // The whole of what ADR 0006 calls recovery, at the layer the user reads:
+    // the supervisor emits `recording_interrupted` naming the file, and about a
+    // second later a state that says the link is attached to a *replacement*
+    // recorder doing nothing. Everything about that second message is true, and
+    // on its own it leaves somebody with a recording they will never find.
+    //
+    // Rendered through `<App />` rather than through the hook, because the
+    // defect this guards against is the notice being dropped anywhere between
+    // the event and the screen.
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
+    renderApp();
+
+    runtime.emit({
+      event: 'recording_interrupted',
+      recording_id: 'r-7',
+      output: 'D:\\clips\\2026-08-11 cs2.mkv',
+      target: 'process cs2.exe',
+      elapsed_ms: 42_000,
+    });
+    runtime.emit({
+      event: 'state',
+      link: 'attached',
+      recorder_process_id: 91,
+      status: { state: 'idle' },
+    });
+
+    const status = screen.getByRole('region', { name: 'Recorder status' });
+    await waitFor(() => {
+      expect(within(status).getByText(/D:\\clips\\2026-08-11 cs2\.mkv/)).toBeVisible();
+    });
+    expect(within(status).getByText(/not resumed/i)).toBeVisible();
+    // And still no controls: naming the file is what can be offered, and a
+    // button that claimed to resume the recording could not keep the promise
+    // (ADR 0006, AGENTS.md section 27).
+    expect(within(status).queryAllByRole('button')).toHaveLength(0);
   });
 
   it('reaches the skip link and then every screen with Tab alone', async () => {

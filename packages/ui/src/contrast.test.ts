@@ -311,6 +311,11 @@ describe('the shell', () => {
     ['body text on the window ground', INHERITED, WINDOW],
     ['secondary text on the window ground', ['styles', '\\.clipped-muted', 'color'], WINDOW],
     ['secondary text in the sidebar', ['styles', '\\.clipped-status__detail', 'color'], SIDEBAR],
+    [
+      'the interrupted-recording notice in the sidebar',
+      ['styles', '\\.clipped-status__notice', 'color'],
+      SIDEBAR,
+    ],
     ['a link on the window ground', ['styles', 'a', 'color'], WINDOW],
     [
       'the open navigation item',
