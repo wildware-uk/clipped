@@ -211,6 +211,24 @@ channel = "$fixtureRustPin"
     New-ItemProperty -LiteralPath $sdkRegistryPath -Name 'KitsRoot10' -Value $sdkRoot `
         -PropertyType String -Force | Out-Null
 
+    # --- WebView2 registrations, also under HKCU -----------------------------
+
+    # The runtime is detected by the `pv` value under its fixed product code.
+    # Two fixtures: one installed, and one that has been uninstalled - which
+    # leaves the key behind with a pv of 0.0.0.0, and is the case a check that
+    # only asked "does the key exist?" would get wrong on a machine where the
+    # runtime is genuinely gone.
+    $webView2Version = '141.0.3537.85'
+    $webView2RegistryPath = Join-Path $fixtureRegistryRoot 'EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    New-Item -Path $webView2RegistryPath -Force | Out-Null
+    New-ItemProperty -LiteralPath $webView2RegistryPath -Name 'pv' -Value $webView2Version `
+        -PropertyType String -Force | Out-Null
+
+    $webView2UninstalledPath = Join-Path $fixtureRegistryRoot 'EdgeUpdateUninstalled\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    New-Item -Path $webView2UninstalledPath -Force | Out-Null
+    New-ItemProperty -LiteralPath $webView2UninstalledPath -Name 'pv' -Value '0.0.0.0' `
+        -PropertyType String -Force | Out-Null
+
     # --- an LLVM install, and an FFmpeg build that has been fetched ---------
 
     # Only the file's name and location matter to the check: it reports where
@@ -410,6 +428,7 @@ FFMPEG_LINK_MODE = "dynamic"
             FfmpegLinkMode           = $null
             VsWherePath              = $vswherePresent
             WindowsKitsRegistryPath  = $sdkRegistryPath
+            WebView2RegistryPath     = $webView2RegistryPath
             RustToolchainFile        = $pinFile
             NvmrcFile                = $nvmrcFile
             # Node is only required once the desktop application exists, and it
@@ -451,7 +470,11 @@ FFMPEG_LINK_MODE = "dynamic"
         # Resolved from the fixture Cargo configuration, with nothing in the
         # environment, and named from the pin record inside the build.
         '[ OK ] FFmpeg libraries',
-        "$ffmpegBuild.zip, linked dynamically"
+        "$ffmpegBuild.zip, linked dynamically",
+        # Read out of the fixture key rather than reported as a bare "present",
+        # so a contributor comparing against a WebView2 release note can.
+        '[ OK ] WebView2 runtime',
+        $webView2Version
     )
 
     # The case the ticket exists for: none of the toolchain is present, and the
@@ -487,6 +510,42 @@ FFMPEG_LINK_MODE = "dynamic"
         -Arguments (New-Arguments @{ NodeCommand = 'clipped-no-such-node' }) `
         -ExpectedExitCode 0 `
         -ExpectedText @('[WARN] Node.js', 'optional prerequisite(s) need attention', 'https://nodejs.org')
+
+    # The desktop application is a Tauri window, which is a WebView2 host: with
+    # no runtime it does not open, and apps/desktop/src-tauri/src/main.rs can
+    # only panic about it, because by then there is no interface left to report
+    # it in. Saying so here is the whole point of the check.
+    Assert-Case -Name 'a missing WebView2 runtime fails once the desktop app exists' `
+        -Arguments (New-Arguments @{
+            WebView2RegistryPath = 'HKCU:\SOFTWARE\Clipped\NoSuchWebView2'
+            DesktopManifest      = $desktopManifest
+        }) `
+        -ExpectedExitCode 1 `
+        -ExpectedText @(
+        '[FAIL] WebView2 runtime',
+        'no runtime registered under any of the WebView2 keys',
+        'developer.microsoft.com/microsoft-edge/webview2'
+    )
+
+    # And is a warning before it exists, for the same reason Node is: nothing
+    # else in the repository opens a window.
+    Assert-Case -Name 'a missing WebView2 runtime is a warning until the desktop app exists' `
+        -Arguments (New-Arguments @{ WebView2RegistryPath = 'HKCU:\SOFTWARE\Clipped\NoSuchWebView2' }) `
+        -ExpectedExitCode 0 `
+        -ExpectedText @('[WARN] WebView2 runtime', 'optional prerequisite(s) need attention')
+
+    # Uninstalling the runtime leaves its key behind with a pv of 0.0.0.0, which
+    # is Microsoft's own signal for "not installed". A check that asked only
+    # whether the key existed would pass on a machine where the window cannot
+    # open, which is the one answer worse than no check at all.
+    Assert-Case -Name 'a WebView2 key left behind by an uninstall is not a runtime' `
+        -Arguments (New-Arguments @{
+            WebView2RegistryPath = $webView2UninstalledPath
+            DesktopManifest      = $desktopManifest
+        }) `
+        -ExpectedExitCode 1 `
+        -ExpectedText @('[FAIL] WebView2 runtime', 'no runtime registered under any of the WebView2 keys') `
+        -UnexpectedText @('0.0.0.0')
 
     # Neither LLVM nor a fetched FFmpeg is on a fresh machine, and both are
     # needed before crates/muxer will build. Without these two checks the

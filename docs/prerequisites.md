@@ -34,6 +34,16 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+And for the desktop application, which is an npm workspace at the repository
+root ([desktop-ui.md](desktop-ui.md)):
+
+```text
+npm install
+npm run lint
+npm test
+npm run build
+```
+
 ## Running the scripts
 
 Every PowerShell command on this page carries the same prefix, because a stock
@@ -104,6 +114,7 @@ Two things to know about that route:
 | LLVM (`libclang`) | any recent release | check script |
 | FFmpeg libraries | the pin in `scripts/fetch-ffmpeg.ps1` | check script; see [FFmpeg libraries](#ffmpeg-libraries) |
 | Node | major version from `.nvmrc` | check script; see [Node](#node) |
+| WebView2 runtime | Evergreen | check script; see [WebView2 runtime](#webview2-runtime) |
 | GPU driver | vendor-current | reported, not enforced |
 | `ffprobe` (test tool) | any recent build | check script, warning only |
 
@@ -295,16 +306,17 @@ verifies the recorded pin, touches no network and says so.
 ## Node
 
 `.nvmrc` pins the Node version. Node is not needed to build or test the Rust
-workspace, so the check script currently reports a missing Node as a warning
-rather than a failure.
+workspace, but it is needed to build, run or test the desktop application — and
+`apps/desktop/package.json` exists, so the check script reports a missing or
+wrong-major Node as a **failure** rather than a warning. It decides that by
+testing for that file, which means the promotion happened on its own when the
+shell landed rather than by anybody remembering to change a script.
 
-That changes when the desktop application lands: `apps/desktop` is a placeholder
-today, and once it gains a `package.json` the check script promotes Node to a
-required prerequisite automatically (it tests for that file). The pin should then
-also be enforced in two more places:
+The same pin is read in two further places, so nothing has to be kept in step by
+hand:
 
-- `engines.node` in the desktop application's `package.json`, so `npm install`
-  refuses a wrong major version.
+- `engines.node` in `apps/desktop/package.json` and in the workspace root's, so
+  `npm install` refuses a wrong major version.
 - `actions/setup-node` with `node-version-file: .nvmrc` in CI, so the workflow
   and contributors read the same pin from the same file.
 
@@ -320,6 +332,37 @@ right major is not.
 Fix: install the pinned version from [nodejs.org](https://nodejs.org), or use a
 version manager that understands `.nvmrc` and run `nvm install` (nvm-windows) or
 `fnm use` in the repository root.
+
+## WebView2 runtime
+
+The desktop application is a Tauri window, and a Tauri window on Windows is a
+WebView2 host. Without the runtime it does not open at all:
+`apps/desktop/src-tauri/src/main.rs` can only panic, naming the runtime, because
+by the time that failure happens there is no interface left to report it in.
+
+Windows 11 ships the Evergreen runtime and Windows Update pushes it to Windows
+10, so this is a check rather than an install step for almost everybody — which
+is why it is worth checking rather than assuming. It is required on the same
+terms as Node: needed to run the desktop application, needed for nothing else,
+and so a failure only once `apps/desktop/package.json` exists.
+
+Check: the check script reads the runtime's version from the registry, under the
+Evergreen product code `{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`. It tries three
+keys, because the runtime registers under a different one depending on how it
+was installed:
+
+```text
+HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-...}   per machine, 64-bit Windows
+HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-...}               per machine, 32-bit Windows
+HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-...}               per user
+```
+
+A `pv` value of `0.0.0.0` means the runtime has been uninstalled and only its key
+remains, and is read as absent.
+
+Fix: install the Evergreen WebView2 Runtime from
+[developer.microsoft.com](https://developer.microsoft.com/microsoft-edge/webview2/).
+It updates itself thereafter, so there is no version to pin.
 
 ## GPU and drivers
 

@@ -1,0 +1,11 @@
+{
+  "name": "@clipped/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Framework-agnostic types and data shared between the Clipped desktop application and its UI components.",
+  "license": "MPL-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

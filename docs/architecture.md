@@ -74,11 +74,18 @@ capture pipeline, and it is not required for recording to start, continue or
 finalise. The reasoning and the alternatives considered are in
 [ADR 0002](adr/0002-separate-recorder-process.md).
 
-One consequence is enforced in the repository: `apps/desktop` and `packages/`
-are deliberately **not** Cargo packages, so the UI cannot be linked into the
-recorder even by mistake. The test `no_crate_depends_on_the_desktop_application`
-in `tests/integration/tests/workspace_layering.rs` fails if a `Cargo.toml`
-appears in any of them.
+One consequence is enforced in the repository, by three tests in
+`tests/integration/tests/workspace_layering.rs`:
+
+- `the_javascript_side_never_becomes_a_cargo_package` — the interface itself,
+  `packages/ui` and `packages/shared` are deliberately **not** Cargo packages,
+  and it fails if a `Cargo.toml` appears in any of them.
+- `no_crate_depends_on_the_desktop_application` — `apps/desktop/src-tauri` *is*
+  a Cargo package, the Tauri binary that owns the window, in a workspace of its
+  own. It fails if any crate of this workspace names `clipped-desktop`.
+- `the_desktop_application_links_no_crate_of_this_workspace` — the same rule
+  facing the other way, so the window reaches the recorder over IPC rather than
+  by linking capture or encoding into its own process.
 
 A second consequence is a convention held up by review, not by a check: no crate
 under `crates/` may refer to UI concerns at all. `clipped-session`, the top
@@ -155,8 +162,8 @@ problem.
 Being blunt about it, because the gap between this section and the ones above is
 large:
 
-- The workspace, the eleven `clipped-*` crates, the recorder binary, the
-  desktop and web placeholders, and the four test suites exist.
+- The workspace, the eleven `clipped-*` crates, the recorder binary, the desktop
+  application's shell, and the four test suites exist.
 - Most crates under `crates/` contain **module documentation only**: no types,
   no functions and no capture code. Three are further on. `clipped-logging` has
   the subscriber setup and the typed logging context. `clipped-capture` has the
@@ -184,7 +191,15 @@ large:
   to the thread that writes the file — which is what keeps the capture thread
   off the filesystem (AGENTS.md section 20). Per-game settings, game detection
   and the replay buffer are later milestones and are not there.
-- `apps/desktop` and `packages/` are README placeholders.
+- `apps/desktop` is the application shell and only the shell: a Tauri 2 window
+  hosting a React interface, with its layout, navigation, design tokens and
+  accessibility baseline, drawn from `packages/ui` and typed by
+  `packages/shared`. It runs — `npm run dev` opens the window — and it shows no
+  data it does not have: each of the seven screens says it is not built and
+  names the issue that builds it, and the recorder status block says the window
+  cannot reach the recorder, because the IPC protocol
+  ([#49](https://github.com/wildware-uk/clipped/issues/49)) does not exist yet.
+  [desktop-ui.md](desktop-ui.md) covers it.
 - The tests assert the behaviour that exists: the workspace layering test,
   `clipped-logging`'s unit and integration tests, `clipped-capture`'s tests for
   the selection policy and the frame and timestamp types, and
@@ -214,11 +229,22 @@ clipped-recorder list-windows
 clipped-recorder record --window <window>
 ```
 
-The desktop application is not runnable and will not be until the M5 scaffold
-([issue #48](https://github.com/wildware-uk/clipped/issues/48)). When it is, it
-is started separately and connects to the recorder; there is no combined "run
-the app" command by design, because in production the two processes have
-independent lifetimes.
+The desktop application is an npm workspace at the repository root and is
+started separately:
+
+```text
+npm install
+npm run dev
+```
+
+There is no combined "run the app" command, by design: in production the two
+processes have independent lifetimes. The window does not connect to the
+recorder yet, because the IPC protocol
+([issue #49](https://github.com/wildware-uk/clipped/issues/49)) is not written,
+and it says so rather than pretending otherwise. `npm run dev` compiles the Rust
+side, so the first run takes several minutes and needs the WebView2 runtime as
+well as the recorder's toolchain; `npm run dev:web` opens the interface alone in
+a browser and needs neither. [desktop-ui.md](desktop-ui.md) has the rest.
 
 Toolchain and platform prerequisites are in [prerequisites.md](prerequisites.md).
 
@@ -306,10 +332,12 @@ contributor working in it needs.
 | [audio-routing.md](audio-routing.md) | Per-source capture, application-to-track routing, drift correction, the compatibility mix | M2 |
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
+| [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
 
 All but [capture-pipeline.md](capture-pipeline.md),
-[encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md) and
-[av-sync.md](av-sync.md) are stubs today, stating what they will cover and which
+[encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md),
+[av-sync.md](av-sync.md) and [desktop-ui.md](desktop-ui.md) are stubs today,
+stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
 policy exist, so the interface, the ownership and threading rules, the timestamp
@@ -322,7 +350,8 @@ has not been exercised because nothing yet produces the packets for it.
 `av-sync.md` decides which clock a recording is timed against and records the
 drift measured between the two capture paths that exist — video and system audio
 — over a thirty-minute run; it names what it deliberately leaves to M2, which is
-correcting that drift rather than measuring it. The rest
+correcting that drift rather than measuring it. `desktop-ui.md` covers the shell
+that exists and is explicit that no feature screen behind it does. The rest
 stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 
