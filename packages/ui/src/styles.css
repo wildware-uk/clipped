@@ -102,6 +102,28 @@ a {
   color: var(--color-text-muted);
 }
 
+/*
+ * A file path, printed in full.
+ *
+ * Monospaced, because a path is read character by character - somebody has to
+ * tell an l from a 1 before typing it into Explorer - and `--font-mono` is in
+ * the token set for exactly this. It is deliberately the class's only type
+ * declaration: it sets no size, so it takes whatever the block it sits in is
+ * set at and cannot fight that block's own rule depending on which of the two
+ * happens to be written later in this file.
+ *
+ * `overflow-wrap: anywhere` for the same reason the sidebar's interrupted-
+ * recording notice carries it: a Windows path has no spaces to break at, and a
+ * path that overflows is a path nobody can read.
+ *
+ * It sets no colour, so it is the window's own ink on the window's own ground -
+ * the pairing `contrast.test.ts` already measures at 14.86:1.
+ */
+.clipped-path {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
 /* — shell — */
 
 .clipped-shell {

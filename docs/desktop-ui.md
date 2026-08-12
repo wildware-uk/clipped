@@ -45,11 +45,11 @@ for each of the link's four states, and one for "this is not the Clipped window"
 which is what `npm run dev:web` and the tests see.
 
 **The controls are in the notification area, not in the window** — see
-[The tray](#the-tray). No screen has a control of any kind: six of the seven are
-not built, and the seventh, Games, deliberately draws none because nothing it
-would drive can be reached from here. A button with nothing behind it is exactly
-what AGENTS.md section 27 forbids. A "Try again" control for a link that has
-given up is
+[The tray](#the-tray). No screen has a control of any kind: four of the seven are
+not built, and the three that are — Home, Library and Games — deliberately draw
+none, because nothing they would drive can be reached from here. A button with
+nothing behind it is exactly what AGENTS.md section 27 forbids. A "Try again"
+control for a link that has given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221).
 
 ## What the shell is
@@ -81,12 +81,93 @@ separately.
 
 Both navigation lists and every route are derived from one array, `SCREENS` in
 `@clipped/shared`, so a navigation item cannot point at a route that does not
-exist. **One of the seven screens has been written**, and it is Games — see
-[The Games screen](#the-games-screen). The other six each lead to a panel saying
-so and naming the issue that builds it — #60 for Home and Library, #83 for
-Editor, #51 for Settings, #94 for Trash, #101 for Diagnostics. Building one
-replaces its placeholder route with the real screen, in `elementFor` in
-`Shell.tsx`, which is the one place that knows a screen from a placeholder.
+exist. **Three of the seven screens have been written** — Home and Library (see
+[Home and Library](#home-and-library)) and Games (see
+[The Games screen](#the-games-screen)). The other four each lead to a panel
+saying so and naming the issue that builds it — #83 for Editor, #51 for
+Settings, #94 for Trash, #101 for Diagnostics. Building one replaces its
+placeholder route with the real screen, in `elementFor` in `Shell.tsx`, which is
+the one place that knows a screen from a placeholder.
+
+## Home and Library
+
+SPEC.md section 17, and issue #60. The deck draws Home as tiles of recent
+sessions, recently clipped and favourites, and Library as a Sessions / Clips /
+Highlights tab strip over a grid of thumbnails, with a filter row and a search
+field above it.
+
+**None of that is drawn, because none of it can be read.** The same shape of
+answer the Games screen gives, and for a sibling reason.
+
+### What the window can and cannot see of the library
+
+`clipped-library` builds the index — games, sessions, recordings, clips,
+favourites, `game_summaries` and `missing_since` — by reconciling the session
+sidecars against the disk ([library.md](library.md)). It does that **inside the
+recorder's process**, and there are three separate reasons none of it reaches
+this window:
+
+| The way in | Why it is shut |
+| --- | --- |
+| A protocol command | There is none. `crates/ipc`'s `Command` is `ping`, `get_status`, `start_recording`, `stop_recording`, `add_bookmark` and `shutdown`, plus three refused ones. None mentions a session, a clip or a count |
+| Reading `library.db` from the window | `capabilities/default.json` grants three `core:` permissions and no file-system access, and Tauri denies what is not listed |
+| Linking `clipped-library` into the Tauri host | `tests/integration/tests/workspace_layering.rs` permits it exactly one member of the workspace, `clipped-ipc` — which is what keeps the recording engine out of the window's process ([ADR 0002](adr/0002-separate-recorder-process.md)) |
+
+[Issue #301](https://github.com/wildware-uk/clipped/issues/301) is that gap,
+raised by #60. It is deliberately not
+[#245](https://github.com/wildware-uk/clipped/issues/245), which is the game
+*catalogue*, nor [#241](https://github.com/wildware-uk/clipped/issues/241),
+which is the *live* session; this is the record of what has already been
+recorded. `docs/library.md` also records that **nothing calls the index at all**
+yet, which is the other half of the same work.
+
+So neither screen draws a session list, a clip grid, a count or a search field.
+An empty Sessions tab is indistinguishable from a machine that has recorded
+nothing; "0 clips" is a figure nobody measured; a search box that cannot search
+is the control AGENTS.md section 27 forbids. What each screen draws instead is
+what it owes, one row per part, naming the issue — the table both share with
+Games, in `WaitingOn.tsx`.
+
+### The one real thing on Home
+
+**What is being recorded right now, and into which file.** That comes from the
+recorder link, changes when the link does, and is the whole of what Home claims.
+`describeRecordingNow` in `recordingNow.ts` has one rendering for each of the
+link's four states and one for "this is not the Clipped window".
+
+Two rules shape those renderings, and both are properties `HomeScreen.test.tsx`
+asserts across every state rather than at the one place they could go wrong:
+
+- **A heading carries its own scope.** It is either "Not known…", which claims
+  nothing; "This recorder…", which names what the claim is about; or
+  "Recording `<target>`", which asserts a recording that demonstrably exists.
+  The wording this rules out is "Nothing is being recorded" — a statement about
+  the machine, when `clipped-recorder watch` serves no protocol and could be
+  recording a game this link cannot see. The same trap the Games screen's
+  detection state describes.
+- **No duration.** `ActiveRecording::elapsed_ms` is on the wire and is not
+  drawn. The recorder publishes `status_changed` when a recording starts and
+  when it ends and at no point between (`apps/recorder/src/serve.rs`), so the
+  elapsed time this window holds is the one from the moment it started and never
+  moves. A duration frozen at 0:00 beside an hour-long recording is worse than
+  no duration, and counting up from it locally would be a figure nobody
+  measured.
+
+The file itself is printed in full, in `.clipped-path`, because it is the only
+thing on the screen anybody can act on and a path with an ellipsis in it cannot
+be typed into Explorer (AGENTS.md sections 28 and 45).
+
+### No tab strip and no chips
+
+[Issue #215](https://github.com/wildware-uk/clipped/issues/215) asks for the
+deck's tab strip and its selectable chips **at the point a screen needs them**,
+so that a component with no consumer is not designed against a guess. **The
+Library screen does not need them yet**: it has nothing to switch between and
+nothing to filter, so a strip over three panels that all say the same thing
+would be exactly the speculative component that issue exists to prevent. They
+belong with the first screen that has three populated lists, which is this one
+once #301 lands. `LibraryScreen.test.tsx` asserts that no `tablist` and no `tab`
+is drawn, so adding one is a decision rather than a drift.
 
 ## The Games screen
 
@@ -838,10 +919,11 @@ accordion, no toast and no tooltip, because no screen in the deck has one
 (AGENTS.md section 1). Two patterns the deck does use are not here either — the
 Library's underlined tab strip and the export dialog's selectable preset chips —
 and [issue #215](https://github.com/wildware-uk/clipped/issues/215) covers them
-with the screen that first needs them. The Games screen (#107) is the first
-screen written and needed neither, so neither was built: they belong to the
-per-game detail view behind the game list, and there is no list yet to open one
-from.
+with the screen that first needs them. Three screens are now written and none
+needed either: the tab strip belongs to the per-game detail view behind the game
+list, which #245 has to land first, and to the Library's Sessions / Clips /
+Highlights row, which has nothing to switch between until #301 does — see
+[No tab strip and no chips](#no-tab-strip-and-no-chips).
 
 Beside the set above, the shell has three classes of its own that a screen
 draws with. They are not from the reference pages, which have no screen in them:
@@ -850,12 +932,13 @@ draws with. They are not from the reference pages, which have no screen in them:
 | --- | --- |
 | `.clipped-screen__title`, `.clipped-screen__heading` | A screen's own two levels of heading |
 | `.clipped-screen__lead` | Running prose at the measure |
-| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet" and by the Games screen's detection state, which are the same thing to look at |
+| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state, by Home's recording state and by Library's reason for being empty — all of them the same thing to look at |
+| `.clipped-path` | A file path, printed in full: monospaced, and broken anywhere, because a Windows path has no spaces to break at. It sets no size, so it takes whatever block it sits in, and no colour, so it is the window's own ink |
 
-**The Games screen is the only consumer of the component layer so far** — its
-`.clipped-table` and `.clipped-muted`. The classes exist ahead of that so that
-#60, #83, #51, #94 and #101 do not each invent their own styling, which is the
-reason issue #79 followed the shell.
+**Three screens consume the component layer so far** — Games, Home and Library,
+through `.clipped-table`, `.clipped-muted` and the screen classes above. The
+classes exist ahead of that so that #83, #51, #94 and #101 do not each invent
+their own styling, which is the reason issue #79 followed the shell.
 
 ### Where it departs from the system, and why
 
@@ -1048,9 +1131,14 @@ retrofitted:
   screen reader's window announcement all say where you are.
 
 `eslint-plugin-jsx-a11y` runs in its `strict` configuration as part of
-`npm run lint`, and `apps/desktop/src/Shell.test.tsx` and `GamesScreen.test.tsx`
-drive the window with Tab and Enter rather than asserting that the markup looks
-right.
+`npm run lint`, and `apps/desktop/src/Shell.test.tsx`, `GamesScreen.test.tsx`,
+`HomeScreen.test.tsx` and `LibraryScreen.test.tsx` drive the window with Tab and
+Enter rather than asserting that the markup looks right. Home is the screen the
+application opens on, so its case opens the window on Library — by putting the
+route in the fragment before mounting, as reopening the application on the last
+screen would — and then tabs back to Home, because the shell deliberately does
+not move focus on the *first* screen and there would otherwise be nothing to
+observe.
 
 ## Testing
 
@@ -1096,6 +1184,23 @@ application, opens Games, and then moves the link underneath it with a
 beside itself. The other cases are about absence: no button, no link, no field,
 no checkbox and no radio anywhere in `<main>`, and a table whose column headers
 are what is missing rather than Game / Recording / Last played.
+
+`HomeScreen.test.tsx` and `LibraryScreen.test.tsx` are built the same way, and
+add one check the other screens do not need: **no figure that nobody measured**.
+`test/counts.ts` matches a number against the nouns SPEC.md sections 17, 29 and
+30 count — sessions, recordings, clips, favourites, highlights, games, bytes —
+and both screens are held to drawing none of them, zero included, because
+nothing in this build has counted anything.
+
+That check is run over each **text node** rather than over the screen's
+`textContent`, and the reason is worth knowing before writing another one like
+it: `textContent` concatenates adjacent table cells with nothing between them.
+A row ending "Issue #301" beside one beginning "Clips" reads as `301Clips`,
+which fired the pattern on a screen that draws no figure at all; and a real
+"0 sessions" followed by the next heading reads as `sessionsWhat`, whose missing
+word boundary made the pattern *miss* the very thing it exists for. Both
+happened while the check was being written, and the second only came to light
+because the mutation that should have failed it did not.
 
 `useWindowTitle.test.ts` stands up a `__TAURI_INTERNALS__` so the branch that
 only runs inside the window is reached — jsdom is a browser, so without it the

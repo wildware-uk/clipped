@@ -72,19 +72,21 @@ describe('the application shell', () => {
   });
 
   /*
-   * Games is written (issue #107) and is therefore not in this list. It is
-   * named rather than filtered by "has a screen", because a list that computed
-   * itself from the same fact the shell routes on could not fail: the point of
-   * naming it is that building a screen and forgetting to route it, or routing
-   * one that was never built, both show up here.
+   * The three screens that are written — Home and Library (issue #60) and Games
+   * (issue #107) — are therefore not in this list. They are named rather than
+   * filtered by "has a screen", because a list that computed itself from the
+   * same fact the shell routes on could not fail: the point of naming them is
+   * that building a screen and forgetting to route it, or routing one that was
+   * never built, both show up here.
    */
-  const PLACEHOLDER_SCREENS = SCREENS.filter((entry) => entry.id !== 'games');
+  const WRITTEN = ['home', 'library', 'games'];
+  const PLACEHOLDER_SCREENS = SCREENS.filter((entry) => !WRITTEN.includes(entry.id));
 
   it('says which issue builds each unwritten screen instead of drawing an empty one', async () => {
     const user = userEvent.setup();
     renderApp();
 
-    expect(PLACEHOLDER_SCREENS).toHaveLength(SCREENS.length - 1);
+    expect(PLACEHOLDER_SCREENS).toHaveLength(SCREENS.length - WRITTEN.length);
 
     for (const entry of PLACEHOLDER_SCREENS) {
       await user.click(screen.getByRole('link', { name: entry.label }));
@@ -95,15 +97,41 @@ describe('the application shell', () => {
     }
   });
 
-  it('routes Games to the screen that was built rather than to the placeholder', async () => {
-    const user = userEvent.setup();
+  /*
+   * The other half of the check above: each written screen is routed to the
+   * thing that was built rather than to the placeholder. The region each one
+   * names is asserted as well as the absence of "Not built yet", so that
+   * pointing a route at the wrong screen fails rather than passing on a heading
+   * the sidebar supplied anyway.
+   *
+   * Home has no navigation of its own to click, being the route the application
+   * opens on.
+   */
+  const ROUTED: readonly (readonly [string, string])[] = [
+    ['Library', 'Why this list is empty'],
+    ['Games', 'Game detection'],
+  ];
+
+  it.each(ROUTED)(
+    'routes %s to the screen that was built, not the placeholder',
+    async (label, region) => {
+      const user = userEvent.setup();
+      renderApp();
+
+      await user.click(screen.getByRole('link', { name: label }));
+
+      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(label);
+      expect(screen.queryByRole('heading', { level: 2, name: 'Not built yet' })).toBeNull();
+      expect(screen.getByRole('region', { name: region })).toBeVisible();
+    },
+  );
+
+  it('opens on Home, which is written rather than a placeholder', () => {
     renderApp();
 
-    await user.click(screen.getByRole('link', { name: 'Games' }));
-
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Games');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Home');
     expect(screen.queryByRole('heading', { level: 2, name: 'Not built yet' })).toBeNull();
-    expect(screen.getByRole('region', { name: 'Game detection' })).toBeVisible();
+    expect(screen.getByRole('region', { name: 'Recording now' })).toBeVisible();
   });
 
   it('offers no recorder controls while the recorder cannot be reached', () => {
