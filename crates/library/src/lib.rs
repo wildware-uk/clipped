@@ -44,6 +44,17 @@
 //! writes, the media files beside them, and the SQLite index. It is the only
 //! thing that writes library rows, and `docs/library.md` is its prose.
 //!
+//! [`events`]: where a session's game events sit in the files that session
+//! produced — the conversion from a moment on the recording's timeline to a
+//! position in one file, for a session that wrote several of them, one that
+//! started after the game did, or none at all
+//! ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+//! **Nothing stores a game event yet**: the `game_events` table is the M9
+//! migration `docs/storage.md` says is owed, `session_events` is a different
+//! vocabulary and is rewritten wholesale on every reconciliation, so this
+//! module places events it is handed rather than events it reads.
+//! `docs/highlights.md` argues the table that is owed.
+//!
 //! [`thumbnail`]: the picture every screen that lists a recording shows for it
 //! (SPEC.md section 22, `docs/thumbnails.md`). It decodes a frame through
 //! FFmpeg, keeps the result in a documented sidecar cache rather than in the
@@ -53,6 +64,7 @@
 //! Nothing else in this crate is built yet.
 
 pub mod accounting;
+pub mod events;
 pub mod index;
 pub mod search;
 pub mod thumbnail;

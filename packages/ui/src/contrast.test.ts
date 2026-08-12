@@ -403,6 +403,22 @@ describe('the editor', () => {
       LANE,
     ],
     ['the playhead on a lane', ['styles', '\\.clipped-timeline__playhead', 'background'], LANE],
+    /*
+     * A game event's mark (issue #71). It is the only thing that says an event
+     * happened at that second, so 1.4.11 applies to it exactly as it does to a
+     * cut - and it is measured against the events lane's own ground, which is
+     * `--color-surface` rather than the `--color-neutral-100` a segment fills.
+     */
+    [
+      'a game event on the events lane',
+      ['styles', '\\.clipped-timeline__event-mark', 'background'],
+      ['styles', '\\.clipped-timeline__events', 'background'],
+    ],
+    [
+      'a game event against the playhead beside it',
+      ['styles', '\\.clipped-timeline__event-mark', 'background'],
+      ['styles', '\\.clipped-timeline__playhead', 'background'],
+    ],
     [
       'the playhead over a segment',
       ['styles', '\\.clipped-timeline__playhead', 'background'],
