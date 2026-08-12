@@ -101,10 +101,18 @@
 //! [issue #37](https://github.com/wildware-uk/clipped/issues/37) and
 //! [issue #38](https://github.com/wildware-uk/clipped/issues/38).
 //!
-//! Per-game settings are not applied here either. A catalogue entry can carry
-//! `default_settings`, and `clipped_game_detection` is explicit that nothing
-//! interprets them because per-game configuration is M7 (SPEC.md section 31).
-//! Reading them here would be building a later milestone's work.
+//! Per-game settings are not applied here either. This module decides *when* to
+//! record and holds no recording settings at all — what a recording is made
+//! with reaches it from the driver, which applies one set of choices to every
+//! game. [`crate::config`] is where those settings are now modelled and
+//! resolved, global layer and per-game overrides both
+//! ([issue #108](https://github.com/wildware-uk/clipped/issues/108)); reading
+//! them at the moment a recording starts is
+//! [issue #61](https://github.com/wildware-uk/clipped/issues/61), and
+//! `docs/configuration.md` sets out exactly what that consumes. A catalogue
+//! entry's own `default_settings` remain uninterpreted, and folding them in as
+//! a further layer is
+//! [issue #247](https://github.com/wildware-uk/clipped/issues/247).
 //!
 //! [ADR 0001]: ../../../docs/adr/0001-mkv-archival-container.md
 

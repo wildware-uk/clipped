@@ -1,0 +1,644 @@
+//! One layer of settings, and what a fold of the layers answers.
+//!
+//! Every field here is an `Option`, and that is the point. `None` means *this
+//! layer says nothing*, which is not the same as a layer setting the value the
+//! layer below already had: a game whose frame rate is unset follows the global
+//! frame rate when the user later changes it, and a game explicitly set to 60
+//! stays at 60. Storing the effective value in the per-game layer would collapse
+//! those two into one and quietly break the second half of AGENTS.md section
+//! 30's worked example.
+//!
+//! The same type is used for the global layer and for each game's, so
+//! inheritance is a fold over a list of layers rather than a special case per
+//! setting. Hotkeys are the one thing that is not here; `super::hotkeys` says
+//! why.
+//!
+//! # Which settings exist
+//!
+//! Exactly the ones this build can be told about today: the capture target, the
+//! resolution, the frame rate, the codec, the encoder and the two audio
+//! selections that `clipped-recorder record` accepts (`docs/recorder-cli.md`),
+//! plus the replay window `clipped_replay::ReplayConfig` is built from
+//! ([issue #35](https://github.com/wildware-uk/clipped/issues/35)). SPEC.md
+//! section 31 lists more — capture mode, bitrate, event types, auto-clipping,
+//! storage behaviour, HDR — and none of them are here, because a setting for a
+//! subsystem that does not exist is a control that silently does nothing
+//! (AGENTS.md section 27). Each arrives with the subsystem that reads it.
+
+use core::time::Duration;
+
+use clipped_replay::{MAXIMUM_WINDOW, MINIMUM_WINDOW};
+
+use crate::config::error::SettingError;
+use crate::config::value::{Resolved, Scope, SettingKey, SettingSource};
+use crate::settings::{CodecPreference, EncoderPreference, ResolutionSetting, DEFAULT_FRAMERATE};
+
+/// The lowest frame rate a recording may be configured for.
+///
+/// The same bound `clipped-recorder record --framerate` enforces. A settings
+/// file and a command line that disagreed about what is acceptable would be two
+/// answers to one question.
+pub const MINIMUM_FRAMERATE: u32 = 1;
+
+/// The highest frame rate a recording may be configured for.
+pub const MAXIMUM_FRAMERATE: u32 = 480;
+
+/// The smallest side a fixed resolution may name.
+pub const MINIMUM_DIMENSION: u32 = 128;
+
+/// The largest side a fixed resolution may name.
+pub const MAXIMUM_DIMENSION: u32 = 7680;
+
+/// The longest an audio device name may be.
+///
+/// Windows device names are far shorter than this; the limit exists so that a
+/// corrupted or hostile settings file cannot put an unbounded string into a log
+/// line or a UI label.
+pub const MAXIMUM_DEVICE_NAME: usize = 256;
+
+/// How much video the replay buffer keeps when nobody has said.
+///
+/// Five minutes: one of the windows SPEC.md section 16 names, in the middle of
+/// the list, and long enough that the thing a player wants to save is still in
+/// the buffer by the time they reach for the hotkey. What it costs is
+/// arithmetic rather than a guess —
+/// [`clipped_replay::ReplayConfig::expected_bytes`] is the figure, and it is
+/// about 700 MB at the 18.66 Mbit/s a 1440p60 recording uses.
+pub const DEFAULT_REPLAY_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// Whether the game's own window is captured, or the display it is on.
+///
+/// Both are reachable rather than aspirational: `clipped-capture`'s two
+/// backends each declare `captures_monitors()`, and
+/// `clipped_windows::monitor_for_window` is how the display a game's window is
+/// on is found. The default is the window, which is what `watch` records today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureTargetSetting {
+    /// The game's own window.
+    #[default]
+    GameWindow,
+    /// The whole display the game's window is on.
+    Display,
+}
+
+impl CaptureTargetSetting {
+    /// Every value, for a settings screen to list.
+    pub const ALL: [Self; 2] = [Self::GameWindow, Self::Display];
+
+    /// The token this is written as in the settings file.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::GameWindow => "game-window",
+            Self::Display => "display",
+        }
+    }
+
+    /// The value a token names.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|value| value.token() == token)
+    }
+}
+
+/// Which audio endpoint to record.
+///
+/// The three values `--microphone` and `--system-audio` accept
+/// (`docs/recorder-cli.md`). A name is matched against the device list at the
+/// moment a recording starts, so a device that is unplugged is a failure the
+/// session reports rather than a settings file that has become invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AudioDeviceSetting {
+    /// Whatever Windows currently considers the default endpoint.
+    #[default]
+    Default,
+    /// Record nothing from this source.
+    Disabled,
+    /// The endpoint whose name contains this text.
+    Named(String),
+}
+
+impl AudioDeviceSetting {
+    /// A named device, having checked the name.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError::OutOfRange`] when the name is blank, longer than
+    /// [`MAXIMUM_DEVICE_NAME`], or contains a control character. `key` names
+    /// which of the two audio settings is being set, so the message says
+    /// `microphone` rather than "a device".
+    pub fn named(key: SettingKey, name: impl Into<String>) -> Result<Self, SettingError> {
+        let name = name.into();
+        Self::check_name(key, &name)?;
+        Ok(Self::Named(name))
+    }
+
+    /// Whether this value is one the settings file can hold and read back.
+    ///
+    /// [`Self::Named`] is a public variant, so a caller can build one without
+    /// going through [`Self::named`]; this is what the setters check so that
+    /// the two routes cannot disagree.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::named`].
+    fn check(&self, key: SettingKey) -> Result<(), SettingError> {
+        match self {
+            Self::Default | Self::Disabled => Ok(()),
+            Self::Named(name) => Self::check_name(key, name),
+        }
+    }
+
+    fn check_name(key: SettingKey, name: &str) -> Result<(), SettingError> {
+        if name.trim().is_empty() {
+            return Err(SettingError::OutOfRange {
+                key,
+                value: format!("{name:?}"),
+                accepted: "a device name, \"default\" or \"none\"".to_owned(),
+            });
+        }
+        if name.chars().count() > MAXIMUM_DEVICE_NAME {
+            return Err(SettingError::OutOfRange {
+                key,
+                value: format!("a name of {} characters", name.chars().count()),
+                accepted: format!("at most {MAXIMUM_DEVICE_NAME} characters"),
+            });
+        }
+        if name.chars().any(char::is_control) {
+            return Err(SettingError::OutOfRange {
+                key,
+                value: format!("{name:?}"),
+                accepted: "a device name without control characters".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One layer of settings: the global layer, or one game's.
+///
+/// Every field is optional and every setter validates, so a `Preferences` that
+/// exists is a `Preferences` whose values are in range. That invariant is what
+/// lets [`super::ConfigurationStore`] promise that a rejected file leaves the
+/// previous configuration standing — there is no half-applied state to unwind.
+///
+/// "In range" is defined by what the settings file can carry, not only by what
+/// the type can hold: every value a setter accepts is one
+/// `crate::config::document` can write and read back unchanged. That is why a
+/// blank device name and a fractional replay window are refused here — each
+/// would produce a file this same build could not read, or could read only as
+/// something other than what was set.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Preferences {
+    capture_target: Option<CaptureTargetSetting>,
+    resolution: Option<ResolutionSetting>,
+    framerate: Option<u32>,
+    codec: Option<CodecPreference>,
+    encoder: Option<EncoderPreference>,
+    microphone: Option<AudioDeviceSetting>,
+    system_audio: Option<AudioDeviceSetting>,
+    replay_window: Option<Duration>,
+    /// Keys this build does not recognise, kept exactly as they were read.
+    ///
+    /// A newer Clipped writing a setting this one has never heard of must not
+    /// cost the user that setting when this one saves the file (AGENTS.md
+    /// section 56). They are carried through untouched and written back out.
+    unknown: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl Preferences {
+    /// A layer that says nothing about any setting.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Whether this layer says nothing at all, unknown keys included.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.unknown.is_empty() && SettingKey::ALL.iter().all(|key| !self.is_set(*key))
+    }
+
+    /// Which of the game's window or its display to capture, if this layer
+    /// says.
+    #[must_use]
+    pub const fn capture_target(&self) -> Option<CaptureTargetSetting> {
+        self.capture_target
+    }
+
+    /// Sets, or with `None` clears, the capture target.
+    pub fn set_capture_target(&mut self, value: Option<CaptureTargetSetting>) {
+        self.capture_target = value;
+    }
+
+    /// The size to encode at, if this layer says.
+    #[must_use]
+    pub const fn resolution(&self) -> Option<ResolutionSetting> {
+        self.resolution
+    }
+
+    /// Sets, or with `None` clears, the resolution.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError::OutOfRange`] when a fixed size names a side outside
+    /// [`MINIMUM_DIMENSION`]..=[`MAXIMUM_DIMENSION`] or an odd one. Odd sides
+    /// are refused because every codec here encodes 4:2:0 chroma, which has no
+    /// representation for half a chroma sample.
+    pub fn set_resolution(&mut self, value: Option<ResolutionSetting>) -> Result<(), SettingError> {
+        if let Some(ResolutionSetting::Fixed { width, height }) = value {
+            check_dimension("width", width)?;
+            check_dimension("height", height)?;
+        }
+        self.resolution = value;
+        Ok(())
+    }
+
+    /// The frame rate ceiling, if this layer says.
+    #[must_use]
+    pub const fn framerate(&self) -> Option<u32> {
+        self.framerate
+    }
+
+    /// Sets, or with `None` clears, the frame rate ceiling.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError::OutOfRange`] outside
+    /// [`MINIMUM_FRAMERATE`]..=[`MAXIMUM_FRAMERATE`].
+    pub fn set_framerate(&mut self, value: Option<u32>) -> Result<(), SettingError> {
+        if let Some(framerate) = value {
+            if !(MINIMUM_FRAMERATE..=MAXIMUM_FRAMERATE).contains(&framerate) {
+                return Err(SettingError::OutOfRange {
+                    key: SettingKey::Framerate,
+                    value: framerate.to_string(),
+                    accepted: format!("{MINIMUM_FRAMERATE}-{MAXIMUM_FRAMERATE} frames per second"),
+                });
+            }
+        }
+        self.framerate = value;
+        Ok(())
+    }
+
+    /// The codec to produce, if this layer says.
+    #[must_use]
+    pub const fn codec(&self) -> Option<CodecPreference> {
+        self.codec
+    }
+
+    /// Sets, or with `None` clears, the codec.
+    pub fn set_codec(&mut self, value: Option<CodecPreference>) {
+        self.codec = value;
+    }
+
+    /// The encoder family to encode with, if this layer says.
+    #[must_use]
+    pub const fn encoder(&self) -> Option<EncoderPreference> {
+        self.encoder
+    }
+
+    /// Sets, or with `None` clears, the encoder family.
+    pub fn set_encoder(&mut self, value: Option<EncoderPreference>) {
+        self.encoder = value;
+    }
+
+    /// Which microphone to record, if this layer says.
+    #[must_use]
+    pub const fn microphone(&self) -> Option<&AudioDeviceSetting> {
+        self.microphone.as_ref()
+    }
+
+    /// Sets, or with `None` clears, the microphone selection.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError::OutOfRange`] for a device name
+    /// [`AudioDeviceSetting::named`] would refuse. The variant is public, so
+    /// this is the check that keeps the invariant true whichever way the value
+    /// was built.
+    pub fn set_microphone(
+        &mut self,
+        value: Option<AudioDeviceSetting>,
+    ) -> Result<(), SettingError> {
+        if let Some(device) = &value {
+            device.check(SettingKey::Microphone)?;
+        }
+        self.microphone = value;
+        Ok(())
+    }
+
+    /// Which system-audio endpoint to record, if this layer says.
+    #[must_use]
+    pub const fn system_audio(&self) -> Option<&AudioDeviceSetting> {
+        self.system_audio.as_ref()
+    }
+
+    /// Sets, or with `None` clears, the system-audio selection.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_microphone`], with the message naming `system_audio`.
+    pub fn set_system_audio(
+        &mut self,
+        value: Option<AudioDeviceSetting>,
+    ) -> Result<(), SettingError> {
+        if let Some(device) = &value {
+            device.check(SettingKey::SystemAudio)?;
+        }
+        self.system_audio = value;
+        Ok(())
+    }
+
+    /// How much video the replay buffer keeps, if this layer says.
+    #[must_use]
+    pub const fn replay_window(&self) -> Option<Duration> {
+        self.replay_window
+    }
+
+    /// Sets, or with `None` clears, the replay window.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingError::OutOfRange`] outside
+    /// [`clipped_replay::MINIMUM_WINDOW`]..=[`clipped_replay::MAXIMUM_WINDOW`],
+    /// which is the range the buffer itself accepts. Validating here as well
+    /// means the refusal reaches the user at the moment they set it rather than
+    /// at the moment a game launches.
+    ///
+    /// A window that is not a whole number of seconds is refused for a
+    /// different reason: `replay_window_seconds` is whole seconds, so half a
+    /// second would be dropped by the writer and the setting would come back
+    /// from the file as something other than what was set.
+    pub fn set_replay_window(&mut self, value: Option<Duration>) -> Result<(), SettingError> {
+        if let Some(window) = value {
+            if !(MINIMUM_WINDOW..=MAXIMUM_WINDOW).contains(&window) {
+                return Err(SettingError::OutOfRange {
+                    key: SettingKey::ReplayWindow,
+                    value: format!("{} seconds", window.as_secs()),
+                    accepted: format!(
+                        "{}-{} seconds",
+                        MINIMUM_WINDOW.as_secs(),
+                        MAXIMUM_WINDOW.as_secs()
+                    ),
+                });
+            }
+            if window.subsec_nanos() != 0 {
+                return Err(SettingError::OutOfRange {
+                    key: SettingKey::ReplayWindow,
+                    value: format!("{} seconds", window.as_secs_f64()),
+                    accepted: "a whole number of seconds, which is what the settings file holds"
+                        .to_owned(),
+                });
+            }
+        }
+        self.replay_window = value;
+        Ok(())
+    }
+
+    /// Whether this layer sets `key` at all.
+    ///
+    /// The question a Reset control asks, without needing to know the type
+    /// behind each setting.
+    #[must_use]
+    pub fn is_set(&self, key: SettingKey) -> bool {
+        match key {
+            SettingKey::CaptureTarget => self.capture_target.is_some(),
+            SettingKey::Resolution => self.resolution.is_some(),
+            SettingKey::Framerate => self.framerate.is_some(),
+            SettingKey::Codec => self.codec.is_some(),
+            SettingKey::Encoder => self.encoder.is_some(),
+            SettingKey::Microphone => self.microphone.is_some(),
+            SettingKey::SystemAudio => self.system_audio.is_some(),
+            SettingKey::ReplayWindow => self.replay_window.is_some(),
+        }
+    }
+
+    /// Clears `key`, so that this layer inherits it again.
+    pub fn clear(&mut self, key: SettingKey) {
+        match key {
+            SettingKey::CaptureTarget => self.capture_target = None,
+            SettingKey::Resolution => self.resolution = None,
+            SettingKey::Framerate => self.framerate = None,
+            SettingKey::Codec => self.codec = None,
+            SettingKey::Encoder => self.encoder = None,
+            SettingKey::Microphone => self.microphone = None,
+            SettingKey::SystemAudio => self.system_audio = None,
+            SettingKey::ReplayWindow => self.replay_window = None,
+        }
+    }
+
+    /// The keys from a newer build that were read and are being kept.
+    pub fn unrecognised_keys(&self) -> impl Iterator<Item = &str> {
+        self.unknown.keys().map(String::as_str)
+    }
+
+    /// Records a key this build does not understand.
+    pub(crate) fn keep_unrecognised(&mut self, key: String, value: serde_json::Value) {
+        self.unknown.insert(key, value);
+    }
+
+    /// The kept keys, for writing back out.
+    pub(crate) const fn unrecognised(
+        &self,
+    ) -> &std::collections::BTreeMap<String, serde_json::Value> {
+        &self.unknown
+    }
+
+    /// Takes on the unrecognised keys of the layer this one is replacing.
+    ///
+    /// A caller cannot carry forward a key it has never heard of, so it is not
+    /// asked to: a settings screen that builds a fresh [`Preferences`] and
+    /// hands it to [`Configuration::set_global`](crate::config::Configuration::set_global)
+    /// keeps the newer build's settings anyway. Keys the caller *does* hold
+    /// win, so a configuration that was read and edited is not overwritten by
+    /// its own older copy.
+    pub(crate) fn adopt_unrecognised_from(&mut self, previous: &Self) {
+        for (key, value) in &previous.unknown {
+            self.unknown
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+}
+
+fn check_dimension(side: &'static str, value: u32) -> Result<(), SettingError> {
+    if !(MINIMUM_DIMENSION..=MAXIMUM_DIMENSION).contains(&value) {
+        return Err(SettingError::OutOfRange {
+            key: SettingKey::Resolution,
+            value: format!("a {side} of {value}"),
+            accepted: format!("{MINIMUM_DIMENSION}-{MAXIMUM_DIMENSION} pixels"),
+        });
+    }
+    if value % 2 != 0 {
+        return Err(SettingError::OutOfRange {
+            key: SettingKey::Resolution,
+            value: format!("a {side} of {value}"),
+            accepted: "an even number of pixels, which 4:2:0 chroma requires".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// What every setting resolves to for one scope, and where each answer came
+/// from.
+///
+/// This is the shape the settings screen renders
+/// ([issue #51](https://github.com/wildware-uk/clipped/issues/51)) and the
+/// shape applying settings to a recording reads
+/// ([issue #61](https://github.com/wildware-uk/clipped/issues/61)). Both get
+/// the same answer from the same fold, which is what "a single resolution
+/// point" means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSettings {
+    scope: Scope,
+    capture_target: Resolved<CaptureTargetSetting>,
+    resolution: Resolved<ResolutionSetting>,
+    framerate: Resolved<u32>,
+    codec: Resolved<CodecPreference>,
+    encoder: Resolved<EncoderPreference>,
+    microphone: Resolved<AudioDeviceSetting>,
+    system_audio: Resolved<AudioDeviceSetting>,
+    replay_window: Resolved<Duration>,
+}
+
+impl ResolvedSettings {
+    /// Folds the default, the global layer and — for a game scope — that game's
+    /// layer, in that order.
+    ///
+    /// This function is the single resolution point AGENTS.md section 30 asks
+    /// for. Every consumer of a setting reaches it through here, so that "does
+    /// this game override the frame rate" has one answer rather than one per
+    /// call site.
+    pub(crate) fn fold(scope: Scope, global: &Preferences, game: Option<&Preferences>) -> Self {
+        // A game's layer only applies to a game's scope. Resolving the global
+        // page must never show a value a game set, or the user would edit the
+        // global settings and see a game's number change under their hands.
+        let game = game.filter(|_| scope.game().is_some());
+        let layers = Layers {
+            layer: scope.layer(),
+            global,
+            game,
+        };
+
+        Self {
+            capture_target: layers
+                .pick(CaptureTargetSetting::default(), Preferences::capture_target),
+            resolution: layers.pick(ResolutionSetting::default(), Preferences::resolution),
+            framerate: layers.pick(DEFAULT_FRAMERATE, Preferences::framerate),
+            codec: layers.pick(CodecPreference::default(), Preferences::codec),
+            encoder: layers.pick(EncoderPreference::default(), Preferences::encoder),
+            microphone: layers.pick(AudioDeviceSetting::default(), |preferences| {
+                preferences.microphone().cloned()
+            }),
+            system_audio: layers.pick(AudioDeviceSetting::default(), |preferences| {
+                preferences.system_audio().cloned()
+            }),
+            replay_window: layers.pick(DEFAULT_REPLAY_WINDOW, Preferences::replay_window),
+            scope,
+        }
+    }
+
+    /// Which layer this was resolved for.
+    #[must_use]
+    pub const fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    /// Whether the game's window or its display is captured.
+    #[must_use]
+    pub const fn capture_target(&self) -> &Resolved<CaptureTargetSetting> {
+        &self.capture_target
+    }
+
+    /// The size to encode at.
+    #[must_use]
+    pub const fn resolution(&self) -> &Resolved<ResolutionSetting> {
+        &self.resolution
+    }
+
+    /// The frame rate ceiling.
+    #[must_use]
+    pub const fn framerate(&self) -> &Resolved<u32> {
+        &self.framerate
+    }
+
+    /// The codec to produce.
+    #[must_use]
+    pub const fn codec(&self) -> &Resolved<CodecPreference> {
+        &self.codec
+    }
+
+    /// The encoder family to encode with.
+    #[must_use]
+    pub const fn encoder(&self) -> &Resolved<EncoderPreference> {
+        &self.encoder
+    }
+
+    /// Which microphone to record.
+    #[must_use]
+    pub const fn microphone(&self) -> &Resolved<AudioDeviceSetting> {
+        &self.microphone
+    }
+
+    /// Which system-audio endpoint to record.
+    #[must_use]
+    pub const fn system_audio(&self) -> &Resolved<AudioDeviceSetting> {
+        &self.system_audio
+    }
+
+    /// How much video the replay buffer keeps.
+    #[must_use]
+    pub const fn replay_window(&self) -> &Resolved<Duration> {
+        &self.replay_window
+    }
+
+    /// Where `key`'s answer came from, without naming its type.
+    ///
+    /// The settings screen renders each setting with a widget of its own, but
+    /// the "inherited from global" badge and the Reset control are the same for
+    /// all of them, and this is what drives both.
+    #[must_use]
+    pub const fn source_of(&self, key: SettingKey) -> SettingSource {
+        match key {
+            SettingKey::CaptureTarget => self.capture_target.source(),
+            SettingKey::Resolution => self.resolution.source(),
+            SettingKey::Framerate => self.framerate.source(),
+            SettingKey::Codec => self.codec.source(),
+            SettingKey::Encoder => self.encoder.source(),
+            SettingKey::Microphone => self.microphone.source(),
+            SettingKey::SystemAudio => self.system_audio.source(),
+            SettingKey::ReplayWindow => self.replay_window.source(),
+        }
+    }
+
+    /// Whether this scope set `key` itself, rather than inheriting it.
+    #[must_use]
+    pub fn is_overridden(&self, key: SettingKey) -> bool {
+        self.source_of(key) == self.scope.layer()
+    }
+}
+
+/// The layers one resolution reads, in the order they are folded.
+struct Layers<'a> {
+    layer: SettingSource,
+    global: &'a Preferences,
+    game: Option<&'a Preferences>,
+}
+
+impl Layers<'_> {
+    /// The last layer that says anything about a setting, and which one that
+    /// was.
+    fn pick<T>(&self, default: T, read: impl Fn(&Preferences) -> Option<T>) -> Resolved<T> {
+        let mut value = default;
+        let mut source = SettingSource::Default;
+        if let Some(set) = read(self.global) {
+            value = set;
+            source = SettingSource::Global;
+        }
+        if let Some(set) = self.game.and_then(read) {
+            value = set;
+            source = SettingSource::Game;
+        }
+        Resolved::new(value, source, self.layer)
+    }
+}

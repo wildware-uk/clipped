@@ -29,6 +29,14 @@ clipped-replay.workspace = true
 # layer table gives — game detection is layer 1, this crate is layer 3 — and
 # `tests/integration/tests/workspace_layering.rs` asserts it.
 clipped-game-detection.workspace = true
+# What a hotkey binding is. `src/config` holds the hotkey layer of the
+# configuration, because a binding is a setting like any other and the ticket
+# that defines the configuration API (#108) names them; the dependency points
+# this way because `clipped-hotkeys` is a key combination plus a handler the
+# caller supplies (README.md, "Dependency direction"), and a hotkey crate that
+# reached back into a session could be linked by neither the recorder nor the
+# desktop application.
+clipped-hotkeys.workspace = true
 # The standard session context — `session_id`, `capture_backend`, `encoder` —
 # so that every line a recording produces is searchable by the same fields
 # (docs/logging.md). `RedactedPath` keeps the output path out of the logs.

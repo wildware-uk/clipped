@@ -330,6 +330,7 @@ dependencies = [
  "clipped-capture",
  "clipped-encoder",
  "clipped-game-detection",
+ "clipped-hotkeys",
  "clipped-logging",
  "clipped-muxer",
  "clipped-replay",

@@ -53,8 +53,17 @@
 //! command that would drive it is
 //! [issue #38](https://github.com/wildware-uk/clipped/issues/38).
 //!
-//! Per-game settings are M7 and are not here: a catalogue entry can carry
-//! `default_settings` and nothing reads them, deliberately (SPEC.md section 31).
+//! Per-game settings are modelled but not yet applied. [`config`] is the
+//! configuration API — global settings, per-game overrides that inherit from
+//! them, validation, and a versioned file that survives being opened by an
+//! older build ([issue
+//! #108](https://github.com/wildware-uk/clipped/issues/108), AGENTS.md section
+//! 30). What it does *not* do is choose a recording's settings: [`record`] and
+//! [`automatic`] still take what their caller hands them, and reading the
+//! resolved settings at the moment a recording starts is
+//! [issue #61](https://github.com/wildware-uk/clipped/issues/61).
+//! A catalogue entry's own `default_settings` remain uninterpreted
+//! (SPEC.md section 31).
 //!
 //! # Threading
 //!
@@ -123,6 +132,7 @@
 //! ```
 
 pub mod automatic;
+pub mod config;
 
 mod error;
 mod pacing;
