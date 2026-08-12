@@ -90,7 +90,7 @@ use clipped_session::automatic::{
 };
 use clipped_session::plugins::{installed_but_not_enabled, PluginOutcome, SessionPlugins};
 use clipped_session::{RecordingOutputs, RecordingProgress};
-use clipped_windows::{enumerate_windows, WindowInfo};
+use clipped_windows::WindowInfo;
 
 use crate::cli::{RecordArgs, WatchArgs};
 use crate::config::{CaptureTarget, RecordingConfig};
@@ -950,7 +950,7 @@ fn wait_for_window(
     stop: &ShutdownSignal,
 ) -> Result<WindowInfo, String> {
     wait_for_window_on(
-        &mut || enumerate_windows().map_err(RecordError::from),
+        &mut || clipped_windows::enumerate_windows().map_err(RecordError::from),
         target,
         timeout,
         stop,
