@@ -285,6 +285,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clipped-logging",
+ "clipped-storage",
+ "serde",
+ "serde_json",
  "time",
  "tracing",
  "tracing-subscriber",

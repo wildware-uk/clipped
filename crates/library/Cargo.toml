@@ -38,7 +38,21 @@ clipped-logging.workspace = true
 # already the day a row belongs to. `std` is the only feature named; nothing
 # here formats, parses or asks the operating system the time. Taken from the
 # workspace, which says why the version is pinned there.
-time = { workspace = true, features = ["std"] }
+time = { workspace = true, features = ["std", "formatting", "parsing", "local-offset"] }
+
+# The database this crate indexes into. `clipped-storage` owns the file, the
+# schema and the write path; this crate owns what the rows *mean*, which is the
+# split docs/storage.md draws and the reason ingestion lives here rather than
+# there. It re-exports `rusqlite`, so the SQL below names one version of the
+# binding — the storage crate's.
+clipped-storage.workspace = true
+
+# The session sidecars this crate ingests are JSON that `clipped-session` wrote
+# (docs/sessions.md). Reading them is what indexing is, so the deserialiser is a
+# dependency of the crate rather than of its tests. Both dual MIT/Apache-2.0 and
+# already pinned in the workspace.
+serde.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
@@ -59,6 +73,31 @@ tracing-subscriber = "0.3"
 # the same argument syntax and the same usage errors (the root manifest says
 # why).
 clap.workspace = true
+
+
+# Reading the session sidecars the recorder writes (docs/sessions.md). The file
+# is JSON, so this is `serde` deriving one struct per shape in that document,
+# and `serde_json` for the parse and for the event detail this crate stores
+# without interpreting. Both dual MIT/Apache-2.0, both already in the graph.
+serde.workspace = true
+serde_json.workspace = true
+
+# Timestamps. Every time column in the schema is RFC 3339 text with an offset,
+# exactly as a sidecar writes it, so ingesting one is a copy — but reconciling
+# has to *compare* moments (which session is the most recent for this game) and
+# has to *write* one (when a recording was first found to be gone), and neither
+# is safe on text: two RFC 3339 strings in different offsets do not compare
+# lexicographically. `time` is already the workspace's calendar crate —
+# `clipped-session` stamps sessions with it — so this is the same dependency
+# rather than a second one (AGENTS.md sections 10 and 55). Dual MIT/Apache-2.0.
+#
+# `parsing` is the feature `clipped-session` does not need and this crate does:
+# the recorder only ever writes these strings, and the index is the first thing
+# that has to read one back.
+# Diagnostics, through the facade every crate calls directly (docs/logging.md).
+# Indexing runs unattended on a background thread, so what it decided about a
+# file nobody can find afterwards is only knowable from the log. MIT.
+tracing.workspace = true
 
 [lints]
 workspace = true
