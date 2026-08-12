@@ -688,10 +688,17 @@ mod tests {
 
     #[test]
     fn a_child_of_a_member_is_a_candidate_and_a_stranger_is_not() {
-        let lineage = rooted(100, 10);
+        let mut lineage = rooted(100, 10);
+        lineage.insert(200, 100, at(20), true);
         let rows = vec![
-            row(200, 100, "helper.exe"),
-            row(300, 999, "notepad.exe"),
+            // The child of a member, and not a member itself: the only one.
+            row(300, 200, "helper.exe"),
+            // Descended from nothing this tree knows.
+            row(400, 999, "notepad.exe"),
+            // Members already. Offering one of these again would have it
+            // reopened and reported as joining on every scan for the rest of
+            // the recording.
+            row(200, 100, "game-child.exe"),
             row(100, 50, "game.exe"),
         ];
 
@@ -701,11 +708,7 @@ mod tests {
             .map(|row| row.pid)
             .collect();
 
-        assert_eq!(
-            candidates,
-            vec![200],
-            "only the child of a member, and not the member itself"
-        );
+        assert_eq!(candidates, vec![300]);
     }
 
     #[test]
