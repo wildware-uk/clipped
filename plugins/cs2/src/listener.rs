@@ -1,9 +1,11 @@
 //! The loopback endpoint Counter-Strike 2 posts to.
 //!
 //! One socket, bound to `127.0.0.1`, accepting `POST` requests whose body is a
-//! Game State Integration payload. It is declared in `plugin.json`, rendered
-//! for the user as a sentence before the plugin may be enabled
-//! (`clipped_plugins::NetworkAccess`) and written down in `docs/privacy.md`.
+//! Game State Integration payload. It is declared in `plugin.json`, rendered as
+//! the sentence a user is meant to read before enabling the plugin
+//! (`clipped_plugins::NetworkAccess`; no screen shows it yet,
+//! [issue #281](https://github.com/wildware-uk/clipped/issues/281)), and
+//! written down in `docs/privacy.md`.
 //!
 //! # Loopback is not the same as safe
 //!
@@ -26,9 +28,27 @@
 //! - The socket binds `127.0.0.1` explicitly and never `0.0.0.0`. Binding the
 //!   wildcard address would expose it to the local network, which
 //!   `docs/privacy.md` calls "an outbound-class change wearing a disguise".
-//! - Everything about a request is bounded before it is read: the header block,
-//!   the body, and how long a connection may sit there. A local port that
-//!   anything can connect to is a local port anything can hold open.
+//! - Everything about a request is bounded before it is read: the header block
+//!   ([`MAX_HEADER_BYTES`]), the body ([`MAX_BODY_BYTES`]), how long one read
+//!   may wait ([`READ_TIMEOUT`]) and how long the whole connection may last
+//!   ([`CONNECTION_DEADLINE`]). A local port that anything can connect to is a
+//!   local port anything can hold open.
+//!
+//! # One connection at a time, so none of them may last
+//!
+//! Payloads are accepted on one thread, one connection at a time, because
+//! Counter-Strike posts one at a time and a queue of one is the whole of the
+//! concurrency this needs. The cost of that choice is that a connection which
+//! never finishes is not one slow request — it is the endpoint not working, and
+//! the game's payloads sitting in the accept backlog behind it.
+//!
+//! [`READ_TIMEOUT`] does not bound that on its own. It bounds a client that
+//! goes *silent*; a client that sends one byte before each timeout expires is
+//! talking, and can hold the socket for as long as it likes. So the connection
+//! as a whole is given an allowance, checked before every read, after which it
+//! is dropped. The worst one connection can cost is therefore
+//! [`CONNECTION_DEADLINE`] plus one [`READ_TIMEOUT`], for a read already in
+//! flight when the allowance ran out.
 //!
 //! # Why there is no HTTP dependency
 //!
@@ -58,8 +78,21 @@ const MAX_HEADER_BYTES: usize = 8 * 1024;
 /// not necessarily the game.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
-/// How long a connection may take to say anything.
+/// How long one read may wait.
+///
+/// This bounds a connection that goes quiet, and only that. A connection that
+/// keeps talking without ever finishing resets it every time, which is what
+/// [`CONNECTION_DEADLINE`] is for.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The whole of the time one connection may take.
+///
+/// Counter-Strike posts a few kilobytes over loopback and is gone, so this is
+/// enormously generous to the game and short against anything else on the
+/// machine that has found the port. Once it is spent the connection is dropped
+/// mid-request, because the alternative — waiting to be told the request is
+/// over — is waiting on a stranger.
+const CONNECTION_DEADLINE: Duration = Duration::from_secs(10);
 
 /// A payload that arrived and proved it came from the game.
 #[derive(Debug)]
@@ -75,6 +108,10 @@ pub struct ReceivedPayload {
 #[derive(Debug)]
 pub struct GsiListener {
     socket: TcpListener,
+    /// What each connection is allowed, in total. [`CONNECTION_DEADLINE`] in
+    /// anything that ships; shorter only in the test that would otherwise have
+    /// to wait it out.
+    allowance: Duration,
 }
 
 impl GsiListener {
@@ -90,7 +127,21 @@ impl GsiListener {
     /// exactly what the user needs to be told.
     pub fn bind(port: u16) -> io::Result<Self> {
         let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
-        TcpListener::bind(address).map(|socket| Self { socket })
+        TcpListener::bind(address).map(|socket| Self {
+            socket,
+            allowance: CONNECTION_DEADLINE,
+        })
+    }
+
+    /// The same socket, with a shorter allowance per connection.
+    ///
+    /// Test-only, and deliberately not part of the API: the plugin gets
+    /// [`CONNECTION_DEADLINE`] and nothing chooses otherwise. It exists so that
+    /// the test which proves a stalled connection is dropped can prove it in
+    /// under a second instead of waiting ten out.
+    #[cfg(test)]
+    fn allowing(self, allowance: Duration) -> Self {
+        Self { allowance, ..self }
     }
 
     /// The port actually bound.
@@ -104,9 +155,12 @@ impl GsiListener {
 
     /// Accepts payloads until the channel's receiver is gone.
     ///
-    /// Runs on a thread of its own. It never blocks the plugin's main loop and
-    /// the main loop never waits for it: a game that stops posting is a channel
-    /// that goes quiet, which is what the heartbeat in `crate::main` is for.
+    /// Runs on a thread of its own, one connection at a time. It never blocks
+    /// the plugin's main loop and the main loop never waits for it: a game that
+    /// stops posting is a channel that goes quiet, which is what the heartbeat
+    /// in `crate::main` is for. No connection can hold this loop for longer
+    /// than the module documentation's bound, which is what stops a stranger on
+    /// the port from being the same thing as a game that stopped posting.
     ///
     /// `on_refusal` is called with each refused request so that the caller can
     /// count and report it; it is deliberately not a log line written here,
@@ -123,7 +177,7 @@ impl GsiListener {
                 // stopping for; the next one may be the game.
                 continue;
             };
-            match handle(stream, token) {
+            match handle(stream, token, self.allowance) {
                 Ok(payload) => {
                     if payloads.send(payload).is_err() {
                         // Nobody is reading any more: the session has ended.
@@ -137,19 +191,37 @@ impl GsiListener {
 }
 
 /// Reads one request and answers it.
-fn handle(mut stream: TcpStream, token: &str) -> Result<ReceivedPayload, Refusal> {
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
+///
+/// `allowance` is the whole of the time this connection may take; see the
+/// module documentation for why a per-read timeout is not that.
+fn handle(
+    mut stream: TcpStream,
+    token: &str,
+    allowance: Duration,
+) -> Result<ReceivedPayload, Refusal> {
+    // Both directions are bounded before a byte is read, and a socket that will
+    // not take a timeout is one this endpoint declines to read from: the
+    // allowance below is checked between reads and cannot interrupt one that is
+    // already blocked, so without a timeout underneath it there is no bound at
+    // all.
+    stream
+        .set_read_timeout(Some(READ_TIMEOUT))
+        .map_err(|_| Refusal::Unreadable)?;
+    stream
+        .set_write_timeout(Some(READ_TIMEOUT))
+        .map_err(|_| Refusal::Unreadable)?;
 
-    let outcome = read_post(&mut BufReader::new(
-        stream.try_clone().map_err(|_| Refusal::Unreadable)?,
-    ));
+    let reading = stream.try_clone().map_err(|_| Refusal::Unreadable)?;
+    let outcome = read_post(&mut BufReader::new(Deadline::starting_now(
+        reading, allowance,
+    )));
     let received = Instant::now();
 
     let answer = match &outcome {
         Ok(body) if carries(body, token) => "HTTP/1.1 200 OK",
         Ok(_) => "HTTP/1.1 403 Forbidden",
         Err(RequestError::TooLarge) => "HTTP/1.1 413 Payload Too Large",
+        Err(RequestError::Stalled) => "HTTP/1.1 408 Request Timeout",
         Err(_) => "HTTP/1.1 400 Bad Request",
     };
     // Answered whatever happened, and the connection closed: Counter-Strike
@@ -165,6 +237,53 @@ fn handle(mut stream: TcpStream, token: &str) -> Result<ReceivedPayload, Refusal
         Ok(_) => Err(Refusal::Unauthenticated),
         Err(error) => Err(Refusal::Malformed { error }),
     }
+}
+
+/// A reader that stops once the connection has spent its allowance.
+///
+/// The check happens *before* each read rather than interrupting one in
+/// flight, which is why the socket underneath it must also have a read timeout:
+/// together they bound the connection at the allowance plus one
+/// [`READ_TIMEOUT`]. Nothing here cancels anything — the caller drops the
+/// connection when this refuses, and dropping it is what ends the conversation.
+struct Deadline<R> {
+    inner: R,
+    expires: Instant,
+}
+
+impl<R> Deadline<R> {
+    /// Gives `inner` `allowance` from this moment.
+    fn starting_now(inner: R, allowance: Duration) -> Self {
+        Self {
+            inner,
+            expires: Instant::now() + allowance,
+        }
+    }
+}
+
+impl<R: Read> Read for Deadline<R> {
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        if Instant::now() >= self.expires {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the connection took longer than this endpoint allows one to take",
+            ));
+        }
+        self.inner.read(into)
+    }
+}
+
+/// Whether an `io::Error` is a read that ran out of time.
+///
+/// Either the socket's own [`READ_TIMEOUT`] or [`Deadline`]: both mean the
+/// connection stopped being worth waiting for, and neither is a socket that
+/// failed. Windows reports the first as `TimedOut`; `WouldBlock` is here
+/// because a timed-out read is permitted to report either.
+fn timed_out(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
 }
 
 /// Whether a body carries the token the configuration file gave the game.
@@ -238,9 +357,13 @@ pub fn read_post(source: &mut impl BufRead) -> Result<Vec<u8>, RequestError> {
     }
 
     let mut body = vec![0; length];
-    source
-        .read_exact(&mut body)
-        .map_err(|_| RequestError::Truncated)?;
+    source.read_exact(&mut body).map_err(|error| {
+        if timed_out(&error) {
+            RequestError::Stalled
+        } else {
+            RequestError::Truncated
+        }
+    })?;
     Ok(body)
 }
 
@@ -250,9 +373,13 @@ fn read_line(source: &mut impl BufRead, into: &mut String) -> Result<usize, Requ
     // that never sends a newline would otherwise be a growing allocation.
     let mut bounded = source.take(MAX_HEADER_BYTES as u64);
     let mut bytes = Vec::new();
-    bounded
-        .read_until(b'\n', &mut bytes)
-        .map_err(|_| RequestError::Unreadable)?;
+    bounded.read_until(b'\n', &mut bytes).map_err(|error| {
+        if timed_out(&error) {
+            RequestError::Stalled
+        } else {
+            RequestError::Unreadable
+        }
+    })?;
     if bytes.is_empty() {
         return Err(RequestError::Truncated);
     }
@@ -274,6 +401,9 @@ pub enum RequestError {
     TooLarge,
     /// The connection ended in the middle.
     Truncated,
+    /// The connection ran out of time: silent for [`READ_TIMEOUT`], or talking
+    /// without finishing for longer than the whole connection is allowed.
+    Stalled,
     /// A header this module could not read.
     Malformed,
     /// The socket failed.
@@ -287,6 +417,7 @@ impl fmt::Display for RequestError {
             Self::NoLength => "no Content-Length",
             Self::TooLarge => "larger than this endpoint reads",
             Self::Truncated => "the connection ended mid-request",
+            Self::Stalled => "the connection took longer than this endpoint waits",
             Self::Malformed => "a header could not be read",
             Self::Unreadable => "the connection failed",
         })
@@ -420,6 +551,69 @@ mod tests {
         );
     }
 
+    /// A client that keeps talking and takes its time about finishing.
+    ///
+    /// A little at a time with a wait in front of each read, which is the shape
+    /// a per-read timeout cannot catch: every read succeeds, so nothing ever
+    /// times out, and the request still never ends.
+    struct Dribble {
+        remaining: Vec<u8>,
+        per_read: Duration,
+    }
+
+    impl Dribble {
+        /// Thirty-two bytes at a time, so that a fixture-sized request takes
+        /// tens of reads rather than one.
+        const CHUNK: usize = 32;
+    }
+
+    impl Read for Dribble {
+        fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+            if self.remaining.is_empty() || into.is_empty() {
+                return Ok(0);
+            }
+            thread::sleep(self.per_read);
+            let taken = Self::CHUNK.min(into.len()).min(self.remaining.len());
+            into[..taken].copy_from_slice(&self.remaining[..taken]);
+            self.remaining.drain(..taken);
+            Ok(taken)
+        }
+    }
+
+    #[test]
+    fn a_request_that_never_finishes_is_refused_when_its_allowance_runs_out() {
+        // Every read here succeeds, so READ_TIMEOUT never fires: what is
+        // measured is the connection as a whole. The request is a perfectly
+        // well-formed post, and the only thing wrong with it is how long it is
+        // taking — which is exactly what a process holding the port open would
+        // look like.
+        let request = post(PAYLOAD);
+        let dribbling = || Dribble {
+            remaining: request.as_bytes().to_vec(),
+            per_read: Duration::from_millis(5),
+        };
+
+        assert_eq!(
+            read_post(&mut BufReader::new(Deadline::starting_now(
+                dribbling(),
+                Duration::from_millis(10)
+            )))
+            .expect_err("a request that outstays its allowance is refused"),
+            RequestError::Stalled
+        );
+
+        // The same client, given time it does not need, is the same well-formed
+        // post: the bound refuses connections that take too long, not slow ones.
+        assert_eq!(
+            read_post(&mut BufReader::new(Deadline::starting_now(
+                dribbling(),
+                Duration::from_secs(60)
+            )))
+            .expect("time enough for it"),
+            PAYLOAD.as_bytes()
+        );
+    }
+
     /// The socket, for real, on a port the operating system picks.
     ///
     /// Loopback only, one connection at a time, and nothing outside this
@@ -472,6 +666,83 @@ mod tests {
                 }
             ],
             "exactly one payload should have got through, and both refusals named"
+        );
+    }
+
+    /// The failure the connection allowance exists for, over a real socket.
+    ///
+    /// Payloads are accepted one connection at a time, so a connection that
+    /// never finishes is the game's payloads never being read. The client below
+    /// is not silent — a silent one `READ_TIMEOUT` would catch — it keeps
+    /// sending, one byte at a time, forever.
+    #[test]
+    fn a_connection_that_will_not_finish_does_not_hold_the_game_out() {
+        // Short enough that this test does not wait CONNECTION_DEADLINE out.
+        // What ships is the constant, asserted below.
+        const ALLOWANCE: Duration = Duration::from_millis(300);
+        // Longer than the endpoint may take to get past the stalling client,
+        // and shorter than that client keeps going for.
+        const PATIENCE: Duration = Duration::from_secs(3);
+
+        let listener = GsiListener::bind(0).expect("an ephemeral loopback port");
+        assert_eq!(
+            listener.allowance, CONNECTION_DEADLINE,
+            "a bound bound only in tests is not a bound"
+        );
+        let listener = listener.allowing(ALLOWANCE);
+        let port = listener.port().expect("the port it got");
+        let (sender, receiver) = mpsc::channel();
+        let serving = thread::spawn(move || {
+            let mut refusals = Vec::new();
+            listener.serve(TOKEN, &sender, |refusal| refusals.push(*refusal));
+            refusals
+        });
+
+        // A request that begins and does not end, for far longer than the
+        // endpoint is prepared to wait.
+        let stalling = thread::spawn(move || {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("loopback connects");
+            stream
+                .write_all(b"POST / HTTP/1.1\r\n")
+                .expect("the first line goes");
+            for _ in 0..200 {
+                // Never a newline, so the header block never ends. It stops
+                // early only when the endpoint has hung up on it, which is the
+                // outcome this test is about.
+                if stream.write_all(b"X").is_err() || stream.flush().is_err() {
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            false
+        });
+
+        // Give the stalling client the connection the endpoint is working on,
+        // then post as the game does.
+        thread::sleep(Duration::from_millis(100));
+        let mut game = TcpStream::connect(("127.0.0.1", port)).expect("loopback connects");
+        game.write_all(post(PAYLOAD).as_bytes())
+            .expect("the payload goes");
+
+        let delivered = receiver
+            .recv_timeout(PATIENCE)
+            .expect("the game's payload was still waiting behind a connection that never finished");
+        assert_eq!(delivered.body, PAYLOAD.as_bytes());
+        assert!(
+            stalling.join().expect("the stalling thread"),
+            "the endpoint waited the stalling client out instead of dropping it"
+        );
+
+        // End the serving thread, and read back what it made of the stall.
+        drop(receiver);
+        let mut closing = TcpStream::connect(("127.0.0.1", port)).expect("loopback connects");
+        let _ = closing.write_all(post(PAYLOAD).as_bytes());
+        let refusals = serving.join().expect("the serving thread");
+        assert!(
+            refusals.contains(&Refusal::Malformed {
+                error: RequestError::Stalled
+            }),
+            "the stalled connection should have been refused by name: {refusals:?}"
         );
     }
 }

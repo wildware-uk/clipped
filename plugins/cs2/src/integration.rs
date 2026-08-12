@@ -585,6 +585,26 @@ mod tests {
     }
 
     #[test]
+    fn a_neighbour_that_spells_uri_differently_is_still_on_the_port() {
+        // KeyValues keys are case-insensitive to the game that reads them, so a
+        // tool writing `URI` posts to that port exactly as one writing `uri`
+        // does. Missing it here would be installing a second integration on an
+        // occupied port and telling the user it was free.
+        let game = FakeGame::new("port-clash-case");
+        game.write_neighbour(
+            "gamestate_integration_shouty.cfg",
+            "\"Other Tool\"\n{\n    \"URI\" \"http://127.0.0.1:3212/\"\n}\n",
+        );
+
+        let refusal = install(&game.root, 3212, "a-token", false).expect_err("the port is taken");
+        assert!(matches!(refusal, SetupError::PortTaken { .. }), "{refusal}");
+        assert!(
+            !game.cfg().join(CONFIGURATION_FILE).exists(),
+            "nothing should have been written"
+        );
+    }
+
+    #[test]
     fn a_neighbour_on_a_different_port_is_left_completely_alone() {
         let game = FakeGame::new("neighbour");
         let theirs = game.write_neighbour(

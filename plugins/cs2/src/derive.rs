@@ -256,14 +256,22 @@ impl MatchTracker {
         })
     }
 
-    /// `match_started`, which is a map this plugin was not already watching.
+    /// `match_started`: a map this plugin was not already watching, or the same
+    /// map starting again.
+    ///
+    /// The second half matters more than it looks. Two matches in a row on one
+    /// map — a rematch, or a queue that lands on it twice — never change
+    /// `map.name`, so a rule about the name alone reports `match_ended` for the
+    /// second match and nothing for its beginning. The map phase leaving
+    /// `gameover` is that beginning, and it is a transition observed directly
+    /// between two payloads, which is the only kind this plugin reports.
     fn derive_match(&mut self, payload: &GsiPayload, window: Window, step: &mut Step) {
         let map = payload.map.as_ref();
         let name = map.and_then(|map| map.name.as_deref());
         let Some(name) = name else {
             return;
         };
-        if self.baseline.map_name.as_deref() == Some(name) {
+        if self.baseline.map_name.as_deref() == Some(name) && !self.left_game_over(map) {
             return;
         }
 
@@ -281,6 +289,22 @@ impl MatchTracker {
         self.baseline.stats = None;
         self.baseline.round_kills = None;
         self.baseline.round_headshot_kills = None;
+    }
+
+    /// Whether the map has just come out of `gameover`.
+    ///
+    /// Counter-Strike keeps posting while the end-of-match scoreboard is up, so
+    /// the interesting moment is the phase changing to something that is not
+    /// `gameover` — warm-up, or straight into a live round. A payload whose map
+    /// carries no phase at all says nothing either way and is declined, in
+    /// keeping with everything else here: a mark this plugin cannot justify is
+    /// worse than a missing one.
+    fn left_game_over(&self, map: Option<&MapState>) -> bool {
+        if self.baseline.map_phase.as_ref() != Some(&MapPhase::GameOver) {
+            return false;
+        }
+        map.and_then(|map| map.phase.as_ref())
+            .is_some_and(|phase| *phase != MapPhase::GameOver)
     }
 
     /// The round phase changing: a round that opened, and a round that closed.
@@ -920,6 +944,81 @@ mod tests {
             "the match ended twice: {:?}",
             again.kinds()
         );
+    }
+
+    #[test]
+    fn a_second_match_on_the_same_map_is_reported_starting() {
+        // Two matches in a row on one map is an ordinary evening, and
+        // `map.name` never changes across it. A rule about the name alone gives
+        // the second match a `match_ended` and no beginning — a timeline with
+        // two endings and one start on it.
+        let phase = |stamp: i64, phase: &str, kills: u32| {
+            payload(serde_json::json!({
+                "provider": {"steamid": LOCAL, "timestamp": stamp},
+                "map": {"name": "de_dust2", "mode": "competitive", "phase": phase, "round": 20,
+                        "team_ct": {"score": 13}, "team_t": {"score": 7}},
+                "player": {"steamid": LOCAL, "team": "CT",
+                           "match_stats": {"kills": kills, "deaths": 6, "assists": 3}}
+            }))
+        };
+
+        let mut tracker = MatchTracker::new();
+        tracker.observe(&live(10, 8, 6, 3), at(0));
+
+        let ended = tracker.observe(&phase(30, "gameover", 8), at(1));
+        assert_eq!(ended.kinds(), vec![&EventKind::MatchEnded, &EventKind::Win]);
+
+        // The scoreboard is up and the game keeps posting: still one ending.
+        assert!(tracker
+            .observe(&phase(31, "gameover", 8), at(2))
+            .events
+            .is_empty());
+
+        // And now the next match begins on the same map.
+        let started = tracker.observe(&phase(40, "warmup", 0), at(3));
+        assert_eq!(
+            started.kinds(),
+            vec![&EventKind::MatchStarted],
+            "the match that started after the last one ended was never reported starting"
+        );
+        assert_eq!(
+            started.events[0].data["map"],
+            Value::String("de_dust2".into())
+        );
+        assert!(
+            started.notes.is_empty(),
+            "a new match's counters starting from zero is not a reset to report: {:?}",
+            started.notes
+        );
+
+        // The counters it starts from are the new match's, so the first kill of
+        // it is one kill rather than the whole of the last match again.
+        let first_kill = tracker.observe(&phase(41, "live", 1), at(4));
+        assert_eq!(first_kill.kinds(), vec![&EventKind::Kill]);
+    }
+
+    #[test]
+    fn a_match_that_has_not_ended_is_not_restarted_by_a_phase_change() {
+        // The guard above is about coming out of `gameover` and nothing else.
+        // Warm-up giving way to a live round is the same match, and reporting
+        // it starting again would put a second beginning on the timeline.
+        let phase = |stamp: i64, phase: &str| {
+            payload(serde_json::json!({
+                "provider": {"steamid": LOCAL, "timestamp": stamp},
+                "map": {"name": "de_dust2", "phase": phase, "round": 0},
+                "player": {"steamid": LOCAL, "team": "CT",
+                           "match_stats": {"kills": 0, "deaths": 0, "assists": 0}}
+            }))
+        };
+
+        let mut tracker = MatchTracker::new();
+        tracker.observe(&phase(10, "warmup"), at(0));
+        assert!(tracker.observe(&phase(11, "live"), at(1)).events.is_empty());
+        assert!(tracker
+            .observe(&phase(12, "intermission"), at(2))
+            .events
+            .is_empty());
+        assert!(tracker.observe(&phase(13, "live"), at(3)).events.is_empty());
     }
 
     #[test]

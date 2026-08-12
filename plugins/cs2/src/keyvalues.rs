@@ -70,11 +70,24 @@ impl KeyValues {
     }
 
     /// The first value for `key`, whatever it is.
+    ///
+    /// Keys are matched without regard to case, because that is how Valve's own
+    /// reader matches them and this one is used to read files other tools wrote
+    /// (`crate::integration::neighbour_posting_to` looks for their `uri`). A
+    /// case-sensitive lookup here would let a neighbouring integration file
+    /// that happens to spell it `URI` past the check for two tools on one port,
+    /// and Counter-Strike would load both and post to one of them.
+    ///
+    /// The same rule is already implemented, and for the same reason, in
+    /// `clipped_game_detection`'s reader for Steam's files; the two are
+    /// duplicates, which
+    /// [issue #69](https://github.com/wildware-uk/clipped/issues/69) is where
+    /// the shared home for them is being decided.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&KeyValue> {
         self.entries
             .iter()
-            .find(|(name, _)| name == key)
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
             .map(|(_, value)| value)
     }
 
@@ -308,6 +321,34 @@ mod tests {
             document.entries().len(),
             1,
             "the comment is not an entry, and neither is the whitespace"
+        );
+    }
+
+    #[test]
+    fn a_key_is_found_however_the_file_that_wrote_it_spelt_it() {
+        // Valve's own reader matches keys without regard to case, and these
+        // files are written by other people's tools. `crate::integration` reads
+        // a neighbouring file's `uri` to find out whether it is already posting
+        // to the port being installed; a lookup that missed `URI` would install
+        // a second integration on one port, and Counter-Strike loads both.
+        let document = KeyValues::parse(
+            r#"
+            "Some Other Tool"
+            {
+                "URI"   "http://127.0.0.1:3212/"
+                "Auth"  { "Token" "abc123" }
+            }
+        "#,
+        )
+        .expect("a well-formed file");
+
+        let service = document
+            .block("some other tool")
+            .expect("the outer block, whatever its case");
+        assert_eq!(service.text("uri"), Some("http://127.0.0.1:3212/"));
+        assert_eq!(
+            service.block("auth").and_then(|auth| auth.text("token")),
+            Some("abc123")
         );
     }
 

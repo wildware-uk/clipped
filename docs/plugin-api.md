@@ -1083,6 +1083,11 @@ run, so a declaration that has drifted from the socket is consent for something
 that is not happening. The same test checks that the manifest names the binary
 Cargo actually builds, because a manifest naming an executable that is not there
 is a plugin the host refuses at discovery and a mistake a rename makes silently.
+What that test bounds is the **default**: `install --port` can still point the
+game somewhere else, and nothing compares the two at run time, so
+`plugins/cs2/README.md` says to edit the manifest to match. Enforcing it needs
+somewhere to enforce it from
+([issue #281](https://github.com/wildware-uk/clipped/issues/281)).
 
 **It says `hello` before it does anything that can fail.** Introducing itself
 and then reporting a `problem` is a plugin the host can tell the user about;

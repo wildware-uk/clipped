@@ -209,7 +209,7 @@ network communication of either class, and none of it is outbound.** Two bundled
 | Feature | Class | Destination | Default | Opt-in |
 | --- | --- | --- | --- | --- |
 | League of Legends highlight plugin | Loopback | `127.0.0.1:2999`, connect only | Off | Enabling the plugin, whose declaration is this row in the words `plugin.json` says it in |
-| Counter-Strike 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3212`. Receives Game State Integration payloads from Counter-Strike 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin does nothing until its configuration file is installed, and does not install one itself. | Two deliberate steps: enabling the plugin, having seen its declaration, and running `clipped-cs2-plugin install <game folder>`, which writes the one file that makes the game post at all. `clipped-cs2-plugin uninstall`, or deleting that file, ends it. |
+| Counter-Strike 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3212`. Receives Game State Integration payloads from Counter-Strike 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin does nothing until its configuration file is installed, and does not install one itself. | Running `clipped-cs2-plugin install <game folder>` by hand, which writes the one file that makes the game post at all. Enabling a plugin having read its declaration is the intended second step and there is no screen for it yet ([issue #281](https://github.com/wildware-uk/clipped/issues/281)), so today the install command is the whole of it. `clipped-cs2-plugin uninstall`, or deleting that file, ends it. |
 
 Each row is spelled out below, because a register entry that has to be decoded
 is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design).
@@ -247,8 +247,16 @@ is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design).
 
 What the plugin receives is a snapshot of your Counter-Strike match — the map,
 the round, the score and your own kill, death and assist counts — and it stays
-on the machine: it becomes marks on a recording's timeline in the local
-database. Nothing about it is transmitted anywhere. The listener requires the
+on the machine. What it becomes is worth being exact about, because it is less
+than the finished feature: the plugin turns those snapshots into events on its
+own standard output, and **nothing reads them yet**. Nothing in the recorder
+starts the plugin during a recording
+([issue #338](https://github.com/wildware-uk/clipped/issues/338)) and nothing
+writes a plugin's events onto a recording's timeline
+([issue #71](https://github.com/wildware-uk/clipped/issues/71)); when that is
+built, the destination is the local database, and this paragraph should say so
+in the present tense at that point and not before. Either way nothing about it
+is transmitted anywhere. The listener requires the
 token from the configuration file on every payload and refuses anything else,
 because a loopback port is reachable by every other process on this machine
 (see [above](#loopback-and-outbound-are-treated-differently)), and it binds

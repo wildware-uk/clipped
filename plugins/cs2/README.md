@@ -96,7 +96,7 @@ afterwards: the game reads these files at start-up.
 
 | | |
 | --- | --- |
-| `--port <n>` | Use a different loopback port. The default is 3212, which is what the plugin's `plugin.json` declares — if you change it, Clipped will ask you to consent to the new declaration. |
+| `--port <n>` | Use a different loopback port. The default is 3212, which is the port `plugin.json` beside this executable declares. **Nothing checks that the two agree**: if you change the port here, edit the `endpoint` in that file to match, or the plugin will be listening on a port its own declaration does not name. |
 | `--replace` | Rewrite a configuration Clipped installed earlier, with a fresh token. It will never replace a file another tool wrote. |
 
 `clipped-cs2-plugin status` says whether it is installed and what it listens on.
@@ -124,17 +124,29 @@ because it looks like the plugin breaking. `status` will tell you.
 ## The port, and what it accepts
 
 The plugin listens on `127.0.0.1:3212` — loopback, never `0.0.0.0`, so nothing
-outside this computer can reach it. That is declared in `plugin.json`, shown to
-you as a sentence before you enable the plugin, and recorded in
-[docs/privacy.md](../../docs/privacy.md)'s register.
+outside this computer can reach it. That is declared in `plugin.json` and
+recorded in [docs/privacy.md](../../docs/privacy.md)'s register.
+
+The declaration is meant to be a sentence you read before you enable the plugin.
+The sentence exists and is tested — "Listens on 127.0.0.1:3212 (this machine
+only) — receives Counter-Strike 2 game state" — but **there is no screen in
+Clipped that shows it to you yet**
+([issue #281](https://github.com/wildware-uk/clipped/issues/281)), and nothing
+records which plugins you have enabled
+([issue #282](https://github.com/wildware-uk/clipped/issues/282)). Today the
+whole of the opt-in is that you run `install` yourself, having read this page.
+Nor is the declaration enforced: a plugin is a separate process and opens its
+own socket ([issue #280](https://github.com/wildware-uk/clipped/issues/280)).
 
 Loopback is not the same as safe, and privacy.md is explicit about it: a port
 bound to loopback is reachable by *every other process on this machine*,
 including a page open in a browser. So every payload has to carry the token from
 the configuration file, and one that does not is answered `403` and dropped
 before anything about it is believed. A request that is not a `POST` with a
-`Content-Length` this endpoint will read gets `400`. Nothing is sent anywhere:
-the socket only ever receives.
+`Content-Length` this endpoint will read gets `400`, and one that starts and
+never finishes is dropped when its ten seconds are up — payloads are read one
+connection at a time, so a connection that lasts is the game not being heard.
+Nothing is sent anywhere: the socket only ever receives.
 
 ## What it reports
 
@@ -144,7 +156,7 @@ Everything below is a *difference* between two payloads.
 
 | Clipped event | Derived from |
 | --- | --- |
-| `match_started` | a map appearing, or the map changing |
+| `match_started` | a map appearing, the map changing, or the same map leaving `gameover` — two matches in a row on one map are two matches |
 | `match_ended`, `win`, `loss` | `map.phase` becoming `gameover`; the result from the two scores and which side you are on |
 | `round_started` | `round.phase` becoming `live` |
 | `round_ended` | `round.phase` becoming `over`, carrying the winning side |
@@ -216,6 +228,11 @@ game on it. Install as above, run any program that echoes what it is POSTed on
 that port — or the plugin itself, with its standard error captured — play a
 competitive match, and keep one payload per interesting transition. What is
 worth having is a warm-up, a round starting, a single kill, a multi-kill, a
-headshot, a death, a round ending, a spectated teammate, and a game over. Drop
-them into `tests/payloads/`, delete the paragraph above, and
-`tests/derivation.rs` will run against them unchanged.
+headshot, a death, a round ending, a spectated teammate, and a game over.
+
+Put them in a **new directory** under `tests/payloads/`, numbered in the order
+they arrived: `tests/derivation.rs` plays any such directory through the tracker
+without changes. What it will not do is tell you what should come out — every
+test there asserts the exact events a named sequence produces, so a capture
+needs a test saying what happened in the match it came from. `tests/payloads/`
+has its own README with the detail.
