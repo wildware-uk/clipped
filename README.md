@@ -234,9 +234,11 @@ is not responsible for, and where it sits in this stack.
 | [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |
 | [docs/game-detection.md](docs/game-detection.md) | The game catalogue, its matching rules and how to add a game |
 | [docs/editing.md](docs/editing.md) | What an edit is, the two kinds of time it is written in, where it is stored and how a document from an older build is read |
+| [docs/storage-management.md](docs/storage-management.md) | What the library occupies, how accurate that figure is, and the limits configured against it |
 
-The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49, #42 and
-#82 and are listed here so those tickets do not each have to edit this table.
+The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49, #42, #82
+and #93 and are listed here so those tickets do not each have to edit this
+table.
 
 ## Contributing
 

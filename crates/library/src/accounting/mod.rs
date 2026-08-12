@@ -41,8 +41,8 @@
 //! walks the filesystem, reconciles the result against the index, and answers
 //! questions about games and sessions, which are library concepts and not
 //! storage primitives. Putting it here also keeps `clipped-storage` free of
-//! policy, which is what `docs/architecture.md` describes as the undecided part
-//! of the storage manager.
+//! policy, which is the split `docs/architecture.md` now records against the
+//! storage manager: the mechanism there, the measurement and the limits here.
 //!
 //! It is deliberately *not* a new crate. It depends on nothing but the standard
 //! library and one Windows call, it is used by the same consumers as the rest of
@@ -117,11 +117,17 @@
 //! Issue #111 has to answer "which files would be removed first", and cannot if
 //! accounting throws away everything but a total. So the inventory keeps one
 //! [`FileEntry`] per file — path, category, size and modification time — and
-//! [`StorageInventory::oldest_first`] orders them the way SPEC.md section 27
-//! describes deletion happening. That is all: the *protection* rules (favourites,
-//! locked recordings, recordings being edited, sources referenced by clips) are
-//! facts about the index rather than the disk, and they belong to the ticket that
-//! deletes. Nothing here decides that a file may go.
+//! [`StorageInventory::cleanup_candidates_oldest_first`] orders them the way
+//! SPEC.md section 27 describes deletion happening.
+//!
+//! Two exclusions are built into that, because they are about the *file* rather
+//! than about policy: the logs, the database and the replay buffer's disk
+//! backing are counted towards the total and are never offered as candidates
+//! ([`StorageCategory::is_cleanup_candidate`]), and a file whose modification
+//! time is unknown sorts last rather than first. That is all: the *protection*
+//! rules (favourites, locked recordings, recordings being edited, sources
+//! referenced by clips) are facts about the index rather than the disk, and they
+//! belong to the ticket that deletes. Nothing here decides that a file may go.
 //!
 //! # Where the settings will live
 //!

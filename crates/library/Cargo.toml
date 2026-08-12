@@ -12,9 +12,16 @@ authors.workspace = true
 # The logging facade. Storage accounting walks the user's library, and the two
 # things it can discover — a root it could not read, and a scan that ran out of
 # its budget — are exactly the diagnostics somebody investigating "why does the
-# reported figure look wrong" needs. Diagnostics go through `tracing` directly;
-# `clipped-logging` only decides where they end up (docs/logging.md). MIT.
+# reported figure look wrong" needs. MIT.
 tracing.workspace = true
+
+# For `RedactedPath`. Every path accounting could log is a path inside the
+# user's own profile — a storage root is `C:\Users\<account>\Videos\Clipped\...`
+# — so the account name and the folders somebody chose are reduced before they
+# reach a log file (docs/logging.md, "Privacy"; AGENTS.md section 13).
+# `clipped-logging` is layer 0 and this crate is layer 1, so this follows the
+# dependency direction.
+clipped-logging.workspace = true
 
 # How much of a volume is free, and how large it is: `GetDiskFreeSpaceExW`.
 # Target-specific so that the platform-neutral half of this crate still compiles
@@ -29,6 +36,12 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# `tests/accounting_privacy.rs` renders real log output through a real
+# subscriber and asserts on the bytes that would have reached a log file, which
+# is the only way to prove a path was reduced before it was recorded. The same
+# approach as `crates/logging/tests/privacy.rs`. MIT.
+tracing-subscriber = "0.3"
+
 # `examples/scan_cost.rs` builds a synthetic library of a requested size and
 # times a scan of it, which is where the figures in docs/storage-management.md
 # come from. It takes arguments, and every executable in this workspace presents

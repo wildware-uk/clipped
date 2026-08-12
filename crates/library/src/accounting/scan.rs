@@ -32,6 +32,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use clipped_logging::RedactedPath;
+
 use crate::accounting::inventory::{
     Completeness, FileEntry, PartialReason, StorageInventory, UnavailableRoot,
 };
@@ -243,7 +245,7 @@ impl Walk<'_> {
                     // yet, so the directory has not been created. Worth zero,
                     // and the measurement is complete.
                     tracing::debug!(
-                        root = %path.display(),
+                        root = %RedactedPath::new(path),
                         category = category.as_str(),
                         "storage root does not exist yet; counted as empty"
                     );
@@ -259,10 +261,15 @@ impl Walk<'_> {
     }
 
     /// Records a root that could not be read.
+    ///
+    /// The log line carries the reduced path; the *inventory* keeps the whole
+    /// one, because "your D: drive is not connected" is a sentence for the
+    /// screen in issue #95 to write from [`UnavailableRoot`], not something a
+    /// log file has to be able to reconstruct (docs/logging.md, "Privacy").
     fn unavailable(&mut self, path: &Path, category: StorageCategory, reason: impl Into<String>) {
         let reason = reason.into();
         tracing::warn!(
-            root = %path.display(),
+            root = %RedactedPath::new(path),
             category = category.as_str(),
             reason = %reason,
             "storage root could not be read; the reported total is incomplete"
@@ -271,11 +278,20 @@ impl Walk<'_> {
             .record_unavailable_root(UnavailableRoot::new(path, category, reason));
     }
 
-    /// Walks a directory and everything below it, breadth first.
+    /// Walks a directory and everything below it, depth first.
     ///
     /// An explicit stack rather than recursion: a library is user data and its
     /// depth is not this code's to assume, and a deep enough tree would exhaust
-    /// the stack of whichever thread the caller chose.
+    /// the stack of whichever thread the caller chose. `pending` is that stack
+    /// and is taken from its end, so the walk enumerates a directory in full —
+    /// measuring the files in it and queueing the directories — and then
+    /// descends into the subdirectory it discovered last.
+    ///
+    /// A complete scan sees the same files in any order, so the order is not
+    /// load-bearing for a total. It is load-bearing for an *interrupted* scan:
+    /// stopping after the root has been enumerated leaves the root's own files
+    /// measured and nothing below them, which is what
+    /// `a_cancelled_scan_keeps_what_it_measured_and_is_marked_partial` asserts.
     fn directory_tree(&mut self, root: &Path, category: StorageCategory) {
         let mut pending = vec![root.to_path_buf()];
 
@@ -288,7 +304,7 @@ impl Walk<'_> {
                 Ok(entries) => entries,
                 Err(error) => {
                     tracing::warn!(
-                        directory = %directory.display(),
+                        directory = %RedactedPath::new(&directory),
                         reason = %error,
                         "a directory could not be read; the reported total is incomplete"
                     );

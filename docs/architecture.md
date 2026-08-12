@@ -128,7 +128,7 @@ surrounding responsibility.
 | Encoder Manager | `clipped-encoder` | M1 |
 | Event/Highlight Engine | `clipped-events` (vocabulary), `clipped-session` (rules) | M8–M10 |
 | Media Library | `clipped-library` | M6 |
-| Storage Manager | `clipped-storage` (persistence); policy undecided | M6, M12 |
+| Storage Manager | `clipped-storage` (persistence); `clipped-library::accounting` (measurement and limits) | M6, M12 |
 | Export Engine | not yet created; `clipped-edit` is the edit document it renders, `clipped-muxer` for remux | M11 |
 | Plugin Manager | `clipped-plugins` | M9 |
 | Game/Screen Capture | `clipped-capture` | M1 |
@@ -154,13 +154,18 @@ in which order, how loud each track is and what text goes over the picture
 ([editing.md](editing.md)) — and it holds no exporter, no editor and no edit
 operation. It sits at layer 0 beside `clipped-ipc` because both ends of the
 application read a document, and it performs no file or database access at all,
-so a clip cannot damage the recording it refers to. Storage policy — quotas, retention, favourite protection — is listed as
-undecided for the same reason: the mechanism (SQLite, on-disk layout) is clearly
-`clipped-storage`, but no crate's documented remit claims the policy, and
-`clipped-library` explicitly claims indexing, search, favourites and tags
-instead. Where it lives is an M12 decision that
-[issue #93](https://github.com/wildware-uk/clipped/issues/93) and
-[issue #111](https://github.com/wildware-uk/clipped/issues/111) will make.
+so a clip cannot damage the recording it refers to. The Storage Manager is split
+between two crates because the mechanism and the policy are different jobs. The
+mechanism — SQLite, migrations, on-disk layout — is `clipped-storage`. The
+policy that had no home was placed by
+[issue #93](https://github.com/wildware-uk/clipped/issues/93): storage
+*accounting* is `clipped-library::accounting`, because measuring what is on disk
+and attributing it to games and sessions is a view over the library, which is
+what `clipped-library` has claimed from the start
+([storage-management.md](storage-management.md)). It measures and judges limits
+and deletes nothing; acting on a breached limit is
+[issue #111](https://github.com/wildware-uk/clipped/issues/111), which is where
+the retention and favourite-protection rules will land.
 
 ### Dependency direction
 

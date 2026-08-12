@@ -111,7 +111,13 @@ impl StorageLimits {
     /// Marks recordings older than `age` as over-age.
     ///
     /// Nothing in this module acts on that; it reports how much is over-age
-    /// ([`StorageInventory::older_than`](crate::accounting::StorageInventory::older_than)).
+    /// ([`StorageInventory::cleanup_candidates_older_than`](crate::accounting::StorageInventory::cleanup_candidates_older_than)).
+    ///
+    /// *Recordings*, in the sense
+    /// [`StorageCategory::is_cleanup_candidate`](crate::accounting::StorageCategory::is_cleanup_candidate)
+    /// defines: the database, the logs and the replay buffer's disk backing are
+    /// older than any age a user would set here and are not what this setting
+    /// is about.
     ///
     /// # Errors
     ///

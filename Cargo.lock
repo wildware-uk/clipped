@@ -284,7 +284,9 @@ name = "clipped-library"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipped-logging",
  "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 

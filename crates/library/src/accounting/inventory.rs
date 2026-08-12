@@ -134,10 +134,15 @@ impl core::fmt::Display for PartialReason {
 }
 
 /// Whether a measurement saw everything it was asked to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The default is [`Complete`](Self::Complete), matching
+/// [`StorageInventory::new`]: a measurement of nothing has not failed to see
+/// anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Completeness {
     /// Every declared root was walked to the end.
+    #[default]
     Complete,
     /// Something stopped it. The reasons are kept in the order they happened,
     /// and there may be more than one — a scan can lose a root *and* run out of
@@ -328,7 +333,8 @@ impl StorageInventory {
         totals
     }
 
-    /// Every file, oldest first, with files of unknown age last.
+    /// Every file a limit may select, oldest first, with files of unknown age
+    /// last.
     ///
     /// This is the order SPEC.md section 27 describes a cleanup working in, and
     /// it is as far as this module goes towards issue #111: it says which files
@@ -338,9 +344,20 @@ impl StorageInventory {
     /// A file whose modification time the filesystem did not report sorts last
     /// rather than first: an unknown age must not make something the first
     /// candidate for deletion.
+    ///
+    /// The database, the logs and the replay buffer's disk backing are counted
+    /// towards the total and are **not** listed here
+    /// ([`StorageCategory::is_cleanup_candidate`]). Handing the file that makes
+    /// the library meaningful, or the backing of a recording in progress, to a
+    /// deleter as its first candidate is the failure this exclusion exists to
+    /// prevent.
     #[must_use]
-    pub fn oldest_first(&self) -> Vec<&FileEntry> {
-        let mut entries: Vec<&FileEntry> = self.files.values().collect();
+    pub fn cleanup_candidates_oldest_first(&self) -> Vec<&FileEntry> {
+        let mut entries: Vec<&FileEntry> = self
+            .files
+            .values()
+            .filter(|entry| entry.category().is_cleanup_candidate())
+            .collect();
         entries.sort_by(|left, right| match (left.modified(), right.modified()) {
             (Some(left_time), Some(right_time)) => left_time
                 .cmp(&right_time)
@@ -352,17 +369,26 @@ impl StorageInventory {
         entries
     }
 
-    /// The files older than `age` at `now`, and what they occupy.
+    /// The files a limit may select that are older than `age` at `now`, and
+    /// what they occupy.
     ///
-    /// Returns the count and the total in bytes. What the maximum recording age
-    /// setting is *for*: a screen can say "31 recordings, 84 GB, older than 90
-    /// days" without anything having been deleted, which is the "review large
-    /// recordings" path issue #111 asks for, one ticket early and without a
-    /// deletion behind it.
+    /// Returns the count and the total in bytes. What the maximum *recording*
+    /// age setting is for: a screen can say "31 recordings, 84 GB, older than
+    /// 90 days" without anything having been deleted, which is the "review
+    /// large recordings" path issue #111 asks for, one ticket early and without
+    /// a deletion behind it.
+    ///
+    /// Which is why it counts the same files
+    /// [`cleanup_candidates_oldest_first`](Self::cleanup_candidates_oldest_first)
+    /// lists and not every file in the inventory: a two-year-old database file
+    /// and a rotated log are older than any recording age a user would set, and
+    /// counting them would put the SQLite database in a sentence about
+    /// over-age footage.
     #[must_use]
-    pub fn older_than(&self, age: Duration, now: SystemTime) -> (usize, u64) {
+    pub fn cleanup_candidates_older_than(&self, age: Duration, now: SystemTime) -> (usize, u64) {
         self.files
             .values()
+            .filter(|entry| entry.category().is_cleanup_candidate())
             .filter(|entry| entry.age(now).is_some_and(|entry_age| entry_age > age))
             .fold((0usize, 0u64), |(count, bytes), entry| {
                 (count + 1, bytes.saturating_add(entry.bytes()))
@@ -390,12 +416,32 @@ mod tests {
     }
 
     fn entry(name: &str, bytes: u64, age: Option<Duration>) -> FileEntry {
-        FileEntry::new(
-            path(name),
-            StorageCategory::Recordings,
-            bytes,
-            age.map(|age| now() - age),
-        )
+        categorised(name, StorageCategory::Recordings, bytes, age)
+    }
+
+    fn categorised(
+        name: &str,
+        category: StorageCategory,
+        bytes: u64,
+        age: Option<Duration>,
+    ) -> FileEntry {
+        FileEntry::new(path(name), category, bytes, age.map(|age| now() - age))
+    }
+
+    /// The file names of the candidates, oldest first.
+    fn candidate_names(inventory: &StorageInventory) -> Vec<String> {
+        inventory
+            .cleanup_candidates_oldest_first()
+            .into_iter()
+            .map(|entry| {
+                entry
+                    .path()
+                    .file_name()
+                    .expect("every entry has a name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
     }
 
     #[test]
@@ -560,20 +606,114 @@ mod tests {
         ));
         inventory.record_added(entry("undated.mkv", 1, None));
 
-        let order: Vec<_> = inventory
-            .oldest_first()
-            .into_iter()
-            .map(|entry| {
-                entry
-                    .path()
-                    .file_name()
-                    .expect("every entry has a name")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
+        assert_eq!(
+            candidate_names(&inventory),
+            vec!["ancient.mkv", "recent.mkv", "undated.mkv"]
+        );
+    }
 
-        assert_eq!(order, vec!["ancient.mkv", "recent.mkv", "undated.mkv"]);
+    #[test]
+    fn the_database_the_logs_and_the_replay_buffer_are_never_candidates() {
+        // The failure this prevents: a library whose oldest files are the
+        // database and a rotated log hands issue #111 the database first, and
+        // the replay buffer it hands over belongs to a recording happening now.
+        // All three are still counted towards the total.
+        let mut inventory = StorageInventory::new();
+        let old = Some(Duration::from_secs(200 * 86_400));
+        inventory.record_added(categorised(
+            "clipped.db",
+            StorageCategory::Metadata,
+            1_000,
+            old,
+        ));
+        inventory.record_added(categorised(
+            "clipped.log",
+            StorageCategory::Logs,
+            1_000,
+            old,
+        ));
+        inventory.record_added(categorised(
+            "buffer.mkv",
+            StorageCategory::ReplayBuffer,
+            1_000,
+            old,
+        ));
+        inventory.record_added(categorised(
+            "match.mkv",
+            StorageCategory::Recordings,
+            1_000,
+            Some(Duration::from_secs(86_400)),
+        ));
+
+        assert_eq!(candidate_names(&inventory), vec!["match.mkv"]);
+        assert_eq!(
+            inventory.total_bytes(),
+            4_000,
+            "everything is counted towards the total; only selection is narrowed"
+        );
+    }
+
+    #[test]
+    fn nothing_but_a_recording_is_counted_against_the_maximum_recording_age() {
+        // The user-facing number: "3 files totalling 3,000 bytes are older than
+        // 90 days" must not be the database, a log and a replay buffer.
+        let mut inventory = StorageInventory::new();
+        let old = Some(Duration::from_secs(200 * 86_400));
+        inventory.record_added(categorised(
+            "clipped.db",
+            StorageCategory::Metadata,
+            1_000,
+            old,
+        ));
+        inventory.record_added(categorised(
+            "clipped.log",
+            StorageCategory::Logs,
+            1_000,
+            old,
+        ));
+        inventory.record_added(categorised(
+            "buffer.mkv",
+            StorageCategory::ReplayBuffer,
+            1_000,
+            old,
+        ));
+
+        assert_eq!(
+            inventory.cleanup_candidates_older_than(Duration::from_secs(90 * 86_400), now()),
+            (0, 0)
+        );
+
+        inventory.record_added(categorised(
+            "match.mkv",
+            StorageCategory::Recordings,
+            5_000,
+            old,
+        ));
+
+        assert_eq!(
+            inventory.cleanup_candidates_older_than(Duration::from_secs(90 * 86_400), now()),
+            (1, 5_000)
+        );
+    }
+
+    #[test]
+    fn footage_in_the_trash_is_still_a_candidate() {
+        // Trash holds footage the user has already asked to lose and it still
+        // occupies the disk. Its retention period (#94) is a separate schedule,
+        // not an exemption from the library's limits.
+        let mut inventory = StorageInventory::new();
+        inventory.record_added(categorised(
+            "deleted.mkv",
+            StorageCategory::Trash,
+            3_000,
+            Some(Duration::from_secs(200 * 86_400)),
+        ));
+
+        assert_eq!(candidate_names(&inventory), vec!["deleted.mkv"]);
+        assert_eq!(
+            inventory.cleanup_candidates_older_than(Duration::from_secs(90 * 86_400), now()),
+            (1, 3_000)
+        );
     }
 
     #[test]
@@ -584,7 +724,7 @@ mod tests {
         inventory.record_added(entry("a.mkv", 1, same));
 
         let order: Vec<_> = inventory
-            .oldest_first()
+            .cleanup_candidates_oldest_first()
             .into_iter()
             .map(FileEntry::path)
             .collect();
@@ -611,7 +751,8 @@ mod tests {
         inventory.record_added(entry("new.mkv", 9_000, Some(Duration::from_secs(86400))));
         inventory.record_added(entry("undated.mkv", 11_000, None));
 
-        let (count, bytes) = inventory.older_than(Duration::from_secs(90 * 86400), now());
+        let (count, bytes) =
+            inventory.cleanup_candidates_older_than(Duration::from_secs(90 * 86400), now());
 
         // Exactly at the limit is not over it, and a file with no modification
         // time is never selected by an age limit.
@@ -633,6 +774,9 @@ mod tests {
 
         let mut inventory = StorageInventory::new();
         inventory.record_added(future);
-        assert_eq!(inventory.older_than(Duration::from_secs(1), now()), (0, 0));
+        assert_eq!(
+            inventory.cleanup_candidates_older_than(Duration::from_secs(1), now()),
+            (0, 0)
+        );
     }
 }

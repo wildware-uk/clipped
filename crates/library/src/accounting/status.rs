@@ -26,7 +26,7 @@ use core::fmt;
 use core::time::Duration;
 use std::time::SystemTime;
 
-use crate::accounting::inventory::StorageInventory;
+use crate::accounting::inventory::{Completeness, StorageInventory};
 use crate::accounting::limits::StorageLimits;
 use crate::accounting::volume::VolumeCapacity;
 
@@ -84,6 +84,11 @@ pub enum Breach {
         required: u64,
     },
     /// Files older than the maximum age exist.
+    ///
+    /// Counted over the files a limit may select
+    /// ([`StorageCategory::is_cleanup_candidate`](crate::accounting::StorageCategory::is_cleanup_candidate)),
+    /// so an install that has been running for a year does not report its own
+    /// database and rotated logs as over-age footage.
     OverMaximumAge {
         /// How many.
         files: usize,
@@ -195,6 +200,7 @@ impl fmt::Display for Unknown {
 pub struct StorageStatus {
     used_bytes: u64,
     free_bytes: Option<u64>,
+    measurement: Completeness,
     breaches: Vec<Breach>,
     unknown: Vec<Unknown>,
 }
@@ -219,6 +225,7 @@ impl StorageStatus {
         let mut status = Self {
             used_bytes,
             free_bytes: volume.map(VolumeCapacity::free_bytes),
+            measurement: inventory.completeness(),
             breaches: Vec::new(),
             unknown: Vec::new(),
         };
@@ -253,7 +260,7 @@ impl StorageStatus {
         }
 
         if let Some(limit) = limits.maximum_age() {
-            let (files, bytes) = inventory.older_than(limit, now);
+            let (files, bytes) = inventory.cleanup_candidates_older_than(limit, now);
             if files > 0 {
                 status.breaches.push(Breach::OverMaximumAge {
                     files,
@@ -276,10 +283,29 @@ impl StorageStatus {
     /// What the library occupies, in bytes.
     ///
     /// A floor rather than a total when the measurement behind it was partial,
-    /// which [`is_certain`](Self::is_certain) reports.
+    /// which [`measurement`](Self::measurement) reports. A screen showing this
+    /// figure has to ask: an under-reported usage presented as final is what
+    /// this module's header exists to prevent, and a scan can be cancelled or
+    /// run out of budget without any *limit* becoming unjudgeable, so
+    /// [`is_certain`](Self::is_certain) — which is about the limits — will
+    /// happily say `true` over a figure that is a floor.
     #[must_use]
     pub const fn used_bytes(&self) -> u64 {
         self.used_bytes
+    }
+
+    /// How complete the measurement behind [`used_bytes`](Self::used_bytes)
+    /// was, and why it was not.
+    ///
+    /// Carried through from the inventory rather than left behind with it,
+    /// because the figure and its completeness are only meaningful together:
+    /// the screen in
+    /// [issue #95](https://github.com/wildware-uk/clipped/issues/95) is handed a
+    /// `StorageStatus` and nothing else, and "212 GB" and "at least 212 GB" are
+    /// different sentences.
+    #[must_use]
+    pub const fn measurement(&self) -> &Completeness {
+        &self.measurement
     }
 
     /// What is free on the volume, if it could be read.
@@ -314,6 +340,11 @@ impl StorageStatus {
     ///
     /// `false` means some limit's state is genuinely not known — not that it is
     /// satisfied.
+    ///
+    /// This is about the *limits* and not about the figures. With no limits
+    /// configured there is nothing to be uncertain about, so a half-measured
+    /// library is `true` here; [`measurement`](Self::measurement) is what says
+    /// whether [`used_bytes`](Self::used_bytes) is a total or a floor.
     #[must_use]
     pub fn is_certain(&self) -> bool {
         self.unknown.is_empty()
@@ -574,6 +605,39 @@ mod tests {
     }
 
     #[test]
+    fn the_database_and_the_logs_are_not_over_age_footage() {
+        // The user-facing sentence this protects: "3 files totalling 3,000
+        // bytes are older than 90 days" must be about recordings. An install
+        // that has been running for a year has a database and rotated logs
+        // older than any age limit a user would set.
+        let limits = StorageLimits::unlimited()
+            .with_maximum_age(Duration::from_secs(90 * 86_400))
+            .expect("90 days");
+        let mut inventory = StorageInventory::new();
+        for (name, category) in [
+            ("clipped.db", StorageCategory::Metadata),
+            ("clipped.log", StorageCategory::Logs),
+            ("buffer.mkv", StorageCategory::ReplayBuffer),
+        ] {
+            inventory.record_added(FileEntry::new(
+                path(name),
+                category,
+                1_000,
+                Some(now() - Duration::from_secs(200 * 86_400)),
+            ));
+        }
+
+        let status = StorageStatus::evaluate(&inventory, &limits, None, now());
+
+        assert!(!status.is_breached(), "{:?}", status.breaches());
+        assert_eq!(
+            status.used_bytes(),
+            3_000,
+            "all three are still counted towards usage"
+        );
+    }
+
+    #[test]
     fn footage_within_the_maximum_age_is_not_a_breach() {
         let limits = StorageLimits::unlimited()
             .with_maximum_age(Duration::from_secs(90 * 86_400))
@@ -614,6 +678,42 @@ mod tests {
                 LimitKind::MaximumAge
             ]
         );
+    }
+
+    #[test]
+    fn a_partial_measurement_says_so_even_when_every_limit_is_judgeable() {
+        // The gap this closes. With no limits configured there is nothing
+        // unknown, so `is_certain` is true — and `used_bytes` is still a floor,
+        // because the scan behind it was cancelled. A screen handed only this
+        // type has to be able to tell.
+        let mut inventory = library_of(10_000_000_000, Duration::from_secs(60));
+        inventory.record_partial(PartialReason::Cancelled);
+
+        let status = StorageStatus::evaluate(&inventory, &StorageLimits::unlimited(), None, now());
+
+        assert!(
+            status.is_certain(),
+            "no limit is configured to be unsure of"
+        );
+        assert!(!status.measurement().is_complete());
+        assert_eq!(
+            status.measurement().reasons(),
+            &[PartialReason::Cancelled],
+            "and it says which half of the library was not seen"
+        );
+    }
+
+    #[test]
+    fn a_complete_measurement_is_reported_as_complete() {
+        let status = StorageStatus::evaluate(
+            &library_of(1_000, Duration::from_secs(60)),
+            &StorageLimits::unlimited(),
+            None,
+            now(),
+        );
+
+        assert!(status.measurement().is_complete());
+        assert!(status.measurement().reasons().is_empty());
     }
 
     #[test]

@@ -96,6 +96,34 @@ impl StorageCategory {
         matches!(self, Self::Thumbnails | Self::Waveforms)
     }
 
+    /// Whether a limit on the library may ever select a file of this kind.
+    ///
+    /// Three kinds are excluded, and they are the three
+    /// `docs/storage-management.md` marks "**No**" in its category table:
+    ///
+    /// - [`Logs`](Self::Logs) and [`Metadata`](Self::Metadata) are small,
+    ///   already bounded, and are what makes the rest meaningful. They are
+    ///   counted so that the reported total agrees with the disk, and a quota
+    ///   that deleted the database to make room for footage would be a bug with
+    ///   a plausible-looking implementation behind it.
+    /// - [`ReplayBuffer`](Self::ReplayBuffer) belongs to a recording *in
+    ///   progress*: removing it damages a capture that is happening.
+    ///
+    /// [`Trash`](Self::Trash) is included. It holds footage the user has
+    /// already asked to lose and it occupies the disk, so a limit may select
+    /// it; its retention period is a separate schedule
+    /// ([issue #94](https://github.com/wildware-uk/clipped/issues/94)) rather
+    /// than a reason to exempt it.
+    ///
+    /// This is a statement about the file, not a deletion rule: what a limit
+    /// *does* about a candidate, and the protection rules that spare
+    /// favourites and locked recordings, are
+    /// [issue #111](https://github.com/wildware-uk/clipped/issues/111)'s.
+    #[must_use]
+    pub const fn is_cleanup_candidate(self) -> bool {
+        !matches!(self, Self::Logs | Self::Metadata | Self::ReplayBuffer)
+    }
+
     /// A short lower-case name, for logs and diagnostics.
     ///
     /// Not user-facing copy: the words a screen shows are the interface's
@@ -171,6 +199,43 @@ mod tests {
                 StorageCategory::Trash,
             ]
         );
+    }
+
+    #[test]
+    fn the_categories_a_limit_may_never_select_are_the_three_the_document_excludes() {
+        // docs/storage-management.md's category table marks exactly these three
+        // "Ever a cleanup candidate? **No**". Spelled out rather than derived,
+        // so that moving a category across the line is a visible change to a
+        // test and to the document rather than a quiet change to a `matches!`.
+        let excluded: Vec<_> = StorageCategory::ALL
+            .iter()
+            .copied()
+            .filter(|category| !category.is_cleanup_candidate())
+            .collect();
+
+        assert_eq!(
+            excluded,
+            vec![
+                StorageCategory::ReplayBuffer,
+                StorageCategory::Logs,
+                StorageCategory::Metadata,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_kind_of_user_media_but_the_replay_buffer_is_a_candidate() {
+        // The replay buffer is the one category that holds user media and is
+        // still never selectable: it belongs to a capture in progress.
+        for category in StorageCategory::ALL {
+            if category.holds_user_media() {
+                assert_eq!(
+                    category.is_cleanup_candidate(),
+                    *category != StorageCategory::ReplayBuffer,
+                    "{category}"
+                );
+            }
+        }
     }
 
     #[test]
