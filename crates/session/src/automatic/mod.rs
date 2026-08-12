@@ -103,17 +103,28 @@
 //! such a recording and driving a save is
 //! [issue #38](https://github.com/wildware-uk/clipped/issues/38).
 //!
-//! Per-game settings are not applied here either. This module decides *when* to
-//! record and holds no recording settings at all — what a recording is made
-//! with reaches it from the driver, which applies one set of choices to every
-//! game. [`crate::config`] is where those settings are now modelled and
-//! resolved, global layer and per-game overrides both
-//! ([issue #108](https://github.com/wildware-uk/clipped/issues/108)); reading
-//! them at the moment a recording starts is
-//! [issue #61](https://github.com/wildware-uk/clipped/issues/61), and
-//! `docs/configuration.md` sets out exactly what that consumes. A catalogue
-//! entry's own `default_settings` remain uninterpreted, and folding them in as
-//! a further layer is
+//! # The settings a recording is made with
+//!
+//! Each recording's settings are resolved **once, when it starts**, from the
+//! [`Configuration`] this manager was given ([issue
+//! #61](https://github.com/wildware-uk/clipped/issues/61)). The answer travels
+//! on [`RecordingRequest::settings`] as a value, is written into the session's
+//! own record, and is never re-read: a user who changes the frame rate while a
+//! game is being recorded gets it on the *next* recording, because a setting
+//! changing under a running encoder is a different feature and not this one.
+//!
+//! The lookup is [`crate::config::Configuration::resolve_for`] and nothing
+//! else — the same fold the settings screen reads, so "what does this game
+//! record at" has one answer rather than one per caller (AGENTS.md section 30).
+//! A game the user has set nothing for inherits the global settings, which is
+//! not a special case: it is what a layer saying nothing means.
+//!
+//! What this manager still does not do is *make* the recording. It names a
+//! process and hands over the settings; the driver resolves the window,
+//! applies them with [`ResolvedSettings::apply_to`] and runs
+//! [`crate::record`]. A catalogue entry's own `default_settings` remain
+//! uninterpreted, and folding them in as a further layer between the default
+//! and the global one is
 //! [issue #247](https://github.com/wildware-uk/clipped/issues/247).
 //!
 //! [ADR 0001]: ../../../docs/adr/0001-mkv-archival-container.md
@@ -130,6 +141,8 @@ use std::time::{Duration, SystemTime};
 
 use clipped_game_detection::catalogue::{Catalogue, Match, ProcessCandidate};
 use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEvent};
+
+use crate::config::{Configuration, GameKey, ResolvedSettings};
 
 pub use session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEndReason, SessionEvent,
@@ -204,6 +217,22 @@ pub struct RecordingRequest {
     pub image_name: String,
     /// Where the recording goes.
     pub output: PathBuf,
+    /// The settings that apply to this game, resolved at the moment this
+    /// recording was asked for.
+    ///
+    /// A value, not a handle on the configuration: it is the answer as it stood
+    /// when the recording started and it does not change afterwards, however
+    /// long the recording runs and whatever the user does to their settings
+    /// meanwhile. [`ResolvedSettings::apply_to`] is how a driver turns it into
+    /// a [`RecordingSettings`](crate::RecordingSettings), and
+    /// [`ResolvedSettings::capture_target`] is read before that, because it
+    /// decides which handle the driver resolves.
+    ///
+    /// Boxed for the reason [`SessionAction::SessionEnded`] boxes a session:
+    /// every setting with its source is far larger than the rest of a request,
+    /// and a [`SessionAction`] is returned from every call the driver makes,
+    /// most of which start nothing.
+    pub settings: Box<ResolvedSettings>,
 }
 
 /// What the manager wants done.
@@ -290,6 +319,9 @@ impl RecordingOutcome {
 pub struct SessionManager {
     catalogue: Catalogue,
     settings: AutomaticSettings,
+    /// What the user has configured, as it stood the last time the driver
+    /// handed it over. Read once per recording, in [`Self::begin_recording`].
+    configuration: Configuration,
     active: Option<Active>,
     /// Games that launched while a session was already recording, newest last.
     deferred: Vec<MatchedLaunch>,
@@ -346,17 +378,47 @@ struct MatchedLaunch {
 }
 
 impl SessionManager {
-    /// A manager with nothing running.
+    /// A manager with nothing running, recording every game at the defaults.
+    ///
+    /// [`Self::with_configuration`] is what makes a game record at its own
+    /// settings; without it every game gets what Clipped ships with, which is
+    /// what a caller that has no settings file to offer should get.
     #[must_use]
     pub fn new(catalogue: Catalogue, settings: AutomaticSettings) -> Self {
         Self {
             catalogue,
             settings,
+            configuration: Configuration::defaults(),
             active: None,
             deferred: Vec::new(),
             last_observed: None,
             stopping: false,
         }
+    }
+
+    /// The same manager, resolving each recording's settings from
+    /// `configuration`.
+    #[must_use]
+    pub fn with_configuration(mut self, configuration: Configuration) -> Self {
+        self.configuration = configuration;
+        self
+    }
+
+    /// Replaces the configuration future recordings are resolved from.
+    ///
+    /// It is *future* recordings, and deliberately: a recording resolves its
+    /// settings once, when it starts (see [`Self::begin_recording`]), and
+    /// nothing here reaches into one that is running. A user who changes the
+    /// frame rate while a game is being recorded gets the new frame rate on the
+    /// next recording, not a re-opened encoder halfway through a file.
+    pub fn set_configuration(&mut self, configuration: Configuration) {
+        self.configuration = configuration;
+    }
+
+    /// The configuration recordings are currently resolved from.
+    #[must_use]
+    pub const fn configuration(&self) -> &Configuration {
+        &self.configuration
     }
 
     /// The session that is open, if one is.
@@ -831,6 +893,10 @@ impl SessionManager {
     }
 
     /// Asks for the next recording of the open session.
+    ///
+    /// This is the moment the settings are resolved, and the only one. Every
+    /// recording carries the answer as a value from here on, so a configuration
+    /// that changes while it runs changes nothing about it.
     fn begin_recording(&mut self, now: SystemTime) -> Option<SessionAction> {
         let limit = self.settings.max_recordings_per_session();
         let active = self.active.as_mut()?;
@@ -853,12 +919,20 @@ impl SessionManager {
             return None;
         }
 
+        // Resolved here, once, from the configuration as it stands now. What
+        // the recording is made with is this value and not the configuration,
+        // so a settings change while it runs reaches the next recording rather
+        // than this one.
+        let settings = resolve_for(&self.configuration, active.session.game());
+
         active.started_recordings += 1;
         let index = active.started_recordings;
         let output = active
             .session
             .recording_path(self.settings.directory(), index);
-        active.session.begin_recording(index, output.clone(), now);
+        active
+            .session
+            .begin_recording(index, output.clone(), settings.clone(), now);
         active.recording = Some(index);
         persist(self.settings.directory(), &active.session);
 
@@ -866,7 +940,10 @@ impl SessionManager {
             session = active.session.id().as_str(),
             index,
             pid = active.subject.pid,
-            "starting a recording for the session"
+            game = active.session.game().slug(),
+            scope = %settings.scope(),
+            settings = %settings,
+            "starting a recording for the session, with the settings that apply to this game"
         );
 
         Some(SessionAction::StartRecording(RecordingRequest {
@@ -878,6 +955,7 @@ impl SessionManager {
             process_id: active.subject.pid,
             image_name: active.subject.image_name.clone(),
             output,
+            settings: Box::new(settings),
         }))
     }
 
@@ -979,6 +1057,46 @@ impl SessionManager {
                     .flat_map(|entry| lowered(entry.child_processes()))
                     .collect(),
             )),
+        }
+    }
+}
+
+/// The settings that apply to one game, from the layers the user configured.
+///
+/// A lookup and not a merge: [`Configuration::resolve_for`] is the single fold
+/// of default, global and per-game layers, and a second one here would be the
+/// scattering AGENTS.md section 30 forbids (`docs/configuration.md`).
+///
+/// Two answers are the global settings rather than a game's, and both are
+/// deliberate:
+///
+/// - **A tie between catalogue entries** has no single game to resolve for. The
+///   session is filed under [`session::UNATTRIBUTED`] precisely because the
+///   catalogue would not choose, and picking one candidate's settings would be
+///   the same guess wearing a different hat.
+/// - **An identifier a settings file cannot name.** A `game_id` is spelled by
+///   the same rule a [`GameKey`] is, so this cannot happen with the shipped
+///   catalogue — `every_catalogue_identifier_is_a_valid_settings_key` is what
+///   holds the two rules together — but a user's own overlay is text on disk.
+///   The recording still happens, at the global settings, and the log says
+///   which game could not be looked up. Refusing to record a game because its
+///   identifier is unusual would lose footage over a spelling (AGENTS.md
+///   sections 15 and 16).
+fn resolve_for(configuration: &Configuration, game: &GameIdentity) -> ResolvedSettings {
+    let GameIdentity::Known { game_id, .. } = game else {
+        return configuration.resolve_global();
+    };
+
+    match GameKey::parse(game_id) {
+        Ok(key) => configuration.resolve_for(&key),
+        Err(error) => {
+            tracing::warn!(
+                game = game_id.as_str(),
+                %error,
+                "this game cannot be named in a settings file, so its own settings could not be \
+                 looked up; recording it with the global settings"
+            );
+            configuration.resolve_global()
         }
     }
 }

@@ -20,9 +20,11 @@ use clipped_game_detection::catalogue::{Catalogue, EntrySource};
 use clipped_game_detection::{LaunchGroup, LaunchId, ProcessExit, ProcessSnapshot, WatchEvent};
 
 use super::*;
+use crate::config::{Preferences, ResolutionSetting, SettingKey, SettingSource};
 use crate::report::EndReason;
+use crate::settings::{CaptureTargetSettings, RecordingSettings, UnavailableChoice};
 
-/// Two ordinary games, one of which has a known helper, and two more that tie
+/// Three ordinary games, one of which has a known helper, and two more that tie
 /// on a shared executable name.
 const GAMES: &str = r#"
 schema_version = 1
@@ -39,6 +41,12 @@ game_id = "other-game"
 name = "Other Game"
 [[game.executables]]
 name = "other-game.exe"
+
+[[game]]
+game_id = "third-game"
+name = "Third Game"
+[[game.executables]]
+name = "third-game.exe"
 
 [[game]]
 game_id = "first-tie"
@@ -114,6 +122,13 @@ struct Harness {
 impl Harness {
     fn new(label: &str) -> Self {
         Self::with(label, |settings| settings)
+    }
+
+    /// A manager resolving every recording's settings from `configuration`.
+    fn configured(label: &str, configuration: Configuration) -> Self {
+        let mut harness = Self::new(label);
+        harness.manager.set_configuration(configuration);
+        harness
     }
 
     fn with(label: &str, adjust: impl FnOnce(AutomaticSettings) -> AutomaticSettings) -> Self {
@@ -969,5 +984,293 @@ fn the_sessions_record_is_on_disk_before_anything_needs_it() {
         harness.directory.sidecars().len(),
         1,
         "a session has one file, rewritten, not one per change"
+    );
+}
+
+/// A configuration in which one game records at 1440p and another at 1080p,
+/// over a global frame rate of 60.
+///
+/// The shape of the ticket's first acceptance criterion, and of AGENTS.md
+/// section 30's worked example: two games that differ, and the games that were
+/// never mentioned, which follow the global settings.
+fn two_games_configured() -> Configuration {
+    let mut configuration = Configuration::defaults();
+
+    let mut global = Preferences::none();
+    global
+        .set_framerate(Some(60))
+        .expect("60 is an acceptable frame rate");
+    configuration.set_global(global);
+
+    let mut first = Preferences::none();
+    first
+        .set_resolution(Some(ResolutionSetting::Fixed {
+            width: 2560,
+            height: 1440,
+        }))
+        .expect("1440p is an acceptable size");
+    configuration.set_game(
+        GameKey::parse("test-game").expect("a valid identifier"),
+        first,
+    );
+
+    let mut second = Preferences::none();
+    second
+        .set_resolution(Some(ResolutionSetting::Fixed {
+            width: 1920,
+            height: 1080,
+        }))
+        .expect("1080p is an acceptable size");
+    configuration.set_game(
+        GameKey::parse("other-game").expect("a valid identifier"),
+        second,
+    );
+
+    configuration
+}
+
+#[test]
+fn each_game_is_recorded_at_its_own_settings_over_the_global_ones() {
+    // The ticket, in one test: two games launch, and each is recorded at the
+    // size its own settings name while both follow the global frame rate.
+    let mut harness = Harness::configured("per-game", two_games_configured());
+
+    let actions = harness.observe(&launch(&[(11, "test-game.exe")]), t(0));
+    let recording = one_start(&actions).recording.clone();
+    let first = one_start(&actions).settings.clone();
+
+    // The first session has to end before the second game is recorded: there
+    // is one encoder and one capture target.
+    harness.observe(&exit(11, "test-game.exe"), t(10));
+    harness.finished(
+        &recording,
+        recorded(Path::new("one.mkv"), EndReason::TargetLost),
+        t(11),
+    );
+    harness.poll(t(45));
+    let second = harness.observe(&launch(&[(21, "other-game.exe")]), t(46));
+    let second = one_start(&second).settings.clone();
+
+    assert_eq!(
+        first.resolution().get(),
+        ResolutionSetting::Fixed {
+            width: 2560,
+            height: 1440
+        }
+    );
+    assert_eq!(first.resolution().source(), SettingSource::Game);
+    assert_eq!(
+        second.resolution().get(),
+        ResolutionSetting::Fixed {
+            width: 1920,
+            height: 1080
+        }
+    );
+    assert_eq!(second.resolution().source(), SettingSource::Game);
+
+    // And the setting neither of them overrode is the same for both, from the
+    // layer they share.
+    assert_eq!(first.framerate().get(), 60);
+    assert_eq!(second.framerate().get(), 60);
+    assert_eq!(first.framerate().source(), SettingSource::Global);
+    assert_eq!(second.framerate().source(), SettingSource::Global);
+}
+
+#[test]
+fn a_game_nobody_configured_records_exactly_as_the_global_settings_say() {
+    // The half of inheritance that is easy to break: a game with no section of
+    // its own must be unaffected by the sections other games have. Every
+    // setting, and its source, has to match the global answer exactly —
+    // "inherited 60" and "set to 60" are different answers and only one of
+    // them is right here.
+    let configuration = two_games_configured();
+    let global = configuration.resolve_global();
+    let mut harness = Harness::configured("inherited", configuration);
+
+    let actions = harness.observe(&launch(&[(31, "third-game.exe")]), t(0));
+    let request = one_start(&actions);
+    assert_eq!(request.game.slug(), "third-game");
+
+    for key in SettingKey::ALL {
+        assert_eq!(
+            request.settings.written_value(key),
+            global.written_value(key),
+            "{key} differs from the global settings"
+        );
+        assert_eq!(
+            request.settings.source_of(key),
+            global.source_of(key),
+            "{key} came from a different layer than the global settings"
+        );
+    }
+}
+
+#[test]
+fn a_manager_given_no_configuration_records_every_game_at_the_shipped_defaults() {
+    // What a caller that has no settings file to offer gets, and the state
+    // every existing driver is in until it hands one over: nothing overridden,
+    // every answer the built-in default.
+    let mut harness = Harness::new("defaults");
+
+    let actions = harness.observe(&launch(&[(11, "test-game.exe")]), t(0));
+    let settings = &one_start(&actions).settings;
+
+    for key in SettingKey::ALL {
+        assert_eq!(
+            settings.source_of(key),
+            SettingSource::Default,
+            "{key} came from somewhere, and nothing was configured"
+        );
+    }
+    assert_eq!(settings.framerate().get(), crate::DEFAULT_FRAMERATE);
+    assert_eq!(settings.resolution().get(), ResolutionSetting::Source);
+}
+
+#[test]
+fn a_tie_between_games_is_recorded_at_the_global_settings_rather_than_a_candidates() {
+    // The catalogue would not choose between the entries, and neither does
+    // this: picking one candidate's settings would be the same guess the
+    // catalogue refused to make, and it would be invisible afterwards.
+    let mut configuration = two_games_configured();
+    let mut tied = Preferences::none();
+    tied.set_framerate(Some(240))
+        .expect("240 is an acceptable frame rate");
+    configuration.set_game(
+        GameKey::parse("first-tie").expect("a valid identifier"),
+        tied,
+    );
+    let mut harness = Harness::configured("ambiguous", configuration);
+
+    let actions = harness.observe(&launch(&[(41, "shared.exe")]), t(0));
+    let request = one_start(&actions);
+
+    assert!(matches!(request.game, GameIdentity::Ambiguous { .. }));
+    assert_eq!(request.settings.scope(), &crate::config::Scope::Global);
+    assert_eq!(
+        request.settings.framerate().get(),
+        60,
+        "a tied candidate's frame rate must not have been applied"
+    );
+}
+
+#[test]
+fn a_recordings_settings_are_the_ones_it_started_with_however_they_change_after() {
+    // The rule the module states, and this is what makes it true: a setting
+    // changing under a running encoder is a different feature. What a user who
+    // edits their settings mid-game gets is the *next* recording.
+    let mut harness = Harness::configured("resolved-once", two_games_configured());
+    let recording = started(&mut harness, 11, t(0));
+    let started_with = harness
+        .manager
+        .active_session()
+        .expect("a session is open")
+        .recordings()[0]
+        .settings()
+        .clone();
+
+    let mut changed = Preferences::none();
+    changed
+        .set_framerate(Some(240))
+        .expect("240 is an acceptable frame rate");
+    let mut configuration = two_games_configured();
+    configuration.set_game(
+        GameKey::parse("test-game").expect("a valid identifier"),
+        changed,
+    );
+    harness.manager.set_configuration(configuration);
+    let nothing = harness.poll(t(5));
+
+    assert!(
+        !starts_a_recording(&nothing),
+        "changing the settings must not start or restart anything: {nothing:?}"
+    );
+    assert_eq!(
+        harness
+            .manager
+            .active_session()
+            .expect("a session is open")
+            .recordings()[0]
+            .settings(),
+        &started_with,
+        "the running recording's settings were re-read after it started"
+    );
+    assert_eq!(started_with.framerate().get(), 60);
+
+    // The next recording of the same session — the window went and came back —
+    // is where the change arrives.
+    let next = harness.finished(
+        &recording,
+        recorded(Path::new("one.mkv"), EndReason::TargetResized),
+        t(6),
+    );
+    assert!(
+        !starts_a_recording(&next),
+        "the restart delay has not passed: {next:?}"
+    );
+    let restarted = harness.poll(t(20));
+    assert_eq!(
+        one_start(&restarted).settings.framerate().get(),
+        240,
+        "the settings that were changed should apply to the recording that follows"
+    );
+}
+
+#[test]
+fn the_settings_a_recording_started_with_are_in_the_sessions_own_record() {
+    // Not only in the log: a log rotates, and "why is this file 1440p" is
+    // asked of a library months later (`docs/sessions.md`).
+    let mut harness = Harness::configured("recorded-settings", two_games_configured());
+    started(&mut harness, 11, t(0));
+
+    let path = harness
+        .directory
+        .path()
+        .join(&harness.directory.sidecars()[0]);
+    let written = fs::read_to_string(&path).expect("written when the session started");
+    let file: serde_json::Value = serde_json::from_str(&written).expect("the sidecar is JSON");
+    let settings = &file["recordings"][0]["settings"];
+
+    assert_eq!(
+        settings["resolution"]["value"],
+        serde_json::Value::from("2560x1440"),
+        "{written}"
+    );
+    assert_eq!(
+        settings["resolution"]["source"],
+        serde_json::Value::from("game")
+    );
+    assert_eq!(
+        settings["framerate"]["source"],
+        serde_json::Value::from("global")
+    );
+}
+
+#[test]
+fn what_a_game_was_configured_for_reaches_the_recording_it_is_made_with() {
+    // The last link: the manager resolves, the driver applies. A setting that
+    // is resolved and then cannot reach a recording is a control that silently
+    // does nothing (AGENTS.md section 27).
+    let mut harness = Harness::configured("applied", two_games_configured());
+    let actions = harness.observe(&launch(&[(11, "test-game.exe")]), t(0));
+
+    let recording = one_start(&actions)
+        .settings
+        .apply_to(RecordingSettings::new(
+            CaptureTargetSettings::window(0x1234, 2560, 1440),
+            PathBuf::from("out.mkv"),
+        ));
+
+    assert_eq!(
+        recording.resolution(),
+        ResolutionSetting::Fixed {
+            width: 2560,
+            height: 1440
+        }
+    );
+    assert_eq!(recording.framerate(), 60);
+    assert_eq!(
+        recording.unavailable_choice(),
+        UnavailableChoice::Substitute,
+        "a configured recording must not be refused over a setting that has gone stale"
     );
 }

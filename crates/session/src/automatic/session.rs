@@ -34,6 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::config::ResolvedSettings;
 use crate::report::{EndReason, RecordingReport};
 
 /// The `game_id` a session is filed under when the catalogue would not choose.
@@ -153,6 +154,7 @@ pub struct SessionRecording {
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: Option<SystemTime>,
     pub(crate) outcome: Option<RecordingOutcomeSummary>,
+    pub(crate) settings: ResolvedSettings,
 }
 
 impl SessionRecording {
@@ -184,6 +186,16 @@ impl SessionRecording {
     #[must_use]
     pub const fn outcome(&self) -> Option<&RecordingOutcomeSummary> {
         self.outcome.as_ref()
+    }
+
+    /// The settings that applied to it, as they were resolved when it started.
+    ///
+    /// Kept per recording rather than per session because that is where the
+    /// answer can differ: a session that spans a settings change contains one
+    /// recording made at the old settings and one at the new.
+    #[must_use]
+    pub const fn settings(&self) -> &ResolvedSettings {
+        &self.settings
     }
 }
 
@@ -468,14 +480,22 @@ impl Session {
         self.events.push(SessionEvent { at, kind });
     }
 
-    /// Adds a recording that has just started.
-    pub(crate) fn begin_recording(&mut self, index: u32, output: PathBuf, at: SystemTime) {
+    /// Adds a recording that has just started, with the settings it was
+    /// resolved for.
+    pub(crate) fn begin_recording(
+        &mut self,
+        index: u32,
+        output: PathBuf,
+        settings: ResolvedSettings,
+        at: SystemTime,
+    ) {
         self.recordings.push(SessionRecording {
             index,
             output: output.clone(),
             started_at: at,
             ended_at: None,
             outcome: None,
+            settings,
         });
         self.record(at, SessionEventKind::RecordingStarted { index, output });
     }
@@ -525,6 +545,11 @@ mod tests {
 
     fn at(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    /// The settings of a user who has configured nothing.
+    fn defaults() -> ResolvedSettings {
+        crate::config::Configuration::defaults().resolve_global()
     }
 
     #[test]
@@ -591,8 +616,8 @@ mod tests {
     #[test]
     fn a_recording_that_ended_is_stored_against_the_recording_it_ended() {
         let mut session = Session::new(known(), at(1_000));
-        session.begin_recording(1, PathBuf::from("one.mkv"), at(1_000));
-        session.begin_recording(2, PathBuf::from("two.mkv"), at(2_000));
+        session.begin_recording(1, PathBuf::from("one.mkv"), defaults(), at(1_000));
+        session.begin_recording(2, PathBuf::from("two.mkv"), defaults(), at(2_000));
         session.end_recording(
             1,
             RecordingOutcomeSummary::Failed {

@@ -20,6 +20,14 @@
 //! With an encoder named explicitly there is no fallback. Someone who typed
 //! `--encoder nvenc` wants to know it was not used, not to discover afterwards
 //! that the recording was made on the CPU.
+//!
+//! There is one exception, and it is the caller's to ask for: a recording given
+//! [`UnavailableChoice::Substitute`] tries the encoder it was told to use first
+//! and then the ranked candidates, because that encoder came from a settings
+//! file rather than from a command line and losing a game's footage over a
+//! stale setting is the worse failure ([`crate::settings::UnavailableChoice`]
+//! says which caller is which). The substitution is logged at `warn` naming
+//! both encoders, so it is never something a user has to infer from a file.
 
 use clipped_capture::PixelFormat;
 use clipped_encoder::{
@@ -30,7 +38,7 @@ use clipped_encoder::{
 };
 
 use crate::error::SessionError;
-use crate::settings::{CodecPreference, EncoderPreference, RecordingSettings};
+use crate::settings::{CodecPreference, EncoderPreference, RecordingSettings, UnavailableChoice};
 
 /// Bits spent per pixel per frame, before any clamping.
 ///
@@ -113,6 +121,19 @@ pub(crate) fn open(
                     configuration = %config,
                     "encoder session opened"
                 );
+                // Said out loud rather than left to be worked out from the two
+                // lines above: this recording was configured for one encoder
+                // and is being made with another (AGENTS.md section 45).
+                if let EncoderPreference::Fixed(requested) = settings.encoder() {
+                    if requested != kind {
+                        tracing::warn!(
+                            configured = %requested.log_encoder_family(),
+                            encoder = %kind.log_encoder_family(),
+                            "the encoder configured for this recording could not be opened, so it \
+                             is being recorded with another one rather than not at all"
+                        );
+                    }
+                }
                 return Ok(OpenedEncoder {
                     encoder,
                     kind,
@@ -155,14 +176,8 @@ fn candidates(
         CodecPreference::Fixed(codec) => Some(codec),
     };
 
-    match settings.encoder() {
-        EncoderPreference::Fixed(kind) => {
-            vec![(
-                kind,
-                requested.unwrap_or_else(|| best_codec_for(kind, report)),
-            )]
-        }
-        EncoderPreference::Automatic => recommend(report)
+    let ranked = || -> Vec<(EncoderKind, Codec)> {
+        recommend(report)
             .into_iter()
             .map(|recommendation| {
                 (
@@ -170,7 +185,26 @@ fn candidates(
                     requested.unwrap_or_else(|| recommendation.codec()),
                 )
             })
-            .collect(),
+            .collect()
+    };
+
+    match settings.encoder() {
+        EncoderPreference::Fixed(kind) => {
+            let named = (
+                kind,
+                requested.unwrap_or_else(|| best_codec_for(kind, report)),
+            );
+            match settings.unavailable_choice() {
+                UnavailableChoice::Refuse => vec![named],
+                // The named encoder first, so a machine that has it still uses
+                // it, and the ranked list behind it so a machine that no longer
+                // has it still records.
+                UnavailableChoice::Substitute => std::iter::once(named)
+                    .chain(ranked().into_iter().filter(|(other, _)| *other != kind))
+                    .collect(),
+            }
+        }
+        EncoderPreference::Automatic => ranked(),
     }
 }
 
@@ -320,6 +354,42 @@ mod tests {
         assert_eq!(
             candidates(&settings, &bare_machine()),
             vec![(EncoderKind::Nvenc, Codec::Av1)]
+        );
+    }
+
+    #[test]
+    fn a_configured_encoder_is_tried_first_and_then_the_ones_this_machine_has() {
+        // The ticket's second acceptance criterion. An encoder that came from a
+        // settings file is a choice made once, possibly before this machine had
+        // the graphics card it has now, and a game that launches with nobody
+        // watching must not go unrecorded because of it. It is still tried
+        // first, so a machine that does have it uses it.
+        let report = bare_machine();
+        let settings = settings()
+            .with_encoder(EncoderPreference::Fixed(EncoderKind::Nvenc))
+            .with_unavailable_choice(UnavailableChoice::Substitute);
+
+        let offered: Vec<EncoderKind> = candidates(&settings, &report)
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .collect();
+
+        assert_eq!(
+            offered.first(),
+            Some(&EncoderKind::Nvenc),
+            "the configured encoder must still be the first thing tried: {offered:?}"
+        );
+        assert!(
+            offered.contains(&EncoderKind::Software),
+            "a machine with nothing else must still record: {offered:?}"
+        );
+        let mut once = offered.clone();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(
+            once.len(),
+            offered.len(),
+            "an encoder that has already refused must not be tried again: {offered:?}"
         );
     }
 

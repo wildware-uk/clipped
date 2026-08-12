@@ -1,15 +1,19 @@
 # Configuration
 
-**Status: the API and the file exist; nothing applies them to a recording yet.**
-`clipped_session::config` models the settings, resolves global and per-game
-layers, validates them and reads and writes `settings.json`. What it does *not*
-do is choose a recording's settings — `clipped-recorder record` still takes them
-from its command line and `clipped-recorder watch` still uses the defaults
-`crates/session/src/automatic` was built with. Reading the resolved settings at
-the moment a recording starts is
-[issue #61](https://github.com/wildware-uk/clipped/issues/61), and
-["What #61 consumes"](#what-61-consumes) below is the shape it will read. The
-settings screen that edits all of this is
+**Status: automatic recording resolves a game's settings; the `watch` command
+does not hand them over yet.** `clipped_session::config` models the settings,
+resolves global and per-game layers, validates them and reads and writes
+`settings.json`. `clipped_session::automatic` now *uses* it: every recording it
+asks for carries the settings resolved for that game
+([issue #61](https://github.com/wildware-uk/clipped/issues/61), and
+["Applying a setting to a recording"](#applying-a-setting-to-a-recording)
+below). What is still missing is one link at the very edge — the `watch`
+subcommand builds one `RecordingPlan` from its command line, does not hand a
+`ConfigurationStore` to the session manager, and does not apply what it is
+given — so **a settings file still changes nothing about what a shipped build
+records**. `clipped-recorder record` takes its settings from its command line
+and always will; that is what a command line is for. The settings screen that
+edits all of this is
 [issue #51](https://github.com/wildware-uk/clipped/issues/51).
 
 This is stated first, and plainly, because a configuration API that looked as
@@ -135,8 +139,12 @@ Two of these are worth a note.
 
 - **`resolution`** may name a size, and nothing in this build can produce a size
   other than the source's: there is no scaler in the capture-to-encoder path. A
-  fixed size that does not match what capture produces is refused when a
-  recording starts (`SessionError::ScalingNotSupported`), not quietly ignored.
+  fixed size that does not match what capture produces is never quietly ignored
+  — a recording asked for by hand is refused
+  (`SessionError::ScalingNotSupported`) and a recording made from these settings
+  is recorded at the source size with the substitution logged. ["What a stale
+  setting does"](#what-a-stale-setting-does-and-why-it-is-not-what-a-flag-does)
+  says why the two differ.
 - **A device name** is matched against the endpoints present when a recording
   starts, so a headset that is unplugged is a failure the session reports rather
   than a settings file that has become invalid. To name a device that is
@@ -350,55 +358,104 @@ understand means the file belongs to somebody — a newer build, or the user's o
 hand — and this build does not get to replace it. A *write* that failed says
 nothing about what is in the file, so the next save simply tries again.
 
-## What #61 consumes
+## Applying a setting to a recording
 
-Automatic recording currently applies one set of choices to every game.
-`crates/session/src/automatic` holds no recording settings at all — it decides
-*when* to record — and its driver, `apps/recorder/src/watch.rs`, builds a single
-`RecordingPlan` from the `watch` command line and hands the same one to every
-`RecordingRequest`. That is the hard-coding
-[issue #61](https://github.com/wildware-uk/clipped/issues/61) replaces, and this
-is the shape it reads.
+### Resolved once, when the recording starts
 
-`RecordingRequest::game` is a `GameIdentity`, and `GameIdentity::slug()` is the
-catalogue's `game_id` for a `Known` game. So the driver holds a
-`ConfigurationStore` and asks:
+`SessionManager` reads the configuration at exactly one moment — the moment it
+asks for a recording — and the answer travels with that recording as a value:
 
-```rust
-let resolved = match &request.game {
-    GameIdentity::Known { game_id, .. } => match GameKey::parse(game_id) {
-        Ok(game) => store.current().resolve_for(&game),
-        Err(_) => store.current().resolve_global(),
-    },
-    // `Ambiguous` has no single game to resolve for: several catalogue entries
-    // tied, and the session is filed under "unattributed". The global settings
-    // are the honest answer, not one of the candidates'.
-    GameIdentity::Ambiguous { .. } => store.current().resolve_global(),
-};
-
-let settings = RecordingSettings::new(target, output)
-    .with_resolution(*resolved.resolution().value())
-    .with_framerate(resolved.framerate().get())
-    .with_codec(*resolved.codec().value())
-    .with_encoder(*resolved.encoder().value());
+```text
+a game launches
+   |
+SessionManager::begin_recording      resolve_for(game)  ← the only read
+   |
+SessionAction::StartRecording { …, settings }
+   |
+the driver:  settings.apply_to(RecordingSettings::new(target, output))
+   |
+clipped_session::record
 ```
 
-Two settings have no `RecordingSettings` field to go into yet, and #61 should
-not invent one:
+Nothing re-reads it afterwards. A user who changes the frame rate while a game
+is being recorded gets the new frame rate on the **next** recording:
+`SessionManager::set_configuration` replaces what future recordings resolve
+from and does not reach into one that is running. A setting changing under a
+running encoder is a different feature, and it is not this one.
 
-- **`microphone` and `system_audio`** wait on audio being wired into a session
-  ([#180](https://github.com/wildware-uk/clipped/issues/180)). Until then
-  `RecordingSettings::with_audio_requested` is the honest signal — the session
-  says once that it cannot record what was asked for.
+A session that spans a change therefore holds recordings made at different
+settings, which is why each recording's own record carries its own answer
+(`docs/sessions.md`).
+
+### Which layer a game is resolved against
+
+`RecordingRequest::game` is a `GameIdentity`, and `GameIdentity::slug()` is the
+catalogue's `game_id` for a `Known` game.
+
+| What the catalogue said | Resolved against |
+| --- | --- |
+| one entry, whose `game_id` is a valid game key | that game, inheriting from global |
+| one entry, whose `game_id` is not a valid game key | the global settings, and the log says which game |
+| several entries tied | the global settings |
+
+A tie is filed under `unattributed` precisely because the catalogue would not
+choose between the candidates, so resolving one candidate's settings would be
+the same guess wearing a different hat. An unusable identifier cannot happen
+with the shipped catalogue —
+`every_catalogue_identifier_is_a_valid_settings_key` holds the two spelling
+rules together — but a user's own overlay is text on disk, and losing a
+session over a spelling would be the worse failure.
+
+**Read through `resolve_for`.** A second place that decides what a game records
+at is the scattering AGENTS.md section 30 forbids, and
+`ResolvedSettings::apply_to` is the one conversion from what a user configured
+into what a recording is told.
+
+### What a stale setting does, and why it is not what a flag does
+
+A per-game setting is not a sentence somebody typed a second ago. It was chosen
+once — possibly on another machine, possibly before the graphics card was
+replaced — and the recording it governs starts because a game launched with
+nobody watching. So a recording built from settings is given
+`UnavailableChoice::Substitute`, and one built from a command line keeps
+`UnavailableChoice::Refuse`:
+
+| The setting names | `--encoder nvenc`, typed now | `"encoder": "nvenc"`, configured |
+| --- | --- | --- |
+| an encoder this machine will not open | the recording fails, naming it | the ranked encoders are tried after it, and the substitution is logged at `warn` |
+| a size the capture is not producing | `SessionError::ScalingNotSupported` | recorded at the source size, and the substitution is logged at `warn` |
+
+In both configured cases the footage exists and the log says what was done
+instead (AGENTS.md sections 16, 17 and 45). The configured encoder is still
+tried *first*, so a machine that does have it uses it.
+
+An invalid *value* cannot reach a recording at all: every setter validates, so a
+`Configuration` that exists is valid, and a file this build cannot read leaves
+the previous configuration standing (["Failure, and what
+survives it"](#failure-and-what-survives-it)).
+
+### What `apply_to` does not carry
+
+- **`capture_target`** decides which handle the *caller* resolves — the game's
+  window, or the display it is on via `clipped_windows::monitor_for_window` — so
+  it is read before a recording's target exists.
 - **`replay_window_seconds`** becomes a `clipped_replay::ReplayConfig` when a
   recording opens a replay buffer, which needs the bitrate the encoder session
   was opened with; `record_with_replay` is where that meets.
-- **`capture_target`** decides which handle the driver resolves: the game's
-  window, as today, or the display it is on via
-  `clipped_windows::monitor_for_window`.
 
-The one rule for #61: read through `resolve_for`. A second place that decides
-what a game records at is the scattering AGENTS.md section 30 forbids.
+### The link that is missing
+
+`apps/recorder/src/watch.rs` does not yet load a `ConfigurationStore`, hand it
+to `SessionManager::with_configuration`, or apply `request.settings` — so a
+settings file changes nothing about a shipped build's recordings today. It is
+three lines and it is the rest of
+[issue #61](https://github.com/wildware-uk/clipped/issues/61):
+
+```rust
+let manager = SessionManager::new(catalogue, settings).with_configuration(configuration);
+// … and in the recording thread, where `settings_for` builds the recording:
+let settings = request.settings.apply_to(settings_for(&config, &window));
+```
 
 ## Where the code is
 
