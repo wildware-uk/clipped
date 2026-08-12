@@ -5,11 +5,15 @@
  * two lists that have to be kept in step, so a navigation item cannot point at
  * a route that does not exist.
  *
- * None of these screens has been written. The shell routes every one of them to
- * a panel that says so and names the issue that builds it, which is why each
- * entry carries `trackedIn`: a navigation item that led to a blank screen, or
- * to a convincing empty one, would be indistinguishable from a broken
- * application (AGENTS.md section 27).
+ * One of these screens has been written — Games, in `GamesScreen.tsx`. The shell
+ * routes the other six to a panel that says the screen is not written and names
+ * the issue that builds it, which is why every entry carries `trackedIn`: a
+ * navigation item that led to a blank screen, or to a convincing empty one,
+ * would be indistinguishable from a broken application (AGENTS.md section 27).
+ *
+ * Which of the two a screen gets is decided in one place, `elementFor` in
+ * `Shell.tsx`, rather than being recorded here. This list is what the
+ * application contains; how far along each one is belongs to its issue.
  */
 
 /** Stable identifier for a screen. Used as a React key and in tests. */
@@ -35,9 +39,12 @@ export interface Screen {
   /** Which sidebar group the screen belongs to. */
   readonly group: ScreenGroup;
   /**
-   * The GitHub issue that builds the screen. The change that builds one
-   * replaces its placeholder route with the real screen and takes its entry
-   * out of this list's "not built" set.
+   * The GitHub issue that builds the screen.
+   *
+   * While a screen is unwritten the placeholder names this issue, so somebody
+   * who lands on it can go and read what is planned. The number stays after the
+   * screen is written: it is still where the screen came from, and the issue is
+   * still where the rest of it is tracked.
    */
   readonly trackedIn: number;
 }

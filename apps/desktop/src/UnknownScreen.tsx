@@ -15,11 +15,11 @@ export function UnknownScreen(): ReactNode {
   return (
     <>
       <h1 className="clipped-screen__title">Screen not found</h1>
-      <div className="clipped-unbuilt">
-        <p className="clipped-unbuilt__body">
+      <div className="clipped-panel">
+        <p className="clipped-panel__body">
           Nothing in Clipped answers to <code>{pathname}</code>.
         </p>
-        <p className="clipped-unbuilt__body">
+        <p className="clipped-panel__body">
           <a href="#/">Go to Home</a>
         </p>
       </div>

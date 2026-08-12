@@ -45,9 +45,11 @@ for each of the link's four states, and one for "this is not the Clipped window"
 which is what `npm run dev:web` and the tests see.
 
 **The controls are in the notification area, not in the window** — see
-[The tray](#the-tray). No screen has a Start Recording button, because no screen
-is built, and a button with nothing behind it is exactly what AGENTS.md section
-27 forbids. A "Try again" control for a link that has given up is
+[The tray](#the-tray). No screen has a control of any kind: six of the seven are
+not built, and the seventh, Games, deliberately draws none because nothing it
+would drive can be reached from here. A button with nothing behind it is exactly
+what AGENTS.md section 27 forbids. A "Try again" control for a link that has
+given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221).
 
 ## What the shell is
@@ -79,10 +81,93 @@ separately.
 
 Both navigation lists and every route are derived from one array, `SCREENS` in
 `@clipped/shared`, so a navigation item cannot point at a route that does not
-exist. **None of the seven screens has been written.** Each one leads to a panel
-saying so and naming the issue that builds it — #60 for Home and Library, #107
-for Games, #83 for Editor, #51 for Settings, #94 for Trash, #101 for
-Diagnostics. Building one replaces its placeholder route with the real screen.
+exist. **One of the seven screens has been written**, and it is Games — see
+[The Games screen](#the-games-screen). The other six each lead to a panel saying
+so and naming the issue that builds it — #60 for Home and Library, #83 for
+Editor, #51 for Settings, #94 for Trash, #101 for Diagnostics. Building one
+replaces its placeholder route with the real screen, in `elementFor` in
+`Shell.tsx`, which is the one place that knows a screen from a placeholder.
+
+## The Games screen
+
+SPEC.md sections 6 and 17, and issue #107. The deck draws it as a table of
+detected games — name, executable, launcher, capture mode, last played — with an
+Add Game control above it and a New Game Detected panel below.
+
+**None of that is drawn, because none of it can be got.** What the screen shows
+instead is the one thing about game detection this window can establish, and a
+table of what the rest is waiting for.
+
+### What the window can and cannot see
+
+The desktop reaches the recorder over [the control protocol](ipc.md) and reaches
+its own Tauri host through two commands, `recorder_link_state` and
+`startup_notice`. Against that:
+
+| The screen would show | Where it would come from | Why it cannot, yet |
+| --- | --- | --- |
+| The list of games | `clipped-game-detection`'s catalogue: the compiled-in `games.toml` plus the user's overlay ([game-detection.md](game-detection.md)) | No protocol command lists it, and the window has no file-system permission to read it — `capabilities/default.json` grants three `core:` permissions and nothing else. [Issue #245](https://github.com/wildware-uk/clipped/issues/245) |
+| Add an executable, rename, exclude, disable capture | The same overlay, written | Same. [#45](https://github.com/wildware-uk/clipped/issues/45) owns the behaviour, #245 the way to reach it |
+| Sessions, clips, favourites, storage per game | The library index | [#55](https://github.com/wildware-uk/clipped/issues/55). The session sidecars `watch` writes ([sessions.md](sessions.md)) are the only record today, and nothing can read one from here |
+| Which game is being recorded now | A `status` that can name a game | [#241](https://github.com/wildware-uk/clipped/issues/241): the protocol describes a recording by its capture target, `process 4242` |
+
+Drawing the deck's table with nothing in it was the tempting alternative and is
+the one AGENTS.md section 27 rules out: an empty Game / Recording / Last played
+table is indistinguishable from a machine that has played nothing, and this
+build has not looked. The table above is on the screen itself, one row each,
+naming the issue — the same contract the unbuilt screens keep.
+
+### What it does show, and why that is real
+
+**Whether anything is detecting games at all.** `describeGameDetection` in
+`gameDetection.ts` has one rendering for each of the link's four states and one
+for "this is not the Clipped window", and the screen is a pure function of it,
+so it follows the recorder rather than restating a sentence.
+
+One of those five says **"This recorder is not detecting games"** and the other
+four say **"Not known"**, and the split is the point. **The link sees exactly one
+thing: the recorder this window started or attached to.** `clipped-recorder
+watch` serves no protocol, so a watcher somebody started in a terminal is
+invisible to it — and the sentence directly beneath the state recommends
+starting exactly that. So no rendering may say that games are going undetected
+on this machine: the window has not looked, and cannot.
+
+That includes the state for a recorder that could not be reached at all. It
+reads "Not known — this window is not attached to a recorder", not "not
+detecting games". It previously read the latter, which was a claim about the
+machine that nothing here can make, and which contradicted its own next
+paragraph.
+
+The one rendering that says anything about detection names the recorder it is
+about, and it is an inference rather than a reading. It holds:
+
+- the supervisor starts, and can only attach to, `clipped-recorder serve`
+  (`SERVE` in `crates/ipc/src/supervisor.rs`), because `serve` is the only
+  subcommand that listens on the endpoint;
+- `serve` does not watch for games. `clipped-recorder watch` is a separate
+  subcommand that takes no `--endpoint`, which is exactly what #241's fourth
+  acceptance criterion is about.
+
+So a recorder this window can see is a recorder that is not detecting games —
+which is a statement about that recorder, and about nothing else on the machine.
+
+The screen then says the thing somebody can act on, because there is one
+(AGENTS.md section 45): automatic recording is built and running, from a
+terminal, as `clipped-recorder watch`. Making it something this window can start
+and follow is #241.
+
+### No controls
+
+There are none — not a disabled Add Game, and not a row menu. The tray disables
+an item and puts the reason in its own label because a notification-area menu
+has nowhere else to put one; a screen does, and it uses it. A disabled control
+here would say less than the row of the table that names the issue.
+
+Which is also why this screen built nothing for
+[issue #215](https://github.com/wildware-uk/clipped/issues/215). The tab strip
+and the selectable chips are for the per-game detail view the deck draws behind
+this list, and there is no list to open one from. #215 asks for them at the point
+a screen needs them, and this one does not.
 
 ## The tray
 
@@ -737,12 +822,24 @@ accordion, no toast and no tooltip, because no screen in the deck has one
 (AGENTS.md section 1). Two patterns the deck does use are not here either — the
 Library's underlined tab strip and the export dialog's selectable preset chips —
 and [issue #215](https://github.com/wildware-uk/clipped/issues/215) covers them
-with the screen that first needs them.
+with the screen that first needs them. The Games screen (#107) is the first
+screen written and needed neither, so neither was built: they belong to the
+per-game detail view behind the game list, and there is no list yet to open one
+from.
 
-**No screen consumes the component layer yet**, because none of the seven
-screens is written; the classes exist so that #60, #107, #83, #51, #94 and #101
-do not each invent their own styling, which is the reason this ticket followed
-the shell.
+Beside the set above, the shell has three classes of its own that a screen
+draws with. They are not from the reference pages, which have no screen in them:
+
+| Class | What it is |
+| --- | --- |
+| `.clipped-screen__title`, `.clipped-screen__heading` | A screen's own two levels of heading |
+| `.clipped-screen__lead` | Running prose at the measure |
+| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet" and by the Games screen's detection state, which are the same thing to look at |
+
+**The Games screen is the only consumer of the component layer so far** — its
+`.clipped-table` and `.clipped-muted`. The classes exist ahead of that so that
+#60, #83, #51, #94 and #101 do not each invent their own styling, which is the
+reason issue #79 followed the shell.
 
 ### Where it departs from the system, and why
 
@@ -926,15 +1023,18 @@ retrofitted:
 
 - **Labels.** Each of the two navigation lists is a named `<nav>`; the recorder
   status is a named region and a polite live region, so a change in state is
-  announced rather than only drawn.
+  announced rather than only drawn. The Games screen's detection block is the
+  second of those, named "Game detection", for the same reason: a recorder
+  appearing or going changes what the screen says while nobody is looking at it.
 - **State is never colour alone.** The open screen is marked by an accent rule
   down its left edge, a heavier weight, _and_ `aria-current="page"`.
 - **The window title** names the open screen, so the taskbar, Alt+Tab and the
   screen reader's window announcement all say where you are.
 
 `eslint-plugin-jsx-a11y` runs in its `strict` configuration as part of
-`npm run lint`, and `apps/desktop/src/Shell.test.tsx` drives the shell with Tab
-and Enter rather than asserting that the markup looks right.
+`npm run lint`, and `apps/desktop/src/Shell.test.tsx` and `GamesScreen.test.tsx`
+drive the window with Tab and Enter rather than asserting that the markup looks
+right.
 
 ## Testing
 
@@ -970,6 +1070,16 @@ rather than passing on nothing.
 `<App />` on its own. That is not ceremony: StrictMode double-invokes effects on
 mount while preserving refs, and a focus guard that passed under a bare `<App />`
 failed under the real tree.
+
+`GamesScreen.test.tsx` does the same, for the same reason and one more. The
+property it is really about is that the screen shows the recorder's state rather
+than a sentence somebody typed — and a screen whose wording is a constant looks
+identical to one that is following the link. So the case drives the whole
+application, opens Games, and then moves the link underneath it with a
+`recorder-link` event, rather than rendering `describeGameDetection`'s output
+beside itself. The other cases are about absence: no button, no link, no field,
+no checkbox and no radio anywhere in `<main>`, and a table whose column headers
+are what is missing rather than Game / Recording / Last played.
 
 `useWindowTitle.test.ts` stands up a `__TAURI_INTERNALS__` so the branch that
 only runs inside the window is reached — jsdom is a browser, so without it the

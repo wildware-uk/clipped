@@ -20,12 +20,12 @@ export function ScreenNotBuilt({ screen }: ScreenNotBuiltProps): ReactNode {
   return (
     <>
       <h1 className="clipped-screen__title">{screen.label}</h1>
-      <div className="clipped-unbuilt">
-        <h2 className="clipped-unbuilt__heading">Not built yet</h2>
-        <p className="clipped-unbuilt__body">
+      <div className="clipped-panel">
+        <h2 className="clipped-panel__heading">Not built yet</h2>
+        <p className="clipped-panel__body">
           The {screen.label} screen has not been written. Issue #{screen.trackedIn} builds it.
         </p>
-        <p className="clipped-unbuilt__body clipped-muted">
+        <p className="clipped-panel__body clipped-muted">
           This is the application shell. Navigation, layout and theming are in place; the screens
           and the connection to the recorder are not.
         </p>
