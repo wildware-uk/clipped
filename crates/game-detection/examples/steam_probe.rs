@@ -61,7 +61,14 @@ fn main() {
     }
     println!("Problems:   {}", steam.problems().len());
     for problem in steam.problems() {
+        // The message redacts its path, because the same message goes to the log
+        // file. This probe is run by hand to look at a real installation, so it
+        // also prints the whole path the error kept for exactly this kind of
+        // caller.
         println!("  {problem}");
+        if let Some(path) = problem.path() {
+            println!("            {}", path.display());
+        }
     }
 
     let arguments: Vec<String> = std::env::args().skip(1).collect();

@@ -146,6 +146,11 @@ impl Installation {
 
     /// Puts a file in Steam's artwork cache.
     fn cache_artwork(&self, relative: &str) -> PathBuf {
+        self.cache_bytes(relative, b"")
+    }
+
+    /// Puts a file with real bytes in Steam's artwork cache.
+    fn cache_bytes(&self, relative: &str, bytes: &[u8]) -> PathBuf {
         let path = self
             .root()
             .join("appcache")
@@ -153,8 +158,28 @@ impl Installation {
             .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
         fs::create_dir_all(path.parent().expect("the cache path has a parent"))
             .expect("the artwork cache can be created");
-        fs::write(&path, b"").expect("the artwork can be written");
+        fs::write(&path, bytes).expect("the artwork can be written");
         path
+    }
+
+    /// Writes a manifest into the second library, derived from a fixture by
+    /// substituting values.
+    ///
+    /// Derived rather than written from scratch so that what is parsed is still
+    /// Steam's own text, tabs, escapes, nested tables and all. Each substitution
+    /// is asserted, so a fixture edited until one no longer applies fails the
+    /// test rather than quietly leaving it testing the unmodified manifest.
+    fn install_derived(&self, from: &str, as_name: &str, substitutions: &[(&str, &str)]) {
+        let mut text = fixture(from);
+        for (replacing, with) in substitutions {
+            assert!(
+                text.contains(replacing),
+                "the fixture should still contain {replacing}"
+            );
+            text = text.replace(replacing, with);
+        }
+        fs::write(self.second_library().join("steamapps").join(as_name), text)
+            .expect("the derived manifest can be written");
     }
 
     fn read(&self) -> Steam {
@@ -176,6 +201,23 @@ fn fixture(name: &str) -> String {
 /// A Windows path as KeyValues spells it.
 fn escape(path: &str) -> String {
     path.replace('\\', r"\\")
+}
+
+/// A JPEG that declares `width` by `height` in its frame header.
+///
+/// Header-valid and deliberately not decodable: nothing in the crate decodes an
+/// image, it reads the two numbers in the frame header, and a real Steam icon
+/// would be somebody's copyrighted artwork checked into this repository.
+fn jpeg(width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = vec![
+        // Start of image, then a baseline frame of eleven bytes: the length,
+        // the sample precision, the dimensions, and one component.
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08,
+    ];
+    bytes.extend(height.to_be_bytes());
+    bytes.extend(width.to_be_bytes());
+    bytes.extend([0x01, 0x01, 0x11, 0x00]);
+    bytes
 }
 
 #[test]
@@ -421,6 +463,117 @@ fn the_small_icon_wins_over_the_larger_artwork() {
 }
 
 #[test]
+fn the_application_icon_is_preferred_to_the_artwork_beside_it() {
+    // What Steam actually caches: the icon is a 32x32 JPEG named for its SHA-1,
+    // in the application's own directory, next to artwork that is not an icon
+    // and is far larger. Finding it needs no `appinfo.vdf` — the directory is
+    // already the application's — and it cannot be found by name, so it is found
+    // by being that shape.
+    let installation = Installation::new("hashed-icon");
+    let icon = installation.cache_bytes(
+        "730/8dbc71957312bbd3baea65848b545be9eae2a355.jpg",
+        &jpeg(32, 32),
+    );
+    installation.cache_bytes("730/library_600x900.jpg", &jpeg(300, 450));
+    installation.cache_bytes("730/library_hero.jpg", &jpeg(1920, 620));
+
+    let steam = installation.read();
+    assert_eq!(
+        steam.app_by_id("730").and_then(|app| app.icon()),
+        Some(icon.as_path())
+    );
+}
+
+#[test]
+fn a_hashed_file_that_is_not_an_icon_is_not_reported_as_one() {
+    // Steam hashes the names of some large artwork too — four of the 660 cached
+    // applications on the machine this was developed against have a hashed JPEG
+    // of a thousand pixels or more and no icon at all. Taking the hashed file on
+    // trust would report one of those as a 32x32 icon.
+    let installation = Installation::new("hashed-artwork");
+    installation.cache_bytes(
+        "730/0aa238e94d2041b128284812415ab4ee48450cce.jpg",
+        &jpeg(2048, 2048),
+    );
+    let capsule = installation.cache_bytes("730/library_600x900.jpg", &jpeg(300, 450));
+
+    let steam = installation.read();
+    assert_eq!(
+        steam.app_by_id("730").and_then(|app| app.icon()),
+        Some(capsule.as_path()),
+        "the artwork with a name that says what it is, not the hashed one"
+    );
+}
+
+#[test]
+fn a_manifest_whose_install_directory_leaves_the_library_claims_nothing() {
+    // The manifest is a file Clipped did not write, and `app_for_path` claims
+    // every executable beneath an installation directory at the catalogue's
+    // strongest rung. An `installdir` that escapes the library would make
+    // Clipped record Notepad as Counter-Strike 2 and be certain about it.
+    let installation = Installation::new("escape");
+    installation.install_derived(
+        "appmanifest_730.acf",
+        "appmanifest_1234567.acf",
+        &[
+            (r#""730""#, r#""1234567""#),
+            (
+                "Counter-Strike Global Offensive",
+                r"..\\..\\..\\..\\Windows\\System32",
+            ),
+        ],
+    );
+
+    let steam = installation.read();
+    assert!(
+        steam.app_by_id("1234567").is_none(),
+        "a manifest that names somewhere outside its library is not an application"
+    );
+    assert_eq!(
+        steam.app_for_path(r"C:\Windows\System32\notepad.exe"),
+        None,
+        "and nothing outside the library is claimed"
+    );
+    assert_eq!(
+        steam
+            .candidate_for("notepad.exe", r"C:\Windows\System32\notepad.exe")
+            .launcher(),
+        None,
+        "so no launcher identity reaches the catalogue"
+    );
+
+    let problem = steam
+        .problems()
+        .first()
+        .map(std::string::ToString::to_string)
+        .expect("the manifest is reported rather than dropped");
+    assert!(
+        problem.contains("appmanifest_1234567.acf") && problem.contains("installdir"),
+        "the problem should name the file and the value: {problem}"
+    );
+}
+
+#[test]
+fn an_absolute_install_directory_claims_nothing_either() {
+    // The same escape, spelled the other way. `Path::join` with an absolute path
+    // discards what it was joined onto, so this one does not need a single `..`.
+    let installation = Installation::new("absolute");
+    installation.install_derived(
+        "appmanifest_730.acf",
+        "appmanifest_1234567.acf",
+        &[
+            (r#""730""#, r#""1234567""#),
+            ("Counter-Strike Global Offensive", r"C:\\Windows\\System32"),
+        ],
+    );
+
+    let steam = installation.read();
+    assert!(steam.app_by_id("1234567").is_none());
+    assert_eq!(steam.app_for_path(r"C:\Windows\System32\notepad.exe"), None);
+    assert_eq!(steam.problems().len(), 1, "{:?}", steam.problems());
+}
+
+#[test]
 fn a_manifest_that_is_not_keyvalues_is_named_and_the_other_games_still_load() {
     // Steam rewrites these files while games install, so a half-written one is
     // an ordinary state of the disk. Refusing to detect any game because of one
@@ -456,6 +609,19 @@ fn a_manifest_that_is_not_keyvalues_is_named_and_the_other_games_still_load() {
     assert!(
         problems[0].contains("line 4"),
         "and the line the reader gave up on: {problems:?}"
+    );
+    // Every one of these goes into the log file (AGENTS.md section 13). It says
+    // which file; it does not say where on somebody's disk that file lives.
+    for leaked in ["SecondLibrary", "steamapps", "Steam"] {
+        assert!(
+            !problems[0].contains(leaked),
+            "the problem should not carry the directory {leaked}: {problems:?}"
+        );
+    }
+    assert_eq!(
+        steam.problems()[0].path(),
+        Some(broken.as_path()),
+        "the whole path is still there for a diagnostics screen to show"
     );
 }
 

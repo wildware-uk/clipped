@@ -44,11 +44,20 @@
 //! coherent view of anything, and guessing at a directory layout would be
 //! inventing data. A single application manifest is not fatal. Steam wrote
 //! eighty-eight of them on the machine this was developed against, they are
-//! rewritten while games install, and
-//! refusing to detect *any* game because one file is half-written would be the
-//! wrong trade for a recorder. They are collected into
-//! [`Steam::problems`] instead — named, logged at `warn`, and never silently
-//! dropped (AGENTS.md section 15).
+//! rewritten while games install, and refusing to detect *any* game because one
+//! file is half-written would be the wrong trade for a recorder. They are
+//! collected into [`Steam::problems`] instead — named, logged at `warn`, and
+//! never silently dropped (AGENTS.md section 15).
+//!
+//! # A manifest is somebody else's file
+//!
+//! Nothing in a manifest is trusted to be sensible merely because Steam usually
+//! writes it. The value that matters is `installdir`, because
+//! [`Steam::app_for_path`] claims every executable beneath an installation
+//! directory *at the catalogue's strongest rung*: a manifest naming
+//! `..\..\..\Windows` would make Clipped record Notepad as a game and say it was
+//! certain. So an `installdir` that does not stay inside its own library is a
+//! reported problem and not an application — see [`install_path`].
 //!
 //! # What Steam is not asked
 //!
@@ -60,11 +69,13 @@
 //!   soundtracks and the Steam Linux Runtime. Deciding which of those is worth
 //!   recording is the catalogue's business; this module reports what Steam says
 //!   is installed, without editorialising.
-//! - **Anything from `appinfo.vdf`.** Steam's binary caches hold the small
-//!   application icon and the launch configuration, in an undocumented format
-//!   that changes. [`SteamApp::icon`] says exactly what it does instead.
+//! - **Anything from `appinfo.vdf`.** Steam's binary caches hold the launch
+//!   configuration in an undocumented format that changes. The icon does *not*
+//!   need it, which an earlier version of this module had wrong; [`icon`] says
+//!   where it actually is.
 
 mod error;
+mod icon;
 #[cfg(windows)]
 mod registry;
 
@@ -170,21 +181,22 @@ impl SteamApp {
 
     /// A picture of the game Steam has already downloaded, if there is one.
     ///
-    /// This is a **file on this machine** and never a network fetch. Steam keeps
-    /// what it has downloaded under `appcache\librarycache`, and the files with
-    /// stable names there are the ones this looks for, best first: the small
-    /// application icon in the layout Steam used before it moved to a directory
-    /// per application, then the portrait capsule, the header and the logo.
+    /// This is a **file on this machine** and never a network fetch: everything
+    /// here is something Steam put in `appcache\librarycache`.
     ///
-    /// It is deliberately not the icon hash from `appcache\appinfo.vdf`. That
-    /// file is binary KeyValues in an undocumented layout, and the icons it
-    /// names — `steam\games\<sha1>.ico` — cannot be tied to an application
-    /// without reading it. Reporting a picture Steam has cached is honest and
-    /// costs one `stat`; guessing at a binary format to get a nicer one is not
-    /// worth the way it fails.
+    /// The application icon when Steam has cached one, which it usually has —
+    /// 511 of the 660 cached applications on the machine this was developed
+    /// against. It is a 32x32 JPEG in the application's own cache directory,
+    /// named for its SHA-1, so it is found by being that shape rather than by
+    /// its name; [`icon`] is the module that explains why, and why no
+    /// `appinfo.vdf` is needed to do it.
     ///
-    /// `None` means Steam has not cached artwork for this application, which is
-    /// ordinary for a game installed but never shown in the library.
+    /// Otherwise the artwork Steam shows in the library — the portrait capsule,
+    /// the header, the logo — which is not an icon and is visibly not one from
+    /// its file name, but is better than nothing.
+    ///
+    /// `None` means Steam has cached nothing at all for this application, which
+    /// is ordinary for a game installed but never shown in the library.
     #[must_use]
     pub fn icon(&self) -> Option<&Path> {
         self.icon.as_deref()
@@ -371,7 +383,8 @@ impl Steam {
     /// is not plugged in, a manifest half-written by an interrupted update — and
     /// a diagnostics screen should say so rather than leave somebody wondering
     /// why one game is never detected. Every one of these is also logged at
-    /// `warn` when it is found.
+    /// `warn` when it is found, with the path redacted; a screen showing the
+    /// user their own disk reads [`SteamError::path`] for the whole thing.
     #[must_use]
     pub fn problems(&self) -> &[SteamError] {
         &self.problems
@@ -457,8 +470,8 @@ fn read_library(root: &Path, library: &Path, problems: &mut Vec<SteamError>) -> 
         Err(source) => {
             // The ordinary cause is a library on a drive that is not plugged in.
             // Detection carries on with the libraries that are.
-            problems.push(report(SteamError::Read {
-                path: directory,
+            problems.push(report(SteamError::Library {
+                path: library.to_path_buf(),
                 source,
             }));
             return Vec::new();
@@ -470,8 +483,8 @@ fn read_library(root: &Path, library: &Path, problems: &mut Vec<SteamError>) -> 
         let entry = match entry {
             Ok(entry) => entry,
             Err(source) => {
-                problems.push(report(SteamError::Read {
-                    path: directory.clone(),
+                problems.push(report(SteamError::Library {
+                    path: library.to_path_buf(),
                     source,
                 }));
                 continue;
@@ -507,6 +520,12 @@ fn read_library(root: &Path, library: &Path, problems: &mut Vec<SteamError>) -> 
 /// Both, always: the log is for the machine that has already failed, and
 /// [`Steam::problems`] is for a caller that wants to tell the user why one game
 /// is missing (AGENTS.md sections 15 and 45).
+///
+/// What reaches the log is [`SteamError`]'s `Display`, which names the file and
+/// redacts the directories above it — the account name and the folders somebody
+/// chose have no business in a file users send to strangers (AGENTS.md section
+/// 13). A caller showing the user their own disk reads
+/// [`SteamError::path`] instead.
 fn report(problem: SteamError) -> SteamError {
     warn!(%problem, "part of the local Steam installation could not be read");
     problem
@@ -538,15 +557,64 @@ fn read_manifest(root: &Path, library: &Path, path: &Path) -> Result<SteamApp, S
     let name = non_empty(state.string("name")).ok_or_else(|| missing(path, "`name`"))?;
     let install_dir =
         non_empty(state.string("installdir")).ok_or_else(|| missing(path, "`installdir`"))?;
+    let installation = install_path(library, install_dir)
+        .ok_or_else(|| missing(path, "`installdir` that stays inside its own library"))?;
 
     Ok(SteamApp {
-        icon: icon(root, app_id),
+        icon: icon::icon(root, app_id),
         app_id: app_id.to_owned(),
         name: name.to_owned(),
-        installation: join(library, INSTALL_DIRECTORY).join(install_dir),
+        installation,
         library: library.to_path_buf(),
         manifest: path.to_path_buf(),
     })
+}
+
+/// Where a manifest's `installdir` puts an application, if it puts it inside the
+/// library at all.
+///
+/// `installdir` is a value out of a file Clipped did not write, and joining it
+/// onto the library unchecked hands it more authority than any other field in
+/// the manifest. [`Steam::app_for_path`] claims every executable beneath an
+/// installation directory, and the catalogue believes a launcher identity above
+/// every other rung, so `"installdir" "C:\\Windows\\System32"` — or the same
+/// thing spelled `..\..\..\..\Windows\System32` — would make Clipped record
+/// Notepad, or the user's browser, as whatever game the manifest named, and
+/// record it with more confidence than it has in a game it recognised properly.
+/// That is a malformed or hostile manifest choosing what Clipped points a
+/// recorder at.
+///
+/// So the value has to be a relative path built out of ordinary names: no drive
+/// or share, no leading separator, no `.` or `..`, and nothing empty. Both
+/// separators are treated as separators regardless of platform, because Steam
+/// writes `\` and this must not depend on which operating system is reading it.
+///
+/// More than one component is still allowed. All eighty-eight manifests on the
+/// machine this was developed against name a single directory, but a nested
+/// `installdir` escapes nothing, and refusing one would be a rule stricter than
+/// the reason for having it.
+///
+/// `None` is reported by [`read_manifest`] as a problem naming the manifest, so
+/// a value this refuses is visible rather than silently dropped.
+fn install_path(library: &Path, install_dir: &str) -> Option<PathBuf> {
+    let mut path = join(library, INSTALL_DIRECTORY);
+    let mut components = 0_usize;
+
+    for component in install_dir.split(['/', '\\']) {
+        let ordinary = !component.is_empty()
+            && component != "."
+            && component != ".."
+            // A drive letter or an alternate data stream: `C:` and `C:\Windows`
+            // both reach here as components carrying a colon.
+            && !component.contains(':');
+        if !ordinary {
+            return None;
+        }
+        path.push(component);
+        components += 1;
+    }
+
+    (components > 0).then_some(path)
 }
 
 /// A value Steam wrote, unless it wrote an empty one.
@@ -562,28 +630,6 @@ fn missing(path: &Path, what: &str) -> SteamError {
     }
 }
 
-/// The artwork Steam has already downloaded for an application, best first.
-///
-/// See [`SteamApp::icon`] for why these names and not the icon hash.
-fn icon(root: &Path, app_id: &str) -> Option<PathBuf> {
-    let cache = join(root, "appcache/librarycache");
-
-    // The layout before Steam moved to a directory per application. This
-    // machine has none, so it is covered by a fixture rather than by
-    // observation; it costs one `stat` and it is the only file in either layout
-    // that is actually an icon.
-    let legacy = cache.join(format!("{app_id}_icon.jpg"));
-    if legacy.is_file() {
-        return Some(legacy);
-    }
-
-    let directory = cache.join(app_id);
-    ["library_600x900.jpg", "header.jpg", "logo.png"]
-        .into_iter()
-        .map(|name| directory.join(name))
-        .find(|candidate| candidate.is_file())
-}
-
 /// Joins a `/`-separated relative path onto a directory.
 ///
 /// The constants above are written with one separator so they read as the paths
@@ -597,6 +643,88 @@ fn join(root: &Path, relative: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty directory of one test's own, under the system temporary
+    /// directory.
+    ///
+    /// Named for the test rather than randomly, and emptied on the way in, so a
+    /// run left half-finished does not decide the next one. Several agents share
+    /// the machine this is developed on, so the process and thread identifiers
+    /// keep two concurrent runs out of each other's way.
+    pub(super) fn scratch(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "clipped-steam-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("the temporary directory can be created");
+        path
+    }
+
+    /// The library an `installdir` is resolved against in these tests.
+    const LIBRARY: &str = "C:/SteamLibrary";
+
+    /// Where an ordinary `installdir` lands.
+    fn installed(install_dir: &str) -> Option<PathBuf> {
+        install_path(Path::new(LIBRARY), install_dir)
+    }
+
+    #[test]
+    fn an_ordinary_install_directory_lands_under_the_library() {
+        assert_eq!(
+            installed("Counter-Strike Global Offensive"),
+            Some(
+                Path::new(LIBRARY)
+                    .join("steamapps")
+                    .join("common")
+                    .join("Counter-Strike Global Offensive")
+            )
+        );
+    }
+
+    #[test]
+    fn a_nested_install_directory_is_still_inside_the_library() {
+        // Steam writes a single name in all eighty-eight manifests on the
+        // machine this was developed against, but a nested one escapes nothing
+        // and refusing it would be stricter than the reason for the rule.
+        assert_eq!(
+            installed(r"Some Game\bin"),
+            Some(
+                Path::new(LIBRARY)
+                    .join("steamapps")
+                    .join("common")
+                    .join("Some Game")
+                    .join("bin")
+            )
+        );
+    }
+
+    /// The one that matters: an `installdir` that leaves the library would make
+    /// [`Steam::app_for_path`] claim unrelated executables, and the catalogue
+    /// believes a launcher identity above every other rung.
+    #[test]
+    fn an_install_directory_that_leaves_the_library_is_refused() {
+        for escape in [
+            r"..\..\..\Windows\System32",
+            "../../../Windows/System32",
+            r"C:\Windows\System32",
+            "/Windows/System32",
+            r"\\server\share\game",
+            "..",
+            ".",
+            r"Some Game\..\..\..\Windows",
+            "",
+            r"Some Game\",
+            "C:",
+        ] {
+            assert_eq!(
+                installed(escape),
+                None,
+                "`{escape}` should not be accepted as an install directory"
+            );
+        }
+    }
 
     #[test]
     fn a_relative_path_written_with_slashes_becomes_a_real_one() {

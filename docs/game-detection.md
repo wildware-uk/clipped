@@ -339,6 +339,7 @@ wrong.
 | The library index | **Fatal.** Without it there is no coherent view of anything, and guessing at a directory layout would be inventing data. |
 | One application manifest | Collected into `Steam::problems()`, logged at `warn`, and the rest are read. |
 | A whole library | The same. The ordinary cause is a drive that is not plugged in. |
+| A manifest whose `installdir` leaves its library | The same. See below: it is refused rather than believed. |
 
 The split is a trade rather than an inconsistency. Steam rewrites manifests
 while games install, so a half-written one is an ordinary state of the disk, and
@@ -347,20 +348,68 @@ recorder. Nothing is dropped silently either way: every problem names its file,
 and `problems()` is there so a diagnostics screen can say why one game is never
 detected instead of leaving somebody to wonder.
 
+**The messages redact their paths.** A problem's `Display` is what
+`Steam::problems()` logs at `warn`, and a Windows path starts with the account
+name and goes on to name the folders somebody chose. Every message therefore
+names its file through `RedactedPath` — final component plus a digest of the
+whole path — so a log file a user sends to a stranger says *which* manifest
+without describing their disk (AGENTS.md section 13, `docs/logging.md`). The
+whole path stays on the error and is reachable through `SteamError::path()`, for
+the one caller that legitimately shows it: a diagnostics screen, on the user's
+own machine.
+
+#### A manifest is a file Clipped did not write
+
+`installdir` is the value that matters, because `Steam::app_for_path` claims
+every executable beneath an installation directory and the catalogue believes a
+launcher identity above every other rung. Joined onto the library unchecked,
+`"installdir" "C:\\Windows\\System32"` — or the same thing spelled
+`..\..\..\..\Windows\System32` — would make Clipped record Notepad as whatever
+game the manifest named, and record it *more* confidently than a game it
+recognised properly.
+
+So the value has to be a relative path of ordinary names: no drive or share, no
+leading separator, no `.` or `..`, nothing empty. More than one component is
+still allowed, because a nested `installdir` escapes nothing; all eighty-eight
+manifests on the machine this was developed against name a single directory.
+A value that is refused is a reported problem naming the manifest, not an
+application and not a silent drop.
+
 #### Icons
 
-`SteamApp::icon()` is a **file on this machine** — whatever artwork Steam has
-already downloaded into `appcache\librarycache`, looked for by the names that
-are stable there, best first: the small application icon in the layout Steam
-used before it moved to a directory per application, then the portrait capsule,
-the header, the logo. `None` means Steam has cached nothing for that
-application, which is ordinary for a game installed but never shown in the
-library; nothing is fetched and nothing is invented.
+`SteamApp::icon()` is a **file on this machine**, and normally the real
+application icon: a 32x32 JPEG in the application's own directory under
+`appcache\librarycache`.
 
-It is deliberately **not** the icon hash from `appcache\appinfo.vdf`. That file
-is binary KeyValues in an undocumented layout that changes, and the icons it
-names — `steam\games\<sha1>.ico` — cannot be tied to an application without
-reading it.
+```text
+appcache\librarycache\730\
+    8dbc71957312bbd3baea65848b545be9eae2a355.jpg    32x32     the icon
+    library_600x900.jpg                             300x450   the capsule
+    library_hero.jpg                                1920x620
+    logo.png
+```
+
+The icon is named for the SHA-1 `appinfo.vdf` records for it, so it cannot be
+recognised by spelling — and Steam hashes the names of some large artwork too.
+It is recognised by *being that shape* instead: the two numbers in a JPEG's
+frame header are a documented format and about forty lines of reader, which is
+not the guess at an undocumented binary layout that reading `appinfo.vdf` would
+be. The hash is needed to name the file, not to find it, because the directory
+is already the application's.
+
+An earlier draft of this module reported the portrait capsule and said an icon
+was not reachable without `appinfo.vdf`. That was wrong: of the 660 cached
+applications on the machine it was written against, **none** has the
+`<appid>_icon.jpg` file that draft looked for first and 511 have the hashed icon.
+Reading the same 660 directories also settled how to pick it — taking the
+*smallest* hashed JPEG would have called a 2048x2048 image an icon for four of
+them.
+
+When Steam has cached no icon, the artwork with names that say what they are is
+reported instead — the portrait capsule, the header, the logo — which is visibly
+not an icon and is better than nothing. `None` means Steam has cached nothing at
+all, which is ordinary for a game installed but never shown in the library.
+Nothing is fetched, nothing is decoded and nothing is invented.
 
 #### KeyValues, and why the parser is ours
 
@@ -417,7 +466,9 @@ did before.
 | --- | --- | --- |
 | The KeyValues reader: escapes, comments, bare tokens, repeated keys, every way a file can be malformed | `src/launcher/keyvalues.rs` | nothing |
 | That a missing registry value is not an error, and that a real one comes back whole | `src/launcher/steam/registry.rs` | Windows |
-| That neither shape of "Steam is not installed" is an error | `src/launcher/steam/mod.rs` | Windows |
+| That neither shape of "Steam is not installed" is an error, and every way an `installdir` can leave its library | `src/launcher/steam/mod.rs` | Windows for the first |
+| That no problem's message carries a directory above the file it names, and that the whole path survives on the error | `src/launcher/steam/error.rs` | nothing |
+| Reading a JPEG's dimensions: metadata segments, progressive frames, truncation, a file that is not a JPEG, and a hostile one | `src/launcher/steam/icon.rs` | nothing |
 | Two libraries, the game in the second one, its name and icon, the catalogue answering by launcher identity, and every failure path | `tests/steam.rs` | nothing |
 
 The fixtures under `tests/fixtures/steam/` are **files Steam wrote**, copied off
@@ -431,6 +482,11 @@ because a fixture cannot name `B:\SteamLibrary` on a machine that has no B
 drive — and the substitution is asserted, so a fixture edited until those paths
 no longer appear fails the test rather than quietly leaving it with no libraries
 to find.
+
+The one thing not taken from a real client is the artwork. A Steam icon is
+somebody's copyrighted picture, and nothing in this crate decodes an image
+anyway, so the tests build a JPEG *header* declaring the dimensions they want.
+That is exactly the part the reader reads.
 
 What no test does is read the developer's own Steam (AGENTS.md section 25).
 That check is a probe, run by hand:
