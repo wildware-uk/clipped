@@ -284,6 +284,8 @@ name = "clipped-library"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipped-edit",
+ "clipped-events",
  "clipped-logging",
  "clipped-storage",
  "serde",
@@ -365,6 +367,7 @@ dependencies = [
  "clap",
  "clipped-capture",
  "clipped-encoder",
+ "clipped-events",
  "clipped-game-detection",
  "clipped-hotkeys",
  "clipped-logging",
