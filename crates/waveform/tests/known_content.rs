@@ -142,18 +142,20 @@ fn zooming_in_and_out_describes_the_same_audio() {
 fn an_overview_of_a_long_recording_still_finds_a_short_sound() {
     let directory = TemporaryDirectory::new("waveform-known");
     let path = directory.file("long.wav");
-    // Eight seconds is 800 base buckets, which is more than one level of the
-    // pyramid: an eight-bucket overview of it is read from a level whose buckets
-    // are 80 ms wide, four times coarser than the base. A 50 ms sound has to
-    // survive that reduction — a coarse level that dropped half of what it
-    // merged would show this recording as quiet throughout.
+    // Eight seconds is 800 base buckets, which is three levels of pyramid above
+    // the base: an eight-bucket overview of it is read from a level whose
+    // buckets are 80 ms wide, eight times coarser than the base. The loud part
+    // is exactly one base bucket long and at an odd index — 4.01 s to 4.02 s is
+    // bucket 401 — so a reduction that took one of each pair instead of merging
+    // them would drop it at the very first level and show this recording as
+    // quiet throughout.
     write_wav(
         &path,
         RATE,
         &[vec![
-            Tone::at(4.0, 0.05),
-            Tone::at(0.05, 1.0),
-            Tone::at(3.95, 0.05),
+            Tone::at(4.01, 0.05),
+            Tone::at(0.01, 1.0),
+            Tone::at(3.98, 0.05),
         ]],
     );
 
