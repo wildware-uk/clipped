@@ -229,6 +229,7 @@ is not responsible for, and where it sits in this stack.
 | [docs/prerequisites.md](docs/prerequisites.md) | Toolchains, SDKs and driver expectations |
 | [docs/architecture.md](docs/architecture.md) | Subsystems, boundaries and ADRs |
 | [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
+| [docs/licensing.md](docs/licensing.md) | What a release has to carry, and the LGPL obligations FFmpeg brings |
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 | [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |
@@ -265,7 +266,13 @@ are MPL-2.0 ones; GPL-only dependencies are not, and a dependency with unclear
 licensing should not be added at all. See
 [CONTRIBUTING.md](CONTRIBUTING.md#licensing-and-dependencies).
 
-Third-party code that lives in this repository — currently the NVENC bindings
-generated from NVIDIA's MIT-licensed `nvEncodeAPI.h` — is listed with the
-notices its licence requires in
+Third-party code that lives in this repository — the encoder bindings generated
+from NVIDIA's, AMD's and Intel's headers, all MIT — is listed with the notices
+its licence requires in
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Distributing Clipped is a separate question again, because a release ships
+FFmpeg's LGPL v3 libraries and several hundred Rust crates that this repository
+does not contain. What a release has to carry, which of it exists today, and how
+the FFmpeg relinking permission was tested are in
+[docs/licensing.md](docs/licensing.md).

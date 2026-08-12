@@ -31,6 +31,15 @@
     than the rolling "latest" tag, so a changed checksum means the artefact
     changed underneath us and is worth stopping for.
 
+    The pin below is also the pin a release publishes source for. FFmpeg is
+    LGPL v3, so shipping its libraries obliges us to offer the corresponding
+    source of the exact build - the asset name carries the FFmpeg commit, and
+    the tag identifies the build recipe. scripts/fetch-ffmpeg-source.ps1 reads
+    both out of this file rather than repeating them, and docs/licensing.md is
+    the whole list of what a release has to carry. Moving the pin therefore
+    moves what a release must publish, which is a third consequence on top of
+    the two docs/ffmpeg.md describes.
+
 .PARAMETER Tag
     Release tag in the builds repository. Must be a dated autobuild tag such as
     autobuild-2026-08-09-13-03, never "latest": "latest" moves daily, which
@@ -294,6 +303,7 @@ function Write-ReadyNotice {
     Write-Host ''
     Write-Host "FFmpeg is ready in $buildRoot"
     Write-Host 'The workspace .cargo/config.toml already points Cargo at it, so "cargo build --workspace" works from here.'
+    Write-Host 'Shipping it carries LGPL obligations: see docs/licensing.md, and scripts/fetch-ffmpeg-source.ps1 for the source a release publishes.'
 }
 
 # Failures below are contributor-facing rather than programmer-facing, so they
