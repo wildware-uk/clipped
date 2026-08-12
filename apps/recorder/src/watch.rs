@@ -94,6 +94,8 @@ use clipped_windows::WindowInfo;
 
 use crate::cli::{RecordArgs, WatchArgs};
 use crate::config::{CaptureTarget, RecordingConfig};
+use clipped_session::config::{Configuration, ConfigurationStore};
+
 use crate::record::{resolve_window, settings_for, RecordError};
 use crate::shutdown::{install_ctrl_c_handler, CtrlCError, ShutdownSignal};
 
@@ -212,7 +214,13 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
     let mut watcher =
         ProcessWatcher::start(WatchConfig::default()).map_err(WatchCommandError::Detection)?;
     let settings = AutomaticSettings::new(directory.clone());
-    let manager = SessionManager::new(catalogue, settings);
+
+    // The user's own settings, if they have any. A missing file is not an
+    // error: somebody who has never changed a setting has none, and a file that
+    // cannot be read leaves the shipped defaults standing rather than stopping
+    // a recorder from recording (crates/session/src/config, AGENTS.md 16).
+    let configuration = load_configuration();
+    let manager = SessionManager::new(catalogue, settings).with_configuration(configuration);
     let plan = RecordingPlan::from(args);
 
     announce(&directory, &watcher, &manager);
@@ -302,6 +310,34 @@ fn load_catalogue() -> Result<Catalogue, WatchCommandError> {
 /// The last part matters: a game that is already running will not be recorded,
 /// and a user who is told nothing would reasonably conclude the recorder is
 /// broken (AGENTS.md section 27).
+/// The user's settings, or the shipped defaults when there are none to read.
+///
+/// A missing file is the ordinary case rather than a failure: somebody who has
+/// never changed a setting has no settings file, and writing one on first run
+/// would put a file on their disk for nothing. A file that exists but cannot be
+/// read is reported and then ignored — a recorder that refuses to record
+/// because a preference is malformed has chosen the wrong thing to protect
+/// (AGENTS.md sections 16 and 45). Neither case is written back over, which is
+/// what stops a build that cannot read a newer file destroying it.
+fn load_configuration() -> Configuration {
+    let Some(path) = ConfigurationStore::default_path() else {
+        return Configuration::defaults();
+    };
+
+    let mut store = ConfigurationStore::at(path);
+    match store.load() {
+        Ok(_) => store.current().clone(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the settings file could not be read, so this run uses the shipped defaults"
+            );
+            eprintln!("Settings not applied: {error}");
+            Configuration::defaults()
+        }
+    }
+}
+
 fn announce(directory: &Path, watcher: &ProcessWatcher, manager: &SessionManager) {
     tracing::info!(
         directory = %RedactedPath::new(directory),
@@ -870,7 +906,10 @@ fn attempt(
         request.output.display()
     );
 
-    let settings = settings_for(&config, &window);
+    // What the command line asked for, then what this game was configured for
+    // laid over it. Resolved once, when the recording started; `request` has
+    // been carrying the answer since then (issue #61).
+    let settings = request.settings.apply_to(settings_for(&config, &window));
     // `record_into` rather than `record`, for the one output this command needs:
     // where the recording's timeline begins. That is what places a plugin's
     // event inside the file (`clipped_session::plugins`), and publishing it is
