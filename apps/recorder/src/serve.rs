@@ -667,7 +667,7 @@ impl RecordingState {
             // filed unattributed rather than under a game nobody identified —
             // which is the same answer a session gives when the catalogue will
             // not name one, and it is honest rather than invented (AGENTS.md
-            // section 27). Attributing it is issue #308.
+            // section 27). Attributing it is issue #334.
             "", now, position,
         )
         .map_err(screenshot_failed)?;

@@ -211,7 +211,7 @@ will collect.
   leaves no timeline marker. The recorder does return `at_seconds` — the
   recording's own media position of the frame — so the marker has somewhere to go
   the day the table exists. That is
-  [#308](https://github.com/wildware-uk/clipped/issues/308).
+  [#334](https://github.com/wildware-uk/clipped/issues/334).
 - **Attribution to a game.** A screenshot taken by `serve` is filed
   `unattributed`, because no `serve` runs a session — the automatic session
   manager is driven by the `watch` subcommand ([sessions.md](sessions.md)) — so

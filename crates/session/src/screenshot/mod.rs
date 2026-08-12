@@ -40,7 +40,7 @@
 //! user's own directory with a name that sorts beside the recordings of the
 //! same game; putting it in the library index and on a timeline needs a
 //! `screenshots` table that `clipped-storage` does not have yet
-//! ([issue #308](https://github.com/wildware-uk/clipped/issues/308)).
+//! ([issue #334](https://github.com/wildware-uk/clipped/issues/334)).
 //!
 //! # Threading
 //!
