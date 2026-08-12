@@ -19,4 +19,6 @@
 export { AppShell, type AppShellProps } from './AppShell';
 export { RecorderStatus, type RecorderStatusProps } from './RecorderStatus';
 export { ScreenNav, type ScreenNavProps } from './ScreenNav';
+export { railPanelId, railTabId } from './railIds';
+export { SectionRail, type RailSection, type SectionRailProps } from './SectionRail';
 export { ScreenNotBuilt, type ScreenNotBuiltProps } from './ScreenNotBuilt';

@@ -45,12 +45,15 @@ for each of the link's four states, and one for "this is not the Clipped window"
 which is what `npm run dev:web` and the tests see.
 
 **The controls are in the notification area, not in the window** — see
-[The tray](#the-tray). No screen has a control of any kind: six of the seven are
-not built, and the seventh, Games, deliberately draws none because nothing it
-would drive can be reached from here. A button with nothing behind it is exactly
-what AGENTS.md section 27 forbids. A "Try again" control for a link that has
-given up is
-[issue #221](https://github.com/wildware-uk/clipped/issues/221).
+[The tray](#the-tray). No screen drives the recorder: five of the seven are not
+built, and the two that are draw nothing that would, because nothing they would
+drive can be reached from here. A button with nothing behind it is exactly what
+AGENTS.md section 27 forbids. A "Try again" control for a link that has given up
+is [issue #221](https://github.com/wildware-uk/clipped/issues/221).
+
+There is exactly one control in a screen, and it changes nothing outside the
+window: the Settings screen's rail, which moves between that screen's own
+sections — see [The Settings screen](#the-settings-screen).
 
 ## What the shell is
 
@@ -81,10 +84,10 @@ separately.
 
 Both navigation lists and every route are derived from one array, `SCREENS` in
 `@clipped/shared`, so a navigation item cannot point at a route that does not
-exist. **One of the seven screens has been written**, and it is Games — see
-[The Games screen](#the-games-screen). The other six each lead to a panel saying
+exist. **Two of the seven screens have been written** — [Games](#the-games-screen)
+and [Settings](#the-settings-screen). The other five each lead to a panel saying
 so and naming the issue that builds it — #60 for Home and Library, #83 for
-Editor, #51 for Settings, #94 for Trash, #101 for Diagnostics. Building one
+Editor, #94 for Trash, #101 for Diagnostics. Building one
 replaces its placeholder route with the real screen, in `elementFor` in
 `Shell.tsx`, which is the one place that knows a screen from a placeholder.
 
@@ -168,6 +171,102 @@ Which is also why this screen built nothing for
 and the selectable chips are for the per-game detail view the deck draws behind
 this list, and there is no list to open one from. #215 asks for them at the point
 a screen needs them, and this one does not.
+
+## The Settings screen
+
+SPEC.md sections 10, 12, 15, 27 and 34, and
+[issue #51](https://github.com/wildware-uk/clipped/issues/51). The deck draws a
+rail of sections and panes of controls: device pickers, a recording directory,
+quality presets, a container choice, hotkey bindings and a row of switches.
+
+**The rail is here and the controls are not, because this window can neither
+read nor write a setting.** That is a fact about what is built rather than about
+what was finished, and it has four parts:
+
+- the settings are `clipped_session::config` — three layers, validation, and
+  each value reported with the layer it came from and whether this scope
+  overrode it ([configuration.md](configuration.md)). It is exactly the shape a
+  settings screen needs, and nothing here can ask it anything;
+- the desktop application may link one crate of the repository's workspace,
+  `clipped-ipc`, and `tests/integration/tests/workspace_layering.rs` enforces
+  it. `clipped-session` sits above capture, audio, encoding and muxing, so
+  naming it here would put the recording engine in the window's process — the
+  separation [ADR 0002](adr/0002-separate-recorder-process.md) exists to make;
+- the control protocol has no command that reads configuration, and the one
+  that would write it, `apply_settings`, is refused as not implemented by every
+  build ([ipc.md](ipc.md));
+- reading `settings.json` from this process instead would be a second
+  implementation of its versioning, migration and validation, against the file
+  the user's own settings live in (AGENTS.md section 55).
+
+[Issue #252](https://github.com/wildware-uk/clipped/issues/252) is the fix, by
+either of its two routes, and it says it blocks this screen.
+
+### What each pane carries instead
+
+Three columns: the setting, **how it is set today**, and what has to land before
+this window can hold the control. The middle column is the one that makes this a
+screen rather than an apology — almost every setting *can* be changed today, and
+the screen says how:
+
+| Section | What can be changed today |
+| --- | --- |
+| Recording | `clipped-recorder watch --framerate 60 --codec auto …`, per run; #61 is what makes the settings file reach a recording |
+| Audio | The same options, with the recorder's own warning that a recording has no audio track yet (#180) |
+| Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
+| Hotkeys | Nothing: the hotkey service is written and no process installs it (#232) |
+| Notifications | **The one thing this window's own behaviour follows**: the three switches in `notifications.json`, named with their keys and their file |
+| Startup | `clipped-recorder start-at-login enable`, which no protocol command can reach — [#308](https://github.com/wildware-uk/clipped/issues/308) |
+
+Two settings SPEC.md asks for have nowhere to be stored rather than nothing to
+read them, and that is worth the distinction the screen draws: the recording
+directory and the container are #307, and listing this machine's audio devices
+at all is #308. Both were raised while this screen was built, because a row that
+said "not yet" with no issue behind it is a promise nobody has made.
+
+### What is checked, and against what
+
+Everything above is a claim about code in another process, and a screen full of
+those goes quietly wrong: a renamed settings key, a subcommand that moved, an
+`apply_settings` that got implemented, and the screen still says what it said in
+August. `apps/desktop/src/settingsConformance.test.ts` reads the definitions out
+of the sources that hold them:
+
+| The screen says | Read from |
+| --- | --- |
+| These are the settings, spelled this way | `SettingKey::name` in `crates/session/src/config/value.rs`, both directions — a setting the API gains and one the screen invented both fail |
+| These are the notification switches | `NotificationCategory::key` in `apps/desktop/src-tauri/src/notification_policy.rs` |
+| The settings file is at this path | `APPLICATION_DIRECTORY` in `clipped-logging` and `FILE_NAME` in `config::document` |
+| The notification file is at this path | The bundle identifier in `tauri.conf.json` and `SETTINGS_FILE` in `notifications.rs` |
+| `apply_settings` is refused | `UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` |
+| Nothing reads settings back | The command names `Command::from_request` parses |
+| Run this command | The subcommands `apps/recorder/src/cli.rs` declares, and their options |
+
+`SettingKey`'s own documentation asks for the first of those: it exists so that
+"the settings screen can list what there is to render without this module having
+to publish a second list that goes stale". This is what stops the copy of that
+list on this side going stale instead.
+
+### The rail
+
+`SectionRail` in `packages/ui`, drawn in the shell's own `.clipped-nav__link`
+because a rail entry and a sidebar item are the same thing to look at. What
+differs is beneath: the sidebar's items are anchors with addresses, and these are
+`role="tab"` buttons, because a section of a screen has no address of its own —
+every route comes from `SCREENS`, one per screen, and both the window title and
+the marked sidebar item are derived from an exact path match. Giving a section a
+URL would mean nested routes and a title that understands a sub-path, and is
+worth doing when something needs to link to one.
+
+So the keyboard contract is the WAI-ARIA tab list's, and it is written out
+rather than left to Tab: **one stop in the tab order**, the arrow keys moving
+between sections, Home and End reaching the ends, and selection following focus.
+Six sections each taking a tab stop would put five stops between the sidebar and
+the pane, every time. The pane itself takes a tab stop because it holds text
+rather than controls, which is what WAI-ARIA asks for and what
+`jsx-a11y/no-noninteractive-tabindex` allows in its own default options —
+`jsx-a11y`'s strict preset restates the rule with no options, which is why that
+one line carries a suppression and a reason (AGENTS.md section 42).
 
 ## The tray
 
@@ -843,19 +942,31 @@ screen written and needed neither, so neither was built: they belong to the
 per-game detail view behind the game list, and there is no list yet to open one
 from.
 
-Beside the set above, the shell has three classes of its own that a screen
-draws with. They are not from the reference pages, which have no screen in them:
+Beside the set above, the shell has classes of its own that a screen draws with.
+They are not from the reference pages, which have no screen in them:
 
 | Class | What it is |
 | --- | --- |
 | `.clipped-screen__title`, `.clipped-screen__heading` | A screen's own two levels of heading |
 | `.clipped-screen__lead` | Running prose at the measure |
-| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet" and by the Games screen's detection state, which are the same thing to look at |
+| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state and by the Settings screen's one statement, which are the same thing to look at |
+| `.clipped-screen__split` + `__pane` | A screen divided into a rail of sections and the pane one of them opens. `--rail-width` is its one metric |
+| `.clipped-rail` | The rail itself, which draws its entries in `.clipped-nav__link` rather than in a class of its own — the same reasoning as the panel above |
+| `.clipped-code` | Text somebody types or finds in a file: a settings key, a path, a command |
 
-**The Games screen is the only consumer of the component layer so far** — its
-`.clipped-table` and `.clipped-muted`. The classes exist ahead of that so that
-#60, #83, #51, #94 and #101 do not each invent their own styling, which is the
-reason issue #79 followed the shell.
+**Games and Settings are the consumers of the component layer so far** — the
+table, `.clipped-muted`, and the rail. The classes exist ahead of that so that
+#60, #83, #94 and #101 do not each invent their own styling, which is the reason
+issue #79 followed the shell.
+
+`.clipped-nav__link` now serves two mechanisms: the sidebar's anchors and the
+rail's `role="tab"` buttons. The declarations a button needs and an anchor does
+not — a width, a border, a ground, a typeface, a text alignment — are in the one
+rule rather than in a second class, because two classes drawing the same thing
+drift, and a screen's rail that stopped matching the sidebar would look like a
+mistake. The rule that marks the open one covers both `aria-current="page"` and
+`aria-selected="true"` for the same reason, and `contrast.test.ts` measures it on
+both grounds it is drawn on.
 
 ### Where it departs from the system, and why
 
@@ -927,7 +1038,9 @@ retrofitted:
 
 - **Keyboard.** Navigation items are real anchors in a real list, so Tab reaches
   them and Enter activates them. The first stop in the tab order is a "Skip to
-  content" button. Nothing in the chrome is reachable by mouse alone.
+  content" button. Nothing in the chrome is reachable by mouse alone. A screen's
+  own rail is one tab stop and the arrow keys move within it, which is the
+  WAI-ARIA tab list's contract — see [The rail](#the-rail).
 - **Focus.** `:focus-visible` draws a `--rule-weight` accent outline, and
   `:focus { outline: none }` is the only place a ring is ever suppressed —
   `stylesheet.test.ts` fails if a second one appears. Two components have to
@@ -972,6 +1085,7 @@ retrofitted:
   |                                     | Ratio   |
   | ----------------------------------- | ------- |
   | Body text on the window ground      | 14.86:1 |
+  | A section in a screen's rail        | 14.86:1 |
   | A button's label, unfilled          | 14.86:1 |
   | Body text on a card                 | 13.70:1 |
   | A field's own text                  | 13.70:1 |
@@ -982,6 +1096,7 @@ retrofitted:
   | The accent tag                      | 9.80:1  |
   | The neutral tag                     | 9.26:1  |
   | The skip link                       | 6.41:1  |
+  | The open section of a rail          | 6.41:1  |
   | The primary button                  | 6.41:1  |
   | The selected segment                | 6.41:1  |
   | A link on the window ground         | 6.41:1  |
@@ -990,6 +1105,7 @@ retrofitted:
   | A card's kicker                     | 5.91:1  |
   | The open navigation item            | 5.83:1  |
   | Secondary text on the window ground | 5.81:1  |
+  | A settings key, path or command     | 5.81:1  |
   | A field's label                     | 5.81:1  |
   | A table's header                    | 5.81:1  |
   | A card's body                       | 5.59:1  |
@@ -1063,11 +1179,11 @@ read the stylesheets as text and Vitest replaces a CSS import with an empty
 module.
 
 The tests assert the things about this shell that would rot quietly: that no
-part of it shows data it does not have — including that the only control in the
-whole window is the skip link — that the chrome is operable from the keyboard
-alone, that every pairing of words and ground clears 4.5:1, and that the
-component layer still consumes the design system rather than a value somebody
-typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
+part of it shows data it does not have — including that the only controls in the
+whole window are the skip link and the Settings rail, neither of which touches a
+recorder — that the chrome is operable from the keyboard alone, that every
+pairing of words and ground clears 4.5:1, and that the component layer still
+consumes the design system rather than a value somebody typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
 colours" is a promise a reviewer has to re-check on every diff, and a test that
 reads the stylesheet is one that cannot be forgotten.
 
@@ -1096,6 +1212,26 @@ application, opens Games, and then moves the link underneath it with a
 beside itself. The other cases are about absence: no button, no link, no field,
 no checkbox and no radio anywhere in `<main>`, and a table whose column headers
 are what is missing rather than Game / Recording / Last played.
+
+`SettingsScreen.test.tsx` is about three things, and the middle one is the
+awkward one. That the screen offers nothing that would change a setting is
+asserted as an absence — no button, link, field, combobox, checkbox, radio,
+switch, slider, spinbutton or menu item anywhere on it, with the rail's own tabs
+counted first so the case cannot pass on an empty screen. That the rail is
+operable from the keyboard alone is driven with Tab, the arrow keys, Home and
+End. And that every setting names both how it is set today and the work that
+would bring it here is checked from a list written out in the test file, not
+mapped from the screen's own tables: a case that walked the rendered rows and
+checked their shape is satisfied by rows somebody invented, which is exactly the
+defect a review found in the Games screen's first version of the same case.
+
+`settingsConformance.test.ts` is the other half, and the table in
+[What is checked, and against what](#what-is-checked-and-against-what) is what it
+reads. It runs in the node environment because its subject is Rust sources as
+text, and every case throws when the item it names is no longer in the file —
+the same rule `contrast.test.ts` and `stylesheet.test.ts` hold to, for the same
+reason: a check that has stopped finding its subject has to fail rather than
+pass on nothing.
 
 `useWindowTitle.test.ts` stands up a `__TAURI_INTERNALS__` so the branch that
 only runs inside the window is reached — jsdom is a browser, so without it the
