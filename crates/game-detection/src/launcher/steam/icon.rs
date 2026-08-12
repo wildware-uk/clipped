@@ -250,6 +250,15 @@ mod tests {
 
         let missing = directory.join("not-here.jpg");
         assert_eq!(jpeg_dimensions(&missing), None);
+
+        // A file that does not open with the JPEG marker is not a JPEG, whatever
+        // it goes on to contain. Without that check, two bytes of anything
+        // followed by a frame-shaped sequence would be read as an image.
+        let impostor = directory.join("impostor.jpg");
+        let mut bytes = vec![0x00, 0x00];
+        bytes.extend(frame(0xC0, 32, 32));
+        fs::write(&impostor, bytes).expect("the file can be written");
+        assert_eq!(jpeg_dimensions(&impostor), None);
     }
 
     #[test]
@@ -291,11 +300,17 @@ mod tests {
 
     #[test]
     fn a_segment_that_claims_an_impossible_length_is_refused() {
+        // A segment's length counts its own two bytes, so anything below two is
+        // impossible and the file is malformed. Treating it as "skip nothing"
+        // instead would carry on reading from the middle of a segment — and the
+        // frame this file puts there proves the difference, because a reader
+        // that carried on would answer 32x32 about a file that is not one.
         let directory = crate::launcher::steam::tests::scratch("jpeg-length");
         let path = directory.join("short.jpg");
-        // A segment length counts its own two bytes, so 1 is impossible.
-        fs::write(&path, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0x00])
-            .expect("the file can be written");
+
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00];
+        bytes.extend(frame(0xC0, 32, 32));
+        fs::write(&path, bytes).expect("the file can be written");
 
         assert_eq!(jpeg_dimensions(&path), None);
     }
