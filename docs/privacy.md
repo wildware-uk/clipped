@@ -275,9 +275,21 @@ and file contents. Diagnostics record what the recorder did — capture backend,
 encoder, dropped frames, audio devices, plugin events — not what was on screen
 or said.
 
-The support bundle exporter planned for Milestone 14 writes a file to your
-disk for you to send on. It must contain no recorded media (SPEC.md section
-36), and it transmits nothing by itself.
+The Diagnostics screen composes a **support report** — what the desktop
+application can establish about the recorder — shows it to you in full, and
+copies it to the clipboard when you ask. It transmits nothing: the clipboard is
+yours, and what you do with it afterwards is your decision. It contains no
+recorded media, no window title, no microphone audio and no file contents, and
+every path in it is reduced to a file name and a digest of the whole path, so no
+folder, drive or account name is in what you paste.
+[diagnostics.md](diagnostics.md) lists every field it carries, and the list is
+asserted by a test rather than only written down.
+
+The support bundle proper — that report **and the log files**, written as one
+archive — is not built. The window cannot reach the log files
+([issue #303](https://github.com/wildware-uk/clipped/issues/303)). It must
+contain no recorded media (SPEC.md section 36), and it will transmit nothing by
+itself.
 
 Forward reference: log content, levels and file locations are specified in
 `docs/logging.md`, which is being written alongside this document

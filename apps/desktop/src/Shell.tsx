@@ -5,6 +5,7 @@ import { Link, Route, Routes, useLocation, useNavigate } from 'react-router';
 
 import { ClipPlaybackScreen } from './ClipPlaybackScreen';
 import { CLIP_ROUTE, clipPath, isClipPath } from './clipPlayback';
+import { DiagnosticsScreen } from './DiagnosticsScreen';
 import { GamesScreen } from './GamesScreen';
 import { SettingsScreen } from './SettingsScreen';
 import { UnknownScreen } from './UnknownScreen';
@@ -13,7 +14,7 @@ import {
   describeRecorderLink,
   useRecorderLink,
   type InterruptedRecording,
-  type RecorderLinkState,
+  type RecorderLinkView,
 } from './useRecorderLink';
 import { joinNotices, useTray } from './useTray';
 import { useWindowTitle } from './useWindowTitle';
@@ -45,16 +46,19 @@ function titleFor(pathname: string, screen: Screen | undefined): string {
  *
  * Every route still comes from `SCREENS`, so the sidebar and the router cannot
  * disagree about what the application contains; this is only the question of
- * which element sits behind one. Five of the seven are still the placeholder
- * that names the issue building them. Games is written (issue #107) and Settings
- * is (issue #51), and the change that builds another screen adds it here.
+ * which element sits behind one. Four of the seven are still the placeholder
+ * that names the issue building them. Games is written (issue #107), Settings is
+ * (issue #51) and Diagnostics is (issue #101), and the change that builds another
+ * screen adds it here.
  */
-function elementFor(screen: Screen, link: RecorderLinkState | null): ReactNode {
+function elementFor(screen: Screen, view: RecorderLinkView, notice: string | undefined): ReactNode {
   switch (screen.id) {
     case 'games':
-      return <GamesScreen link={link} />;
+      return <GamesScreen link={view.link} />;
     case 'settings':
       return <SettingsScreen />;
+    case 'diagnostics':
+      return <DiagnosticsScreen view={view} notice={notice} />;
     default:
       return <ScreenNotBuilt screen={screen} />;
   }
@@ -102,8 +106,8 @@ export function Shell(): ReactNode {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const screen = screenFor(pathname);
-  const { link, interrupted } = useRecorderLink();
-  const recorder = describeRecorderLink(link);
+  const view = useRecorderLink();
+  const recorder = describeRecorderLink(view.link);
 
   // The window title is what a person reads in the taskbar, in Alt+Tab and in
   // the window switcher, so it says which screen is open rather than only which
@@ -182,13 +186,13 @@ export function Shell(): ReactNode {
         <RecorderStatus
           state={recorder.state}
           detail={recorder.detail}
-          notice={noticeFor(trayNotice, interrupted)}
+          notice={noticeFor(trayNotice, view.interrupted)}
         />
       }
     >
       <Routes>
         {SCREENS.map((entry) => (
-          <Route key={entry.id} path={entry.path} element={elementFor(entry, link)} />
+          <Route key={entry.id} path={entry.path} element={elementFor(entry, view, trayNotice)} />
         ))}
         {/*
          * The eighth route, and the only one not in `SCREENS`: a screen opened
@@ -196,7 +200,7 @@ export function Shell(): ReactNode {
          * so putting it in that array would put "Playback" in the navigation
          * with no recording to show (issue #52).
          */}
-        <Route path={CLIP_ROUTE} element={<ClipPlaybackScreen view={{ link, interrupted }} />} />
+        <Route path={CLIP_ROUTE} element={<ClipPlaybackScreen view={view} />} />
         <Route path="*" element={<UnknownScreen />} />
       </Routes>
     </AppShell>

@@ -172,7 +172,121 @@ describe('following the recorder link inside the window', () => {
   it('reports no link at all outside the Clipped window', () => {
     const { result } = renderHook(() => useRecorderLink());
 
-    expect(result.current).toEqual({ link: null, interrupted: null });
+    expect(result.current).toEqual({
+      link: null,
+      observedAt: null,
+      interrupted: null,
+      failed: null,
+    });
+  });
+
+  /*
+   * A recording that failed while the recorder stayed up. The state that follows
+   * it about a second later is "idle" — true, and silent about what happened —
+   * so a hook that dropped the failure would leave the window with no record that
+   * anything went wrong, which is precisely what a support report is for
+   * (issue #101).
+   */
+  it('keeps a recording failure, which the idle state that follows it does not carry', async () => {
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
+    const { result } = renderHook(() => useRecorderLink());
+
+    runtime.emit({
+      event: 'state',
+      link: 'attached',
+      recorder_process_id: 91,
+      status: {
+        state: 'recording',
+        recording_id: 'r-7',
+        output: 'D:\\clips\\2026-08-11 cs2.mkv',
+        target: 'process cs2.exe',
+        elapsed_ms: 42_000,
+      },
+    });
+    runtime.emit({
+      event: 'recording_failed',
+      recording_id: 'r-7',
+      error: { code: 'recording_failed', message: 'the encoder stopped accepting frames' },
+    });
+    runtime.emit({
+      event: 'state',
+      link: 'attached',
+      recorder_process_id: 91,
+      status: { state: 'idle' },
+    });
+
+    await waitFor(() => {
+      expect(result.current.link).toEqual({
+        link: 'attached',
+        recorder_process_id: 91,
+        status: { state: 'idle' },
+      });
+    });
+
+    expect(result.current.failed?.recording_id).toBe('r-7');
+    expect(result.current.failed?.error.message).toBe('the encoder stopped accepting frames');
+    // The event carries no path, so the file comes from the recording status
+    // this window saw — and only because its identifier is the one that failed.
+    expect(result.current.failed?.output).toBe('D:\\clips\\2026-08-11 cs2.mkv');
+  });
+
+  /*
+   * The same rule `src-tauri/src/notifications.rs` applies to the toast's "Show
+   * the file" button: a failure for a recording this window never saw claims no
+   * file at all. Naming the last file seen would put a different recording in
+   * front of somebody diagnosing this one.
+   */
+  it('refuses to name a file for a recording it never saw', async () => {
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
+    const { result } = renderHook(() => useRecorderLink());
+
+    runtime.emit({
+      event: 'state',
+      link: 'attached',
+      recorder_process_id: 91,
+      status: {
+        state: 'recording',
+        recording_id: 'r-1',
+        output: 'D:\\clips\\someone-elses.mkv',
+        target: 'process cs2.exe',
+        elapsed_ms: 1000,
+      },
+    });
+    runtime.emit({
+      event: 'recording_failed',
+      recording_id: 'r-9',
+      error: { code: 'internal', message: 'the muxer could not write a frame' },
+    });
+
+    await waitFor(() => {
+      expect(result.current.failed?.recording_id).toBe('r-9');
+    });
+    expect(result.current.failed?.output).toBeNull();
+  });
+
+  /*
+   * `elapsed_ms` is measured when the recorder answers, so a status kept for four
+   * minutes says a recording has run for eight seconds. The window cannot make it
+   * fresher — nothing polls, and nothing should — so what it records is *when* it
+   * was true, which is what makes the figure readable rather than misleading
+   * (AGENTS.md section 27).
+   */
+  it('records when it last heard from the recorder, so a stale figure reads as one', async () => {
+    const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
+    const { result } = renderHook(() => useRecorderLink());
+
+    await waitFor(() => {
+      expect(result.current.observedAt).toBeInstanceOf(Date);
+    });
+    const first = result.current.observedAt;
+
+    runtime.emit({ event: 'state', link: 'unavailable', reason: 'the recorder went' });
+
+    await waitFor(() => {
+      expect(result.current.link).toEqual({ link: 'unavailable', reason: 'the recorder went' });
+    });
+    expect(result.current.observedAt?.getTime()).toBeGreaterThanOrEqual(first?.getTime() ?? 0);
+    expect(result.current.observedAt).not.toBe(first);
   });
 
   it('surfaces the file a killed recorder left, and does not lose it', async () => {

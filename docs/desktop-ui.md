@@ -44,22 +44,20 @@ block in the sidebar shows what the link reports and nothing else — one wordin
 for each of the link's four states, and one for "this is not the Clipped window",
 which is what `npm run dev:web` and the tests see.
 
-**The controls are in the notification area, not in the window** — see
-[The tray](#the-tray). No screen drives the recorder: five of the seven are not
-built, and the two that are draw nothing that would, because nothing they would
-drive can be reached from here. A button with nothing behind it is exactly what
-AGENTS.md section 27 forbids. A "Try again" control for a link that has given up
-is [issue #221](https://github.com/wildware-uk/clipped/issues/221).
-
-There is exactly one control in a screen, and it changes nothing outside the
-window: the Settings screen's rail, which moves between that screen's own
-sections — see [The Settings screen](#the-settings-screen).
-[The tray](#the-tray). No screen has a control of any kind: five of the seven are
-not built, and neither Games nor Playback draws one, because nothing either
-would drive can be reached from here. A button with nothing behind it is exactly
-what AGENTS.md section 27 forbids. A "Try again" control for a link that has
-given up is
+**Almost every control is in the notification area, not in the window** — see
+[The tray](#the-tray). No screen drives the recorder: four of the seven are not
+built, and none of the three that are draws anything that would, because nothing
+they would drive can be reached from here. A button with nothing behind it is
+exactly what AGENTS.md section 27 forbids, which is also why Diagnostics has no
+Export Support Bundle button ([diagnostics.md](diagnostics.md)). A "Try again"
+control for a link that has given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221).
+
+The two controls a screen does draw change nothing outside the window: the
+Settings screen's rail, which moves between that screen's own sections — see
+[The Settings screen](#the-settings-screen) — and the Diagnostics screen's Copy
+report, which does what it says with a browser API and no recorder involved — see
+[The Diagnostics screen](#the-diagnostics-screen).
 
 There is one **link** in the chrome that is not navigation, and a link is a
 destination rather than an action: when a recorder dies mid-recording, the notice
@@ -97,12 +95,14 @@ separately.
 
 Both navigation lists and every route are derived from one array, `SCREENS` in
 `@clipped/shared`, so a navigation item cannot point at a route that does not
-exist. **Two of the seven screens have been written** — [Games](#the-games-screen)
-and [Settings](#the-settings-screen). The other five each lead to a panel saying
-so and naming the issue that builds it — #60 for Home and Library, #83 for
-Editor, #94 for Trash, #101 for Diagnostics. Building one
-replaces its placeholder route with the real screen, in `elementFor` in
-`Shell.tsx`, which is the one place that knows a screen from a placeholder.
+exist. **Three of the seven screens have been written** —
+[Games](#the-games-screen), [Settings](#the-settings-screen) and
+[Diagnostics](#the-diagnostics-screen), which has a document of its own in
+[diagnostics.md](diagnostics.md). The other four each lead to a panel saying so
+and naming the issue that builds it — #60 for Home and Library, #83 for Editor,
+#94 for Trash. Building one replaces its placeholder route with the real screen,
+in `elementFor` in `Shell.tsx`, which is the one place that knows a screen from a
+placeholder.
 
 There is an **eighth route** that is not in `SCREENS` and deliberately not in the
 sidebar: `/clip/:recordingId`, the playback screen, which is opened *for* a
@@ -288,6 +288,33 @@ rather than controls, which is what WAI-ARIA asks for and what
 `jsx-a11y/no-noninteractive-tabindex` allows in its own default options —
 `jsx-a11y`'s strict preset restates the rule with no options, which is why that
 one line carries a suppression and a reason (AGENTS.md section 42).
+## The Diagnostics screen
+
+SPEC.md section 36, and issue #101. It has a document of its own,
+[diagnostics.md](diagnostics.md), because most of what it is about is not the
+interface: what the recorder records, what reaches this window, and exactly what
+a support report may and may not contain.
+
+The shape is the Games screen's, for the same reason — a live panel saying what
+this window can establish, and a table of what the rest is waiting for — with a
+third part the Games screen has no equivalent of: the support report, composed
+here, shown in full, and copied to the clipboard.
+
+Two things it adds to this document. Its `Copy report` is the **one control in a
+screen that acts** rather than navigating: a browser clipboard call, needing no
+Tauri permission and reaching no recorder, which reports both of its failure
+modes rather than appearing to work. And it is the reason
+`.clipped-screen__report` exists in `styles.css` — a monospaced block on the card
+ground, wrapping rather than scrolling and with no height limit, because
+[privacy.md](privacy.md) asks that nothing about what leaves the machine is
+hidden and a scroll box showing eight of thirty lines hides twenty-two of them.
+
+It draws **no Export Support Bundle button**, which SPEC.md section 36 asks for
+and the deck draws. The log files that would make a bundle worth sending are
+unreachable from this window, and diagnostics.md sets out why a button that wrote
+a report with no logs in it would be an export in name only
+([issue #303](https://github.com/wildware-uk/clipped/issues/303)).
+
 ## The playback screen
 
 SPEC.md section 42 and [issue #52](https://github.com/wildware-uk/clipped/issues/52).
@@ -1115,15 +1142,18 @@ They are not from the reference pages, which have no screen in them:
 | --- | --- |
 | `.clipped-screen__title`, `.clipped-screen__heading` | A screen's own two levels of heading |
 | `.clipped-screen__lead` | Running prose at the measure |
-| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state and by the Settings screen's one statement, which are the same thing to look at |
+| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state, by the Settings screen's one statement and by the Diagnostics screen's capture health, which are the same thing to look at |
 | `.clipped-screen__split` + `__pane` | A screen divided into a rail of sections and the pane one of them opens. `--rail-width` is its one metric |
 | `.clipped-rail` | The rail itself, which draws its entries in `.clipped-nav__link` rather than in a class of its own — the same reasoning as the panel above |
 | `.clipped-code` | Text somebody types or finds in a file: a settings key, a path, a command |
+| `.clipped-screen__report` | A block of machine-written text a person is meant to read before sending it on: the Diagnostics screen's support report. Monospaced, on the card ground, wrapping rather than scrolling and with no height limit |
 
-**Games and Settings are the consumers of the component layer so far** — the
-table, `.clipped-muted`, and the rail. The classes exist ahead of that so that
-#60, #83, #94 and #101 do not each invent their own styling, which is the reason
-issue #79 followed the shell.
+**Games, Settings, Playback and Diagnostics are the consumers of the component
+layer so far** — `.clipped-table`, `.clipped-panel`, `.clipped-muted`, the rail,
+and, on Diagnostics, `.clipped-btn--primary`, the first button in the application
+outside the skip link. The classes exist ahead of that so that #60, #83 and #94
+do not each invent their own styling, which is the reason issue #79 followed the
+shell.
 
 `.clipped-nav__link` now serves two mechanisms: the sidebar's anchors and the
 rail's `role="tab"` buttons. The declarations a button needs and an anchor does
@@ -1133,10 +1163,11 @@ drift, and a screen's rail that stopped matching the sidebar would look like a
 mistake. The rule that marks the open one covers both `aria-current="page"` and
 `aria-selected="true"` for the same reason, and `contrast.test.ts` measures it on
 both grounds it is drawn on.
-**Games and Playback are the only consumers of the component layer so far** —
-`.clipped-table`, `.clipped-panel` and `.clipped-muted` between them. The classes
-exist ahead of that so that #60, #83, #51, #94 and #101 do not each invent their
-own styling, which is the reason issue #79 followed the shell.
+
+`.clipped-screen__report` is Diagnostics' own, for the block of machine-written
+text a user is asked to read before sending it on. It is not a component-layer
+class: nothing in the deck has one, and it belongs to the screen that needs it
+rather than to the system.
 
 One element default was added with the playback screen and belongs with the
 classes above: **`code` takes `--font-mono`**. That token was declared with the
@@ -1359,10 +1390,12 @@ module.
 
 The tests assert the things about this shell that would rot quietly: that no
 part of it shows data it does not have — including that the only controls in the
-whole window are the skip link and the Settings rail, neither of which touches a
-recorder — that the chrome is operable from the keyboard alone, that every
-pairing of words and ground clears 4.5:1, and that the component layer still
-consumes the design system rather than a value somebody typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
+whole window are the skip link, the Settings rail and Diagnostics' Copy report,
+none of which touches a recorder, and that Games offers none at all and
+Diagnostics offers no button that would not work — that the chrome is operable
+from the keyboard alone, that every pairing of words and ground clears 4.5:1, and
+that the component layer still consumes the design system rather than a value
+somebody typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
 colours" is a promise a reviewer has to re-check on every diff, and a test that
 reads the stylesheet is one that cannot be forgotten.
 

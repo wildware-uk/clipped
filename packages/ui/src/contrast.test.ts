@@ -338,6 +338,17 @@ describe('the shell', () => {
     ['a section in a screen rail', ['styles', '\\.clipped-nav__link', 'color'], WINDOW],
     ['the open section of a screen rail', ['styles', NAV_OPEN, 'color'], WINDOW],
     ['a settings key, path or command', ['styles', '\\.clipped-code', 'color'], WINDOW],
+    /*
+     * The Diagnostics screen's support report. It is the one block in the
+     * interface a user is asked to *read before sending*, so words that are hard
+     * to read there are words that go unread — and it fills its own ground rather
+     * than inheriting the window's, so it needs its own case.
+     */
+    [
+      'the support report',
+      ['styles', '\\.clipped-screen__report', 'color'],
+      ['styles', '\\.clipped-screen__report', 'background'],
+    ],
     ['the title strip', ['styles', '\\.clipped-header', 'color'], TITLE_STRIP],
     ['the title strip tagline', ['styles', '\\.clipped-header__tagline', 'color'], TITLE_STRIP],
   ];

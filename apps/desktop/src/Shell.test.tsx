@@ -72,14 +72,14 @@ describe('the application shell', () => {
   });
 
   /*
-   * Games (issue #107) and Settings (issue #51) are written and are therefore
-   * not in this list. They are named rather than filtered by "has a screen",
-   * because a list that computed itself from the same fact the shell routes on
-   * could not fail: the point of naming them is that building a screen and
-   * forgetting to route it, or routing one that was never built, both show up
-   * here.
+   * Games (issue #107), Settings (issue #51) and Diagnostics (issue #101) are
+   * written and are therefore not in this list. They are named rather than
+   * filtered by "has a screen", because a list that computed itself from the
+   * same fact the shell routes on could not fail: the point of naming them is
+   * that building a screen and forgetting to route it, or routing one that was
+   * never built, both show up here.
    */
-  const WRITTEN_SCREENS: readonly string[] = ['games', 'settings'];
+  const WRITTEN_SCREENS: readonly string[] = ['games', 'settings', 'diagnostics'];
   const PLACEHOLDER_SCREENS = SCREENS.filter((entry) => !WRITTEN_SCREENS.includes(entry.id));
 
   it('says which issue builds each unwritten screen instead of drawing an empty one', async () => {
@@ -117,6 +117,17 @@ describe('the application shell', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Settings');
     expect(screen.queryByRole('heading', { level: 2, name: 'Not built yet' })).toBeNull();
     expect(screen.getByRole('tablist', { name: 'Settings sections' })).toBeVisible();
+  });
+
+  it('routes Diagnostics to the screen that was built rather than to the placeholder', async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(screen.getByRole('link', { name: 'Diagnostics' }));
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Diagnostics');
+    expect(screen.queryByRole('heading', { level: 2, name: 'Not built yet' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Capture health' })).toBeVisible();
   });
 
   it('offers no recorder controls while the recorder cannot be reached', () => {

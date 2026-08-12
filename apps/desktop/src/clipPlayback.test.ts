@@ -30,11 +30,20 @@ const INTERRUPTED: InterruptedRecording = {
 };
 
 /** A view with nothing in it: no window, no recorder, no interruption. */
-const NOTHING: RecorderLinkView = { link: null, interrupted: null };
+const NOTHING: RecorderLinkView = {
+  link: null,
+  observedAt: null,
+  interrupted: null,
+  failed: null,
+};
+
+/** When a link in these fixtures was observed. Fixed, so nothing here is clock-dependent. */
+const OBSERVED_AT = new Date('2026-08-11T12:00:00.000Z');
 
 /** A link attached to a recorder writing one recording. */
 function recording(recordingId: string): RecorderLinkView {
   return {
+    ...NOTHING,
     link: {
       link: 'attached',
       recorder_process_id: 91,
@@ -46,7 +55,7 @@ function recording(recordingId: string): RecorderLinkView {
         elapsed_ms: 5_000,
       },
     },
-    interrupted: null,
+    observedAt: OBSERVED_AT,
   };
 }
 
@@ -87,7 +96,7 @@ describe('resolving a recording', () => {
   });
 
   it('names the file a killed recorder left', () => {
-    const resolution = resolveClip('r-7', { link: null, interrupted: INTERRUPTED });
+    const resolution = resolveClip('r-7', { ...NOTHING, interrupted: INTERRUPTED });
 
     expect(resolution.found).toBe('interrupted');
     expect(recordingOf(resolution)?.output).toBe('D:\\clips\\2026-08-11 cs2.mkv');
@@ -119,7 +128,9 @@ describe('resolving a recording', () => {
       { link: 'reconnecting', attempt: 1, attempts_allowed: 4, delay_ms: 500, reason: 'gone' },
       { link: 'attached', recorder_process_id: 91, status: { state: 'idle' } },
     ] as const) {
-      expect(resolveClip('r-3', { link, interrupted: null }).found).toBe('unindexed');
+      expect(resolveClip('r-3', { ...NOTHING, link, observedAt: OBSERVED_AT }).found).toBe(
+        'unindexed',
+      );
     }
   });
 });
