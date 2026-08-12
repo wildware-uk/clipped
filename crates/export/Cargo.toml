@@ -1,0 +1,62 @@
+[package]
+name = "clipped-export"
+description = "Rendering an edit document to a new file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The document being rendered. Layer 0, and the whole input to this crate.
+clipped-edit.workspace = true
+
+# The container writer. An export writes a file, `MkvWriter` is what writes
+# files in this workspace, and the packets a copy carries are exactly the
+# packets it takes — so an export drives it rather than containing a second
+# Matroska implementation (AGENTS.md section 55). `clipped_replay::save_clip`
+# is the same shape and the precedent for it.
+clipped-muxer.workspace = true
+
+# A recording's path contains the account name and the folders somebody chose,
+# so this crate logs the reduced form rather than the path (docs/logging.md).
+clipped-logging.workspace = true
+tracing.workspace = true
+
+# The raw FFmpeg FFI, for *reading* the recordings an edit refers to.
+#
+# Nothing in this workspace exposes a container reader: `clipped-muxer` has one
+# (`crates/muxer/src/av.rs`) and it is private to that crate, which offers
+# writing and a whole-file remux and no packet-level read. `clipped-waveform`
+# names this binding for exactly the same reason and cites the amendment issue
+# #155 made to `docs/adr/0004-ffmpeg-dependency-strategy.md`: a crate with no
+# lower-layer route to what it needs may name the binding.
+#
+# Note what this is *not* used for. The output side of an export is
+# `clipped-muxer` and nothing else, so there is no second muxer here — see
+# `docs/exporting.md`, "There is no second muxer here".
+rusty_ffmpeg.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+# This crate links FFmpeg, so it needs the runtime DLLs beside its own test
+# executables. It does depend on `clipped-muxer`, whose build script does the
+# same thing, but a crate cannot rely on the order Cargo runs build scripts in
+# for a *sibling* target's output directory (issue #158), so it asks for its
+# own.
+clipped-ffmpeg-runtime.workspace = true
+
+[dev-dependencies]
+# Every crate that writes media checks its output with this one harness
+# (AGENTS.md section 22, docs/testing.md), and it is also where the pinned
+# build's `ffmpeg` is found for building fixtures and where `TemporaryDirectory`
+# lives.
+clipped-media-validation.workspace = true
+
+# Building a document that says something impossible — the only way to reach a
+# validation failure, since every constructor here refuses one — needs the
+# encoding the document model is written in.
+serde_json.workspace = true

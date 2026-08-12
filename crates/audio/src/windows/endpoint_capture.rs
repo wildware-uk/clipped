@@ -1,23 +1,24 @@
-//! One WASAPI endpoint, turned into a continuous timestamped stream.
+//! One WASAPI capture client, turned into a continuous timestamped stream.
 //!
 //! # What it does
 //!
-//! Opens an audio endpoint — the one Windows plays through, in loopback mode,
-//! or a microphone — and turns it into a continuous, gapless run of timestamped
-//! `f32` buffers. "Continuous" is the word doing the work: what WASAPI delivers
-//! is not continuous, and most of this file exists to make it so.
+//! Opens a WASAPI capture — the endpoint Windows plays through, in loopback
+//! mode, a microphone, or one process tree's audio — and turns it into a
+//! continuous, gapless run of timestamped `f32` buffers. "Continuous" is the
+//! word doing the work: what WASAPI delivers is not continuous, and most of
+//! this file exists to make it so.
 //!
-//! # Why one engine for both
+//! # Why one engine for all three
 //!
-//! The two captures Clipped runs differ in three things: whether the endpoints
-//! they open render or capture, whether the stream is a loopback, and the words
-//! their log lines use. Everything else — the mix format being read and
-//! converted, the device clock, silence being synthesised for periods the
-//! endpoint said nothing about, the device being unplugged mid-recording, an
-//! endpoint that fails the instant it opens — is identical, and was solved once
-//! for system audio (issue #19). So [`EndpointCapture`] is that engine,
-//! parameterised by an [`EndpointSource`], and `loopback.rs` and
-//! `microphone.rs` are the two thin public captures over it (AGENTS.md
+//! The captures Clipped runs differ in very little: how the client is
+//! activated, whether the stream is a loopback, what makes an open stream
+//! stale, and the words their log lines use. Everything else — the format being
+//! read and converted, the device clock, silence being synthesised for periods
+//! nothing was said about, the device being unplugged mid-recording, a stream
+//! that fails the instant it opens — is identical, and was solved once for
+//! system audio (issue #19). So [`EndpointCapture`] is that engine,
+//! parameterised by a [`CaptureSource`], and `loopback.rs`, `microphone.rs` and
+//! `process_loopback.rs` are the thin public captures over it (AGENTS.md
 //! section 55).
 //!
 //! # Threading
@@ -68,10 +69,11 @@
 //!
 //! # What is not here
 //!
-//! Process-scoped capture — the game's tree and its complement — is M2 and
-//! [ADR 0003](../../../../docs/adr/0003-process-specific-audio-capture.md).
-//! Mixing is [issue #29](https://github.com/wildware-uk/clipped/issues/29).
-//! This is the single-endpoint stream everything else is built beside.
+//! The complement of a process tree — everything the machine plays *except* one
+//! game — is [issue #27](https://github.com/wildware-uk/clipped/issues/27), and
+//! mixing several captures into one track is
+//! [issue #29](https://github.com/wildware-uk/clipped/issues/29). This is the
+//! single stream everything else is built beside.
 
 use core::num::NonZeroU64;
 use core::time::Duration;
@@ -88,6 +90,8 @@ use windows::Win32::System::Com::CLSCTX_ALL;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
+use clipped_logging::AudioSource;
+
 use crate::buffer::{CapturedAudio, SampleOrigin};
 use crate::error::{AudioError, Capture};
 use crate::format::{append_as_f32, AudioFormat};
@@ -99,6 +103,7 @@ use crate::windows::endpoint::{
     SourceKind,
 };
 use crate::windows::notifications::{EndpointChange, EndpointNotifications, EndpointWatch};
+use crate::windows::process_loopback::ProcessLoopbackSource;
 
 /// How much audio the endpoint holds for this capture, in 100-nanosecond units.
 ///
@@ -114,7 +119,7 @@ use crate::windows::notifications::{EndpointChange, EndpointNotifications, Endpo
 /// 200 ms rather than the 10 ms minimum because the cost is 77 KB for a stereo
 /// 48 kHz endpoint and the benefit is surviving a scheduling hiccup on a
 /// machine that is also running a game.
-const BUFFER_DURATION: i64 = 2_000_000;
+pub(super) const BUFFER_DURATION: i64 = 2_000_000;
 
 /// The longest one wait inside a read blocks for.
 ///
@@ -156,7 +161,7 @@ const SETTLED: Duration = Duration::from_millis(500);
 
 /// How the capture thread waits for the next packet.
 #[derive(Debug)]
-enum Wake {
+pub(super) enum Wake {
     /// WASAPI signals this handle when a packet is ready. Owned by the
     /// [`Stream`], and closed when the [`WakeEvent`] drops — after the audio
     /// client that Windows signals it through has been released, which is the
@@ -173,7 +178,7 @@ enum Wake {
 /// the close is ordered by the struct's field order: `wake` is declared after
 /// `client` and `capture`, so the audio client is released first and there is
 /// no instant at which Windows holds a handle this process has closed.
-struct WakeEvent(HANDLE);
+pub(super) struct WakeEvent(HANDLE);
 
 impl core::fmt::Debug for WakeEvent {
     /// Forwards to the handle, so that the log line naming it reads as the
@@ -193,12 +198,81 @@ impl Drop for WakeEvent {
     }
 }
 
-/// One live stream on one endpoint.
+/// Where the timestamp on a packet comes from.
+///
+/// An endpoint reports a performance-counter position with every packet, and
+/// that position is the whole basis of the timeline (`docs/audio-routing.md`).
+/// A process-scoped client is a different activation path, its packets come
+/// from the audio engine's mix of one process tree rather than from a device,
+/// and whether it fills that field is not documented. A stream that quietly
+/// reported zero for every packet would look to the timeline like audio
+/// arriving hours early, which it would answer by discarding the lot: the
+/// track would be silence and nothing would say why.
+///
+/// So a stream that is not known to report positions checks its first packet
+/// against the performance counter and decides once (AGENTS.md section 16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PositionTrust {
+    /// The stream reports a performance-counter position and it is used.
+    Reported,
+    /// Nothing is known yet: the first packet decides.
+    Unverified,
+    /// The stream's reported positions are not performance-counter readings,
+    /// so each packet is stamped with the counter as it is read instead.
+    Counter,
+}
+
+/// How far a reported position may be from the counter reading taken as the
+/// packet was read before it is not a reading of the same clock.
+///
+/// A position is normally within a device period of *now* — one measurement on
+/// Windows 11 build 26200 has a loopback packet's position about 10 ms ahead of
+/// the moment it is read, because it is when the endpoint will play the audio.
+/// Five seconds is hundreds of times that and still nowhere near the decades a
+/// counter that counts from boot is worth, so the test separates "this clock"
+/// from "not this clock" without adjudicating jitter, which the timeline's
+/// deadband exists for.
+const POSITION_SANITY: u64 = 5_000_000_000;
+
+/// Whether `reported` is a reading of the same clock as `now`.
+///
+/// Both are nanoseconds on the performance counter, which counts from boot, so
+/// a position from a stream that does not fill the field — zero, or a count of
+/// frames since the stream started — is many orders of magnitude away from the
+/// counter rather than slightly out.
+fn position_is_on_the_counter(reported: AudioTimestamp, now: AudioTimestamp) -> bool {
+    reported.as_nanos().abs_diff(now.as_nanos()) < POSITION_SANITY
+}
+
+/// Everything a [`Stream`] needs that is decided by how it was opened.
+///
+/// A structure rather than seven arguments because the two ways of opening a
+/// stream — activating an endpoint, and activating a process-scoped client
+/// (`process_loopback.rs`) — differ in exactly these fields and agree on
+/// everything that happens afterwards.
+pub(super) struct StreamParts {
+    /// What is being recorded, for the log lines.
+    pub(super) kind: SourceKind,
+    /// How the thing being recorded is named in a log line.
+    pub(super) identity: EndpointIdentity,
+    /// The shape of the samples the stream will deliver.
+    pub(super) format: AudioFormat,
+    /// An initialised, unstarted audio client.
+    pub(super) client: IAudioClient,
+    /// How the capture thread waits for packets on it.
+    pub(super) wake: Wake,
+    /// The endpoint's mute switch, when one was wanted and Windows offered it.
+    pub(super) mute: Option<EndpointMute>,
+    /// Whether the positions this stream reports can be believed.
+    pub(super) positions: PositionTrust,
+}
+
+/// One live stream: an endpoint, or one process tree's audio.
 ///
 /// Everything in here is replaced together when the endpoint changes; there is
 /// no way to keep half of it.
 #[derive(Debug)]
-struct Stream {
+pub(super) struct Stream {
     /// What is being recorded, so that a log line raised in here says which of
     /// a session's captures it is about.
     kind: SourceKind,
@@ -216,6 +290,13 @@ struct Stream {
     /// Bytes one frame occupies in the endpoint's buffer, cached because it is
     /// multiplied by a frame count for every packet.
     bytes_per_frame: usize,
+    /// Whether the positions this stream reports can be believed, and what to
+    /// do about it if not.
+    positions: PositionTrust,
+    /// The performance counter's frequency, needed only when a packet has to be
+    /// stamped with a reading taken here rather than with the one the stream
+    /// reported. Fixed for the life of the system.
+    counter_frequency: NonZeroU64,
     /// The endpoint's mute switch, when one was wanted and Windows offered it.
     /// Only microphones ask: a muted microphone is the commonest reason a
     /// microphone track is silent and the stream itself cannot tell.
@@ -247,22 +328,75 @@ enum Polled {
 }
 
 impl Stream {
-    /// Opens a stream on the endpoint `source` describes.
+    /// Opens a stream on whatever `source` describes.
     ///
-    /// [`None`] when that endpoint is not there: the machine has no default
-    /// output device, or the chosen microphone is unplugged. That is a state to
-    /// wait through rather than an error, so it is not one.
+    /// [`None`] when the thing to record is not there: the machine has no
+    /// default output device, the chosen microphone is unplugged, or the game's
+    /// process tree has no living member. That is a state to wait through
+    /// rather than an error, so it is not one.
+    fn open(
+        source: &mut CaptureSource,
+        enumerator: &IMMDeviceEnumerator,
+        watch: &EndpointWatch,
+        counter_frequency: NonZeroU64,
+    ) -> Result<Option<Self>, AudioError> {
+        let parts = match source {
+            CaptureSource::Endpoint(endpoint) => Self::open_endpoint(endpoint, enumerator, watch)?,
+            CaptureSource::ProcessTree(process) => process.open_stream(enumerator)?,
+        };
+        parts
+            .map(|parts| Self::start(parts, counter_frequency))
+            .transpose()
+    }
+
+    /// Starts a stream on an initialised client, whichever way it was
+    /// activated.
+    ///
+    /// The half of opening that is the same for an endpoint and for a
+    /// process-scoped client: obtain the capture client, start the stream, and
+    /// work out the byte arithmetic every packet is read with.
+    fn start(parts: StreamParts, counter_frequency: NonZeroU64) -> Result<Self, AudioError> {
+        // SAFETY: `client` is an initialised `IAudioClient`, which is when
+        // `GetService` is valid; the interface identifier comes from the
+        // return type.
+        let capture: IAudioCaptureClient = unsafe { parts.client.GetService() }
+            .map_err(|error| platform_error("obtaining the capture client", error))?;
+
+        // SAFETY: `client` is initialised and not started.
+        unsafe { parts.client.Start() }
+            .map_err(|error| platform_error("starting the capture stream", error))?;
+
+        let format = parts.format;
+        Ok(Self {
+            kind: parts.kind,
+            identity: parts.identity,
+            format,
+            opened: Instant::now(),
+            client: parts.client,
+            capture,
+            wake: parts.wake,
+            bytes_per_frame: usize::from(format.channels().get())
+                * format.endpoint_samples().bytes_per_sample(),
+            mute: parts.mute,
+            positions: parts.positions,
+            counter_frequency,
+            #[cfg(test)]
+            injected_failure: None,
+        })
+    }
+
+    /// Activates and initialises a client on the endpoint `source` describes.
     ///
     /// `watch` is told which endpoint this is as soon as the endpoint is known,
     /// which is before the stream exists rather than after. `Activate`,
     /// `Initialize` and `Start` take long enough for a device to be unplugged
     /// during them, and a notification that arrives while the watch says no
     /// endpoint is being captured is discarded as somebody else's business.
-    fn open(
-        enumerator: &IMMDeviceEnumerator,
+    fn open_endpoint(
         source: &EndpointSource,
+        enumerator: &IMMDeviceEnumerator,
         watch: &EndpointWatch,
-    ) -> Result<Option<Self>, AudioError> {
+    ) -> Result<Option<StreamParts>, AudioError> {
         let Some(device) = source.resolve(enumerator)? else {
             watch.set_captured(None);
             return Ok(None);
@@ -334,32 +468,22 @@ impl Stream {
             }
         };
 
-        // SAFETY: `client` is an initialised `IAudioClient`, which is when
-        // `GetService` is valid; the interface identifier comes from the
-        // return type.
-        let capture: IAudioCaptureClient = unsafe { client.GetService() }
-            .map_err(|error| platform_error("obtaining the capture client", error))?;
-
-        // SAFETY: `client` is initialised and not started.
-        unsafe { client.Start() }
-            .map_err(|error| platform_error("starting the capture stream", error))?;
-
-        Ok(Some(Self {
+        Ok(Some(StreamParts {
             kind: source.kind,
             identity,
             format,
-            opened: Instant::now(),
             client,
-            capture,
             wake,
-            bytes_per_frame: usize::from(format.channels().get())
-                * format.endpoint_samples().bytes_per_sample(),
             mute: match source.kind {
-                SourceKind::SystemAudio => None,
+                // Only a microphone asks: a muted microphone is the commonest
+                // reason a microphone track is silent and the stream itself
+                // cannot tell.
                 SourceKind::Microphone => EndpointMute::of(&device),
+                SourceKind::SystemAudio | SourceKind::GameAudio => None,
             },
-            #[cfg(test)]
-            injected_failure: None,
+            // An endpoint reports the position of every packet it delivers, and
+            // `tests/system_audio.rs` asserts that it does.
+            positions: PositionTrust::Reported,
         }))
     }
 
@@ -429,11 +553,63 @@ impl Stream {
             return self.lost(&error, "returning a packet to the audio device");
         }
 
+        let arrived = match self.arrival_of(position) {
+            Ok(arrived) => arrived,
+            Err(error) => return self.lost_reading_the_counter(&error),
+        };
+
         Polled::Packet {
-            arrived: AudioTimestamp::from_hundred_nanos(position),
+            arrived,
             frames: u64::from(frames),
             discontinuity,
         }
+    }
+
+    /// Where a packet belongs on the performance counter.
+    ///
+    /// The position the stream reported, unless this is a stream whose
+    /// positions have not been shown to be counter readings — see
+    /// [`PositionTrust`] — in which case the first packet decides for the rest
+    /// of the stream's life.
+    fn arrival_of(&mut self, position: u64) -> Result<AudioTimestamp, AudioError> {
+        let reported = AudioTimestamp::from_hundred_nanos(position);
+        match self.positions {
+            PositionTrust::Reported => Ok(reported),
+            PositionTrust::Counter => read_performance_counter(self.counter_frequency),
+            PositionTrust::Unverified => {
+                let now = read_performance_counter(self.counter_frequency)?;
+                if position_is_on_the_counter(reported, now) {
+                    self.positions = PositionTrust::Reported;
+                    return Ok(reported);
+                }
+                tracing::warn!(
+                    audio_source = %self.kind.audio_source(),
+                    reported_nanos = reported.as_nanos(),
+                    counter_nanos = now.as_nanos(),
+                    "this capture's packets do not carry a performance-counter position, so \
+                     each one is timed as it is read instead. The track stays the length of \
+                     the recording; what is lost is the drift measurement against the \
+                     endpoint's own clock"
+                );
+                self.positions = PositionTrust::Counter;
+                Ok(now)
+            }
+        }
+    }
+
+    /// Ends the stream because the performance counter could not be read.
+    ///
+    /// Unreachable in practice — `QueryPerformanceCounter` cannot fail on any
+    /// machine Windows runs on — and handled rather than unwrapped because this
+    /// is a recorder that must not panic on a capture thread (AGENTS.md
+    /// section 17).
+    fn lost_reading_the_counter(&self, error: &AudioError) -> Polled {
+        tracing::warn!(
+            %error,
+            audio_source = %self.kind.audio_source(),
+            "the performance counter could not be read, so this capture is reopening"
+        );
+        Polled::Lost(EndpointChange::CaptureEndpointInvalidated)
     }
 
     /// How many frames are queued, or the failure a test asked for in place of
@@ -508,7 +684,7 @@ impl Drop for Stream {
 /// The handle is returned rather than stored so that a failure to attach it
 /// closes it here instead of leaking one handle per attempt on a machine where
 /// event-driven capture is refused.
-fn create_wake_event(client: &IAudioClient) -> windows::core::Result<Wake> {
+pub(super) fn create_wake_event(client: &IAudioClient) -> windows::core::Result<Wake> {
     // SAFETY: all four arguments are optional and null/false is valid for each:
     // default security, auto-reset, initially unsignalled, unnamed.
     let handle = unsafe { CreateEventW(None, false, false, None) }?;
@@ -565,19 +741,115 @@ enum Ready {
     },
 }
 
-/// A capture of one audio endpoint, whichever kind of endpoint it is.
+/// What a capture is a capture *of*.
+///
+/// The engine below is the same whichever this is — the mix format, the device
+/// clock, the silence synthesised for periods nothing was said about, the
+/// stream that fails and has to be opened again — so the difference is one
+/// enumeration rather than a second implementation of all of it (AGENTS.md
+/// section 55). Exactly three things vary: how a stream is activated, what
+/// makes an open stream stale, and the words the log lines use.
+#[derive(Debug)]
+pub(super) enum CaptureSource {
+    /// One audio endpoint: the one Windows plays through, or a microphone.
+    Endpoint(EndpointSource),
+    /// Everything one process tree plays, through process loopback
+    /// (`process_loopback.rs`).
+    ProcessTree(ProcessLoopbackSource),
+}
+
+impl CaptureSource {
+    /// What is being recorded.
+    fn kind(&self) -> SourceKind {
+        match self {
+            Self::Endpoint(endpoint) => endpoint.kind,
+            Self::ProcessTree(_) => SourceKind::GameAudio,
+        }
+    }
+
+    /// What the `audio_source` field on this capture's log lines says.
+    fn audio_source(&self) -> AudioSource {
+        self.kind().audio_source()
+    }
+
+    /// How the thing being recorded is named in a log line, including while it
+    /// is not there to be asked.
+    fn description(&self) -> &str {
+        match self {
+            Self::Endpoint(endpoint) => endpoint.device_description(),
+            Self::ProcessTree(process) => process.description(),
+        }
+    }
+
+    /// Whether Windows moving the default endpoint concerns this capture.
+    fn follows_default(&self) -> bool {
+        match self {
+            Self::Endpoint(endpoint) => endpoint.follows_default(),
+            // A process-scoped client is not on an endpoint, so no endpoint
+            // notification is about it.
+            Self::ProcessTree(_) => false,
+        }
+    }
+
+    /// Whether this capture has any reason to subscribe to device changes.
+    fn watches_devices(&self) -> bool {
+        matches!(self, Self::Endpoint(_))
+    }
+
+    /// Anything that has happened to what is being recorded that means the
+    /// current stream has to be replaced.
+    fn take_change(&mut self) -> Option<Reopen> {
+        match self {
+            Self::Endpoint(_) => None,
+            Self::ProcessTree(process) => process.take_change(),
+        }
+    }
+}
+
+/// Why a capture is about to throw its stream away and open another.
+///
+/// Carried rather than acted on immediately so that the decision and the log
+/// line are made in one place, and so that the two reasons which can repeat
+/// without limit are told apart from the ones a person's hand paces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Reopen {
+    /// What to put in the log line, phrased as the thing that happened.
+    pub(super) reason: &'static str,
+    /// Whether this was raised by a failed call on the stream rather than by
+    /// something outside it. Those are the ones that can loop: a stream that
+    /// fails on every look raises one every time it is read, so a stream that
+    /// has only just been opened and has already failed is left alone for a
+    /// moment rather than reopened at once.
+    pub(super) from_failed_call: bool,
+}
+
+/// What a process-scoped capture's tree looks like at one moment.
+///
+/// Two facts a caller acts on rather than the tree itself: the tree is owned by
+/// the capture thread and lending it out would let something else scan the
+/// process table from wherever it liked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TreeState {
+    /// The process the current activation names.
+    pub(super) scoped_to: u32,
+    /// How many processes of the game are running.
+    pub(super) members: usize,
+}
+
+/// A capture of one endpoint or one process tree.
 ///
 /// See the module documentation for the threading and ownership rules, and
 /// `docs/audio-routing.md` for what happens when the endpoint changes. The
-/// public captures built on this are `SystemAudioCapture` and
-/// `MicrophoneCapture`.
+/// public captures built on this are `SystemAudioCapture`, `MicrophoneCapture`
+/// and `ProcessLoopbackCapture`.
 #[derive(Debug)]
 pub(super) struct EndpointCapture {
-    source: EndpointSource,
+    source: CaptureSource,
     enumerator: IMMDeviceEnumerator,
     watch: Arc<EndpointWatch>,
     /// Held for its [`Drop`], which unsubscribes from device notifications.
-    _notifications: EndpointNotifications,
+    /// [`None`] for a capture no device notification can concern.
+    _notifications: Option<EndpointNotifications>,
     stream: Option<Stream>,
     /// The shape of the track, fixed when the capture was opened.
     format: AudioFormat,
@@ -601,6 +873,9 @@ pub(super) struct EndpointCapture {
     awaiting_change: bool,
     /// A format change to report to the caller, once.
     format_change: Option<AudioFormat>,
+    /// Whether the capture is handing over what the audio engine still holds
+    /// and then closing; see [`begin_drain`](Self::begin_drain).
+    draining: bool,
     closed: bool,
     stats: CaptureStats,
     /// The `HRESULT` every WASAPI call on this capture's stream returns instead
@@ -644,27 +919,32 @@ impl EndpointCapture {
     /// [`AudioError::UnsupportedFormat`] when the endpoint presents samples in
     /// a shape this crate will not convert, and [`AudioError::Platform`] when
     /// Windows refuses something outright.
-    pub(super) fn open(source: EndpointSource) -> Result<Option<Self>, AudioError> {
+    pub(super) fn open(mut source: CaptureSource) -> Result<Option<Self>, AudioError> {
         ensure_multi_threaded_apartment()
             .map_err(|error| platform_error("preparing the COM apartment", error))?;
 
         let enumerator = create_enumerator()?;
         let watch = Arc::new(EndpointWatch::new(
-            source.kind.flow(),
+            source.kind().flow(),
             source.follows_default(),
         ));
-        let notifications = EndpointNotifications::register(&enumerator, Arc::clone(&watch))?;
+        let notifications = source
+            .watches_devices()
+            .then(|| EndpointNotifications::register(&enumerator, Arc::clone(&watch)))
+            .transpose()?;
 
-        let Some(stream) = Stream::open(&enumerator, &source, &watch)? else {
+        let counter_frequency = performance_counter_frequency()?;
+
+        let Some(stream) = Stream::open(&mut source, &enumerator, &watch, counter_frequency)?
+        else {
             return Ok(None);
         };
         let format = stream.format;
 
-        let counter_frequency = performance_counter_frequency()?;
         let opened = read_performance_counter(counter_frequency)?;
 
         tracing::info!(
-            audio_source = %source.kind.audio_source(),
+            audio_source = %source.audio_source(),
             device = stream.identity.name,
             device_id = stream.identity.id,
             sample_rate = format.sample_rate().get(),
@@ -692,6 +972,7 @@ impl EndpointCapture {
             retry_at: None,
             awaiting_change: false,
             format_change: None,
+            draining: false,
             closed: false,
             stats: CaptureStats::default(),
             #[cfg(test)]
@@ -733,6 +1014,18 @@ impl EndpointCapture {
     /// the mute switch, or when Windows would not give one.
     pub(super) fn is_muted(&self) -> Option<bool> {
         self.stream.as_ref()?.mute.as_ref()?.is_muted()
+    }
+
+    /// What a process-scoped capture's process tree looks like now, or [`None`]
+    /// for a capture that has no tree.
+    pub(super) fn tree_state(&self) -> Option<TreeState> {
+        match &self.source {
+            CaptureSource::Endpoint(_) => None,
+            CaptureSource::ProcessTree(process) => Some(TreeState {
+                scoped_to: process.scoped_to(),
+                members: process.members(),
+            }),
+        }
     }
 
     /// What this capture has produced so far.
@@ -801,8 +1094,9 @@ impl EndpointCapture {
         if self.stream.take().is_some() || !self.closed {
             self.watch.set_captured(None);
             self.closed = true;
+            self.draining = false;
             tracing::info!(
-                audio_source = %self.source.kind.audio_source(),
+                audio_source = %self.source.audio_source(),
                 frames = self.timeline.frames_emitted(),
                 synthesised_silence_frames = self.stats.synthesised_silence_frames,
                 endpoint_changes = self.stats.endpoint_changes,
@@ -812,6 +1106,48 @@ impl EndpointCapture {
         }
     }
 
+    /// Ends the capture by handing over whatever the audio engine still holds.
+    ///
+    /// The audio engine keeps up to [`BUFFER_DURATION`] of audio that has been
+    /// captured and not yet collected. A capture that is simply closed throws
+    /// that away, which is up to 200 ms missing from the end of the track — the
+    /// last thing that happened before the user stopped recording, which is
+    /// often exactly what they pressed the key for.
+    ///
+    /// So this leaves the capture readable and stops it looking forwards:
+    /// subsequent reads hand over the packets that were queued, in order, on
+    /// the same timeline as everything before them, and once the queue is empty
+    /// the capture closes itself and the next read reports
+    /// [`AudioError::NotOpen`]. Nothing is reopened during a drain and no
+    /// further silence is synthesised, because there is no more recording for
+    /// silence to keep in step with: a drain ends at the last sample that
+    /// exists.
+    ///
+    /// **The client is deliberately not stopped first.** Stopping it and then
+    /// reading is the obvious order and it loses the audio: measured on Windows
+    /// 11 build 26200 against a process-scoped client, a stream stopped after a
+    /// 150 ms stall reported no queued packets at all, where the same stream
+    /// drained before stopping produced the 150 ms. `IAudioClient::Stop` is
+    /// what ends the stream, and it happens where every other release does, in
+    /// [`Stream::drop`].
+    ///
+    /// The cost of that order is a packet that the engine is producing at the
+    /// moment the queue is first found empty, which is one device period —
+    /// 10 ms — against the 200 ms a close would lose.
+    ///
+    /// Idempotent, and pointless after [`close`](Self::close): a closed capture
+    /// has already let go of the stream, and this cannot get it back.
+    pub(super) fn begin_drain(&mut self) {
+        if self.closed || self.draining {
+            return;
+        }
+        self.draining = true;
+        tracing::debug!(
+            audio_source = %self.source.audio_source(),
+            "draining the audio the capture had not collected yet"
+        );
+    }
+
     /// Decides what the next read returns, without borrowing any buffer.
     fn next_ready(&mut self, deadline: Instant) -> Result<Ready, AudioError> {
         loop {
@@ -819,31 +1155,21 @@ impl EndpointCapture {
                 return Ok(Ready::FormatChanged(format));
             }
 
-            let instalment = self.timeline.take_silence_instalment();
-            if instalment > 0 {
-                let samples = instalment as usize * usize::from(self.format.channels().get());
-                if self.silence.len() < samples {
-                    // Only ever grown, and only ever with zeroes, so the buffer
-                    // stays silent without being rewritten each time. Bounded
-                    // by one silence instalment however long the silence is.
-                    self.silence.resize(samples, 0.0);
+            if self.draining {
+                if let Some(ready) = self.drain_one() {
+                    return Ok(ready);
                 }
-                let timestamp = self.timeline.emit(instalment);
-                self.stats.synthesised_silence_frames += instalment;
-                return Ok(Ready::Silence { samples, timestamp });
+                // Everything the audio engine held has been handed over.
+                self.close();
+                return Ok(Ready::Idle);
             }
 
-            if self.packet_pending {
-                self.packet_pending = false;
-                let channels = usize::from(self.format.channels().get());
-                let start = self.packet_offset * channels;
-                let frames = ((self.packet.len() - start) / channels) as u64;
-                let timestamp = self.timeline.emit(frames);
-                return Ok(Ready::Packet {
-                    start,
-                    timestamp,
-                    device: self.packet_device,
-                });
+            if let Some(silence) = self.silence_instalment() {
+                return Ok(silence);
+            }
+
+            if let Some(packet) = self.pending_packet() {
+                return Ok(packet);
             }
 
             self.service_endpoint();
@@ -891,6 +1217,71 @@ impl EndpointCapture {
                     }
                     self.timeline.owe_silence_until(self.counter_now()?);
                 }
+            }
+        }
+    }
+
+    /// The next instalment of owed silence, if any is owed.
+    fn silence_instalment(&mut self) -> Option<Ready> {
+        let instalment = self.timeline.take_silence_instalment();
+        if instalment == 0 {
+            return None;
+        }
+        let samples = instalment as usize * usize::from(self.format.channels().get());
+        if self.silence.len() < samples {
+            // Only ever grown, and only ever with zeroes, so the buffer stays
+            // silent without being rewritten each time. Bounded by one silence
+            // instalment however long the silence is.
+            self.silence.resize(samples, 0.0);
+        }
+        let timestamp = self.timeline.emit(instalment);
+        self.stats.synthesised_silence_frames += instalment;
+        Some(Ready::Silence { samples, timestamp })
+    }
+
+    /// The converted packet waiting to be handed over, if there is one.
+    fn pending_packet(&mut self) -> Option<Ready> {
+        if !self.packet_pending {
+            return None;
+        }
+        self.packet_pending = false;
+        let channels = usize::from(self.format.channels().get());
+        let start = self.packet_offset * channels;
+        let frames = ((self.packet.len() - start) / channels) as u64;
+        let timestamp = self.timeline.emit(frames);
+        Some(Ready::Packet {
+            start,
+            timestamp,
+            device: self.packet_device,
+        })
+    }
+
+    /// The next thing a draining capture has to hand over, or [`None`] once the
+    /// audio engine has nothing left.
+    ///
+    /// The same two producers an ordinary read has, in the same order, so a
+    /// drained tail is exactly as contiguous as everything before it: silence
+    /// already owed is still paid, and a packet whose position leaves a gap
+    /// still has that gap filled. What a drain does not do is invent silence
+    /// for time passing, look at the process tree, or open anything.
+    fn drain_one(&mut self) -> Option<Ready> {
+        loop {
+            if let Some(silence) = self.silence_instalment() {
+                return Some(silence);
+            }
+            if let Some(packet) = self.pending_packet() {
+                return Some(packet);
+            }
+            match self.poll_stream() {
+                Polled::Packet {
+                    arrived,
+                    frames,
+                    discontinuity,
+                } => self.accept_packet(arrived, frames, discontinuity),
+                // A stream that has failed has nothing left to give, and one
+                // whose queue is empty has given everything: a stopped client
+                // produces no more.
+                Polled::Empty | Polled::Lost(_) => return None,
             }
         }
     }
@@ -972,9 +1363,9 @@ impl EndpointCapture {
     /// stream may be torn down and rebuilt: the notification callbacks
     /// themselves only set a flag (`notifications.rs`).
     fn service_endpoint(&mut self) {
-        let audio_source = self.source.kind.audio_source();
+        let audio_source = self.source.audio_source();
 
-        if let Some(change) = self.watch.take_change() {
+        if let Some(change) = self.take_reopen() {
             // A stream that has only just been opened and has already failed on
             // the endpoint itself is a broken device, and opening it again
             // immediately is how a recorder ends up doing nothing else for the
@@ -988,7 +1379,7 @@ impl EndpointCapture {
             // and can. So an unplug still reopens the moment it is noticed,
             // however long the stream had been running, and only a device that
             // breaks the instant it is opened is left alone for a while.
-            let failed_at_once = change == EndpointChange::CaptureEndpointInvalidated
+            let failed_at_once = change.from_failed_call
                 && self
                     .stream
                     .as_ref()
@@ -997,11 +1388,11 @@ impl EndpointCapture {
             if self.stream.is_some() {
                 tracing::info!(
                     audio_source = %audio_source,
-                    reason = change.as_str(),
+                    reason = change.reason,
                     device = self.device_name().unwrap_or("<none>"),
-                    "the audio device being recorded changed; the capture is opening the \
-                     device it should be on now. The recording continues, and the gap is \
-                     filled with silence"
+                    "what this capture is recording changed; the capture is opening what it \
+                     should be on now. The recording continues, and the gap is filled with \
+                     silence"
                 );
             }
             self.stream = None;
@@ -1028,7 +1419,12 @@ impl EndpointCapture {
             return;
         }
 
-        match Stream::open(&self.enumerator, &self.source, &self.watch) {
+        match Stream::open(
+            &mut self.source,
+            &self.enumerator,
+            &self.watch,
+            self.counter_frequency,
+        ) {
             Ok(Some(stream)) if self.format.is_interchangeable_with(&stream.format) => {
                 tracing::info!(
                     audio_source = %audio_source,
@@ -1061,9 +1457,9 @@ impl EndpointCapture {
             Ok(None) => {
                 tracing::warn!(
                     audio_source = %audio_source,
-                    device = self.source.device_description(),
-                    "the audio device this capture records is not available, so this track is \
-                     silence until it comes back. The recording continues"
+                    device = self.source.description(),
+                    "what this capture records is not available, so this track is silence \
+                     until it comes back. The recording continues"
                 );
                 self.retry_at = Some(Instant::now() + ENDPOINT_RETRY);
             }
@@ -1071,13 +1467,30 @@ impl EndpointCapture {
                 tracing::warn!(
                     %error,
                     audio_source = %audio_source,
-                    device = self.source.device_description(),
-                    "could not open the audio device; this track is silence until it can be \
-                     opened. The recording continues"
+                    device = self.source.description(),
+                    "could not open what this capture records; this track is silence until \
+                     it can be opened. The recording continues"
                 );
                 self.retry_at = Some(Instant::now() + ENDPOINT_RETRY);
             }
         }
+    }
+
+    /// The reason to replace the current stream, if there is one.
+    ///
+    /// Two places can raise one and they cannot both be right at once: a device
+    /// notification — or a failed call on the stream, which arrives the same way
+    /// (`notifications.rs`) — and the source itself, which for a process-scoped
+    /// capture is the game's process tree having moved underneath it. The
+    /// device is asked first because it is the one that can be urgent.
+    fn take_reopen(&mut self) -> Option<Reopen> {
+        if let Some(change) = self.watch.take_change() {
+            return Some(Reopen {
+                reason: change.as_str(),
+                from_failed_call: change == EndpointChange::CaptureEndpointInvalidated,
+            });
+        }
+        self.source.take_change()
     }
 
     /// Reads the performance counter.
@@ -1160,6 +1573,49 @@ fn read_performance_counter(frequency: NonZeroU64) -> Result<AudioTimestamp, Aud
         ticks.unsigned_abs(),
         frequency,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(nanos: u64) -> AudioTimestamp {
+        AudioTimestamp::from_nanos(nanos)
+    }
+
+    #[test]
+    fn a_position_a_device_period_from_the_counter_is_a_counter_reading() {
+        // The ordinary case, and the reason the test is not an equality: a
+        // loopback packet's position is about one device period *ahead* of the
+        // moment it is read, because it is when the endpoint will play the
+        // audio rather than when it was captured.
+        let now = 31_107_000_000_000_000;
+        assert!(position_is_on_the_counter(at(now + 10_000_000), at(now)));
+        assert!(position_is_on_the_counter(at(now - 10_000_000), at(now)));
+        assert!(position_is_on_the_counter(at(now), at(now)));
+    }
+
+    #[test]
+    fn a_stream_that_reports_no_position_at_all_is_not_believed() {
+        // The failure this exists for. A client that leaves the field alone
+        // reports zero, and a timeline anchored on zero treats every later
+        // packet as audio from hours before the recording started and discards
+        // the lot — a silent track, with nothing in the log to say why. The
+        // same is true of a client that reports frames since the stream
+        // started, which on a machine that has been up for a day is nine
+        // orders of magnitude from the counter.
+        let now = at(31_107_000_000_000_000);
+        assert!(!position_is_on_the_counter(at(0), now));
+        assert!(!position_is_on_the_counter(at(1_000_000_000), now));
+        assert!(!position_is_on_the_counter(
+            at(now.as_nanos() + POSITION_SANITY),
+            now
+        ));
+        assert!(
+            position_is_on_the_counter(at(now.as_nanos() + POSITION_SANITY - 1), now),
+            "the boundary itself is inside, so a busy machine's late read is still believed"
+        );
+    }
 }
 
 /// What both public captures' tests need in order to say anything about a real

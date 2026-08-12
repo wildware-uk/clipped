@@ -58,25 +58,32 @@ pub(super) fn create_enumerator() -> Result<IMMDeviceEnumerator, AudioError> {
 /// Which side of the audio stack a capture records, and what its audio is
 /// called.
 ///
-/// The two captures Clipped runs differ in three things and no more: whether
-/// the endpoints they open render or capture, whether the stream is a loopback
-/// of a render endpoint, and the words a log line describes them with. So they
-/// are one engine parameterised by this rather than two implementations of the
-/// same WASAPI stream, the same timeline and the same device-change handling
-/// (AGENTS.md section 55).
+/// The captures Clipped runs differ in very little: whether the endpoints they
+/// open render or capture, whether the stream is a loopback, and the words a
+/// log line describes them with. So they are one engine parameterised by this
+/// rather than three implementations of the same WASAPI stream, the same
+/// timeline and the same device-change handling (AGENTS.md section 55).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SourceKind {
     /// The endpoint Windows plays through, recorded in loopback mode.
     SystemAudio,
     /// An input device, recorded directly.
     Microphone,
+    /// Everything one process tree plays, recorded through process loopback
+    /// rather than from an endpoint at all (`process_loopback.rs`).
+    GameAudio,
 }
 
 impl SourceKind {
     /// Which side of the audio stack this kind's endpoints are on.
+    ///
+    /// Game audio is rendered, and so is on the render side, even though the
+    /// capture it feeds opens no endpoint: the answer decides which device
+    /// notifications a capture is interested in, and a process-scoped capture
+    /// is interested in none of them (`process_loopback.rs`).
     pub(super) fn flow(self) -> EDataFlow {
         match self {
-            Self::SystemAudio => eRender,
+            Self::SystemAudio | Self::GameAudio => eRender,
             Self::Microphone => eCapture,
         }
     }
@@ -84,11 +91,13 @@ impl SourceKind {
     /// The flags `IAudioClient::Initialize` opens the stream with, beside the
     /// event-driven flag the stream adds when the audio engine accepts it.
     ///
-    /// A render endpoint can only be recorded in loopback mode; a capture
-    /// endpoint is recorded as it is, and asking for loopback on one fails.
+    /// A render endpoint can only be recorded in loopback mode, and a
+    /// process-scoped client is documented as requiring the same flag; a
+    /// capture endpoint is recorded as it is, and asking for loopback on one
+    /// fails.
     pub(super) fn stream_flags(self) -> u32 {
         match self {
-            Self::SystemAudio => AUDCLNT_STREAMFLAGS_LOOPBACK,
+            Self::SystemAudio | Self::GameAudio => AUDCLNT_STREAMFLAGS_LOOPBACK,
             Self::Microphone => 0,
         }
     }
@@ -106,6 +115,7 @@ impl SourceKind {
         match self {
             Self::SystemAudio => AudioSource::SystemAudio,
             Self::Microphone => AudioSource::Microphone,
+            Self::GameAudio => AudioSource::Game,
         }
     }
 }
@@ -191,8 +201,11 @@ impl EndpointSource {
     pub(super) fn device_description(&self) -> &str {
         match (&self.selection, self.kind) {
             (DeviceSelection::Device { name, .. }, _) => name,
-            (DeviceSelection::Default, SourceKind::SystemAudio) => "the default output device",
             (DeviceSelection::Default, SourceKind::Microphone) => "the default microphone",
+            // Every other endpoint source is on the render side. A
+            // [`SourceKind::GameAudio`] source is not an endpoint at all and
+            // never reaches here (`process_loopback.rs`).
+            (DeviceSelection::Default, _) => "the default output device",
         }
     }
 }
