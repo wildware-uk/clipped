@@ -6,13 +6,16 @@
 //! keeps a track the same length as its recording, the sample conversion —
 //! compiles and runs its tests anywhere (AGENTS.md section 5).
 
+mod activation;
 mod apartment;
 mod endpoint;
 mod endpoint_capture;
 mod loopback;
 mod microphone;
 mod notifications;
+mod process_loopback;
 
 pub use endpoint_capture::CaptureStats;
 pub use loopback::SystemAudioCapture;
 pub use microphone::{microphones, Microphone, MicrophoneCapture, MicrophoneSelection};
+pub use process_loopback::ProcessLoopbackCapture;

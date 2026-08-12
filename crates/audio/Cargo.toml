@@ -35,6 +35,18 @@ clipped-logging.workspace = true
 # The feature list is the exact set of namespaces this crate names. Dual
 # MIT/Apache-2.0.
 [target.'cfg(windows)'.dependencies]
+# Which processes a game consists of, right now (`ProcessTree`, issue #25).
+# Process-scoped loopback capture scopes a client to one process and the
+# processes it started, and the set of processes that means has to be tracked
+# from this side too: to know when the game has gone, and to re-scope the
+# capture when the process the activation names exits while the game lives on
+# (`src/windows/process_loopback.rs`). It is layer 0 of the dependency table in
+# README.md and this crate is layer 1, which is the direction
+# `tests/integration/tests/workspace_layering.rs` enforces. Target-specific
+# because the tree is a Windows facility and the platform-neutral half of this
+# crate compiles anywhere. MPL-2.0.
+clipped-windows.workspace = true
+
 windows = { workspace = true, features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
