@@ -1,13 +1,17 @@
 # Editing
 
 **Status: the document model and the operations that cut a clip up exist and are
-tested; nothing renders one yet.** `crates/edit` defines what an edit *is*,
+tested, and the editor screen draws a document it is given — but nothing in the
+desktop application can open one yet
+([#306](https://github.com/wildware-uk/clipped/issues/306)), and nothing
+renders a clip to a file.** `crates/edit` defines what an edit *is*,
 reads and writes it, converts an older one, answers the question an exporter
 asks — "what is on screen at this moment, and where does it come from?" — and
 performs the four edits that change what material a clip plays: trim start, trim
 end, split and delete section, with undo and redo
-([#84](https://github.com/wildware-uk/clipped/issues/84)). The editor itself is
-[issue #83](https://github.com/wildware-uk/clipped/issues/83), the remaining
+([#84](https://github.com/wildware-uk/clipped/issues/84)). The editor's shell is
+[issue #83](https://github.com/wildware-uk/clipped/issues/83) and is described
+in [desktop-ui.md](desktop-ui.md#the-editor-screen), the remaining
 operations are [#85](https://github.com/wildware-uk/clipped/issues/85) to
 [#88](https://github.com/wildware-uk/clipped/issues/88), and the export engine
 is [#89](https://github.com/wildware-uk/clipped/issues/89). This document is the

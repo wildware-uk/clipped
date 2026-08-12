@@ -277,6 +277,10 @@ const WINDOW: Painted = ['styles', 'body', 'background'];
 const SIDEBAR: Painted = ['styles', '\\.clipped-sidebar', 'background'];
 const TITLE_STRIP: Painted = ['styles', '\\.clipped-header', 'background'];
 const CARD: Painted = ['components', '\\.clipped-card', 'background'];
+/* The editor's two grounds: the dark rectangle the frame will be drawn in, and
+   the lane a track is drawn in. */
+const FRAME: Painted = ['styles', '\\.clipped-editor__frame', 'background'];
+const LANE: Painted = ['styles', '\\.clipped-timeline__lane', 'background'];
 const DIALOG: Painted = ['components', '\\.clipped-dialog', 'background'];
 const FIELD: Painted = ['components', '\\.clipped-input', 'background'];
 
@@ -355,6 +359,59 @@ describe('the shell', () => {
 
   it.each(PAIRINGS)('draws %s at 4.5:1 or better', (_name, ink, ground) => {
     expect(ratioBetween(ink, ground)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+});
+
+/*
+ * The editor's timeline (issue #83). Its two new grounds are the dark rectangle
+ * where a frame will go and the lane a track is drawn in, and both carry words:
+ * the sentence saying why there is no picture, and the one saying a lane has no
+ * waveform. Neither is decoration - each is the only thing on that ground - so
+ * both are held to body text's ratio.
+ */
+describe('the editor', () => {
+  const PAIRINGS: readonly (readonly [string, Painted, Painted])[] = [
+    [
+      'the frame’s note about having no picture',
+      ['styles', '\\.clipped-editor__frame-note', 'color'],
+      FRAME,
+    ],
+    ['a fact’s term at the playhead', ['styles', '\\.clipped-editor__facts dt', 'color'], WINDOW],
+    ['a ruler mark’s label', ['styles', '\\.clipped-timeline__tick', 'color'], WINDOW],
+    ['a lane saying it has no waveform', ['styles', '\\.clipped-timeline__absent', 'color'], LANE],
+    [
+      'a segment’s recording name',
+      INHERITED,
+      ['styles', '\\.clipped-timeline__segment', 'background'],
+    ],
+  ];
+
+  it.each(PAIRINGS)('draws %s at 4.5:1 or better', (_name, ink, ground) => {
+    expect(ratioBetween(ink, ground)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+
+  /*
+   * What the timeline says without words. A segment's edge is where the cut is
+   * and the playhead is where you are, so 1.4.11 applies to both - they convey
+   * information rather than separating two paragraphs, which is the exception
+   * `--color-divider` is allowed to sit at 2.41:1 for.
+   */
+  const NON_TEXT: readonly (readonly [string, Painted, Painted])[] = [
+    [
+      "a segment's edge, which is where the cut is",
+      ['styles', '\\.clipped-timeline__segment', 'border'],
+      LANE,
+    ],
+    ['the playhead on a lane', ['styles', '\\.clipped-timeline__playhead', 'background'], LANE],
+    [
+      'the playhead over a segment',
+      ['styles', '\\.clipped-timeline__playhead', 'background'],
+      ['styles', '\\.clipped-timeline__segment', 'background'],
+    ],
+  ];
+
+  it.each(NON_TEXT)('draws %s at 3:1 or better', (_name, ink, ground) => {
+    expect(ratioBetween(ink, ground)).toBeGreaterThanOrEqual(AA_NON_TEXT);
   });
 });
 

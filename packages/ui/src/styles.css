@@ -481,6 +481,226 @@ code {
   margin-bottom: 0;
 }
 
+/* — the editor's timeline — */
+
+/*
+ * The Editor screen (issue #83). These are screen classes rather than
+ * components: the design system's component layer is the set the deck draws
+ * with, and a timeline is not one of them - so they sit here with the shell's
+ * own classes and inside the same gate, which is what `stylesheet.test.ts` and
+ * `contrast.test.ts` reading this file gets them.
+ *
+ * Every distance *along* the timeline is a percentage, written by the component
+ * rather than here: a position is a proportion of the clip, so it scales with
+ * the window and there is nothing for a token to hold. What is here is the
+ * geometry across it - how tall a lane is, how wide the labels are - which is
+ * fixed, and which `tokens.css` therefore holds.
+ */
+
+.clipped-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.clipped-editor__top {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+/* Where the frame at the playhead will be drawn (issue #306). It is drawn as
+   the dark ground a picture would sit on, holding the sentence that says why
+   there is no picture - rather than as a black rectangle, which would look like
+   a frame that failed to decode. */
+.clipped-editor__frame {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  padding: var(--space-4);
+  background: var(--color-neutral-900);
+}
+
+.clipped-editor__frame-note {
+  margin: 0;
+  color: var(--color-neutral-200);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  text-align: center;
+}
+
+/* What is at the playhead, as a term-and-value list: the densest way to put
+   eight facts on screen without a card around each one. */
+.clipped-editor__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+}
+
+.clipped-editor__facts dt {
+  color: var(--color-text-muted);
+}
+
+.clipped-editor__facts dd {
+  margin: 0;
+}
+
+.clipped-editor__transport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.clipped-editor__position {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+}
+
+.clipped-editor__zoom {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.clipped-editor__note {
+  max-width: var(--measure);
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+}
+
+/* The label column and the scrolling timeline beside it. The labels stay put
+   while the timeline scrolls, because a lane whose name has scrolled off is a
+   lane nobody can identify. */
+.clipped-editor__timeline {
+  display: grid;
+  grid-template-columns: var(--editor-lane-label-width) minmax(0, 1fr);
+}
+
+.clipped-timeline__labels {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.clipped-timeline__label {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: var(--editor-lane-height);
+  padding-right: var(--space-2);
+  border-bottom: var(--hairline) solid var(--color-divider);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+}
+
+/* The one that is not a lane: it lines the column up with the ruler. */
+.clipped-timeline__label--ruler {
+  height: var(--editor-ruler-height);
+  border-bottom: 0;
+}
+
+.clipped-timeline__track-name {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+}
+
+.clipped-timeline {
+  overflow-x: auto;
+}
+
+.clipped-timeline__content {
+  position: relative;
+  min-width: 100%;
+}
+
+.clipped-timeline__ruler {
+  position: relative;
+  height: var(--editor-ruler-height);
+}
+
+.clipped-timeline__tick {
+  position: absolute;
+  top: 0;
+  padding-left: var(--space-1);
+  border-left: var(--hairline) solid var(--color-divider);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+}
+
+.clipped-timeline__lanes {
+  position: relative;
+}
+
+/* The ring is pulled inside, because the lanes sit in a scroller that clips
+   them and an outward ring would be cut off at both ends. It is the global
+   ring moved, not a second one. */
+.clipped-timeline__lanes:focus-visible {
+  outline-offset: calc(var(--rule-weight) * -1);
+}
+
+.clipped-timeline__lane {
+  position: relative;
+  height: var(--editor-lane-height);
+  border-bottom: var(--hairline) solid var(--color-divider);
+  background: var(--color-surface);
+}
+
+/*
+ * A segment is bounded by an edge rather than filled with a colour, because
+ * where one segment ends and the next begins *is* the cut - it identifies
+ * something rather than decorating it, so it is held to WCAG 1.4.11's 3:1 and
+ * takes the same edge a control does.
+ */
+.clipped-timeline__segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 var(--space-2);
+  border: var(--rule-weight) solid var(--color-control-edge);
+  background: var(--color-neutral-100);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* A lane with no waveform says so, in the lane. `docs/waveforms.md` is explicit
+   that a missing waveform must never be drawn as a flat line, which is
+   indistinguishable from silence. */
+.clipped-timeline__absent {
+  position: absolute;
+  top: 50%;
+  left: var(--space-2);
+  transform: translateY(-50%);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+/* The playhead. Accent, because it is the one mark on the timeline that says
+   where you are; its position is also given as a timecode in the transport and
+   as the slider's own value, so it is never the only signal. */
+.clipped-timeline__playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--rule-weight);
+  margin-left: calc(var(--rule-weight) / -2);
+  background: var(--color-accent);
+  pointer-events: none;
+}
+
 /*
  * A block of machine-written text a person is meant to read before sending it
  * on: the Diagnostics screen's support report (issue #101).

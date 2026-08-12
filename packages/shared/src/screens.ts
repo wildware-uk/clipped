@@ -5,10 +5,11 @@
  * two lists that have to be kept in step, so a navigation item cannot point at
  * a route that does not exist.
  *
- * Five of these screens have been written — Home, Library, Games, Settings and
- * Diagnostics, each in the `…Screen.tsx` named for it. The shell routes the other
- * two to a panel that says the screen is not written and names the issue that
- * builds it, which is why every entry carries `trackedIn`: a
+ * Six of these screens have been written — Home, Library, Games, Settings and
+ * Diagnostics, each in the `…Screen.tsx` named for it, and Editor, in
+ * `editor/EditorScreen.tsx`. The shell routes the last, Trash, to a panel that
+ * says the screen is not written and names the issue that builds it, which is why
+ * every entry carries `trackedIn`: a
  * navigation item that led to a blank screen, or to a convincing empty one,
  * would be indistinguishable from a broken application (AGENTS.md section 27).
  *

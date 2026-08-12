@@ -271,6 +271,15 @@ describe('keyboard focus', () => {
   const MOVED_RING: readonly string[] = [
     '.clipped-input:focus-visible',
     '.clipped-nav__link:focus-visible',
+    /*
+     * The editor's timeline, for the same reason as the segmented control: the
+     * lanes sit inside a horizontal scroller that clips them, so an outward
+     * ring would be cut off at both ends of the clip. It is the one control on
+     * the Editor screen the keyboard lands on to move the playhead, so a ring
+     * that could not be seen would be the whole of that screen's keyboard
+     * affordance gone.
+     */
+    '.clipped-timeline__lanes:focus-visible',
   ];
 
   it.each(MOVED_RING)('is the global ring moved by %s, not a second one', (selector) => {

@@ -72,9 +72,9 @@ describe('the application shell', () => {
   });
 
   /*
-   * The five screens that are written — Home and Library (issue #60), Games
-   * (issue #107), Settings (issue #51) and Diagnostics (issue #101) — are
-   * therefore not in this list. They are named rather than
+   * The six screens that are written — Home and Library (issue #60), Games
+   * (issue #107), Editor (issue #83), Settings (issue #51) and Diagnostics
+   * (issue #101) — are therefore not in this list. They are named rather than
    * filtered by "has a screen", because a list that computed itself from the
    * same fact the shell routes on could not fail: the point of naming them is
    * that building a screen and forgetting to route it, or routing one that was
@@ -84,6 +84,7 @@ describe('the application shell', () => {
     'home',
     'library',
     'games',
+    'editor',
     'settings',
     'diagnostics',
   ];
@@ -118,6 +119,7 @@ describe('the application shell', () => {
   const ROUTED: readonly (readonly [string, string])[] = [
     ['Library', 'Why this list is empty'],
     ['Games', 'Game detection'],
+    ['Editor', 'Open clip'],
     ['Diagnostics', 'Capture health'],
   ];
 

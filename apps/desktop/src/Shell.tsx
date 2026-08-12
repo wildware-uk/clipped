@@ -6,6 +6,7 @@ import { Link, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { ClipPlaybackScreen } from './ClipPlaybackScreen';
 import { CLIP_ROUTE, clipPath, isClipPath } from './clipPlayback';
 import { DiagnosticsScreen } from './DiagnosticsScreen';
+import { EditorScreen } from './editor/EditorScreen';
 import { GamesScreen } from './GamesScreen';
 import { HomeScreen } from './HomeScreen';
 import { LibraryScreen } from './LibraryScreen';
@@ -48,11 +49,17 @@ function titleFor(pathname: string, screen: Screen | undefined): string {
  *
  * Every route still comes from `SCREENS`, so the sidebar and the router cannot
  * disagree about what the application contains; this is only the question of
- * which element sits behind one. Five of the seven are written — Home and Library
- * (issue #60), Games (issue #107), Settings (issue #51) and Diagnostics
- * (issue #101) — and the other two are still the placeholder that names the issue
- * building them. The change that builds another screen adds it here, which is the
- * one place that knows a screen from a placeholder.
+ * which element sits behind one. Six of the seven are written — Home and Library
+ * (issue #60), Games (issue #107), Editor (issue #83), Settings (issue #51) and
+ * Diagnostics (issue #101) — and the last, Trash, is still the placeholder that
+ * names the issue building it. The change that builds another screen adds it
+ * here, which is the one place that knows a screen from a placeholder.
+ *
+ * The Editor is given no clip, because nothing in this window can open one: a
+ * clip's edit document is a row of a database this process may not read
+ * (issue #306). The screen says so rather than drawing an empty timeline, and
+ * takes the document as a prop so that the day something can supply one, this is
+ * the line that changes.
  */
 function elementFor(screen: Screen, view: RecorderLinkView, notice: string | undefined): ReactNode {
   switch (screen.id) {
@@ -62,6 +69,8 @@ function elementFor(screen: Screen, view: RecorderLinkView, notice: string | und
       return <LibraryScreen />;
     case 'games':
       return <GamesScreen link={view.link} />;
+    case 'editor':
+      return <EditorScreen />;
     case 'settings':
       return <SettingsScreen />;
     case 'diagnostics':
