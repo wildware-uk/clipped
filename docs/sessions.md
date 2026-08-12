@@ -11,6 +11,7 @@ they start and finalises the recording when they stop
 issue that builds it.
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
+[#38]: https://github.com/wildware-uk/clipped/issues/38
 [#41]: https://github.com/wildware-uk/clipped/issues/41
 [#42]: https://github.com/wildware-uk/clipped/issues/42
 [#46]: https://github.com/wildware-uk/clipped/issues/46
@@ -74,9 +75,10 @@ keep everything (SPEC.md section 7).
 The other three modes are not offered rather than offered and doing nothing.
 Match Recording needs an integration that can say when a match begins, which is
 the highlight provider API in M9. Highlights Only and Manual/Replay Buffer need a
-replay buffer a clip can be *saved* from: the buffer exists and fills from the
-same encoder (`docs/replay-buffer.md`), and turning a window of it into a file is
-[#37].
+replay buffer a clip can be *saved* from: the buffer exists, fills from the same
+encoder and can be written out as a clip (`docs/replay-buffer.md`, [#37]). What
+is still missing is anything that asks for one — a command ([#38]) or a hotkey
+that reaches the recorder.
 
 ## How a launch becomes a recording
 

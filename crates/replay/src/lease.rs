@@ -119,15 +119,21 @@ impl SegmentLease {
     /// Extra material before the requested start, kept because the segment
     /// containing that instant begins earlier.
     ///
-    /// Between zero and one segment. Trimming it off is
-    /// [issue #37](https://github.com/wildware-uk/clipped/issues/37); until
-    /// then a saved clip begins here.
+    /// Between zero and one segment, and it is not trimmed off: a clip that
+    /// began at the requested instant would open with pictures nothing can
+    /// decode, so a saved clip begins here and says it did
+    /// ([`SavedClip::leading_slack`](crate::SavedClip::leading_slack)).
     #[must_use]
     pub fn leading_slack(&self) -> Duration {
         self.requested.start().saturating_sub(self.covered.start())
     }
 
     /// Extra material after the requested end, kept for the same reason.
+    ///
+    /// This end *is* trimmed when the clip is written, because nothing after
+    /// the requested end has to be there for what precedes it to decode
+    /// (`crate::save`). A lease still holds it, so that the decision belongs to
+    /// the save rather than to the selection.
     #[must_use]
     pub fn trailing_slack(&self) -> Duration {
         self.covered.end().saturating_sub(self.requested.end())
@@ -159,8 +165,9 @@ impl SegmentLease {
 
     /// Every packet in every segment, in the order the encoder produced them.
     ///
-    /// This is what a save writes. The first packet is a keyframe, which is
-    /// what makes the result decodable on its own.
+    /// This is what [`save_clip`](crate::save_clip) writes, minus whatever falls
+    /// after the requested end. The first packet is a keyframe, which is what
+    /// makes the result decodable on its own.
     pub fn packets(&self) -> impl Iterator<Item = SegmentPacket<'_>> + '_ {
         self.segments.iter().flat_map(|segment| segment.packets())
     }

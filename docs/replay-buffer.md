@@ -4,14 +4,14 @@ Clipped keeps the last few minutes of a game in memory so that a hotkey pressed
 *after* something interesting still produces a clip of it. This document covers
 the part of that which exists today: the rolling buffer of encoded segments in
 `crates/replay` ([issue #35](https://github.com/wildware-uk/clipped/issues/35)),
-what it costs, and what it does when it cannot have what it asked for.
+what it costs, what it does when it cannot have what it asked for, and — since
+[issue #37](https://github.com/wildware-uk/clipped/issues/37) — how a leased
+range becomes a playable file.
 
-**What does not exist yet is the save.** Turning a leased range into a playable
-file is [issue #37](https://github.com/wildware-uk/clipped/issues/37); the
-`recorder replay` command that would drive it is
-[issue #38](https://github.com/wildware-uk/clipped/issues/38) and the hotkey is
-[issue #39](https://github.com/wildware-uk/clipped/issues/39). Spilling segments
-to disk for long durations is
+**What does not exist yet is anything that asks for one.** The `recorder replay`
+command is [issue #38](https://github.com/wildware-uk/clipped/issues/38) and the
+hotkey is [issue #39](https://github.com/wildware-uk/clipped/issues/39).
+Spilling segments to disk for long durations is
 [issue #36](https://github.com/wildware-uk/clipped/issues/36), and the
 "per-configuration ceiling" section below is the argument for why it has to
 exist. Nothing in the shipped recorder turns a replay buffer on: `clipped-session`
@@ -84,10 +84,11 @@ buffer can actually act on, so the granularity is the larger of the two.
 
 At that default:
 
-- A saved clip carries **up to two seconds of extra video before the requested
+- A lease carries **up to two seconds of extra video before the requested
   start** and **up to two seconds after the requested end**.
-  `SegmentLease::leading_slack` and `trailing_slack` report exactly how much,
-  and trimming it to the requested range is issue #37.
+  `SegmentLease::leading_slack` and `trailing_slack` report exactly how much.
+  The save keeps the first and trims the second; "What a save gives you" below
+  is the rule and the reason.
 - The requested range is always covered in full when the buffer held it.
   `SegmentLease::is_complete` says whether it did, and `shortfall` says by how
   much it did not.
@@ -179,6 +180,105 @@ across a filesystem call, an unbounded allocation, or a wait on another thread.
 The one moment a reader holds it longer is the open-segment copy above. Measured
 on the hardware below, taking a lease over a full 5-minute window took **0.77
 ms** — under a twentieth of a frame interval at 60 fps, once per save.
+
+## What a save gives you
+
+`clipped_replay::save_clip` takes a lease, a destination and a video track
+description, and writes a Matroska file. It is **not a second muxer**: a clip is
+the same encoded packets a recording is made of, in the same container, so the
+save is a loop over the lease driving `clipped_muxer::MkvWriter` — the writer a
+recording is written by (AGENTS.md section 55). Everything the container already
+does for a recording, a clip therefore gets: timestamps rebased onto the first
+packet, decode timestamps forced to increase, and a file that stays playable if
+the process is killed while it is being written.
+
+That is why `clipped-replay` depends on `clipped-muxer` rather than sitting
+beside it. The dependency points one way — nothing in the muxer knows a replay
+buffer exists — and README.md's "Dependency direction" carries the argument.
+
+### The two ends are not symmetrical
+
+```text
+ segments      │▓▓▓▓▓▓▓▓│▓▓▓▓▓▓▓▓│▓▓▓▓▓▓▓▓│▓▓▓▓▓▓▓▓│
+ requested          ├──────────────────┤
+ written        ├──────────────────────┤
+```
+
+**At the front the clip is longer than was asked for**, and it cannot be
+otherwise. A coded picture references the pictures before it, so a stream can
+only be cut immediately before a keyframe; a clip that began at the requested
+instant would open with pictures nothing can decode. It therefore begins at the
+keyframe at or before the requested start, which at the two-second default is up
+to two seconds early. `SavedClip::leading_slack` reports how much a particular
+clip carries, so a caller can say so rather than leaving somebody to notice.
+
+**At the end it is trimmed to the request.** Nothing after the requested end has
+to be there for what precedes it to decode, so it is not written. The trim is
+made *in decode order* — everything up to and including the last packet
+*presented* at or before the requested end — which is what keeps it safe for an
+encoder that reorders: every picture a written packet references was decoded
+before it, so it was written too. Trimming on the first packet past the end would
+drop pictures that later ones need.
+
+So the tolerance a caller may rely on is:
+
+```text
+requested length  ≤  clip length  <  requested length + segment length
+```
+
+and the extra is at the front. Measured on the fixture in
+`crates/replay/tests/save_clip.rs` — 640×360 at 60 fps, H.264, two-second
+keyframes — a request for the previous 60 seconds produced a clip of **61.983
+seconds in 3,720 packets, 1.983 s of which is before the requested start**,
+15,507,949 bytes of coded video. `ffprobe` decodes all 3,720 pictures of it.
+
+A clip the buffer could not fill is still written: a hotkey pressed ten seconds
+into a session asking for the last thirty produces the ten seconds there are,
+with `SavedClip::is_complete` false and `shortfall` saying what was missing.
+Refusing would be worse — there is a clip to be had, and it is the clip somebody
+asked for.
+
+### Audio: there is none, deliberately
+
+A replay is video only. A recording has no audio track yet
+([issue #180](https://github.com/wildware-uk/clipped/issues/180)), so there is
+nothing in the buffer to write, and carrying every audio track into a replay is
+[issue #40](https://github.com/wildware-uk/clipped/issues/40), which is where it
+will be verified. `save_clip` takes a `VideoTrack` rather than a
+`RecordingLayout` so that this is a property of the signature and not a comment:
+a caller cannot hand it audio tracks that would be silently dropped.
+
+### Where the work happens
+
+Not on the capture thread. `save_clip` never touches the buffer at all — it
+reads a lease, whose segments are immutable and kept alive by their own reference
+count — so the only moment a save spends under the buffer's lock is taking the
+lease, measured at 0.77 ms for a five-minute window above. What that asks of a
+caller is one thing: **take the lease wherever is convenient and call
+`save_clip` on a thread that is not capturing** (AGENTS.md section 20).
+
+`crates/replay/tests/save_clip.rs` holds that to be true rather than asserting
+it: a thread stands in for the capture and encode loop, pushing real coded
+pictures into the buffer *and* writing each of them to a recording of its own,
+while a clip is saved from the same packets on another thread. It waits for
+capture to advance while the save thread is still running, so a save that blocked
+the buffer — or one that wrote nothing — ends the wait with nothing counted and
+fails. Afterwards the buffered video is checked frame by frame against the frame
+numbers it was pushed with, so a single picture lost across the save is a
+failure, and both files are decoded.
+
+### Names, and two saves at once
+
+Nothing in `save_clip` invents a file name, and a path that is already taken is
+refused rather than overwritten (AGENTS.md section 56). Deciding what a clip
+should be called belongs to the layer that knows what it is of, which is
+[issue #38](https://github.com/wildware-uk/clipped/issues/38).
+
+Two saves at once need nothing special: two leases are two independent sets of
+references and two writers are two files. The test above takes two leases a
+moment apart out of a buffer that is still being written to, writes both
+concurrently, and checks that the buffer took every packet throughout and will
+still serve a third clip afterwards.
 
 ## Per-configuration ceiling
 
@@ -467,8 +567,8 @@ produces, which for a real game is the configured one.
 ## Threading
 
 ```text
- capture + encode thread                    save thread (issue #37)
- ───────────────────────                    ───────────────────────
+ capture + encode thread                    save thread
+ ───────────────────────                    ───────────
  acquire a frame
  submit it to the encoder
  drain packets ─┬─▶ bounded queue ─▶ MkvWriter
@@ -477,7 +577,7 @@ produces, which for a real game is the configured one.
                         (memcpy)                       │
                                                  SegmentLease
                                                        │
-                                             read packets, write the clip
+                                              save_clip ─▶ MkvWriter
 ```
 
 One writer, any number of readers. The buffer takes the lock itself so that
@@ -493,11 +593,12 @@ and a wrong number in a report is a smaller failure than a recording that stops
   ([issue #40](https://github.com/wildware-uk/clipped/issues/40)), and
   `clipped-session` has no audio path yet
   ([issue #180](https://github.com/wildware-uk/clipped/issues/180)). The segment
-  model does not assume one stream, but nothing has been built for more.
-- **Trimming to the requested range.** A lease reports its slack; issue #37
-  decides whether a clip is trimmed to the frame or left on segment boundaries.
-- **Two saves in quick succession.** Concurrent leases work and are tested here;
-  what two overlapping *files* should be called is issue #37's.
+  model does not assume one stream, but nothing has been built for more, and a
+  clip written today is video only.
+- **What a clip is called, and where it goes.** `save_clip` writes where it is
+  told and refuses a name that is taken; choosing one is
+  [issue #38](https://github.com/wildware-uk/clipped/issues/38), which is also
+  what will decide whether a saved clip is entered in the recording library.
 - **Interaction with a full-session recording**, and with automatic highlight
   clipping in M10. Both consume the same packets and neither has been written.
 

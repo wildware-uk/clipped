@@ -20,37 +20,42 @@
 //! - Selecting the segments that cover a requested range and holding them
 //!   against eviction while a save reads them: [`ReplayBuffer::lease`],
 //!   [`SegmentLease`].
+//! - Writing those segments out as a playable clip: [`save_clip`],
+//!   [`SavedClip`].
 //! - Saying what it holds and what it has thrown away: [`ReplayStats`].
 //!
 //! # Not responsible for
 //!
-//! Encoding (see `clipped-encoder`), writing the saved clip (see
-//! `clipped-muxer`, and
-//! [issue #37](https://github.com/wildware-uk/clipped/issues/37) for the save
-//! itself), spilling segments to disk for long durations
-//! ([issue #36](https://github.com/wildware-uk/clipped/issues/36)), or deciding
-//! when to save ([issues #38 and
-//! #39](https://github.com/wildware-uk/clipped/issues/38)). A lease is where
-//! this crate stops: it hands over the exact packets a clip needs and
-//! guarantees they stay readable, and something else turns them into a file.
+//! Encoding (see `clipped-encoder`), the container itself (see `clipped-muxer`,
+//! whose `MkvWriter` a save drives — there is no second muxer here), spilling
+//! segments to disk for long durations
+//! ([issue #36](https://github.com/wildware-uk/clipped/issues/36)), deciding
+//! *when* to save ([issues #38 and
+//! #39](https://github.com/wildware-uk/clipped/issues/38)), or what a clip
+//! should be called, which belongs to the layer that knows what it is of.
 //!
 //! # Position in the architecture
 //!
-//! Sits above `clipped-encoder`, whose packets it consumes, and below
-//! `clipped-session`, which owns the thread that drives capture into the
-//! encoder and pushes each packet here as well as to the muxer. The buffer is a
-//! *second consumer of the same packets*, not a second encoder: a recording and
-//! a replay buffer running at once encode once.
+//! Sits above `clipped-encoder`, whose packets it consumes, and
+//! `clipped-muxer`, which writes the clips it saves; below `clipped-session`,
+//! which owns the thread that drives capture into the encoder and pushes each
+//! packet here as well as to the muxer. The buffer is a *second consumer of the
+//! same packets*, not a second encoder: a recording and a replay buffer running
+//! at once encode once, and a clip saved from the buffer is written by the same
+//! writer the recording is.
 //!
 //! # What a save costs, and why
 //!
 //! A segment begins on a keyframe because a stream can only be cut there, so
-//! the keyframe interval is the granularity of a save: a clip keeps up to one
-//! segment of extra video before the requested start and up to one after the
-//! requested end, which [`SegmentLease::leading_slack`] and
-//! [`SegmentLease::trailing_slack`] report. At the two-second default that is
-//! at most two seconds either side. `docs/replay-buffer.md` covers the
-//! trade-off, the measured memory figures and the behaviour under pressure.
+//! the keyframe interval is the granularity of a save. A saved clip is
+//! therefore **never shorter than was asked for and never more than one segment
+//! longer, and the extra is at the front**: it begins at the keyframe at or
+//! before the requested start — up to two seconds early at the default segment
+//! length — and is trimmed to the requested end.
+//! [`SavedClip::leading_slack`] reports how much extra a particular clip
+//! carries. `crate::save` sets out why the two ends differ, and
+//! `docs/replay-buffer.md` covers the trade-off, the measured memory figures and
+//! the behaviour under pressure.
 //!
 //! # Example
 //!
@@ -100,6 +105,7 @@ mod config;
 mod error;
 mod lease;
 mod range;
+mod save;
 mod segment;
 
 pub use buffer::{PushOutcome, ReplayBuffer, ReplayStats};
@@ -107,4 +113,5 @@ pub use config::{ReplayConfig, DEFAULT_SEGMENT, MAXIMUM_WINDOW, MINIMUM_WINDOW};
 pub use error::{ConfigError, LeaseError};
 pub use lease::SegmentLease;
 pub use range::TimeRange;
+pub use save::{save_clip, SaveError, SavedClip};
 pub use segment::{Segment, SegmentId, SegmentPacket};

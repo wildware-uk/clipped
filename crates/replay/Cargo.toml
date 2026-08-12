@@ -15,6 +15,17 @@ authors.workspace = true
 # bytes, two timestamps and a picture kind" would be one that can drift
 # (README, "Dependency direction": layer 2 may name layer 1).
 clipped-encoder.workspace = true
+# The writer a saved clip is written with. A clip is the same encoded packets a
+# recording is made of, in the same container, so `save_clip` drives
+# `MkvWriter` rather than containing a second Matroska implementation
+# (AGENTS.md section 55, issue #37). This is what puts this crate above
+# `clipped-muxer` in the layering rather than beside it; README.md,
+# "Dependency direction", carries the argument.
+clipped-muxer.workspace = true
+# For `RedactedPath`. A clip's path contains the account name and the folders
+# somebody chose, so `SaveError` and the log line report the reduced form
+# (docs/logging.md, "Privacy").
+clipped-logging.workspace = true
 tracing.workspace = true
 
 # The memory harness that produced the figures in docs/replay-buffer.md. It
@@ -38,6 +49,13 @@ windows = { workspace = true, features = [
 # workspace presents the same argument syntax and the same usage errors (the
 # root manifest says why).
 clap.workspace = true
+# What a saved clip is checked with: the container opens, the video stream is
+# the one that was asked for, its frames *decode*, the duration is plausible and
+# the timestamps increase (AGENTS.md section 22). It is also where
+# `tests/save_clip.rs` gets the FFmpeg programs it produces its H.264 fixture
+# with — the packets a replay buffer holds have to be real coded video for
+# `decoded_frames_at_least` to mean anything, and this crate links no encoder.
+clipped-media-validation.workspace = true
 
 [lints]
 workspace = true
