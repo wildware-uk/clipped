@@ -189,6 +189,7 @@ name = "clipped-audio"
 version = "0.1.0"
 dependencies = [
  "clipped-logging",
+ "clipped-windows",
  "tracing",
  "tracing-subscriber",
  "windows",
@@ -349,6 +350,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "clipped-process-tree-audio"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clipped-audio",
+ "clipped-media-validation",
+ "clipped-video-pattern",
 ]
 
 [[package]]

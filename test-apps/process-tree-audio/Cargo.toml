@@ -1,0 +1,55 @@
+[package]
+name = "clipped-process-tree-audio"
+description = "A controlled test application whose child process plays a known tone, for process-scoped audio capture tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Never published: this is a test subject, not a part of the product. It is a
+# workspace member so that `cargo build --workspace` and `cargo clippy
+# --workspace --all-targets` hold it to the same standard as everything else —
+# a test application nobody compiles is a capture test that stops running
+# (AGENTS.md section 26).
+publish = false
+
+[[bin]]
+name = "process-tree-audio"
+path = "src/main.rs"
+
+[dependencies]
+# The command-line parser every executable in this workspace uses, so that
+# `--help` looks the same wherever a contributor meets it. Dual MIT/Apache-2.0.
+clap.workspace = true
+
+# The render stream this application plays its tone through. `video-pattern`
+# already owns the one copy of "open the default output endpoint in shared mode
+# and feed it", written to be shared (AGENTS.md section 55); a second copy here
+# would be the fourth in the workspace and the first that nobody would notice
+# drifting.
+[target.'cfg(windows)'.dependencies]
+clipped-video-pattern.workspace = true
+
+# The capture under test. `tests/process_loopback_isolation.rs` records this
+# application's child through `clipped-audio` and asserts by frequency that the
+# track holds the tone the tree played and not the one an unrelated process was
+# playing at the same time — which is issue #26's first acceptance criterion,
+# and needs the subject and the capture in one place.
+#
+# It is a dev-dependency, so nothing in the product links a test application;
+# `tests/integration/tests/workspace_layering.rs` asserts that rather than
+# hoping.
+[target.'cfg(windows)'.dev-dependencies]
+clipped-audio.workspace = true
+
+# The Goertzel filter the isolation assertion is made with. `AudioContent` is
+# the media harness's own single-frequency measurement over samples already in
+# hand, which is exactly the question this test asks of a recording: how much of
+# each tree's tone is in this track. Reused rather than written a third time
+# (AGENTS.md section 55, issue #152). Nothing here runs ffprobe: this is the
+# sample-analysis half of the harness, which needs no tools at all.
+clipped-media-validation.workspace = true
+
+[lints]
+workspace = true
