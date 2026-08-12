@@ -111,7 +111,12 @@ const LAYERS: &[&[&str]] = &[
     // `fullscreen-dx11` is `video-pattern` pointed at a whole display, and
     // shares its renderer and its pattern rather than owning a second copy, so
     // it has to sit above it.
-    &["clipped-fullscreen-dx11"],
+    //
+    // `process-tree-audio` is here for the same reason: its child process plays
+    // a tone through `video-pattern`'s render stream, which is the workspace's
+    // one copy of "open the default output endpoint and feed it" (AGENTS.md
+    // section 55).
+    &["clipped-fullscreen-dx11", "clipped-process-tree-audio"],
 ];
 
 fn workspace_root() -> PathBuf {

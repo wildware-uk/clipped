@@ -1,36 +1,32 @@
 # Audio routing
 
-**Status: two streams exist, and they are not a track model yet.**
+**Status: three captures exist, and they are not a track model yet.**
 [Issue #19](https://github.com/wildware-uk/clipped/issues/19) built system audio
 capture: `clipped-audio` can record the output device Windows is playing
 through, as a continuous, timestamped stream of `f32` samples.
 [Issue #20](https://github.com/wildware-uk/clipped/issues/20) added microphone
-capture beside it, on the same engine. That is the foundation the track model is
-built on, and it is all there is: nothing yet writes either stream into a file,
-which is [issue #28](https://github.com/wildware-uk/clipped/issues/28). Routing
-— the part this document is named after — is milestone M2, and the sections at
-the end that describe it are still unwritten because describing behaviour before
-it is built produces a page that is wrong from the day it is committed
-(AGENTS.md section 7).
+capture beside it, on the same engine, and
+[issue #26](https://github.com/wildware-uk/clipped/issues/26) added the one this
+product exists for: **everything one game's process tree plays, and nothing
+else**. That is the foundation the track model is built on, and it is all there
+is — assembling a configured set of tracks, mixing the compatibility track
+([issue #29](https://github.com/wildware-uk/clipped/issues/29)) and capturing
+the complement of a game
+([issue #27](https://github.com/wildware-uk/clipped/issues/27)) are still to
+come, and the sections at the end that describe them are unwritten because
+describing behaviour before it is built produces a page that is wrong from the
+day it is committed (AGENTS.md section 7).
 
-One piece of M2 is built and is described here in full: **which processes a game
-consists of**, which is what "the game's audio" has to mean before anything can
-capture it ([issue #25](https://github.com/wildware-uk/clipped/issues/25)). No
-capture uses it yet — that is
-[issue #26](https://github.com/wildware-uk/clipped/issues/26) for the game's own
-track and [issue #27](https://github.com/wildware-uk/clipped/issues/27) for
-everything else — so [The game's process tree](#the-games-process-tree) below
-describes a facility with no consumer, deliberately said out loud.
-
-So this document describes two captures and one process tree: what the captures
-do, the two problems they exist to solve, what they convert, what happens when
-the user changes their audio device mid-recording, how a game's process tree is
-resolved and kept current, and how to check any of it for yourself. Most of it
-is written about system audio because that is where the machinery was built and
-where it is easiest to describe; the [Microphone](#microphone) section says what
-is different about the other one, and everything not listed there is the same
-code. The intended end state is SPEC.md sections 11 to 14, the constraints are
-AGENTS.md section 21, and the decision that shapes the whole subsystem is
+So this document describes three captures and one process tree: what they do,
+the problems they exist to solve, what they convert, what happens when the user
+changes their audio device mid-recording, how a game's process tree is resolved
+and kept current, and how to check any of it for yourself. Most of it is written
+about system audio because that is where the machinery was built and where it is
+easiest to describe; the [Microphone](#microphone) and
+[The game's own audio](#the-games-own-audio) sections say what is different
+about the other two, and everything not listed there is the same code. The
+intended end state is SPEC.md sections 11 to 14, the constraints are AGENTS.md
+section 21, and the decision that shapes the whole subsystem is
 [ADR 0003](adr/0003-process-specific-audio-capture.md).
 
 ## What it does
@@ -302,6 +298,98 @@ a second or two at a time and assert on frame counts, timestamps and whether
 silence is zero. None of them keeps a sample, writes one, or looks at what was
 said.
 
+## The game's own audio
+
+**This is the feature.** Everything one game's process tree plays, captured on
+its own, so that the game can be turned down in an edit days later without
+touching the voice chat that was playing over it
+([ADR 0003](adr/0003-process-specific-audio-capture.md)).
+
+```rust
+let mut capture = ProcessLoopbackCapture::open(game_process)?;
+while capture.target_is_running() {
+    match capture.read(Duration::from_millis(100))? {
+        Capture::Samples(audio) => { /* the game, and only the game */ }
+        Capture::Idle | Capture::FormatChanged(_) => {}
+    }
+}
+capture.finish(); // then read until `NotOpen`: see "Ending a capture" below.
+```
+
+`read`, `format` and `stats` behave exactly as they do for system audio, and the
+buffers are the same contiguous, timestamped `f32` on the same clock. Five
+things are different.
+
+**It is not on a device.** A process-scoped client is activated through
+`ActivateAudioInterfaceAsync` against a *virtual* device no enumerator lists,
+with the target process in an `AUDIOCLIENT_ACTIVATION_PARAMS` blob, and the call
+is asynchronous: it returns an operation object and calls a completion handler
+this crate implements. `crates/audio/src/windows/activation.rs` is that call and
+nothing else.
+
+One trap is worth stating because it costs an afternoon. The `PROPVARIANT` that
+carries the blob **borrows** it, and windows-rs implements `Drop` for
+`PROPVARIANT` as `PropVariantClear`, which for a `VT_BLOB` frees `pBlobData`.
+With a stack blob that is `CoTaskMemFree` on a stack address: the process dies
+with `STATUS_HEAP_CORRUPTION` the moment an activation succeeds. It is held in a
+`ManuallyDrop` for that reason.
+
+**Nobody says what shape the audio is.** There is no endpoint, so there is no
+mix format — `GetMixFormat` is not available on this client and the format is
+Clipped's choice, which the audio engine converts into. The choice is the
+default output endpoint's sample rate and channel count as 32-bit float, so that
+the game track can sit in one file beside the system-audio track without a
+resampler (issue #30); 48 kHz stereo is asked for if the engine refuses that or
+the machine has no output device. Whichever is accepted is **fixed for the life
+of the capture**, so a stream reopened mid-recording cannot change a track's
+shape underneath a muxer that has written a stream header.
+
+**The target is a tree, and Windows takes one root.**
+`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` includes the process named
+and the ones it started — including ones started *after* the capture was opened,
+which the isolation test asserts by starting the process that makes the noise
+only once the capture is running. Clipped tracks the same membership from this
+side with [the game's process tree](#the-games-process-tree), for the two
+questions the activation cannot answer:
+
+| What happens | What the capture does |
+| --- | --- |
+| A process of the game starts or exits | nothing: Windows follows the tree itself |
+| The process the activation names exits with descendants still running | re-scopes onto a surviving member and activates again, logging one `info`; the outage is filled with silence |
+| …and more than one member survives, in separate trees | re-scopes onto the lowest-numbered one and logs a `warn` naming the members whose audio is therefore not in this track ([issue #311](https://github.com/wildware-uk/clipped/issues/311)) |
+| The game and everything it started exit | `target_is_running` becomes `false`, one `info` is logged, and the track continues as silence until the caller stops it |
+| A process of the game cannot be opened | it is not a member — an unpinned identifier is not one to scope a capture to — and its name is logged at `debug` |
+
+The tree is rooted at the game rather than at the launcher, for the reason
+[The tree is rooted at the game](#the-tree-is-rooted-at-the-game-not-at-the-launch)
+gives: Steam's notification chime does not belong in a track named after a game.
+
+**Ending a capture drains it.** The audio engine holds up to 200 ms of captured
+audio; closing a capture throws that away, which is the last fraction of a
+second before somebody stopped recording — often the part they pressed the key
+for. `finish()` therefore leaves the capture readable and stops it looking
+forwards: the queued packets are handed over on the same timeline as everything
+before them, and then the capture closes itself and `read` reports `NotOpen`.
+The client is deliberately **not** stopped first. Measured on Windows 11 build
+26200, a process-scoped stream stopped after a 150 ms stall reported no queued
+packets at all, where the same stream drained before stopping produced the
+150 ms.
+
+**It may not be available at all.** Process loopback is documented from Windows
+build 20348, which no shipping Windows 10 release reaches, and
+`AudioError::ProcessLoopbackUnavailable` is what a machine below that floor
+produces. It is its own error precisely so a caller can tell it apart and take
+the documented fallback: **record one system-audio track and say that per-source
+separation is unavailable on this machine.** What must never happen is a track
+labelled "Game" that is really everything the machine played (ADR 0003's second
+consequence, AGENTS.md section 27). The message names the build number and the
+fallback, so a user whose tracks all came out identical can find out why.
+
+The floor itself is still unconfirmed on real hardware — this has only been run
+on Windows 11 build 26200, where it works — so
+[prerequisites.md](prerequisites.md) does not yet state a minimum version for
+it.
+
 ## The game's process tree
 
 A game is not one process. Steam starts a launcher, the launcher starts the
@@ -485,15 +573,18 @@ never changes.
   practice this is a game's anti-cheat or crash-reporting *service*, which runs
   as the system account and plays nothing; `TreeChange::refused` names them so
   that a case where it is plainly part of the game can be reported rather than
-  guessed at. Nothing logs those names yet, because nothing yet consumes a tree.
+  guessed at. `ProcessLoopbackCapture` logs them at `debug`.
 - **Where audio that belongs to no tree ends up** is not decided here. It is a
   question about the complement capture, and it belongs to
   [issue #27](https://github.com/wildware-uk/clipped/issues/27) with an
   observation behind it (ADR 0003's last consequence).
 - **Nothing has been tried against a real game.** The behaviour is asserted
-  against a chain of processes the tests start themselves. Anti-cheat wrappers
-  and launchers do things test fixtures do not, and the first real capture
-  (#26) is where that meets a game.
+  against a chain of processes the tests start themselves, and against
+  `test-apps/process-tree-audio`, whose child plays a known tone. Anti-cheat
+  wrappers and launchers do things test fixtures do not; a session that records
+  a real game is
+  [issue #22](https://github.com/wildware-uk/clipped/issues/22), and that is
+  where this meets one.
 
 ## Threading
 
@@ -567,6 +658,23 @@ The probe opens the same capture the recorder will, installs Clipped's logging
 so endpoint changes appear as they will in a session, and prints a line a
 second: frames captured, seconds of audio, how much of it was synthesised
 silence, endpoint changes, discontinuities, peak level and the device name.
+
+The game's own track has one too, and it is how a machine is asked whether it
+can do process-scoped capture at all:
+
+```text
+cargo run -p clipped-audio --example process_loopback_probe -- 30
+cargo run -p clipped-audio --example process_loopback_probe -- 30 12345
+```
+
+With no second argument it scopes the capture to *itself*, which plays nothing,
+so it makes no sound and still answers the questions that matter on a shared
+machine: whether the activation works on this build, what shape the audio engine
+accepted, whether packets arrive and whether their positions are
+performance-counter readings. Give it a game's process identifier to watch a
+real track — `peak` staying at zero while a game is plainly making a noise is
+the failure it exists to find — and it ends by draining, printing how much audio
+the engine still held.
 
 The process tree has a probe of its own, which measures rather than watches:
 
@@ -670,6 +778,40 @@ cargo test -p clipped-audio
   `Stream::lost` and everything after it is the code a real unplug runs. What
   no test covers is Windows returning that `HRESULT` in the first place — the
   same gap as the notification callbacks, and the same issue: #141.
+- **The game's own track**, in `src/windows/process_loopback.rs`. Four of these
+  capture a process tree that **plays nothing** — this test process, or a
+  `cmd.exe` chain the test starts — so they make no sound at all and are not
+  suppressed by `CLIPPED_SKIP_AUDIO`; what they need is a Windows that can scope
+  a capture to a process, which a GitHub runner cannot, so they skip loudly
+  there. They assert a contiguous timeline of the right length from a tree that
+  is silent; that stopping a capture after a 150 ms stall hands over about
+  150 ms of audio rather than losing it, and then reports `NotOpen`; that the
+  game exiting is noticed and leaves the track running as silence; and that a
+  game which exits the process it was launched as, leaving a descendant, is
+  followed onto that descendant with the recording contiguous across the
+  re-scoping.
+
+  Beside them are the arithmetic that needs no machine at all: the
+  `WAVEFORMATEXTENSIBLE` describing exactly the format the crate then converts
+  by, the speaker mask filled in for an unlabelled stereo endpoint and not
+  invented for anything else, the activation blob naming the process it scopes
+  to, an activation that never completes being given up on, the completion
+  handler signalling through its real vtable, and the check that decides whether
+  a stream's reported positions are performance-counter readings at all.
+- **Isolation**, in `test-apps/process-tree-audio/tests/`, which is the
+  acceptance criterion this feature stands or falls on and the one thing here
+  that makes a noise. Two process trees play two tones at once — 997 Hz from a
+  child the captured tree spawns *after* the capture is open, 1373 Hz from an
+  unrelated process — and the recording has to contain the first as its
+  strongest frequency, the second at least eight times down, and nothing at all
+  during the window before the child started. Run it with:
+
+  ```text
+  cargo test -p clipped-process-tree-audio
+  ```
+
+  `CLIPPED_SKIP_AUDIO` skips it; `CLIPPED_REQUIRE_AUDIO` turns the skip into a
+  failure.
 - **What is not tested automatically**, and is the honest gap in issue #20: no
   test plays a known waveform *into* a microphone. Doing that needs a virtual
   input device, which is not installed on the machine this was written on and
@@ -753,6 +895,21 @@ into failures on a machine that is supposed to have one.
   console role — is the one a chat application picks, and following it would
   mean a capture that changed device whenever a call started. Voice chat as its
   own track is [issue #27](https://github.com/wildware-uk/clipped/issues/27).
+- **Windows follows a process tree as it grows.** A capture is scoped once, and
+  a process the game starts afterwards is included without the client being
+  activated again. That is what
+  `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` is documented to do, and
+  the isolation test asserts it by starting the process that makes the noise
+  only after the capture is open — but it has been seen on one build of Windows,
+  and a build where it does not hold would need the capture to activate again
+  whenever the tree gains a member.
+- **A process-scoped client reports performance-counter positions.** Measured on
+  Windows 11 build 26200, where a silent tree produced exactly its sample rate
+  in frames per second with no silence synthesised, which only happens if the
+  positions are counter readings. It is not documented, so it is not trusted
+  blind: the first packet of such a stream is compared with the counter, and a
+  stream whose positions are not on it is timed by readings taken as each packet
+  is read, with one `warn` saying so.
 
 ## What this document will cover
 
@@ -760,10 +917,10 @@ Written during M2, alongside the code:
 
 - The track model as actually implemented, and how a configured set of tracks
   becomes a set of capture streams.
-- Process-scoped loopback capture in both directions: including a game's
-  process tree, and excluding it to obtain everything else
-  ([issue #26](https://github.com/wildware-uk/clipped/issues/26),
-  [issue #27](https://github.com/wildware-uk/clipped/issues/27)).
+- The other direction of process-scoped capture: excluding a game's tree to
+  obtain everything else
+  ([issue #27](https://github.com/wildware-uk/clipped/issues/27)). Including one
+  is written above.
 - What happens to audio that cannot be attributed to a process tree, once there
   is a capture to observe it with. How the tree itself is resolved and kept
   current is written above.
@@ -785,9 +942,14 @@ Written during M2, alongside the code:
 - Per-source processing — gain, mute, noise suppression, gate, compressor,
   limiter — and where in the chain each sits
   ([issue #31](https://github.com/wildware-uk/clipped/issues/31)).
-- How to verify isolation: the tone-generator system tests in `tests/audio`
-  ([issue #34](https://github.com/wildware-uk/clipped/issues/34)), which assert
-  by frequency rather than by ear, as `tests/system_audio.rs` already does for
-  one source.
-- The Windows version requirements the subsystem depends on, and how it behaves
-  on a machine that does not meet them.
+- How to verify isolation across the whole track model at once
+  ([issue #34](https://github.com/wildware-uk/clipped/issues/34)): a recording
+  with a game track, a system track and a microphone track, each asserted by
+  frequency to hold its own tone and none of the others. Two trees against one
+  capture is asserted today, in
+  `test-apps/process-tree-audio/tests/process_loopback_isolation.rs`.
+- The Windows version requirements the subsystem depends on, measured rather
+  than read off the documentation, and how it behaves on a machine that does not
+  meet them. What is known today is above: the activation fails and
+  `AudioError::ProcessLoopbackUnavailable` says so, and the floor itself is
+  unconfirmed on hardware.
