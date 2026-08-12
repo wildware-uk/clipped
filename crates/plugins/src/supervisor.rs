@@ -543,14 +543,29 @@ mod tests {
     use super::*;
     use crate::fixture::{install_example, session, until, TemporaryDirectory};
 
-    /// The longest a recording may spend on its plugins in one turn of its
-    /// loop, whatever they are doing.
+    /// The longest a recording may spend *draining its plugins' events*,
+    /// whatever they are doing.
     ///
-    /// This is the number the first acceptance criterion of issue #69 comes
-    /// down to. It is deliberately far larger than the work involved — draining
-    /// a queue of at most a few hundred events, and looking at a handful of
-    /// counters — so that it fails for a stall and not for a scheduler.
-    const NEVER_LONGER_THAN: Duration = Duration::from_millis(250);
+    /// Loose on purpose, and it does not need to be tight: a drain that had
+    /// gone wrong would not be *slower*, it would be **unbounded** — a loop
+    /// that empties a queue a flooding plugin is refilling does not finish
+    /// while the flood lasts. Half a second separates that from a machine
+    /// running eight tests and a flooding process at once, where a thread can
+    /// be descheduled for tens of milliseconds through nobody's fault
+    /// (AGENTS.md section 25).
+    ///
+    /// The sharp assertion beside this one is that a drain never returns more
+    /// than a queue's worth, which is not a measurement and cannot flake.
+    const A_DRAIN_IS_NEVER_LONGER_THAN: Duration = Duration::from_millis(500);
+
+    /// The longest a supervision poll may take.
+    ///
+    /// Deliberately much larger, and deliberately a separate number: a poll can
+    /// start a replacement plugin, and starting a process takes as long as the
+    /// operating system takes. What it may never do is *wait for a plugin* —
+    /// which is what this catches, since every way a plugin can make something
+    /// wait lasts far longer than this.
+    const A_POLL_IS_NEVER_LONGER_THAN: Duration = Duration::from_secs(5);
 
     /// A supervisor with a policy tuned to fail fast, so that the rules can be
     /// watched in a test rather than in an afternoon.
@@ -581,19 +596,26 @@ mod tests {
         events: &mut Vec<GameEvent>,
         reported: &mut Vec<SupervisionEvent>,
     ) {
-        let started = Instant::now();
+        let before_draining = Instant::now();
         let drained = receiver.drain();
+        let draining = before_draining.elapsed();
         assert!(
             drained.len() <= receiver.capacity(),
             "a drain must cost at most one queue, and this one cost {}",
             drained.len()
         );
-        events.extend(drained);
-        reported.extend(supervisor.poll(Instant::now()));
-        let spent = started.elapsed();
         assert!(
-            spent < NEVER_LONGER_THAN,
-            "a recording spent {spent:?} on its plugins in one turn of its loop"
+            draining < A_DRAIN_IS_NEVER_LONGER_THAN,
+            "a recording spent {draining:?} taking events from its plugins"
+        );
+        events.extend(drained);
+
+        let before_polling = Instant::now();
+        reported.extend(supervisor.poll(Instant::now()));
+        let polling = before_polling.elapsed();
+        assert!(
+            polling < A_POLL_IS_NEVER_LONGER_THAN,
+            "a supervision poll took {polling:?}, which is long enough to have waited for a plugin"
         );
     }
 
@@ -887,11 +909,21 @@ mod tests {
         assert_eq!(kill.timing().precision(), Duration::from_millis(100));
         assert_eq!(kill.data().fields()["weapon"], serde_json::json!("ak47"));
 
+        // Placed on the recording's timeline, and placed *earlier than the
+        // report that carried it*. The second half is the one worth checking:
+        // the queue was drained within a few milliseconds of the report
+        // arriving, so an event that was not moved back by the 480 ms the
+        // plugin said it was late would sit within a few milliseconds of now.
         let at = kill.timing().at().as_media_nanos();
+        let now = SessionTimeline::starting_at(started).now().as_media_nanos();
         assert!(
-            (1_000_000_000..3_000_000_000).contains(&at),
-            "the kill belongs 480 ms before the report arrived, which is about a second and a \
-             half into this recording, and was placed at {at}ns"
+            at > 1_000_000_000,
+            "the kill belongs on this recording's timeline, and was placed at {at}ns"
+        );
+        assert!(
+            at <= now - 400_000_000,
+            "the kill happened 480 ms before it was reported, and was placed at {at}ns with the \
+             recording at {now}ns"
         );
 
         // And it stops when the session does.

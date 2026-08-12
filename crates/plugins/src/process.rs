@@ -390,14 +390,78 @@ enum Line {
     End,
 }
 
+/// A line being accumulated, which never grows past its limit.
+///
+/// The bound is the whole reason this is a type rather than a `Vec<u8>` and an
+/// `if`: what it protects is an *allocation*, which the result of reading a
+/// line cannot show — a line given up on and a line given up on after
+/// allocating a gigabyte read back identically. Keeping the rule in something
+/// with a size that can be asked for is what makes it testable.
+#[derive(Debug)]
+struct BoundedLine {
+    kept: Vec<u8>,
+    seen: usize,
+    limit: usize,
+    overflowed: bool,
+}
+
+impl BoundedLine {
+    fn new(limit: usize) -> Self {
+        Self {
+            kept: Vec::new(),
+            seen: 0,
+            limit,
+            overflowed: false,
+        }
+    }
+
+    /// Takes the next piece of the line, keeping it only if it fits.
+    fn push(&mut self, bytes: &[u8]) {
+        self.seen += bytes.len();
+        if self.overflowed {
+            return;
+        }
+        if self.kept.len() + bytes.len() > self.limit {
+            // Past the limit: stop keeping any of it. Reading continues to the
+            // newline so that the *next* line is still readable.
+            self.overflowed = true;
+            self.kept = Vec::new();
+            return;
+        }
+        self.kept.extend_from_slice(bytes);
+    }
+
+    /// Whether nothing at all has arrived.
+    fn is_empty(&self) -> bool {
+        self.seen == 0
+    }
+
+    /// How much has been kept, in bytes of allocation.
+    #[cfg(test)]
+    fn allocated(&self) -> usize {
+        self.kept.capacity()
+    }
+
+    /// The line, or the report that it was too long.
+    fn finish(mut self) -> Line {
+        if self.overflowed {
+            return Line::TooLong { bytes: self.seen };
+        }
+        // A line written on Windows arrives with a carriage return.
+        if self.kept.last() == Some(&b'\r') {
+            self.kept.pop();
+        }
+        Line::Text(String::from_utf8_lossy(&self.kept).into_owned())
+    }
+}
+
 /// Reads one line, refusing to allocate more than `limit` for it.
 ///
 /// `BufRead::read_line` has no limit, which is the whole reason this exists: a
 /// plugin that prints a gigabyte before its first newline would otherwise be a
 /// gigabyte in this process.
 fn read_line(reader: &mut impl BufRead, limit: usize) -> io::Result<Line> {
-    let mut line: Vec<u8> = Vec::new();
-    let mut discarded = 0_usize;
+    let mut line = BoundedLine::new(limit);
 
     loop {
         let available = match reader.fill_buf() {
@@ -406,44 +470,22 @@ fn read_line(reader: &mut impl BufRead, limit: usize) -> io::Result<Line> {
             Err(error) => return Err(error),
         };
         if available.is_empty() {
-            return Ok(if line.is_empty() && discarded == 0 {
+            return Ok(if line.is_empty() {
                 Line::End
-            } else if discarded > 0 {
-                Line::TooLong {
-                    bytes: discarded + line.len(),
-                }
             } else {
-                Line::Text(String::from_utf8_lossy(&line).into_owned())
+                line.finish()
             });
         }
 
         match available.iter().position(|byte| *byte == b'\n') {
             Some(end) => {
-                let taken = end + 1;
-                if discarded == 0 && line.len() + end <= limit {
-                    line.extend_from_slice(&available[..end]);
-                    reader.consume(taken);
-                    // A line written on Windows arrives with a carriage return.
-                    if line.last() == Some(&b'\r') {
-                        line.pop();
-                    }
-                    return Ok(Line::Text(String::from_utf8_lossy(&line).into_owned()));
-                }
-                reader.consume(taken);
-                return Ok(Line::TooLong {
-                    bytes: discarded + line.len() + end,
-                });
+                line.push(&available[..end]);
+                reader.consume(end + 1);
+                return Ok(line.finish());
             }
             None => {
                 let length = available.len();
-                if line.len() + length > limit {
-                    // Past the limit: stop keeping it, and keep reading until
-                    // the newline so that the *next* line is still readable.
-                    discarded += line.len() + length;
-                    line.clear();
-                } else {
-                    line.extend_from_slice(available);
-                }
+                line.push(available);
                 reader.consume(length);
             }
         }
@@ -518,14 +560,19 @@ mod tests {
         );
     }
 
+    /// A torrent of `x`, a newline, and then something worth reading.
+    fn a_line_far_too_long() -> Vec<u8> {
+        let mut torrent = vec![b'x'; 4096];
+        torrent.push(b'\n');
+        torrent.extend_from_slice(b"{\"report\":\"alive\"}\n");
+        torrent
+    }
+
     #[test]
     fn an_endless_line_is_discarded_rather_than_allocated() {
         // The failure this exists for: a plugin that never sends a newline must
         // not be a plugin that owns as much of this process as it likes.
-        let mut torrent = vec![b'x'; 4096];
-        torrent.push(b'\n');
-        torrent.extend_from_slice(b"{\"report\":\"alive\"}\n");
-        let mut reader = io::Cursor::new(torrent);
+        let mut reader = io::Cursor::new(a_line_far_too_long());
 
         let read = read_line(&mut reader, 512).expect("a line");
         assert!(
@@ -537,5 +584,43 @@ mod tests {
             Line::Text(r#"{"report":"alive"}"#.to_owned()),
             "and the plugin is still readable afterwards"
         );
+    }
+
+    #[test]
+    fn an_endless_line_arriving_in_pieces_is_discarded_too() {
+        // The same thing over a reader that hands out a few bytes at a time,
+        // which is what a pipe does: a plugin sending a megabyte before its
+        // first newline arrives in buffer-sized pieces, and the limit has to
+        // hold across them rather than only within one.
+        let mut reader = BufReader::with_capacity(16, io::Cursor::new(a_line_far_too_long()));
+
+        let read = read_line(&mut reader, 512).expect("a line");
+        assert!(
+            matches!(read, Line::TooLong { bytes } if bytes >= 512),
+            "expected the line to be given up on, got {read:?}"
+        );
+        assert_eq!(
+            read_line(&mut reader, 512).expect("a line"),
+            Line::Text(r#"{"report":"alive"}"#.to_owned()),
+            "and the plugin is still readable afterwards"
+        );
+    }
+
+    #[test]
+    fn a_line_past_the_limit_stops_being_kept() {
+        // The allocation bound, which the outcome of reading cannot show: a
+        // line given up on immediately and a line given up on after keeping a
+        // megabyte of it read back as the same `TooLong`. This is why
+        // `BoundedLine` is a type with a size that can be asked for.
+        let mut line = BoundedLine::new(512);
+        for _ in 0..100 {
+            line.push(&[b'x'; 64]);
+            assert!(
+                line.allocated() <= 512,
+                "a plugin that never sends a newline has been allowed {} bytes of this process",
+                line.allocated()
+            );
+        }
+        assert_eq!(line.finish(), Line::TooLong { bytes: 6400 });
     }
 }

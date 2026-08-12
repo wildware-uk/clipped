@@ -152,6 +152,13 @@ impl EventReceiver {
     ///
     /// Events from several plugins are interleaved by arrival and are **not**
     /// in timeline order; sort by `timing().at()` (`crates/events`).
+    ///
+    /// The bound is proved by
+    /// `supervisor::tests::a_plugin_that_floods_is_bounded_counted_and_stopped_for_good`,
+    /// against a real flooding process, and not by a test in this module: two
+    /// threads of one process do not reliably outrun each other, so an
+    /// in-process producer makes a test that passes whether or not the bound is
+    /// there. A real plugin filling a pipe does outrun the drain, every time.
     #[must_use]
     pub fn drain(&self) -> Vec<GameEvent> {
         let mut events = Vec::with_capacity(0);
@@ -257,33 +264,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_producer_that_never_stops_cannot_keep_a_drain_going() {
-        // The failure the bound exists for, and it is not hypothetical: a
-        // flooding plugin delivers from its own thread while the recording
-        // drains, so "loop until the queue is empty" is a loop that a fast
-        // enough producer never leaves.
-        let (inbox, receiver) = inbox(8);
-        let (started, wait) = std::sync::mpsc::channel();
-        let producer = std::thread::spawn(move || {
-            let _ = started.send(());
-            for _ in 0..100_000 {
-                inbox.deliver(event());
-            }
-        });
-        wait.recv().expect("the producer started");
-
-        for _ in 0..50 {
-            let drained = receiver.drain();
-            assert!(
-                drained.len() <= receiver.capacity(),
-                "a drain took {} events from a queue of {}",
-                drained.len(),
-                receiver.capacity()
-            );
-        }
-        producer.join().expect("the producer finishes");
-    }
+    // There is deliberately no test here for "a producer that never stops
+    // cannot keep a drain going". One was written, and it passed with the bound
+    // removed: two threads of one process do not reliably outrun each other, so
+    // the drain emptied the queue between deliveries and the assertion never
+    // saw the case it was written for. The bound is proved instead by
+    // `supervisor::tests::a_plugin_that_floods_is_bounded_counted_and_stopped_for_good`,
+    // where the producer is a real process filling a pipe — which fails
+    // consistently when the bound is taken out. A test that cannot fail is
+    // worse than no test (AGENTS.md section 23).
 
     #[test]
     fn delivering_to_a_finished_recording_is_counted_rather_than_failing() {
