@@ -126,7 +126,7 @@ without being placed in a layer.
 | --- | --- | --- |
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
-| 2 | `clipped-muxer`, `clipped-league-plugin` (plugin) | layers 0–1 |
+| 2 | `clipped-muxer`, `clipped-league-plugin` (plugin, see below) | layers 0–1 |
 | 3 | `clipped-replay`, `clipped-export` | layers 0–2 |
 | 4 | `clipped-session` | layers 0–3 |
 | 5 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–4 |
@@ -135,12 +135,23 @@ without being placed in a layer.
 
 `clipped-league-plugin` is in `plugins/`, not `crates/`: it is a game
 integration ([docs/plugin-api.md](docs/plugin-api.md)), which is an executable
-the recorder *starts* rather than a crate anything links. Nothing may depend on
-it, which would argue for the top of the stack beside the test applications —
-but the top of the stack also permits depending on everything below, and a
-plugin that reached `clipped-session` would be a game's protocol inside the
-recording engine. Layer 2 is what makes the real rule enforceable: a plugin may
-name the plugin contract and the event vocabulary, and nothing else here.
+the recorder *starts* rather than a crate anything links. Layering is not what
+governs it, and no layer could: whichever one it sat at, every layer above would
+be free to name it, and every layer below would be free to be named by it. The
+two rules that actually apply are asserted directly, by
+`nothing_in_the_workspace_depends_on_a_plugin` and
+`a_plugin_names_only_the_plugin_contract_and_the_event_vocabulary` in
+`tests/integration/tests/workspace_layering.rs`:
+
+- **Nothing may depend on a plugin**, of any kind, including for tests. A plugin
+  is reached by starting a process.
+- **A plugin may name only `clipped-plugins` and `clipped-events`** — the
+  contract and the vocabulary. A plugin that reached `clipped-session` would be
+  a game's protocol inside the recording engine, which is what the process
+  boundary exists to prevent.
+
+Its layer is therefore only what the layer table needs in order to cover every
+member.
 
 Layers 6 and 7 are the controlled test applications in `test-apps/`, which
 capture tests point at instead of an installed game

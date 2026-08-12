@@ -170,9 +170,31 @@ mod windows_main {
         let watching = Arc::clone(&finished);
         thread::spawn(move || {
             for line in io::stdin().lock().lines() {
-                match line.as_deref().map(str::trim_end).map(read_command) {
-                    Ok(Ok(HostCommand::Detach)) | Err(_) => break,
-                    Ok(_) => {}
+                let Ok(line) = line else {
+                    // The pipe broke, which is the host having gone.
+                    break;
+                };
+                match read_command(line.trim_end()) {
+                    Ok(HostCommand::Detach) => break,
+                    // A second `attach` is not something this plugin acts on —
+                    // it is attached — but it is worth a line, because a host
+                    // sending one is a host doing something this plugin does
+                    // not expect.
+                    Ok(HostCommand::Attach { .. }) => {
+                        eprintln!(
+                            "league plugin: ignored an attach command while already attached"
+                        );
+                    }
+                    // Not a break: a line this build cannot read is the
+                    // compatibility policy's case (`docs/plugin-api.md`), and
+                    // leaving a recording unmarked over one unreadable line
+                    // would be worse than carrying on. But it is not silence
+                    // either — an unreadable command is how a contract drifts,
+                    // and nobody can see that happening if it is swallowed
+                    // (AGENTS.md section 15).
+                    Err(error) => {
+                        eprintln!("league plugin: could not read a host command: {error}");
+                    }
                 }
             }
             watching.store(true, Ordering::Relaxed);
