@@ -23,7 +23,11 @@
 //! # What exists today
 //!
 //! Windows, monitors and target selection
-//! ([issue #10](https://github.com/wildware-uk/clipped/issues/10)). COM and
+//! ([issue #10](https://github.com/wildware-uk/clipped/issues/10)), and the
+//! process tree a game's audio is scoped to
+//! ([issue #25](https://github.com/wildware-uk/clipped/issues/25)) — see
+//! [`ProcessTree`], and `docs/audio-routing.md` for what it is for and what it
+//! costs. COM and
 //! WinRT apartment handling arrives with the first capture backend
 //! ([issue #12](https://github.com/wildware-uk/clipped/issues/12)), which is
 //! what will need one; there is none here yet, because none of the calls below
@@ -56,15 +60,20 @@
 //! that reason: [`WindowsError::WindowGone`] is how a game closing reaches the
 //! caller, and [`is_window`] is the cheap check a capture loop makes.
 //!
-//! The one owned handle in the crate is the process handle behind
-//! [`process_image_path`], which is opened, read and closed inside that call
-//! and never escapes it (AGENTS.md section 58).
+//! The owned handles in the crate are process handles. The one behind
+//! [`process_image_path`] is opened, read and closed inside that call and never
+//! escapes it; a [`ProcessTree`] holds one per member for as long as it tracks
+//! that member, which is not tidiness but the mechanism — an open handle is
+//! what stops Windows reusing a process identifier underneath a recording
+//! (AGENTS.md section 58).
 //!
 //! # Threading
 //!
 //! Everything here is a free function that borrows nothing and shares nothing,
 //! so any of it can be called from any thread. Two callers enumerating at once
-//! get two independent snapshots.
+//! get two independent snapshots. [`ProcessTree`] is the one thing with state:
+//! it has a single owner, does its work on the calling thread, and is [`Send`]
+//! so that it can be moved to whichever thread that is.
 //!
 //! What must not be done from a capture thread is any of it. Enumeration walks
 //! every top-level window and opens a handle to every process behind them,
@@ -108,6 +117,7 @@ mod error;
 mod geometry;
 mod monitor;
 mod process;
+mod process_tree;
 mod selection;
 mod window;
 
@@ -117,6 +127,7 @@ pub use monitor::{
     enumerate_monitors, monitor_for_window, monitor_info, MonitorHandle, MonitorInfo,
 };
 pub use process::{process_image_name, process_image_path};
+pub use process_tree::{ProcessTree, TreeChange};
 pub use selection::{resolve, ResolveError, TargetSelector};
 pub use window::{
     enable_per_monitor_dpi_awareness, enumerate_windows, is_window, window_geometry, DpiAwareness,

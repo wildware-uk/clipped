@@ -38,6 +38,18 @@ pub enum WindowsError {
         handle: MonitorHandle,
     },
 
+    /// The process cannot be opened, so nothing can be asked about it.
+    ///
+    /// Two situations spell the same way and neither is a fault. The process
+    /// has exited — its identifier now names nothing, or something else
+    /// entirely — or it runs at a higher integrity level than Clipped, which an
+    /// unelevated application may not open at all. Anti-cheat services and
+    /// most of Windows' own processes are the second case.
+    ProcessUnavailable {
+        /// The identifier that could not be opened.
+        process_id: u32,
+    },
+
     /// A Windows API call failed.
     Api {
         /// The function that failed, as it is spelled in the Windows SDK, so
@@ -66,6 +78,11 @@ impl fmt::Display for WindowsError {
                 "the monitor {handle} is no longer attached, or the displays have been \
                  rearranged since it was enumerated"
             ),
+            Self::ProcessUnavailable { process_id } => write!(
+                formatter,
+                "process {process_id} cannot be opened: it has exited, or it runs at a higher \
+                 integrity level than this application"
+            ),
             Self::Api { operation, source } => {
                 write!(formatter, "{operation} failed: {source}")
             }
@@ -76,7 +93,9 @@ impl fmt::Display for WindowsError {
 impl Error for WindowsError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::WindowGone { .. } | Self::MonitorGone { .. } => None,
+            Self::WindowGone { .. }
+            | Self::MonitorGone { .. }
+            | Self::ProcessUnavailable { .. } => None,
             Self::Api { source, .. } => Some(source),
         }
     }
@@ -92,6 +111,17 @@ mod tests {
             handle: WindowHandle::from_raw(0x1234),
         };
         assert_eq!(error.to_string(), "the window 0x00001234 has closed");
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn a_process_that_cannot_be_opened_says_which_and_offers_both_reasons() {
+        let error = WindowsError::ProcessUnavailable { process_id: 4 };
+        assert_eq!(
+            error.to_string(),
+            "process 4 cannot be opened: it has exited, or it runs at a higher integrity level \
+             than this application"
+        );
         assert!(error.source().is_none());
     }
 
