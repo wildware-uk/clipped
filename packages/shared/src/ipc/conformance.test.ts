@@ -407,6 +407,8 @@ function replyDiscriminant(reply: Reply): string {
       return 'recording_started';
     case 'recording_stopped':
       return `recording_stopped.${reply.summary.end_reason}`;
+    case 'bookmark_added':
+      return 'bookmark_added';
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise
