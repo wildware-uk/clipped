@@ -83,6 +83,21 @@ windows-core.workspace = true
 [dev-dependencies]
 tracing-subscriber = "0.3"
 
+# The Goertzel filter `tests/compatibility_mix.rs` measures the mix with. A
+# compatibility mix that summed nothing and emitted silence of exactly the right
+# length would satisfy every structural assertion in this crate, so the claim
+# that every source is *audible* in it — and that no source is audible on
+# anybody else's track — is made by measuring energy at a frequency rather than
+# by asserting it (AGENTS.md sections 21 and 26). The same filter, through the
+# same type, that `crates/muxer/tests/multi_track_audio.rs` asserts a finished
+# recording with; sharing it is what keeps one measurement rather than two.
+#
+# Test-only and layer 0, which is what
+# `tests/integration/tests/workspace_layering.rs` holds it to: it must never
+# appear under `[dependencies]`. Nothing here needs `ffprobe` — the samples are
+# in hand, so `AudioContent::from_samples` is the whole of it. MPL-2.0.
+clipped-media-validation.workspace = true
+
 # `tests/system_audio.rs` plays a tone it synthesises itself, so that the
 # frequency assertion has a known signal to find and the test needs no installed
 # application (AGENTS.md sections 25 and 26). Rendering needs the same WASAPI

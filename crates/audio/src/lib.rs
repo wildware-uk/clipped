@@ -25,18 +25,27 @@
 //! [`docs/audio-routing.md`](../../../docs/audio-routing.md) describes their
 //! behaviour in full.
 //!
+//! Beside them, and the one piece of the track model that lives here:
+//! [`Mixer`] assembles the **compatibility mix**, the track a player that takes
+//! one audio track arbitrarily should take (SPEC.md section 13). It is the only
+//! place in Clipped where sources are deliberately combined, it combines copies,
+//! and it holds the result under full scale rather than letting several loud
+//! sources clip it (AGENTS.md section 21). Everything else about a source's
+//! audio — the level it is mixed at, the limiting — is invisible on that
+//! source's own track.
+//!
 //! The rest of the track model is not built. Capturing everything *except* a
-//! game is [issue #27](https://github.com/wildware-uk/clipped/issues/27), the
-//! compatibility mix is
-//! [issue #29](https://github.com/wildware-uk/clipped/issues/29), microphone
-//! processing and the optional raw microphone track are
+//! game is [issue #27](https://github.com/wildware-uk/clipped/issues/27),
+//! microphone processing and the optional raw microphone track are
 //! [issue #31](https://github.com/wildware-uk/clipped/issues/31) and
 //! [issue #32](https://github.com/wildware-uk/clipped/issues/32), and
 //! resampling between capture clocks is
-//! [issue #30](https://github.com/wildware-uk/clipped/issues/30). Nothing
-//! consumes what this crate produces yet, so no recording contains a game
-//! track: writing several audio tracks into one file is
-//! [issue #28](https://github.com/wildware-uk/clipped/issues/28).
+//! [issue #30](https://github.com/wildware-uk/clipped/issues/30) — which is also
+//! what the mix needs before it can carry a source captured at a different rate
+//! from its own. Nothing consumes the mix yet: a recording session opens the
+//! captures and writes their tracks (`clipped-session`), and giving the mix
+//! track its samples is the remaining half of
+//! [issue #29](https://github.com/wildware-uk/clipped/issues/29).
 //!
 //! # Responsibilities
 //!
@@ -127,6 +136,7 @@
 mod buffer;
 mod error;
 mod format;
+mod mix;
 mod time;
 mod timeline;
 
@@ -136,4 +146,5 @@ pub mod windows;
 pub use buffer::{CapturedAudio, SampleOrigin};
 pub use error::{AudioError, Capture};
 pub use format::{AudioFormat, ChannelMask, SampleFormat};
+pub use mix::{Level, MixError, MixReport, MixSourceId, MixedAudio, Mixer};
 pub use time::AudioTimestamp;
