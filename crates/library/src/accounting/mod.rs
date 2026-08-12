@@ -146,7 +146,14 @@ mod error;
 mod inventory;
 mod limits;
 mod reconcile;
-mod roots;
+/// Where each kind of file lives, as the caller declares it.
+///
+/// Visible to the rest of the crate rather than to accounting alone, for
+/// [`roots::contains`]: "is this path inside that directory?" is also the guard
+/// that stops the trash unlinking anything it did not put there
+/// (`crate::trash`), and one comparison that handles Windows' case rules is
+/// better than two (AGENTS.md section 55).
+pub(crate) mod roots;
 mod scan;
 mod status;
 mod volume;

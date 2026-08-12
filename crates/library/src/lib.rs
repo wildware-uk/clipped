@@ -11,15 +11,20 @@
 //! - Thumbnails, and waveform bookkeeping.
 //! - Storage accounting and the limits configured against it:
 //!   [`accounting`].
+//! - The trash a deletion goes to, and the restore that undoes it: [`trash`].
 //!
 //! # Not responsible for
 //!
 //! Storage primitives (see `clipped-storage`), capture, encoding or muxing.
-//! Nothing here deletes a *recording* — measuring what is on disk and removing
-//! something from it are deliberately different modules in different tickets
-//! (AGENTS.md section 56). [`thumbnail`] is the one module that writes files of
-//! its own, and everything it writes is a disposable copy of something the
-//! recording still holds.
+//! [`thumbnail`] is the one module that writes files of its own, and everything
+//! it writes is a disposable copy of something the recording still holds.
+//!
+//! **[`trash`] is the only module here that can remove a recording**, it can
+//! only remove one that is already in the trash, and it can only unlink a file
+//! that is inside the trash directory. Measuring what is on disk
+//! ([`accounting`]) and reconciling the index against it ([`index`]) still
+//! delete nothing at all: a recording that has gone is marked, never removed
+//! (AGENTS.md section 56).
 //!
 //! # Position in the architecture
 //!
@@ -50,10 +55,18 @@
 //! database, and runs on a background thread that a recording suspends. It is
 //! the one part of this crate that opens a media file.
 //!
+//! [`trash`]: deleting a recording so that it can be undeleted, with the
+//! retention SPEC.md section 28 configures and a restore that returns the file
+//! byte for byte (`docs/storage-management.md`,
+//! [issue #94](https://github.com/wildware-uk/clipped/issues/94)). It is what
+//! makes [issue #111](https://github.com/wildware-uk/clipped/issues/111)'s
+//! automatic cleanup defensible.
+//!
 //! Nothing else in this crate is built yet.
 
 pub mod accounting;
 pub mod index;
 pub mod search;
 pub mod thumbnail;
+pub mod trash;
 pub mod virtual_clip;

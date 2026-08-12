@@ -125,7 +125,10 @@ fn overlaps(left: &Path, right: &Path) -> bool {
 /// `C:\Videos2` is not treated as living inside `C:\Videos`. Neither path is
 /// touched on disk: this has to work for a drive that is not connected, which is
 /// exactly when a user is configuring one.
-fn contains(outer: &Path, inner: &Path) -> bool {
+///
+/// `crate::trash` uses it as the guard on the one function in this crate that
+/// unlinks a media file, so the case rules below are load-bearing twice over.
+pub(crate) fn contains(outer: &Path, inner: &Path) -> bool {
     let mut outer = outer.components();
     let mut inner = inner.components();
 
