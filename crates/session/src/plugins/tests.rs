@@ -426,6 +426,15 @@ fn a_plugin_that_hangs_does_not_delay_the_end_of_a_recording() {
     // The failure a plugin is a separate process for. It says hello, stops
     // answering, and ignores `detach` — so ending the recording means killing
     // it, which is not possible for a thread that has stopped answering.
+    //
+    // The policy below is `impatient()` with one number moved, and the reason is
+    // the whole point of the test. A silence timeout of 400 ms would have the
+    // ordinary supervision loop kill this plugin for going quiet *before* the
+    // recording ever ended, so `finish` would be handed a plugin that was
+    // already dead and the shutdown path — detach, poll, kill what ignored it —
+    // would never run. Holding the silence open past the end of the test is what
+    // makes the plugin still be hanging at the moment the recording ends, which
+    // is the case this test is named for.
     let root = TemporaryDirectory::new("session-plugins-hang");
     let plugin = enabled(install(
         &root,
@@ -435,8 +444,12 @@ fn a_plugin_that_hangs_does_not_delay_the_end_of_a_recording() {
         "cs2.exe",
     ));
 
+    let policy = SupervisionPolicy {
+        silence_timeout: Duration::from_secs(120),
+        ..impatient()
+    };
     let progress = RecordingProgress::new();
-    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, impatient());
+    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, policy);
     progress.timeline_began(Instant::now());
 
     let mut reports = Vec::new();
@@ -446,6 +459,13 @@ fn a_plugin_that_hangs_does_not_delay_the_end_of_a_recording() {
             .iter()
             .any(|report| matches!(report, SupervisionEvent::Ready { .. }))
     });
+    assert!(
+        !reports
+            .iter()
+            .any(|report| matches!(report, SupervisionEvent::Disabled { .. })),
+        "this plugin has to be alive and hanging when the recording ends, or the shutdown path \
+         this test is named for is never reached: {reports:?}"
+    );
 
     let before = Instant::now();
     let outcome = plugins.finish();
@@ -454,7 +474,7 @@ fn a_plugin_that_hangs_does_not_delay_the_end_of_a_recording() {
     // The bound the policy states: the stop grace, plus the poll that notices
     // it has passed, plus room for a machine running several test binaries at
     // once. A recording that *waited* for this plugin would never finish at all.
-    let bound = impatient().stop_grace + POLL_INTERVAL + Duration::from_secs(2);
+    let bound = policy.stop_grace + POLL_INTERVAL + Duration::from_secs(2);
     assert!(
         ending < bound,
         "finishing a recording whose plugin had hung took {ending:?}, which is longer than the \

@@ -151,7 +151,7 @@ windows = { workspace = true, features = [
     "Win32_Storage_FileSystem",
 ] }
 
-# The two plugins `tests/plugins_during_a_recording.rs` runs, compiled from
+# The two plugins `src/plugins/tests.rs` runs, compiled from
 # `crates/plugins`' own example sources rather than copied here.
 #
 # A test of this crate's plugin wiring has to have a real plugin process to

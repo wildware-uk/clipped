@@ -390,7 +390,7 @@ struct Collected {
     ///
     /// Kept so that "a plugin is never polled on the thread that is recording"
     /// is something a test can assert rather than something a comment claims
-    /// (`tests/plugins_during_a_recording.rs`, AGENTS.md section 20).
+    /// (`src/plugins/tests.rs`, AGENTS.md section 20).
     polled_on: Option<ThreadId>,
     /// How many turns the runner has taken.
     polls: u64,
