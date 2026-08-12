@@ -1201,9 +1201,10 @@ mod tests {
 
     #[test]
     fn a_target_that_names_no_window_at_all_is_also_waited_for() {
-        // Without this the test above would pass just as well against a wait
-        // that gave up on everything: a game that has not drawn yet is the
-        // ordinary case, and it reaches the same loop by a different error.
+        // The wait this function was written for in the first place, kept here
+        // so that the minimised case cannot be made to pass by breaking it: a
+        // game that has not drawn yet reaches the same loop by a different
+        // error, and it is the ordinary one.
         let looks = std::cell::Cell::new(0u32);
         let mut desktop = || {
             looks.set(looks.get() + 1);
