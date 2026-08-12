@@ -34,6 +34,13 @@ clipped-game-detection.workspace = true
 # implementation of them; what lives here is the recorder behind it.
 clipped-ipc.workspace = true
 clipped-logging.workspace = true
+# What is installed under the plugins directory, and why anything there was
+# refused. `watch` reads that list at start-up and names what it found;
+# `clipped_session::plugins` is what would start one. The dependency is on the
+# *contract* — the manifest, discovery and consent — and never on a plugin,
+# which is reached by starting a process
+# (tests/integration/tests/workspace_layering.rs).
+clipped-plugins.workspace = true
 clipped-session.workspace = true
 # Window and monitor enumeration for `list-windows`, and the target selection
 # the recorder resolves `--window`, `--process` and `--pid` through. Every

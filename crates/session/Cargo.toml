@@ -46,6 +46,18 @@ clipped-game-detection.workspace = true
 # types only; producing events is `clipped-plugins`' and persisting them is
 # `clipped-storage`'s.
 clipped-events.workspace = true
+# The plugin contract, and the supervisor that runs one. `src/plugins.rs` is
+# what starts a plugin during a recording (issue #338): `clipped-plugins`
+# deliberately starts nothing by itself — its supervisor is a state machine over
+# a clock reading its owner supplies — and this crate is the owner, because this
+# is where a recording's timeline exists and a plugin's event is a position on
+# one. The dependency points down the layer table in README.md: the plugin
+# contract is layer 1 and this crate is layer 4.
+#
+# It is the contract only. The plugins themselves are separate executables under
+# `plugins/`, reached by starting a process and never by linking a crate, which
+# `tests/integration/tests/workspace_layering.rs` asserts rather than trusts.
+clipped-plugins.workspace = true
 # What a clip *is* once a rule has decided a moment is worth one:
 # `clipped_library::VirtualClip` — an edit document plus the event that caused
 # it — and `window_around`, the one conversion from an event's moment to a
@@ -138,6 +150,31 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Storage_FileSystem",
 ] }
+
+# The two plugins `src/plugins/tests.rs` runs, compiled from
+# `crates/plugins`' own example sources rather than copied here.
+#
+# A test of this crate's plugin wiring has to have a real plugin process to
+# point at: a fake that pretends to hang would only prove the pretence was
+# ignored (AGENTS.md section 54). Those two programs already exist, and the one
+# thing that cannot be done is take them from `clipped-plugins` at run time —
+# Cargo builds a dependency's library and never its examples, so a test relying
+# on `target/<profile>/examples/misbehaving_plugin` would pass under `cargo test
+# --workspace` and fail under `cargo test -p clipped-session`.
+#
+# Naming the same source files as examples of this package is what avoids a
+# second copy of both (AGENTS.md section 55): `cargo test -p clipped-session`
+# builds them, they land beside this crate's own test binaries, and there is
+# still exactly one `misbehaving_plugin.rs` in the repository. It is the same
+# arrangement `test-apps/video-pattern` uses in the other direction, where the
+# `[[test]]` entries name files under `tests/capture/`.
+[[example]]
+name = "misbehaving_plugin"
+path = "../plugins/examples/misbehaving_plugin.rs"
+
+[[example]]
+name = "example_plugin"
+path = "../plugins/examples/example_plugin.rs"
 
 [dev-dependencies]
 # `examples/replay_probe.rs` takes command-line arguments, and every executable

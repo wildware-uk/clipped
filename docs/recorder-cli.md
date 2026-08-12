@@ -270,6 +270,42 @@ than that to reach a window while it compiles shaders, so this is how long a
 game is allowed to take to appear. A game that never shows one is reported in
 the session's record and not tried again.
 
+### Plugins
+
+`watch` reads the plugins directory — `plugins` inside Clipped's own per-user
+directory, `%LOCALAPPDATA%\Clipped\plugins`
+([plugin-api.md](plugin-api.md)) — once, when it starts, and says what is there.
+A directory under it that is not a usable plugin is reported with the reason
+rather than passed over:
+
+```text
+A plugin could not be read: plugin.json names an executable that is not there: …
+```
+
+**Nothing there is started.** Starting a plugin needs the consent the user
+recorded against what it declares, and nothing records that yet
+([#282](https://github.com/wildware-uk/clipped/issues/282)) — so when a game
+launches, any installed plugin that claims it is named as one that is not
+running, instead of being ignored:
+
+```text
+Counter-Strike 2 highlight plugin supports Counter-Strike 2 and is installed, but
+nothing in this build can record that you enabled it, so it is not running.
+```
+
+The wiring behind that line is real and is the whole of
+[#338](https://github.com/wildware-uk/clipped/issues/338): a recording that is
+given an enabled plugin starts it on a thread of its own, polls it once a second
+and stops it when the recording ends, and a plugin that crashes, hangs or floods
+costs the recording nothing. What a running plugin says goes to the log and, for
+the two kinds worth interrupting somebody for, to standard error:
+
+```text
+counter-strike-2: Counter-Strike 2's integration file is not installed, so nothing will be reported.
+counter-strike-2 was stopped for the rest of this recording: the plugin said nothing for 10s and was stopped
+  The recording itself is unaffected.
+```
+
 There is deliberately **no capture-mode option**. Full Session is the only mode
 this build can run, and an option offering four values three of which would do
 nothing is a control that silently does nothing (AGENTS.md section 27).
