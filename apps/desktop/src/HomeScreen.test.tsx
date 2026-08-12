@@ -1,3 +1,4 @@
+import type { RecorderStatus } from '@clipped/shared';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
@@ -5,37 +6,39 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
 import { HomeScreen } from './HomeScreen';
+import type { RecorderProblem, RecordTarget } from './recording';
 import { describeRecordingNow } from './recordingNow';
 import { A_COUNT, textRuns } from './test/counts';
-import { stubRecorderLinkRuntime } from './test/recorderLinkRuntime';
+import { stubRecorderLinkRuntime, type Invocation } from './test/recorderLinkRuntime';
 import type { RecorderLinkState } from './useRecorderLink';
+import { STATUS_INTERVAL_MS } from './useRecording';
 
 /**
- * The Home screen's contract, as tests (issue #60).
+ * The Home screen's contract, as tests (issues #60, #301 and #389).
  *
- * SPEC.md section 17 draws Home as recent sessions, recently clipped,
- * favourites and games. Not one of those can be read from this window — the
- * library index lives in the recorder's process and no protocol command reads it
- * (issue #301) — so the properties worth guarding are about what is *not* drawn
- * as much as what is.
+ * The properties worth guarding, in the order they would hurt:
  *
- * Four of them:
- *
- * - **no figure is invented.** No count, no total, no "0 sessions". A zeroed
- *   tile is indistinguishable from a machine that has recorded nothing, and this
- *   build has not looked (AGENTS.md section 27).
+ * - **the recording state is asked for, not assumed.** Not from the button
+ *   having been pressed, not from a clock this window keeps, and not from the
+ *   status that arrived with the link — which is measured when a recording
+ *   starts and never again (`apps/recorder/src/serve.rs`). Several cases below
+ *   drive the recorder's answer and the link apart on purpose, because a window
+ *   that is confidently wrong about somebody's footage is worse than one that
+ *   says it does not know (issue #389).
+ * - **the command that goes out is the one the button offered**, carrying what
+ *   the screen named. The middle hop — the Tauri command itself — is covered in
+ *   `src-tauri/src/main.rs`, because `invoke` is stubbed here and nothing on
+ *   this side can see what reached the recorder.
+ * - **a refusal is reported in the recorder's own words**, rather than as a
+ *   silent no-op or a spinner that never resolves (AGENTS.md section 45).
+ * - **no figure is invented.** No count, no total, no "0 sessions" over a
+ *   library that was never read. A zeroed tile is indistinguishable from a
+ *   machine that has recorded nothing (AGENTS.md section 27).
  * - **no wording claims more than the link can establish.** The link sees the
  *   one recorder this window started or attached to; a `clipped-recorder watch`
  *   in a terminal is invisible to it. So "Nothing is being recorded" is a claim
  *   about the machine that nothing here measured, and the heading has to name
  *   what it speaks for.
- * - **the one real thing reaches the screen, and follows the link.** A screen
- *   whose wording is a constant looks identical to one that is following the
- *   recorder, which is why the case below drives the whole application and moves
- *   the link underneath it.
- * - **no duration.** `elapsed_ms` is on the wire and is measured at the moment
- *   the recording started; the recorder publishes no status between start and
- *   end, so a duration drawn from it would be frozen at zero for ever.
  */
 
 /** Mounts the application the way `main.tsx` does, StrictMode and all. */
@@ -52,28 +55,108 @@ function recordingPanel(): HTMLElement {
   return screen.getByRole('region', { name: 'Recording now' });
 }
 
-/** A recorder attached and writing a file, with a long elapsed time on it. */
-const RECORDING: RecorderLinkState = {
+/** The record button, whatever it currently offers to do. */
+function recordButton(): HTMLElement {
+  return within(recordingPanel()).getByRole('button');
+}
+
+/** The file a recording in these cases writes. */
+const OUTPUT = 'D:\\clips\\clipped-cs2-2026-08-11T21-04-19.mkv';
+
+/** What the window would record: the application the user was last in. */
+const TARGET: RecordTarget = { process_id: 4_242, process_name: 'cs2.exe' };
+
+/**
+ * A recorder attached, whose *link* says it is idle.
+ *
+ * Used as the link in nearly every case below, including the ones where a
+ * recording is running. That is deliberate and is the point: the status inside
+ * the link is measured once, when a recording starts, and the screen must not be
+ * reading it. Driving the two apart is what makes "the state comes from
+ * `get_status`" a thing a test can fail on.
+ */
+const ATTACHED: RecorderLinkState = {
+  link: 'attached',
+  recorder_process_id: 7,
+  status: { state: 'idle' },
+};
+
+/** A recorder attached whose link claims a recording, for the reverse case. */
+const LINK_CLAIMS_RECORDING: RecorderLinkState = {
   link: 'attached',
   recorder_process_id: 7,
   status: {
     state: 'recording',
     recording_id: 'rec-1',
-    output: 'D:\\clips\\clipped-cs2-2026-08-11T21-04-19.mkv',
+    output: OUTPUT,
     target: 'process cs2.exe',
     elapsed_ms: 754_000,
   },
 };
 
+/** What `get_status` answers while a recording has been running this long. */
+function recordingFor(elapsedMs: number): RecorderStatus {
+  return {
+    state: 'recording',
+    recording_id: 'rec-1',
+    output: OUTPUT,
+    target: 'process cs2.exe',
+    elapsed_ms: elapsedMs,
+  };
+}
+
+/** What `get_status` answers when nothing is being recorded. */
+const IDLE: RecorderStatus = { state: 'idle' };
+
+/** What `stop_recording` answers: a recording the recorder has finished. */
+const FINISHED = {
+  output: OUTPUT,
+  duration_ms: 9_000,
+  end_reason: 'stopped',
+  frames_encoded: 540,
+  frames_skipped_for_rate: 0,
+  frames_dropped_writer_behind: 0,
+  encoder: 'nvenc',
+  codec: 'av1',
+  width: 2_560,
+  height: 1_392,
+};
+
+/** Every `recorder_status` ask a run made, so a case can wait for the next one. */
+function statusAsks(invocations: readonly Invocation[]): readonly Invocation[] {
+  return invocations.filter((invocation) => invocation.command === 'recorder_status');
+}
+
 /*
- * Every state the link has, and what each one means for "what is being recorded
- * now". The five are listed rather than generated: the failure this guards
- * against is two states collapsing into one wording, and a table built from the
- * states themselves could not see that happen.
+ * Every combination of link and answer, and what each one means for "what is
+ * being recorded now". They are listed rather than generated: the failure this
+ * guards against is two of them collapsing into one wording, and a table built
+ * from the states themselves could not see that happen.
  */
-const STATES: readonly (readonly [string, RecorderLinkState | null, string, RegExp])[] = [
-  ['outside the Clipped window', null, 'Not known', /not the Clipped window.*no recorder to ask/],
-  ['while the link is being made', { link: 'connecting' }, 'Not known yet', /Looking for/],
+const STATES: readonly (readonly [
+  string,
+  RecorderLinkState | null,
+  RecorderStatus | null,
+  RecorderProblem | null,
+  string,
+  RegExp,
+])[] = [
+  [
+    'outside the Clipped window',
+    null,
+    null,
+    null,
+    'Not known',
+    /not the Clipped window.*no recorder to ask/,
+  ],
+  [
+    'while the link is being made',
+    { link: 'connecting' },
+    null,
+    null,
+    'Not known yet',
+    /Looking for/,
+  ],
   [
     'while the link is being remade',
     {
@@ -83,27 +166,56 @@ const STATES: readonly (readonly [string, RecorderLinkState | null, string, RegE
       delay_ms: 500,
       reason: 'The pipe closed.',
     },
+    null,
+    null,
     'Not known',
     /The pipe closed\. Attempt 2 of 4\./,
   ],
   [
     'when there is no recorder',
     { link: 'unavailable', reason: 'clipped-recorder.exe is not beside this application.' },
+    null,
+    null,
     'Not known',
     /not attached to a recorder.*not beside this application/,
   ],
   [
-    'when a recorder is attached and idle',
-    { link: 'attached', recorder_process_id: 7, status: { state: 'idle' } },
+    'when a recorder is attached and has not answered yet',
+    ATTACHED,
+    null,
+    null,
+    'Not known yet',
+    /Asking the recorder/,
+  ],
+  [
+    'when the recorder was asked and did not answer',
+    ATTACHED,
+    null,
+    { code: 'recorder_unreachable', message: 'the recorder could not be reached: the pipe closed' },
+    'Not known',
+    /did not get an answer.*the pipe closed/,
+  ],
+  [
+    'when the recorder answers that it is idle',
+    ATTACHED,
+    IDLE,
+    null,
     'This recorder is not recording',
     /running and idle.*clipped-recorder watch.*invisible here/,
   ],
-  ['when a recording is running', RECORDING, 'Recording process cs2.exe', /being written now/],
+  [
+    'when the recorder answers that it is recording',
+    ATTACHED,
+    recordingFor(754_000),
+    null,
+    'Recording process cs2.exe',
+    /being written now/,
+  ],
 ];
 
 describe('what the Home screen says about the recording now', () => {
-  it.each(STATES)('is described %s', (_case, link, state, detail) => {
-    const described = describeRecordingNow(link);
+  it.each(STATES)('is described %s', (_case, link, status, problem, state, detail) => {
+    const described = describeRecordingNow(link, status, problem);
 
     expect(described.state).toBe(state);
     expect(described.detail).toMatch(detail);
@@ -121,47 +233,53 @@ describe('what the Home screen says about the recording now', () => {
    * is invisible to this link, so it could be recording a game while this window
    * said so — and the screen's own next paragraph says as much.
    *
-   * Asserted over all six renderings rather than over the one that would be
-   * wrong, because the defect is a class: it is the same unscoped heading
-   * whichever branch it gets written into.
+   * Asserted over every rendering rather than over the one that would be wrong,
+   * because the defect is a class: it is the same unscoped heading whichever
+   * branch it gets written into.
    */
-  it.each(STATES)('either names what it speaks for, or claims nothing, %s', (_case, link) => {
-    expect(describeRecordingNow(link).state).toMatch(/^(Not known|This recorder |Recording )/);
-  });
+  it.each(STATES)(
+    'either names what it speaks for, or claims nothing, %s',
+    (_case, link, status, problem) => {
+      expect(describeRecordingNow(link, status, problem).state).toMatch(
+        /^(Not known|This recorder |Recording )/,
+      );
+    },
+  );
 
   /*
-   * The file is the only thing on this screen anybody can act on, and it is only
-   * ever the one the recorder says it is writing. A path invented, guessed at or
-   * left over from a previous recording would put somebody else's footage in
-   * front of the user.
+   * The file and the duration are only ever drawn for a recording the recorder
+   * has just said is running. A path left over from a previous recording, or a
+   * duration beside a state that is not "recording", would both be this window
+   * making something up.
    */
-  it('names the file being written, and only when one is', () => {
-    expect(describeRecordingNow(RECORDING).output).toBe(
-      'D:\\clips\\clipped-cs2-2026-08-11T21-04-19.mkv',
-    );
+  it('names the file and the duration only while the recorder says one is running', () => {
+    const running = describeRecordingNow(ATTACHED, recordingFor(754_000), null);
+    expect(running.output).toBe(OUTPUT);
+    expect(running.elapsed).toBe('12:34');
 
-    for (const [, link] of STATES.filter(([, candidate]) => candidate !== RECORDING)) {
-      expect(describeRecordingNow(link).output).toBeUndefined();
+    for (const [, link, status, problem] of STATES.filter(
+      ([, , candidate]) => candidate?.state !== 'recording',
+    )) {
+      const described = describeRecordingNow(link, status, problem);
+      expect(described.output).toBeUndefined();
+      expect(described.elapsed).toBeUndefined();
     }
   });
 
   /*
-   * `elapsed_ms` arrives with the status and is 754,000 in the fixture above.
-   * The recorder publishes `status_changed` when a recording starts and when it
-   * ends and at no point between (`apps/recorder/src/serve.rs`), so a duration
-   * drawn from it is the duration at the moment the recording started and never
-   * moves. Counting up from it in the window would be a figure nobody measured.
-   *
-   * The assertion is on the shape of a duration rather than on the number,
-   * because "12:34", "754 s" and "12 minutes" are the same mistake.
+   * The one place a duration may come from. `elapsed_ms` is the recorder's own
+   * measurement, and this asserts the screen's figure is a rendering of it
+   * rather than of anything else — a different number in means a different
+   * number out, every time. Truncated rather than rounded: 1,900 ms is one
+   * completed second, and a file holding one second of video beside "0:02"
+   * would be a duration nobody measured.
    */
-  it('shows no duration, because the one on the wire never moves', () => {
-    const described = describeRecordingNow(RECORDING);
-    const said = `${described.state} ${described.detail} ${described.output ?? ''}`;
-
-    expect(said).not.toMatch(/\d+:\d\d\b/);
-    expect(said).not.toMatch(/\b\d+\s*(?:ms|s|sec|secs|seconds|m|min|mins|minutes|h|hours)\b/i);
-    expect(said).not.toMatch(/elapsed|so far|running for/i);
+  it('renders the duration the recorder measured, whatever it is', () => {
+    expect(describeRecordingNow(ATTACHED, recordingFor(0), null).elapsed).toBe('0:00');
+    expect(describeRecordingNow(ATTACHED, recordingFor(1_900), null).elapsed).toBe('0:01');
+    expect(describeRecordingNow(ATTACHED, recordingFor(5_000), null).elapsed).toBe('0:05');
+    expect(describeRecordingNow(ATTACHED, recordingFor(65_000), null).elapsed).toBe('1:05');
+    expect(describeRecordingNow(ATTACHED, recordingFor(3_671_000), null).elapsed).toBe('1:01:11');
   });
 });
 
@@ -177,52 +295,430 @@ describe('the Home screen', () => {
   });
 
   /*
-   * The property is that the screen shows the recorder's real state rather than
-   * a sentence somebody typed, so the case drives the whole application and
-   * moves the link underneath it. A screen whose wording is a constant looks
-   * identical to one that is following the link, and stays identical after the
-   * link has been disconnected from it.
+   * The property the whole feature turns on, in the arrangement that catches
+   * the tempting shortcut. The **link** says the recorder is idle; the
+   * recorder's answer to `get_status` says it is recording. A screen wired to
+   * `link.status` — which is right there, already on screen, and free — draws
+   * "This recorder is not recording" over a running recording and passes every
+   * other case in this file.
    */
-  it('follows the recorder link rather than showing a sentence that was typed once', async () => {
-    const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
-    renderApp();
-
-    // Anchored, because "Not known" is a substring of "Not known yet" and an
-    // unanchored match would let the screen sit on one wording for both.
-    await waitFor(() => {
-      expect(within(recordingPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
-        /^Not known yet$/,
-      );
+  it('draws what the recorder answers, not the status that arrived with the link', async () => {
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => recordingFor(30_000),
     });
-
-    runtime.emit({ event: 'state', ...RECORDING });
+    renderApp();
 
     await waitFor(() => {
       expect(within(recordingPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
         /^Recording process cs2\.exe$/,
       );
     });
-    expect(
-      within(recordingPanel()).getByText('D:\\clips\\clipped-cs2-2026-08-11T21-04-19.mkv'),
-    ).toBeVisible();
+    expect(within(recordingPanel()).getByText(OUTPUT)).toBeVisible();
+  });
 
-    // And back to idle, so the case covers a move in both directions and the
-    // file going away with the recording rather than staying on screen.
-    runtime.emit({
-      event: 'state',
-      link: 'attached',
-      recorder_process_id: 7,
-      status: { state: 'idle' },
+  /* And the same trap in the other direction, which is the dangerous one: the
+   * link still carrying the recording it last saw start, while the recorder has
+   * since stopped. A screen reading the link would claim a recording that is not
+   * happening. */
+  it('does not claim a recording the recorder says has ended', async () => {
+    stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => IDLE,
     });
+    renderApp();
 
     await waitFor(() => {
       expect(within(recordingPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
         /^This recorder is not recording$/,
       );
     });
+    expect(within(recordingPanel()).queryByText(OUTPUT)).toBeNull();
+  });
+
+  /*
+   * Issue #389's third acceptance criterion, at the call site.
+   *
+   * The recorder answers the same `elapsed_ms` every time it is asked, and the
+   * case then lets several real seconds pass — waiting on the asks themselves,
+   * so it is the window's own polling that measures the delay. A duration
+   * counted up locally would have moved; the one the recorder measured has not,
+   * so it must not have.
+   *
+   * Real time rather than fake, deliberately: a fake clock is exactly the thing
+   * a local timer would also be driven by, and advancing it proves less. It
+   * costs a few seconds once.
+   */
+  it('shows the duration the recorder measured and never a clock of its own', async () => {
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => recordingFor(5_000),
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(within(recordingPanel()).getByText(/^Recording for /)).toHaveTextContent(
+        'Recording for 0:05,',
+      );
+    });
+
+    // Several rounds of asking, which is several real seconds of wall clock.
+    await waitFor(() => expect(statusAsks(runtime.invocations).length).toBeGreaterThanOrEqual(4), {
+      timeout: STATUS_INTERVAL_MS * 8,
+    });
+
+    // The recorder never said anything but five seconds, so five seconds is the
+    // only figure that may be on screen.
+    expect(within(recordingPanel()).getByText(/^Recording for /)).toHaveTextContent(
+      'Recording for 0:05,',
+    );
+    for (const run of textRuns(recordingPanel())) {
+      expect(run).not.toMatch(/\b0:(0[0-46-9]|[1-9]\d)\b/);
+    }
+  });
+
+  /*
+   * The other half of the same property. The recorder's answer jumps by a minute
+   * between one ask and the next, and the screen has to follow it — a window
+   * running its own clock would show six seconds, not sixty-five.
+   */
+  it('follows the recorder when its measurement moves', async () => {
+    let elapsed = 5_000;
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => recordingFor(elapsed),
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(within(recordingPanel()).getByText(/^Recording for /)).toHaveTextContent(
+        'Recording for 0:05,',
+      );
+    });
+
+    elapsed = 65_000;
+
+    await waitFor(
+      () => {
+        expect(within(recordingPanel()).getByText(/^Recording for /)).toHaveTextContent(
+          'Recording for 1:05,',
+        );
+      },
+      { timeout: STATUS_INTERVAL_MS * 5 },
+    );
+  });
+
+  /*
+   * The failure issue #389 names in as many words: a window that says
+   * "recording" while the recorder has died.
+   *
+   * The recorder answers a recording, then stops answering at all. Nothing in
+   * the window may keep the old answer on screen — it is a claim about a file
+   * that may no longer be being written, and the person reading it is relying on
+   * it.
+   */
+  it('stops saying a recording is running when the recorder stops answering', async () => {
+    let answering = true;
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => {
+        if (!answering) {
+          throw {
+            code: 'recorder_unreachable',
+            message: 'the recorder could not be reached: the pipe closed',
+          };
+        }
+        return recordingFor(12_000);
+      },
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(within(recordingPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
+        /^Recording process cs2\.exe$/,
+      );
+    });
+
+    answering = false;
+
+    await waitFor(
+      () => {
+        expect(within(recordingPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
+          /^Not known$/,
+        );
+      },
+      { timeout: STATUS_INTERVAL_MS * 5 },
+    );
+    expect(within(recordingPanel()).getByText(/the pipe closed/)).toBeVisible();
+    expect(within(recordingPanel()).queryByText(OUTPUT)).toBeNull();
+    expect(within(recordingPanel()).queryByText(/^Recording for /)).toBeNull();
+  });
+
+  /*
+   * The optimism this must not have, in the arrangement where it shows.
+   *
+   * `start_recording` is accepted — the command went out and the recorder took
+   * it — and then **the recorder says nothing more**: the second `get_status` is
+   * held open, which is what a recorder busy opening an encoder session looks
+   * like from here, and is also what a recorder that died in the attempt looks
+   * like. In that gap the window has no answer newer than "idle", so anything it
+   * says about a recording is something it made up.
+   *
+   * The status is held rather than answered "idle" for a reason worth keeping: a
+   * version of this case that let the poll answer freely passed against an
+   * implementation that *did* set its own state on success, because the next
+   * answer corrected it a few milliseconds later. The bug was real and the case
+   * could not see it. Holding the answer is what makes the window's own
+   * invention the only thing on screen.
+   */
+  it('does not say it is recording because the button was pressed', async () => {
+    const user = userEvent.setup();
+    let asked = 0;
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => {
+        asked += 1;
+        // The first ask is answered, so the screen has a state at all. Every one
+        // after it is held open and never resolves.
+        return asked === 1 ? IDLE : new Promise<RecorderStatus>(() => undefined);
+      },
+      startRecording: () => ({ recording_id: 'rec-1', output: OUTPUT }),
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(recordButton()).toHaveTextContent('Start recording cs2.exe');
+    });
+
+    await user.click(recordButton());
+
+    // The command has been sent, answered, and the window has asked again —
+    // which is the last thing it does after a start, so every state it was going
+    // to set has been set and drawn by now.
+    await waitFor(() => {
+      expect(statusAsks(runtime.invocations).length).toBeGreaterThanOrEqual(2);
+    });
+    await waitFor(() => {
+      expect(recordButton()).toBeEnabled();
+    });
+
+    expect(within(recordingPanel()).getByRole('heading', { level: 2 })).toHaveTextContent(
+      /^This recorder is not recording$/,
+    );
+    expect(recordButton()).toHaveTextContent('Start recording cs2.exe');
+    expect(within(recordingPanel()).queryByText(/^Recording for /)).toBeNull();
+    expect(within(recordingPanel()).queryByText(OUTPUT)).toBeNull();
+  });
+
+  /*
+   * What the button sends. `invoke` is stubbed, so this can see the command and
+   * its arguments leave the window and no further; what happens to them after
+   * that — which protocol command is sent, and whether the process identifier
+   * survives — is `src-tauri/src/main.rs`'s own tests, because nothing on this
+   * side can see it.
+   */
+  it('records the application the user was last in, and names it on the button', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => IDLE,
+      startRecording: () => ({ recording_id: 'rec-1', output: OUTPUT }),
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(recordButton()).toHaveTextContent('Start recording cs2.exe');
+    });
+
+    await user.click(recordButton());
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'start_recording'),
+      ).toEqual([{ command: 'start_recording', args: { processId: 4_242 } }]);
+    });
+  });
+
+  /*
+   * And what stop sends. The identifier is the safety property: a recording that
+   * ended by itself between the screen drawing it and the button being pressed
+   * must not have its successor stopped instead (`docs/ipc.md`). A stop that
+   * dropped it would send "stop whatever is running", and the damage would show
+   * up as somebody's *next* recording ending early.
+   */
+  it('stops the recording it has on screen, by name', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => recordingFor(9_000),
+      stopRecording: () => FINISHED,
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(recordButton()).toHaveTextContent('Stop recording');
+    });
+
+    await user.click(recordButton());
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'stop_recording'),
+      ).toEqual([{ command: 'stop_recording', args: { recordingId: 'rec-1' } }]);
+    });
+  });
+
+  /*
+   * Issue #389's fourth acceptance criterion. A recording that cannot start says
+   * why, in the words the protocol returned — not a silent no-op, and not a
+   * spinner that never resolves (AGENTS.md section 45).
+   */
+  it('says why a recording could not start, in the recorder’s own words', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => IDLE,
+      startRecording: () => {
+        throw {
+          code: 'target_not_found',
+          message: 'no visible window belongs to process 4242; it may have closed',
+        };
+      },
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(recordButton()).toHaveTextContent('Start recording cs2.exe');
+    });
+
+    await user.click(recordButton());
+
+    const said = await within(recordingPanel()).findByRole('alert');
+    expect(said).toHaveTextContent('no visible window belongs to process 4242; it may have closed');
+    // And it is still offering to record: a refusal is not a dead screen.
+    expect(recordButton()).toBeEnabled();
+  });
+
+  /*
+   * A control that cannot work says so where it is, rather than being drawn as
+   * though pressing it would do something (AGENTS.md sections 27 and 45). The
+   * reason is text beside the button rather than a `title`, because a tooltip is
+   * invisible to a keyboard and to a screen reader.
+   */
+  it('offers no start when there is nothing to record, and says why', async () => {
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => null,
+      recorderStatus: () => IDLE,
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(
+        within(recordingPanel()).getByText(/Nothing has been in front of this window/),
+      ).toBeVisible();
+    });
+    expect(recordButton()).toBeDisabled();
+  });
+
+  /*
+   * The same rule for a window with no recorder at all. The button's own reason
+   * is short and does not repeat the link's, which the panel has already given
+   * in full immediately above it — the whole reason is on the screen once.
+   */
+  it('offers no start when there is no recorder, and says why', async () => {
+    stubRecorderLinkRuntime(
+      { link: 'unavailable', reason: 'clipped-recorder.exe is not beside this application.' },
+      null,
+      { recordTarget: () => TARGET },
+    );
+    renderApp();
+
+    await waitFor(() => {
+      expect(
+        within(recordingPanel()).getByText('There is no recorder to record with.'),
+      ).toBeVisible();
+    });
+    expect(recordButton()).toBeDisabled();
     expect(
-      within(recordingPanel()).queryByText('D:\\clips\\clipped-cs2-2026-08-11T21-04-19.mkv'),
-    ).toBeNull();
+      within(recordingPanel()).getByText(/not attached to a recorder.*not beside this application/),
+    ).toBeVisible();
+  });
+
+  /*
+   * The recording that was just stopped leaves the panel with nothing to point
+   * at otherwise: the state goes to "not recording" and the path goes with it,
+   * which would leave somebody holding a file they had just made and no idea
+   * where it is. The path shown is the one the recorder reported finishing.
+   */
+  it('names the file a stopped recording finished in', async () => {
+    const user = userEvent.setup();
+    let running = true;
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => (running ? recordingFor(9_000) : IDLE),
+      stopRecording: () => {
+        running = false;
+        return FINISHED;
+      },
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(recordButton()).toHaveTextContent('Stop recording');
+    });
+
+    await user.click(recordButton());
+
+    await waitFor(() => {
+      expect(within(recordingPanel()).getByText(/Recording finished/)).toBeVisible();
+    });
+    expect(within(recordingPanel()).getByText(OUTPUT)).toBeVisible();
+  });
+
+  /*
+   * The duration changes every second, and a screen reader reading a new one
+   * aloud every second would drown the announcement the live region exists for
+   * and make the screen unusable (AGENTS.md section 46). It stays in the
+   * accessibility tree and is read on demand.
+   */
+  it('does not announce the duration once a second', async () => {
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => recordingFor(5_000),
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(within(recordingPanel()).getByText(/^Recording for /)).toHaveAttribute(
+        'aria-live',
+        'off',
+      );
+    });
+  });
+
+  /* The record control has to be reachable and operable from the keyboard,
+   * because a core workflow that needs a mouse fails AGENTS.md section 46. */
+  it('has a record control that can be reached and pressed from the keyboard', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => IDLE,
+      startRecording: () => ({ recording_id: 'rec-1', output: OUTPUT }),
+    });
+    renderApp();
+
+    await waitFor(() => {
+      expect(recordButton()).toBeEnabled();
+    });
+
+    recordButton().focus();
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'start_recording'),
+      ).toHaveLength(1);
+    });
   });
 
   it('announces a change of state rather than only drawing it', async () => {
@@ -235,22 +731,24 @@ describe('the Home screen', () => {
   });
 
   /*
-   * The deck draws Home as tiles of recent sessions, recent clips and
-   * favourites, each of which opens something. None of them has anything behind
-   * it in this build, so none is drawn. This asserts the property rather than
-   * the three cases: anything operable inside the screen would have to do
-   * something, and nothing here can.
+   * The record control is the only control the recording panel has, and the only
+   * one on the screen while the library has not been read. Anything else
+   * operable would have to do something, and nothing else here can (AGENTS.md
+   * section 27).
    */
-  it('offers no control, because nothing it would drive can be reached', async () => {
-    stubRecorderLinkRuntime(RECORDING);
+  it('offers the record control and no other', async () => {
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      recordTarget: () => TARGET,
+      recorderStatus: () => recordingFor(9_000),
+    });
     renderApp();
 
     await waitFor(() => {
-      expect(recordingPanel()).toBeInTheDocument();
+      expect(recordButton()).toBeInTheDocument();
     });
 
     const main = screen.getByRole('main');
-    expect(within(main).queryAllByRole('button')).toHaveLength(0);
+    expect(within(main).getAllByRole('button')).toHaveLength(1);
     expect(within(main).queryAllByRole('link')).toHaveLength(0);
     expect(within(main).queryAllByRole('textbox')).toHaveLength(0);
     expect(within(main).queryAllByRole('combobox')).toHaveLength(0);
@@ -272,7 +770,7 @@ describe('the Home screen', () => {
   it('draws no count while the library has not been read', async () => {
     // The runtime here answers neither library command, so nothing has been
     // counted. A figure on this screen would then be one nobody measured.
-    stubRecorderLinkRuntime(RECORDING);
+    stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING);
     renderApp();
 
     await waitFor(() => {
@@ -291,7 +789,7 @@ describe('the Home screen', () => {
    * anything, and the second on one that invents.
    */
   it('lists the most recent sittings once the library has been read', async () => {
-    stubRecorderLinkRuntime(RECORDING, null, {
+    stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING, null, {
       sessions: () =>
         Promise.resolve({
           sessions: [
@@ -326,7 +824,7 @@ describe('the Home screen', () => {
   });
 
   it('draws the per-game figures the index computes, and what is missing from them', async () => {
-    stubRecorderLinkRuntime(RECORDING, null, {
+    stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING, null, {
       games: () =>
         Promise.resolve([
           {
@@ -357,7 +855,7 @@ describe('the Home screen', () => {
   });
 
   it('says a library it could not read could not be read, rather than showing it as empty', async () => {
-    stubRecorderLinkRuntime(RECORDING, null, {
+    stubRecorderLinkRuntime(LINK_CLAIMS_RECORDING, null, {
       sessions: () =>
         Promise.reject({
           code: 'library_unavailable',

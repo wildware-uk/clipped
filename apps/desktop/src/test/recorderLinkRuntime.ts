@@ -23,22 +23,46 @@ export interface Invocation {
 }
 
 /**
- * What the two library commands answer with (issue #301).
+ * What the commands that go to the recorder answer with (issues #301 and #389).
  *
  * Functions rather than values, because the interesting cases are the ones that
- * depend on the arguments: a second page has to answer to the cursor the first
- * one ended with, and a search has to answer to the query.
+ * depend on the arguments or on when they are asked: a second page has to answer
+ * to the cursor the first one ended with, a search has to answer to the query,
+ * and a window that follows a recorder has to be given a different status each
+ * time it asks or there is no following to observe.
  *
- * The default for both is a **rejection**, not an empty library. A stub that
- * answered "nothing recorded" by default would let a screen test pass while the
- * screen drew an empty library over a read that never happened, which is the
- * exact confusion issue #301 is shaped to prevent (AGENTS.md section 27).
+ * The default for every one of them is a **rejection**, not an empty library and
+ * not an idle recorder. A stub that answered "nothing recorded" by default would
+ * let a screen test pass while the screen drew an empty library over a read that
+ * never happened, or drew "not recording" over a recorder nobody asked — which
+ * is the confusion both issues are shaped to prevent (AGENTS.md section 27).
+ *
+ * `recordTarget` is the exception, and it defaults to `null`: a test that has
+ * not said what was in front of the window has had nothing in front of it, which
+ * is a state the screen already has to draw honestly.
  */
-export interface LibraryAnswers {
+export interface CommandAnswers {
   /** What `library_sessions` answers, given the request. */
   readonly sessions?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `library_games` answers. */
   readonly games?: () => Promise<unknown>;
+  /** What `record_target` answers: the process the button would record. */
+  readonly recordTarget?: () => unknown;
+  /**
+   * What `get_status` answers, once per ask.
+   *
+   * Called again for every round of asking, so a case can move the recorder
+   * underneath the window — which is the only way to see a window that follows
+   * one rather than holding on to the first answer it got. Throwing is how a
+   * recorder that cannot be reached is expressed; the thrown value is what
+   * `invoke` rejects with, exactly as a `#[tauri::command]` returning `Err`
+   * does.
+   */
+  readonly recorderStatus?: () => unknown;
+  /** What `start_recording` answers, given the arguments it was sent. */
+  readonly startRecording?: (args: Record<string, unknown>) => unknown;
+  /** What `stop_recording` answers, given the arguments it was sent. */
+  readonly stopRecording?: (args: Record<string, unknown>) => unknown;
 }
 
 /** What an unstubbed library command rejects with. */
@@ -46,6 +70,31 @@ const NO_LIBRARY_STUBBED = {
   code: 'no_recorder_configured',
   message: 'this test stubbed no library',
 };
+
+/** What an unstubbed recording command rejects with. */
+const NO_RECORDER_STUBBED = {
+  code: 'no_recorder_configured',
+  message: 'this test did not say what the recorder answers; pass it to stubRecorderLinkRuntime',
+};
+
+/**
+ * Runs one of the answers above, turning a throw into the rejection `invoke`
+ * would produce.
+ *
+ * Rejected with the thrown value itself rather than an `Error`, because that is
+ * what the real runtime does: `invoke` rejects with the serialised `Err` of the
+ * command, which for these is a `RecorderProblem` object.
+ */
+function answered(answer: (() => unknown) | undefined): Promise<unknown> {
+  if (answer === undefined) {
+    return Promise.reject(NO_RECORDER_STUBBED);
+  }
+  try {
+    return Promise.resolve(answer());
+  } catch (refusal) {
+    return Promise.reject(refusal);
+  }
+}
 
 /** A stubbed runtime, and the things a test does with one. */
 export interface StubbedRuntime {
@@ -81,11 +130,14 @@ export interface StubbedRuntime {
  * back and let something else happen first. That is a real ordering — the
  * command is a round trip and the tray can say something while it is in flight —
  * and it is the only way to see which of the two ends up on screen.
+ *
+ * `commands` is what everything that goes to the recorder answers with. See
+ * {@link CommandAnswers} for why each default is what it is.
  */
 export function stubRecorderLinkRuntime(
   answer: unknown,
   startupNotice: string | null | Promise<string | null> = null,
-  library: LibraryAnswers = {},
+  commands: CommandAnswers = {},
 ): StubbedRuntime {
   const invocations: Invocation[] = [];
   const handlers: ((event: unknown) => void)[] = [];
@@ -107,10 +159,26 @@ export function stubRecorderLinkRuntime(
         return Promise.resolve(startupNotice);
       }
       if (command === 'library_sessions') {
-        return library.sessions?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+        return commands.sessions?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'library_games') {
-        return library.games?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
+        return commands.games?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'record_target') {
+        return Promise.resolve(commands.recordTarget?.() ?? null);
+      }
+      if (command === 'recorder_status') {
+        return answered(commands.recorderStatus);
+      }
+      if (command === 'start_recording') {
+        return answered(
+          commands.startRecording === undefined ? undefined : () => commands.startRecording?.(args),
+        );
+      }
+      if (command === 'stop_recording') {
+        return answered(
+          commands.stopRecording === undefined ? undefined : () => commands.stopRecording?.(args),
+        );
       }
       if (command === 'plugin:event|listen') {
         // The real wrapper registers its callback first and then sends this,

@@ -184,15 +184,19 @@ with Games, naming the work that lands it: clips and highlights wait on
 something creating one (#91, #76), favourites on anything being favouritable
 (#58), and thumbnails and waveforms on a transport for bytes rather than rows.
 
-### What is being recorded right now
+### What is being recorded right now, and the button that changes it
 
-**What is being recorded, and into which file.** That comes from the recorder
-link rather than from the library, changes when the link does, and is the one
-thing on Home that is not a read of the index.
-`describeRecordingNow` in `recordingNow.ts` has one rendering for each of the
-link's four states and one for "this is not the Clipped window".
+**What is being recorded, into which file, and a control that starts and stops
+it.** That is the one part of Home which is not a read of the index, and since
+[issue #389](https://github.com/wildware-uk/clipped/issues/389) it is the part
+that makes this an application rather than a window over one: press the button, a
+recording starts; press it again, a file exists.
 
-Two rules shape those renderings, and both are properties `HomeScreen.test.tsx`
+`describeRecordingNow` in `recordingNow.ts` renders the state and
+`describeRecordControl` in `recording.ts` renders the button. Both are pure
+functions beside the screen rather than conditions inside it.
+
+Three rules shape them, and all three are properties `HomeScreen.test.tsx`
 asserts across every state rather than at the one place they could go wrong:
 
 - **A heading carries its own scope.** It is either "Not known…", which claims
@@ -202,17 +206,76 @@ asserts across every state rather than at the one place they could go wrong:
   the machine, when `clipped-recorder watch` serves no protocol and could be
   recording a game this link cannot see. The same trap the Games screen's
   detection state describes.
-- **No duration.** `ActiveRecording::elapsed_ms` is on the wire and is not
-  drawn. The recorder publishes `status_changed` when a recording starts and
-  when it ends and at no point between (`apps/recorder/src/serve.rs`), so the
-  elapsed time this window holds is the one from the moment it started and never
-  moves. A duration frozen at 0:00 beside an hour-long recording is worse than
-  no duration, and counting up from it locally would be a figure nobody
-  measured.
+- **The state is asked for, never assumed.** See below.
+- **The duration is the recorder's measurement, rendered.** `formatElapsed`
+  turns `ActiveRecording::elapsed_ms` into `M:SS` or `H:MM:SS` and does nothing
+  else. There is no branch anywhere that computes a duration from a clock in
+  this window.
 
-The file itself is printed in full, in `.clipped-path`, because it is the only
-thing on the screen anybody can act on and a path with an ellipsis in it cannot
-be typed into Explorer (AGENTS.md sections 28 and 45).
+The file is printed in full, in `.clipped-path`, because it is the thing on the
+screen anybody can act on and a path with an ellipsis in it cannot be typed into
+Explorer (AGENTS.md sections 28 and 45). The recording that was just *stopped*
+has its file printed too, from the `stop_recording` reply, because the panel
+would otherwise go from "Recording cs2.exe" straight to "not recording" and take
+the path with it.
+
+### The record control
+
+Four Tauri commands in `src-tauri/src/main.rs`, and one rule about where the
+state comes from.
+
+| Command | Sends | Answers |
+| --- | --- | --- |
+| `record_target` | nothing; reads `foreground::last_seen()` | the process the button would record, or `null` |
+| `recorder_status` | `get_status` | `RecorderStatus` — idle, or a recording and its elapsed time |
+| `start_recording` | `start_recording` with `pid` | the recording's identifier and the file it is writing |
+| `stop_recording` | `stop_recording` with `recording_id` | the finished `RecordingSummary`, after the file is closed |
+
+**What is recorded** is the application the user was last in — the same answer
+the tray's Start Recording gives, from the same `foreground` module, so there is
+one idea of "what to record" in this process rather than two. The button names
+it, because a screen has somewhere to put a name and a control that records
+something unnamed is one nobody consented to. The identifier the button was
+showing is what `start_recording` is given, so a foreground change between the
+label being drawn and the button being pressed cannot record something else;
+`stop_recording` names the recording the screen had for the same reason, which is
+the race `StopRecording::recording_id` exists for.
+
+**Where the state comes from.** `useRecording` asks `recorder_status` once a
+second while Home is open, and *that answer* is what the screen draws. Three
+things it deliberately does not do:
+
+- it does not draw the status inside the link. That one is pushed, and the
+  recorder publishes `status_changed` when a recording starts and when it ends
+  and at no point between (`apps/recorder/src/serve.rs`) — so its `elapsed_ms` is
+  the figure from the moment the recording began and never moves;
+- it does not count up from that figure with a timer of its own, which would be
+  a number nobody measured (AGENTS.md section 27);
+- it does not set a recording state when `start_recording` resolves. The command
+  being accepted is not the recording still running a second later.
+
+All three collapse into the same failure: **a window that says "recording" after
+the recorder has died.** Because the state is asked for, an ask that fails drops
+it — the screen says it does not know, and gives the reason — and the window
+follows a dead recorder down within one interval. `HomeScreen.test.tsx` drives
+the link and the answer *apart* to check this: the link says idle while
+`get_status` says recording, and the other way about, so a screen wired to the
+wrong one fails rather than passing on a coincidence.
+
+A refusal is reported in the recorder's own words — `target_not_found` for a
+window that has closed, `already_recording` for a second start — because those
+are different problems with different answers (AGENTS.md section 45). A request
+that never reached a recorder carries one of `recorder_unreachable`,
+`no_recorder_configured` or `unexpected_reply` instead, which are outside the
+protocol's own vocabulary so that "the recorder said no" and "there was no
+recorder" cannot be confused. `RecorderProblem` is the one shape all of that
+arrives in, shared with the library commands.
+
+The middle hop — the Tauri command itself — is tested in `src-tauri/src/main.rs`
+against a real named pipe, because `invoke` is stubbed in the TypeScript suite
+and the recorder's own tests start at its dispatch. Without those, a
+`start_recording` that sent the wrong protocol command and dropped its parameter
+would pass every other test in the repository.
 
 ### No tab strip and no chips
 
@@ -247,8 +310,10 @@ table of what the rest is waiting for.
 ### What the window can and cannot see
 
 The desktop reaches the recorder over [the control protocol](ipc.md) and reaches
-its own Tauri host through two commands, `recorder_link_state` and
-`startup_notice`. Against that:
+its own Tauri host through the eight commands listed under
+[The record control](#the-record-control) and
+[How the window sees the library](#how-the-window-sees-the-library). Not one of
+them is about a game. Against that:
 
 | The screen would show | Where it would come from | Why it cannot, yet |
 | --- | --- | --- |
@@ -1818,9 +1883,9 @@ read the stylesheets as text and Vitest replaces a CSS import with an empty
 module.
 
 The tests assert the things about this shell that would rot quietly: that no
-part of it shows data it does not have — including that the only controls in the
-whole window are the skip link, the Settings rail and Diagnostics' Copy report,
-none of which touches a recorder, and that Games offers none at all and
+part of it shows data it does not have — including that the controls in the whole
+window are the skip link, Home's record button, the Settings rail and
+Diagnostics' Copy report and no others, that Games offers none at all and
 Diagnostics offers no button that would not work — that the chrome is operable
 from the keyboard alone, that every pairing of words and ground clears 4.5:1, and
 that the component layer still consumes the design system rather than a value
@@ -1876,6 +1941,16 @@ a library and holds the figures on the screen to being the index's own. Both
 halves are needed. The first alone would pass on a screen that can never show
 anything; the second alone would pass on a screen that invents while a read is
 in flight or has failed.
+
+Home adds two more of its own that are worth knowing about before changing them.
+**The link and the recorder's answer are driven apart on purpose** — the case
+stubs a link saying "idle" and a `get_status` saying "recording", and the
+reverse — so that a screen reading the wrong one fails rather than passing
+because the two happened to agree. And **one case runs in real time**: the
+recorder answers the same `elapsed_ms` however often it is asked, the case waits
+for four rounds of asking, and the duration on screen has to be unchanged. A fake
+clock is exactly what a local timer would also be driven by, so advancing one
+would prove less; the few seconds it costs buy the acceptance criterion.
 
 That check is run over each **text node** rather than over the screen's
 `textContent`, and the reason is worth knowing before writing another one like

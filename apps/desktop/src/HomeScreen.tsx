@@ -1,16 +1,32 @@
 import type { ReactNode } from 'react';
 
 import { describeProblem, formatBytes, useGames, useSessions } from './library';
+import { describeRecordControl } from './recording';
 import { describeRecordingNow, WHERE_RECORDINGS_GO } from './recordingNow';
 import { SessionList } from './SessionList';
 import type { RecorderLinkState } from './useRecorderLink';
+import { useRecording } from './useRecording';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
 /** How many sittings Home lists. It is a recent-activity list, not the library. */
 const RECENT = 5;
 
 /**
- * The Home screen (issues #60 and #301).
+ * The Home screen (issues #60, #301 and #389).
+ *
+ * # The record control
+ *
+ * Pressing it starts a recording of the application the user was last in;
+ * pressing it again stops that recording and finishes its file. That is the
+ * whole of [issue #389](https://github.com/wildware-uk/clipped/issues/389), and
+ * it is the smallest thing that makes Clipped an application rather than a set
+ * of parts.
+ *
+ * Everything the control says about the recording comes from the recorder, asked
+ * once a second (`useRecording`). Nothing here is set because a button was
+ * pressed: a window that assumed its own command had worked would say
+ * "recording" over a recorder that had died, and that state — confidently wrong
+ * about somebody's footage — is worse than no state at all.
  *
  * # What it draws
  *
@@ -56,15 +72,18 @@ export interface HomeScreenProps {
    * Where the recorder link stands, or `null` outside the Clipped window.
    *
    * Passed in rather than taken from `useRecorderLink` here, so that the shell
-   * holds one subscription rather than two and this screen is a pure function of
-   * what it is told.
+   * holds one subscription rather than two. What the recorder is *doing* is not
+   * passed in: it is asked for by this screen, and only while this screen is
+   * open, so that leaving it stops the asking.
    */
   readonly link: RecorderLinkState | null;
 }
 
 /** The Home screen. */
 export function HomeScreen({ link }: HomeScreenProps): ReactNode {
-  const now = describeRecordingNow(link);
+  const recording = useRecording(link);
+  const now = describeRecordingNow(link, recording.status, recording.problem);
+  const control = describeRecordControl(link, recording.status, recording.target);
   const { read: sessions } = useSessions('', RECENT);
   const games = useGames();
 
@@ -81,14 +100,74 @@ export function HomeScreen({ link }: HomeScreenProps): ReactNode {
        * A live region, like the recorder status in the sidebar and the Games
        * screen's detection block, because a recording starting or ending changes
        * what this says while nobody is looking at it. It carries the state, the
-       * reason for it and the file, and nothing else.
+       * reason for it, the control and the file, and nothing else.
        */}
       <section className="clipped-panel" aria-label="Recording now" aria-live="polite">
         <h2 className="clipped-panel__heading">{now.state}</h2>
         <p className="clipped-panel__body">{now.detail}</p>
+
+        {now.elapsed !== undefined && (
+          /*
+           * `aria-live="off"` inside a polite region, deliberately. The region
+           * is live because a recording starting is worth announcing; this
+           * figure changes every second, and a screen reader reading a new
+           * duration aloud once a second would make the screen unusable and
+           * drown the announcement that actually matters (AGENTS.md section 46).
+           * It stays in the accessibility tree and is read on demand.
+           */
+          <p className="clipped-panel__body" aria-live="off">
+            Recording for {now.elapsed}, as the recorder last reported it.
+          </p>
+        )}
+
         {now.output !== undefined && (
           <p className="clipped-panel__body clipped-path">{now.output}</p>
         )}
+
+        <p className="clipped-panel__body">
+          <button
+            type="button"
+            className={
+              control.action === 'stop'
+                ? 'clipped-btn clipped-btn--secondary'
+                : 'clipped-btn clipped-btn--primary'
+            }
+            disabled={control.action === null || recording.working}
+            onClick={control.action === 'stop' ? recording.stop : recording.start}
+          >
+            {control.label}
+          </button>
+        </p>
+
+        {control.reason !== undefined && (
+          <p className="clipped-panel__body clipped-muted">{control.reason}</p>
+        )}
+
+        {/*
+         * A refusal the recorder made, in the recorder's own words (AGENTS.md
+         * section 45). `role="alert"` because it is the answer to something the
+         * user just did, and the polite region around it would otherwise hold it
+         * behind whatever else changed.
+         */}
+        {recording.refusal !== null && (
+          <p className="clipped-panel__body" role="alert">
+            {recording.refusal.message}
+          </p>
+        )}
+
+        {/*
+         * Where the recording that was just stopped ended up. The panel would
+         * otherwise go from "Recording cs2.exe" straight to "not recording" and
+         * take the path with it, leaving somebody with a file they had just made
+         * and no idea where.
+         */}
+        {recording.finished !== null && (
+          <>
+            <p className="clipped-panel__body">Recording finished, and its file is closed.</p>
+            <p className="clipped-panel__body clipped-path">{recording.finished.output}</p>
+          </>
+        )}
+
         <p className="clipped-panel__body clipped-muted">{WHERE_RECORDINGS_GO}</p>
       </section>
 

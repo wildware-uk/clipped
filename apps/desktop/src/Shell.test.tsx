@@ -159,19 +159,32 @@ describe('the application shell', () => {
     expect(screen.getByRole('tablist', { name: 'Settings sections' })).toBeVisible();
   });
 
-  it('offers no recorder controls while the recorder cannot be reached', () => {
+  it('offers no working recorder control while the recorder cannot be reached', () => {
     renderApp();
 
     const status = screen.getByRole('region', { name: 'Recorder status' });
     expect(within(status).getByText('Not connected')).toBeVisible();
     expect(within(status).queryAllByRole('button')).toHaveLength(0);
 
-    // The only control in the whole shell is the skip link. Anything else would
-    // be a button with nothing behind it, which is what AGENTS.md section 27
-    // forbids until the recorder can be reached.
+    // Two controls in the whole shell, and no third. Anything else would be a
+    // button with nothing behind it, which is what AGENTS.md section 27 forbids.
     expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
       'Skip to content',
+      'Start recording',
     ]);
+
+    // The record control exists because Home is a screen about recording, and
+    // it is disabled and says why rather than being absent (issue #389): a
+    // control that appears only once it would work leaves somebody with nothing
+    // to read and nowhere to look. Nothing here is running, so nothing is
+    // pressable.
+    const record = screen.getByRole('button', { name: 'Start recording' });
+    expect(record).toBeDisabled();
+    expect(
+      within(screen.getByRole('region', { name: 'Recording now' })).getByText(
+        'There is no recorder to record with.',
+      ),
+    ).toBeVisible();
   });
 
   it('names the file a killed recorder left, rather than only saying "Idle"', async () => {
