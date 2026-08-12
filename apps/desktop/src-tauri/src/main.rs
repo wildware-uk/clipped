@@ -494,6 +494,299 @@ mod tests {
         );
     }
 
+    /// A recorder that answers the two library commands and remembers exactly
+    /// what it was asked.
+    #[derive(Debug, Default)]
+    struct AskedRecorder {
+        /// Every command it was sent, in order.
+        asked: std::sync::Mutex<Vec<clipped_ipc::Command>>,
+        /// What to answer both commands with instead of a reply.
+        refusal: Option<clipped_ipc::ProtocolError>,
+    }
+
+    impl AskedRecorder {
+        /// A recorder that refuses every library question.
+        fn refusing(refusal: clipped_ipc::ProtocolError) -> Self {
+            Self {
+                asked: std::sync::Mutex::new(Vec::new()),
+                refusal: Some(refusal),
+            }
+        }
+
+        /// What it has been asked so far.
+        fn asked(&self) -> Vec<clipped_ipc::Command> {
+            self.asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl clipped_ipc::CommandHandler for AskedRecorder {
+        fn call(
+            &self,
+            command: clipped_ipc::Command,
+        ) -> Result<clipped_ipc::Reply, clipped_ipc::ProtocolError> {
+            self.asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(command.clone());
+
+            if let Some(refusal) = &self.refusal {
+                return Err(refusal.clone());
+            }
+
+            match command {
+                clipped_ipc::Command::LibrarySessions(_) => {
+                    Ok(clipped_ipc::Reply::LibrarySessions { page: a_page() })
+                }
+                clipped_ipc::Command::LibraryGames => Ok(clipped_ipc::Reply::LibraryGames {
+                    games: vec![a_game()],
+                }),
+                other => Err(clipped_ipc::ProtocolError::new(
+                    clipped_ipc::ErrorCode::UnknownCommand,
+                    format!("this test recorder answers the library commands only, not {other:?}"),
+                )),
+            }
+        }
+
+        fn status(&self) -> clipped_ipc::RecorderStatus {
+            clipped_ipc::RecorderStatus::Idle
+        }
+
+        fn features(&self) -> Vec<String> {
+            vec![clipped_ipc::features::LIBRARY.to_owned()]
+        }
+    }
+
+    /// The page [`AskedRecorder`] answers `library_sessions` with.
+    fn a_page() -> clipped_ipc::LibrarySessionPage {
+        clipped_ipc::LibrarySessionPage {
+            sessions: vec![clipped_ipc::LibrarySession {
+                session_id: "counter-strike-2-20260811-201400".to_owned(),
+                game_name: Some("Counter-Strike 2".to_owned()),
+                started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+                ..clipped_ipc::LibrarySession::default()
+            }],
+            next_cursor: Some(
+                "2026-08-11T20:14:00+01:00|counter-strike-2-20260811-201400".to_owned(),
+            ),
+        }
+    }
+
+    /// The game [`AskedRecorder`] answers `library_games` with.
+    fn a_game() -> clipped_ipc::LibraryGame {
+        clipped_ipc::LibraryGame {
+            game_id: Some("counter-strike-2".to_owned()),
+            name: Some("Counter-Strike 2".to_owned()),
+            sessions: 3,
+            recordings: 7,
+            ..clipped_ipc::LibraryGame::default()
+        }
+    }
+
+    /// A recorder listening on a named pipe of this test's own.
+    ///
+    /// The protocol's own [`clipped_ipc::Server`] behind a real pipe rather
+    /// than a stub in place of [`RecorderLink`], because the link is a concrete
+    /// type with no seam in it: the only way to find out what the window
+    /// actually put on the wire is to be the thing at the other end of it. That
+    /// is the point of these tests — the TypeScript suite stubs `invoke` and so
+    /// stops at the window's edge, and the recorder's own tests start at its
+    /// dispatch, leaving the two commands that join them covered by nothing.
+    struct FakeRecorder {
+        endpoint: Endpoint,
+        handler: std::sync::Arc<AskedRecorder>,
+        events: clipped_ipc::EventPublisher,
+        serving: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeRecorder {
+        /// Starts one on a pipe named after `test`, serving on a thread.
+        fn listening(test: &str, handler: AskedRecorder) -> Self {
+            let endpoint = Endpoint::named(&format!("clipped-{test}.{}", std::process::id()))
+                .expect("the generated name is valid");
+            let mut listener = clipped_ipc::transport::Listener::bind(&endpoint)
+                .expect("nothing else has this name");
+
+            let handler = std::sync::Arc::new(handler);
+            let events = clipped_ipc::EventPublisher::new();
+            let server = clipped_ipc::Server::new(
+                std::sync::Arc::clone(&handler),
+                events.clone(),
+                PeerIdentity {
+                    name: "clipped-recorder".to_owned(),
+                    version: "0.0.0-test".to_owned(),
+                },
+            );
+
+            let serving = std::thread::spawn(move || {
+                let _ = server.serve(&mut listener);
+            });
+
+            Self {
+                endpoint,
+                handler,
+                events,
+                serving: Some(serving),
+            }
+        }
+
+        /// A link pointed at this recorder, inside an application that manages
+        /// it — which is the only way to obtain the [`tauri::State`] a
+        /// `#[tauri::command]` is handed.
+        ///
+        /// The executable named is one that does not exist, and is never
+        /// reached: a recorder is already listening on the endpoint, so the
+        /// supervisor attaches rather than starting one. `RestartPolicy::NEVER`
+        /// makes sure a test cannot leave something trying again in the
+        /// background.
+        fn window(&self) -> tauri::App<tauri::test::MockRuntime> {
+            let settings = SupervisorSettings {
+                restart: clipped_ipc::RestartPolicy::NEVER,
+                ..SupervisorSettings::new(
+                    self.endpoint.clone(),
+                    std::env::temp_dir().join("clipped-no-such-recorder.exe"),
+                    PeerIdentity {
+                        name: "clipped-desktop-test".to_owned(),
+                        version: "0.0.0".to_owned(),
+                    },
+                )
+            };
+            let (link, _events) = RecorderLink::start(settings);
+
+            tauri::test::mock_builder()
+                .manage(link)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("a mock application builds")
+        }
+    }
+
+    impl Drop for FakeRecorder {
+        /// Over the protocol, the way the real recorder is stopped, so a test
+        /// does not leave a pipe listening for the rest of the run.
+        fn drop(&mut self) {
+            if let Ok(mut client) = clipped_ipc::Client::connect(
+                &self.endpoint,
+                "clipped-desktop-test",
+                "0.0.0",
+                std::time::Duration::from_secs(5),
+            ) {
+                let _ = client.call(&clipped_ipc::Command::Shutdown(
+                    clipped_ipc::Shutdown::default(),
+                ));
+            }
+            self.events.close();
+            if let Some(serving) = self.serving.take() {
+                let _ = serving.join();
+            }
+        }
+    }
+
+    #[test]
+    fn the_library_page_command_asks_the_recorder_for_the_page_it_was_asked_for() {
+        // The middle hop of the round trip this feature is: window → Tauri
+        // command → control protocol → recorder. A `library_sessions` that sent
+        // `library_games`, or that dropped `limit`, `after` or `query` on the
+        // way through, would show the newest page for ever — the search box
+        // typed into and nothing happening, the second page of the library
+        // being the first one again — and every other test in the repository
+        // would still be green.
+        let recorder = FakeRecorder::listening("library-page", AskedRecorder::default());
+        let window = recorder.window();
+
+        let page = library_sessions(
+            window.state::<RecorderLink>(),
+            Some(7),
+            Some("2026-08-11T20:14:00+01:00|counter-strike-2-20260810-193000".to_owned()),
+            Some("game:cs2 tag:clutch -favourite".to_owned()),
+        )
+        .expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::LibrarySessions(
+                clipped_ipc::LibrarySessions {
+                    limit: Some(7),
+                    after: Some(
+                        "2026-08-11T20:14:00+01:00|counter-strike-2-20260810-193000".to_owned()
+                    ),
+                    query: Some("game:cs2 tag:clutch -favourite".to_owned()),
+                }
+            )],
+            "the command the recorder received has to be the one the window was asked for, \
+             carrying every parameter it was given"
+        );
+        assert_eq!(
+            page,
+            a_page(),
+            "and its reply has to reach the caller whole"
+        );
+    }
+
+    #[test]
+    fn a_page_asked_for_with_no_parameters_asks_the_recorder_for_none() {
+        // What a window sends when a Library screen first opens. `None` has to
+        // stay `None`: a command that substituted a limit of its own would put
+        // a second page size in the system, and the recorder's is the one that
+        // knows what a frame can carry.
+        let recorder = FakeRecorder::listening("library-page-default", AskedRecorder::default());
+        let window = recorder.window();
+
+        library_sessions(window.state::<RecorderLink>(), None, None, None)
+            .expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::LibrarySessions(
+                clipped_ipc::LibrarySessions::default()
+            )]
+        );
+    }
+
+    #[test]
+    fn the_per_game_command_asks_the_recorder_for_the_games_rather_than_a_page() {
+        // The two library commands take the same link and answer shapes that
+        // both start with `Library`, so sending the wrong one is a one-word
+        // mistake that compiles.
+        let recorder = FakeRecorder::listening("library-games", AskedRecorder::default());
+        let window = recorder.window();
+
+        let games = library_games(window.state::<RecorderLink>()).expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::LibraryGames]
+        );
+        assert_eq!(games, vec![a_game()]);
+    }
+
+    #[test]
+    fn a_refusal_from_the_recorder_reaches_the_window_as_its_own_code() {
+        // The other half of what these commands do, over the real transport:
+        // an unreadable library has to arrive at the window carrying
+        // `library_unavailable`, because that is what the screen tells apart
+        // from an empty library (AGENTS.md section 27).
+        let recorder = FakeRecorder::listening(
+            "library-refused",
+            AskedRecorder::refusing(clipped_ipc::ProtocolError::new(
+                clipped_ipc::ErrorCode::LibraryUnavailable,
+                "the recording library could not be opened: the drive is not connected",
+            )),
+        );
+        let window = recorder.window();
+
+        let problem = library_sessions(window.state::<RecorderLink>(), None, None, None)
+            .expect_err("an unreadable library is a refusal");
+
+        assert_eq!(problem.code, "library_unavailable");
+        assert!(
+            problem.message.contains("the drive is not connected"),
+            "the recorder's own sentence is the one worth showing: {}",
+            problem.message
+        );
+    }
+
     #[test]
     fn a_startup_failure_waits_for_the_window_to_ask_for_it() {
         // Nothing is listening for an event while `setup` runs, so the notice
