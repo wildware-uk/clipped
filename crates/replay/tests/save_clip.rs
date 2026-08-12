@@ -371,8 +371,9 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     let pushed = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    // Both saves read a buffer that is still being written to and still
-    // evicting, which is the condition "without corrupting the buffer" is about.
+    // Capture keeps running for the whole of this test, so both saves read a
+    // buffer that is still being written to. That it is also still *evicting* is
+    // not assumed from the pacing below — it is waited for and then asserted.
     let capturing = std::thread::spawn({
         let buffer = Arc::clone(&buffer);
         let pushed = Arc::clone(&pushed);
@@ -391,15 +392,27 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
         }
     });
 
-    while pushed.load(Ordering::Acquire) < 40 * FRAMES_PER_SECOND {
+    // Wait until the window has begun to roll, so the saves below start against
+    // a buffer at its steady state rather than one still filling up. Taken from
+    // the buffer's own counter rather than inferred from a frame count, and
+    // bounded by the capture thread's ceiling so that a buffer which never
+    // evicts fails here instead of spinning.
+    while buffer.stats().segments_evicted_for_window() == 0 {
+        assert!(
+            pushed.load(Ordering::Acquire) < 12_000,
+            "the capture thread pushed everything it had and the window never moved, so nothing \
+             in this test was read out of an evicting buffer"
+        );
         std::thread::yield_now();
     }
+    let before = buffer.stats();
 
     // Two leases, one after the other, as two hotkey presses a moment apart
-    // would take them.
-    let first = buffer
-        .lease_last(Duration::from_secs(30))
-        .expect("thirty seconds are held");
+    // would take them: the whole minute, then the last fifteen seconds. The
+    // first is deliberately the whole window, so the oldest segment it holds is
+    // the very one the buffer is about to evict — which is what makes the wait
+    // inside the scope below reachable in the time a save takes.
+    let first = buffer.lease_last(WINDOW).expect("the whole minute is held");
     let second = buffer
         .lease_last(Duration::from_secs(15))
         .expect("fifteen seconds are held");
@@ -408,10 +421,29 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     let second_path = directory.file("second.mkv");
     let track = video.track();
 
-    let (first_clip, second_clip) = std::thread::scope(|scope| {
+    // "Still evicting" measured rather than claimed. This waits — with both
+    // saves still running — for the buffer to move its window past a segment one
+    // of them is reading: `segments_evicted_for_window` says the window moved,
+    // and `segments_retained_for_a_save` says what it moved past was still being
+    // read. The two together are the contention "without corrupting the buffer"
+    // is about; the eviction count alone would be satisfied by a window moving
+    // past segments no reader ever wanted.
+    let (during, first_clip, second_clip) = std::thread::scope(|scope| {
         let one = scope.spawn(|| save_clip(&first, &first_path, &track));
         let two = scope.spawn(|| save_clip(&second, &second_path, &track));
+
+        let mut during = buffer.stats();
+        while !one.is_finished()
+            && !two.is_finished()
+            && (during.segments_evicted_for_window() == before.segments_evicted_for_window()
+                || during.segments_retained_for_a_save() == 0)
+        {
+            std::thread::yield_now();
+            during = buffer.stats();
+        }
+
         (
+            during,
             one.join().expect("the first save finishes"),
             two.join().expect("the second save finishes"),
         )
@@ -422,12 +454,25 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     stop.store(true, Ordering::Release);
     let frames = capturing.join().expect("the capture thread finishes");
 
+    assert!(
+        during.segments_evicted_for_window() > before.segments_evicted_for_window(),
+        "the window did not move while the saves were running, so neither save read an evicting \
+         buffer: {} segments evicted before the saves and {} while they ran",
+        before.segments_evicted_for_window(),
+        during.segments_evicted_for_window()
+    );
+    assert!(
+        during.segments_retained_for_a_save() > 0,
+        "the window moved past no segment a save was reading, so the saves and the eviction never \
+         met on the same segment and the lease was never what kept one alive"
+    );
+
     // The buffer is intact: it took every packet, and it will still serve a
     // clip afterwards.
     assert_eq!(buffer.stats().packets_buffered(), frames);
     assert!(buffer.lease_last(Duration::from_secs(30)).is_ok());
 
-    for (clip, seconds) in [(&first_clip, 30), (&second_clip, 15)] {
+    for (clip, seconds) in [(&first_clip, 60), (&second_clip, 15)] {
         assert!(clip.is_complete(), "{clip}");
         assert!(clip.duration() >= Duration::from_secs(seconds));
 

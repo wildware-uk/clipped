@@ -280,6 +280,15 @@ moment apart out of a buffer that is still being written to, writes both
 concurrently, and checks that the buffer took every packet throughout and will
 still serve a third clip afterwards.
 
+The contention it is really about is eviction, so the test waits for that rather
+than assuming it. It begins only once the buffer's own
+`segments_evicted_for_window` has moved — the window is rolling, not still
+filling — and while both saves are in flight it waits for that count to rise
+*again* and for `segments_retained_for_a_save` to become non-zero, which is the
+buffer reporting that the window has moved past a segment a save is still
+reading. That is the moment the lease exists for: the segment is out of the
+buffer and alive because a reader holds it.
+
 ## Per-configuration ceiling
 
 The memory a buffer occupies is arithmetic, not a guess:
