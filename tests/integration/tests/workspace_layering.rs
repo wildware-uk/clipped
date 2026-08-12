@@ -85,16 +85,22 @@ const LAYERS: &[&[&str]] = &[
     ],
     // Consumers of encoded output. `clipped-muxer` writes it to a container.
     //
-    // `clipped-league-plugin` is a game integration from `plugins/`
-    // (docs/plugin-api.md), and layering is not what governs it: a plugin is a
-    // separate process the recorder starts rather than a crate anything links,
-    // so both directions are asserted directly by `PLUGINS` below — nothing may
-    // depend on it, and it may name only the plugin contract and the event
-    // vocabulary. It is placed here rather than up with the executables because
-    // the layer table has to cover every member, and because the two rules that
-    // do govern it are stricter than any layer, so the choice of layer decides
-    // nothing.
-    &["clipped-muxer", "clipped-league-plugin"],
+    // `clipped-league-plugin` and `clipped-cs2-plugin` are game integrations
+    // from `plugins/` (docs/plugin-api.md), and layering is not what governs
+    // them: a plugin is a separate process the recorder starts rather than a
+    // crate anything links, so both directions are asserted directly by
+    // `PLUGINS` below — nothing may depend on one, and one may name only the
+    // plugin contract and the event vocabulary. They are placed here rather
+    // than up with the executables because the layer table has to cover every
+    // member, and because the two rules that do govern them are stricter than
+    // any layer, so the choice of layer decides nothing. Every plugin sits on
+    // the same layer so that adding the next one is a line in two places
+    // rather than a decision.
+    &[
+        "clipped-muxer",
+        "clipped-league-plugin",
+        "clipped-cs2-plugin",
+    ],
     // `clipped-replay` holds a rolling window of encoded packets in memory so
     // that a hotkey pressed after something interesting can still save it, and
     // then writes that clip out (docs/replay-buffer.md).
@@ -330,7 +336,7 @@ fn test_only_packages_are_never_linked_into_the_product() {
 /// (docs/plugin-api.md) — so the two rules that matter about it are not
 /// "which layer", and the two tests below assert them instead of trusting a
 /// comment. Adding a plugin to the workspace means adding it here.
-const PLUGINS: &[&str] = &["clipped-league-plugin"];
+const PLUGINS: &[&str] = &["clipped-league-plugin", "clipped-cs2-plugin"];
 
 /// The only crates of this workspace a plugin may name.
 ///

@@ -1,0 +1,17 @@
+{
+  "contract": 1,
+  "id": "counter-strike-2",
+  "name": "Counter-Strike 2",
+  "version": "0.1.0",
+  "description": "Reports kills, deaths, assists, rounds and match results from Game State Integration.",
+  "executable": "clipped-cs2-plugin.exe",
+  "supports": { "executables": ["cs2.exe"] },
+  "network": [
+    {
+      "class": "loopback",
+      "direction": "listen",
+      "endpoint": "127.0.0.1:3212",
+      "purpose": "receives Counter-Strike 2 game state"
+    }
+  ]
+}

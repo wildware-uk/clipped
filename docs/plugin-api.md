@@ -1,21 +1,23 @@
 # Plugin API
 
-**Status: there is one plugin, and nothing starts it yet.** Both halves of the
-contract exist. The *event model* — what a plugin reports, how it is timed, and
-how it stays readable for years — is `crates/events`
+**Status: two plugins exist, and nothing in the recorder starts either.** Both
+halves of the contract exist. The *event model* — what a plugin reports, how it
+is timed, and how it stays readable for years — is `crates/events`
 ([issue #68](https://github.com/wildware-uk/clipped/issues/68)). The *plugin
 contract* — what a plugin is, how one is found, started, supervised and kept
 away from a recording — is `crates/plugins`
-([issue #69](https://github.com/wildware-uk/clipped/issues/69)). The first
-integration written against it is `plugins/league`
+([issue #69](https://github.com/wildware-uk/clipped/issues/69)). The
+integrations written against it are `plugins/league`
 ([issue #72](https://github.com/wildware-uk/clipped/issues/72)), described in
-[The League of Legends plugin](#the-league-of-legends-plugin); Counter-Strike 2
-([#70](https://github.com/wildware-uk/clipped/issues/70)) and Dota 2
-([#73](https://github.com/wildware-uk/clipped/issues/73)) do not exist yet.
+[The League of Legends plugin](#the-league-of-legends-plugin), and `plugins/cs2`
+([issue #70](https://github.com/wildware-uk/clipped/issues/70)) —
+Counter-Strike 2, through Game State Integration — described in
+[The reference plugin](#the-reference-plugin). Dota 2
+([#73](https://github.com/wildware-uk/clipped/issues/73)) does not exist yet.
 
 What is still missing is the wiring: **nothing in the recorder attaches a
-supervisor to a session**, so no plugin runs during a real recording, and the
-League plugin is a program that has to be started by hand to see it work. That
+supervisor to a session**, so no plugin runs during a real recording, and both
+plugins are programs that have to be started by hand to see them work. That
 is [What is not built](#what-is-not-built), and it is stated here as well
 because it is the thing most likely to be misread (AGENTS.md section 7).
 
@@ -56,6 +58,12 @@ The contract:
 - [Writing a plugin](#writing-a-plugin)
 - [What a plugin may not do](#what-a-plugin-may-not-do)
 - [Versioning the contract](#versioning-the-contract)
+
+The plugin:
+
+- [The reference plugin](#the-reference-plugin)
+- [Writing into somebody else's game](#writing-into-somebody-elses-game)
+- [Deriving events from state](#deriving-events-from-state)
 - [What is not built](#what-is-not-built)
 
 The plugins:
@@ -398,12 +406,16 @@ made without a version-1 document being read by the version-2 build.
 
 ## How the three planned integrations map
 
-**One of these exists** — League of Legends, below — and the other two do not.
-They are the three shapes the model was designed against, and they are recorded
-here because the design's only real test is whether it absorbs their differences
-without any of them reaching the core. The League column is now what the code
-does rather than what was expected of it, and it turned out to be what this
-table said, which is the most that can be claimed for a prediction.
+**Two of these exist** — Counter-Strike 2 (`plugins/cs2`) and League of Legends
+(`plugins/league`) — and Dota 2 does not. They are the three shapes the model
+was designed against, and they are recorded here because the design's only real
+test is whether it absorbs their differences without any of them reaching the
+core. The first two columns are now descriptions of code rather than plans; the
+League column turned out to be what this table said, which is the most that can
+be claimed for a prediction, and
+[The reference plugin](#the-reference-plugin) is where the parts of the
+Counter-Strike 2 column that turned out to be harder than the table suggests are
+written down.
 
 | | Counter-Strike 2 ([#70](https://github.com/wildware-uk/clipped/issues/70)) | League of Legends ([#72](https://github.com/wildware-uk/clipped/issues/72)) | Dota 2 ([#73](https://github.com/wildware-uk/clipped/issues/73)) |
 | --- | --- | --- | --- |
@@ -1036,19 +1048,214 @@ standard output as they happen. Saving the body of one
 players' Riot IDs replaced ([privacy.md](privacy.md)), and pointing a test at it
 is what turns the first gap into a fixture.
 
+## The reference plugin
+
+`plugins/cs2` is Counter-Strike 2, and it is the first plugin written against
+everything above. It is the reference because two more follow it and copy its
+shape, so its shape is stated here rather than left to be inferred from a diff.
+`plugins/cs2/README.md` is the user-facing half — what is written where, and how
+to take it away; this section is the part a plugin author needs.
+
+It is Counter-Strike rather than something more interesting for one reason:
+**the game has an official answer.** Game State Integration is Valve's own
+documented mechanism, a `.cfg` in the game's configuration directory asks the
+game to POST a JSON snapshot of its state to a local port, and it posts. That is
+exactly what [What a plugin may not do](#what-a-plugin-may-not-do) asks for, and
+it means the reference plugin never has to demonstrate a compromise.
+
+**The layout is the contract's, with nothing added:**
+
+```text
+plugins/cs2/
+    plugin.json            what it is, what it supports, what it will do with
+                           the network
+    src/main.rs            the plugin protocol loop, and three subcommands
+    src/derive.rs          state snapshots into events
+    tests/payloads/        payloads to test against, and no game
+```
+
+Four things in it are worth copying, and one is worth arguing with.
+
+**The manifest is asserted against the code.** `plugin.json` declares
+`127.0.0.1:3212`; `integration::DEFAULT_PORT` is what gets bound; a test
+compares them. A declaration is what the user consents to before the plugin may
+run, so a declaration that has drifted from the socket is consent for something
+that is not happening. The same test checks that the manifest names the binary
+Cargo actually builds, because a manifest naming an executable that is not there
+is a plugin the host refuses at discovery and a mistake a rename makes silently.
+What that test bounds is the **default**: `install --port` can still point the
+game somewhere else, and nothing compares the two at run time, so
+`plugins/cs2/README.md` says to edit the manifest to match. Enforcing it needs
+somewhere to enforce it from
+([issue #281](https://github.com/wildware-uk/clipped/issues/281)).
+
+**It says `hello` before it does anything that can fail.** Introducing itself
+and then reporting a `problem` is a plugin the host can tell the user about;
+failing before the handshake is a plugin that "never introduced itself", which
+is a different message and a less useful one. When the integration is not set
+up, that is exactly what happens: `hello`, then a `problem` naming the command
+to run, then exit — and the supervisor's bounded restart leaves it stopped with
+the reason showing.
+
+**It is tested as a process, not only as a function.** `tests/plugin_process.rs`
+copies the built binary into a directory laid out like a plugin, runs its
+`install` subcommand against a directory laid out like Counter-Strike 2, starts
+it the way a supervisor does, POSTs payloads at the port it opened and reads the
+events it prints. Everything else in the crate tests a function, and every unit
+test passes when the token is written in one format and read in another.
+
+**Its fixtures say where they came from.** The payloads in `tests/payloads/` are
+constructed against the documented shape, not captured from a running game,
+because the game was not installed on the machine it was written on, and the
+directory's README says so in the first paragraph. A fixture that quietly claims
+to be a recording is a test that claims more than it proves (AGENTS.md section
+27).
+
+The thing to argue with is that **a plugin has to remember where it installed
+something**, and there is nowhere obvious to put that. A plugin is told the
+game's executable *file name* and its process identifier, deliberately and not
+its path ([The wire](#the-wire)), so a running plugin cannot find the game's
+installation directory and therefore cannot find the file it wrote there —
+which is where its port and its token live. `plugins/cs2` writes one line beside
+its own executable naming that path, and nothing else: the port and the token
+are read back out of the configuration file itself, so there is exactly one copy
+of each and no way for two records to disagree about what the game was told. It
+is the plugin's own state in the plugin's own directory, which is not the
+application's configuration store (AGENTS.md section 30) — but the next two
+integrations will meet the same problem, and if all three solve it separately
+that is a shared facility waiting to be extracted.
+
+## Writing into somebody else's game
+
+Installing Game State Integration means **writing a file into the user's game
+directory**, and that is the part of this plugin with the least code and the
+most judgement in it. `docs/privacy.md` governs it, and three rules fall out.
+
+**It is never a side effect.** Nothing is installed when the plugin is attached
+to a session, or when the game launches, or when the plugin is enabled. It is a
+command the user runs — `clipped-cs2-plugin install <game folder>` — and until
+they do, an attached plugin reports a problem naming that command and stops.
+A plugin that wrote into a game directory because a game started would be doing
+something nobody asked for.
+
+**Exactly what is written is documented, and it is one file.**
+`gamestate_integration_clipped.cfg`, in `game\csgo\cfg`, holding a loopback URI,
+four timing values, a token and six `data` subscriptions.
+`plugins/cs2/README.md` reproduces it in full. Six subscriptions rather than the
+dozen available is the same instinct as the rest of this document: data the
+plugin does not need is data it does not need to be handling.
+
+**Removal is a command, and deletion is equivalent.** `uninstall` removes that
+one file; deleting it by hand does the same job and breaks nothing. A user who
+cannot get rid of something without the tool that put it there does not really
+have a choice about it.
+
+Then there is the part that is specific to Counter-Strike and general in
+principle: **the directory is shared.** Counter-Strike loads *every*
+`gamestate_integration_*.cfg` it finds, which is how several tools coexist in
+one game. So the plugin writes under a name of its own, refuses to replace a
+file of that name it did not write — recognised structurally, by the service
+name at the top of the document, not by a comment anybody could copy — and
+refuses to install onto a port a neighbouring file already posts to, naming that
+file. Two integrations on one port means one of them silently receives nothing,
+and being the tool that does that to somebody is worse than failing to install.
+
+The listening socket is loopback, and [privacy.md](privacy.md) does not treat
+that as a free pass: a loopback port is reachable by every process on the
+machine, including a page open in a browser, so every payload has to carry the
+token from the configuration file and one that does not is refused before
+anything about it is believed. The token is generated from the operating
+system's random number generator at install time, and there is no fallback — a
+token from a worse source would be a check that looks like authentication and is
+not.
+
+## Deriving events from state
+
+This is the substance of a Game State Integration plugin, and it is the part the
+[integration table](#how-the-three-planned-integrations-map) compresses into the
+word "difference".
+
+Game State Integration reports **state**. There is no kill message: there is a
+match statistics block whose `kills` was 8 a moment ago and is 9 now. Every
+event `plugins/cs2` reports is a difference between two payloads, and every way
+it could go wrong is a way of getting a difference wrong. One rule holds it
+together:
+
+> **An event is reported only for a transition the plugin observed directly,
+> between two payloads it accepted.**
+
+Five consequences, each of which is a test in `plugins/cs2/src/derive.rs`, and
+each of which a plugin for any state-reporting game will need its own version
+of:
+
+- **The first payload reports nothing.** It is a baseline. A plugin attached to
+  a game already three rounds into a match knows the score and knows nothing
+  about how it got there; a `match_started` at the moment it happened to look
+  would be a mark on a timeline where nothing happened.
+- **A payload older than the last one accepted is discarded whole.** Each post
+  is a separate connection to a loopback port, so two can arrive out of order,
+  and a difference measured against a *newer* baseline is a negative number of
+  kills — or, once the next payload lands, the same kills counted twice. The
+  game's own timestamp is the only ordering information a payload carries; the
+  plugin uses it, and accepts payloads stamped in the same second in arrival
+  order, because within a second there is nothing to order by and pretending
+  otherwise would be a guess.
+- **A counter that goes backwards is not a negative event.** A new match, a
+  warm-up ending, rejoining: all reset the game's counters. A decrease means the
+  plugin's baseline is wrong, so the baseline is replaced and nothing is
+  reported for that step.
+- **A payload about somebody else is not about the player.** Dying in a
+  competitive match moves the camera to a teammate and the payload follows the
+  camera. The plugin compares the payload's Steam identifier against the one the
+  game is running as, and a mismatch means the block is neither reported *nor
+  taken as a baseline* — adopting it would produce a spurious decrease the
+  moment the camera came back.
+- **A field that cannot be attributed is left off.** A kill carries
+  `"headshot"` only when one kill happened in the step and the round's headshot
+  counter moved by one alongside it. Two kills with one headshot between them
+  says nothing about which, so neither event claims it. The same reasoning
+  removes `weapon` entirely: the payload carries the weapon held when it
+  arrived, which after a kill is very often the next one.
+
+**And the timing.** A payload says a counter changed; it does not say when. What
+the plugin knows is that the change happened after the previous payload it
+accepted and no later than this one, so `at` is the **middle of that window**
+and `precision` is **half of it** — which is exactly the claim
+[Timing](#timing) asks a source to make. Every event derived from one payload
+carries the same moment, because two kills in one step really are two kills the
+plugin cannot separate and giving them different times would be inventing an
+order.
+
+The one place this costs something is honesty about a quiet game: with nothing
+changing, the window widens to the game's heartbeat interval and the precision
+widens with it. That is the correct number rather than a flattering one, and a
+highlight rule padding a clip by `precision` is the reason it matters.
+
 ## What is not built
 
 Stated plainly, because the gap between this document and the running
 application is the thing most likely to be misread (AGENTS.md section 7):
 
-- **Nothing attaches a supervisor to a recording session.** `clipped-session`
-  does not yet create one, so no plugin runs during a real recording — including
-  the League plugin, which exists and is started by hand or not at all. That is
-  wiring, and it belongs with
-  [#70](https://github.com/wildware-uk/clipped/issues/70).
-- **Nothing installs a plugin.** `plugins/league` builds an executable and has a
-  `plugin.json` beside it; putting the two in a directory under the plugins
-  folder is a manual step, and there is no packaging step that does it.
+- **Nothing attaches a supervisor to a recording session**
+  ([issue #338](https://github.com/wildware-uk/clipped/issues/338)).
+  `clipped-session` does not create one, so `plugins/league` and `plugins/cs2`
+  run when they are started by hand and are never started by Clipped. This
+  document previously said the wiring belonged with the first integration; it
+  did not — an integration is a plugin and the wiring is in `crates/session`,
+  and putting them in one change would have meant neither being reviewed
+  properly.
+- **Nothing installs a plugin.** `plugins/league` and `plugins/cs2` each build
+  an executable and have a `plugin.json` beside it; putting the two in a
+  directory under the plugins folder is a manual step, and there is no packaging
+  step that does it.
+- **The reference plugin's fixtures are constructed, not captured.**
+  `plugins/cs2/tests/payloads/` was written against the documented Game State
+  Integration payload, because Counter-Strike 2 was not installed on the machine
+  that wrote it. The derivation is therefore tested against the shape it was
+  told about and not against the shape the game produces, which is the
+  outstanding half of
+  [#70](https://github.com/wildware-uk/clipped/issues/70)'s first acceptance
+  criterion. The directory's README says how to take a real capture.
 - **Nothing stores which plugins are enabled**, or the consent each was enabled
   with ([issue #282](https://github.com/wildware-uk/clipped/issues/282)). That
   lives in the configuration API, not here: a plugin crate with its own settings

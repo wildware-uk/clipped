@@ -208,6 +208,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-cs2-plugin"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clipped-events",
+ "clipped-plugins",
+ "serde",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
 name = "clipped-edit"
 version = "0.1.0"
 dependencies = [
