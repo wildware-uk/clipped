@@ -263,8 +263,13 @@ the link and the answer *apart* to check this: the link says idle while
 wrong one fails rather than passing on a coincidence.
 
 A refusal is reported in the recorder's own words — `target_not_found` for a
-window that has closed, `already_recording` for a second start — because those
-are different problems with different answers (AGENTS.md section 45). A request
+window that has closed, `target_not_capturable` for one that is minimised and
+would record nothing, `already_recording` for a second start — because those
+are different problems with different answers (AGENTS.md section 45). The
+minimised one is the reason the message is shown verbatim rather than mapped to
+a sentence of the window's own: only the recorder knows which window it is, and
+"Counter-Strike 2 (cs2.exe) is minimised" is the whole of what the user has to
+act on ([#383](https://github.com/wildware-uk/clipped/issues/383)). A request
 that never reached a recorder carries one of `recorder_unreachable`,
 `no_recorder_configured` or `unexpected_reply` instead, which are outside the
 protocol's own vocabulary so that "the recorder said no" and "there was no

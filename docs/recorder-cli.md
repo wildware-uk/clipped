@@ -115,6 +115,20 @@ runs on, so `list-windows --window <TITLE>` shows exactly what
 `record --window <TITLE>` will point at — including the candidates of an
 ambiguous title, which is a usage error rather than a guess.
 
+**A minimised window is refused, before anything is created.** Windows draws a
+minimised window for nobody, so a recording of one is a container header and no
+picture; the refusal names the window and what to do about it, and no file is
+made ([#383](https://github.com/wildware-uk/clipped/issues/383)):
+
+```text
+Counter-Strike 2 (cs2.exe) is minimised, so there would be nothing to record:
+Windows hands over no frames for a window it is not drawing. Restore it and
+start again
+```
+
+Minimising it *during* a recording is different, and does not end one — see
+"What a finished recording prints" below.
+
 `--framerate` is a **ceiling**, not a pace. The compositor produces a frame when
 the window's content changes, so a source slower than the requested rate records
 at the source's rate, with the real intervals between frames in the timestamps;
@@ -190,6 +204,32 @@ number that means something went wrong: it counts frames that were not encoded
 because the thread writing the file had not caught up. Frames skipped to hold
 `--framerate` are counted separately and are not in it, because they are the
 recorder doing what it was asked.
+
+A window minimised part way through adds a sentence, because nothing else in
+the line would show it: the frame counts are simply lower and the duration still
+covers the silence, so a session that spent most of itself on the taskbar reads
+as a recording of a very still game.
+
+```text
+Recorded 421 frames of 2560x1440 AV1 in 96.30s to D:\clips\session.mkv (NVIDIA NVENC, Windows Graphics Capture, 4.4 fps sustained; 0 frames dropped). Stopped by request. The window was minimised once during the recording, and nothing was recorded while it was.
+```
+
+The recording is deliberately **kept open** while the window is minimised.
+Alt-tabbing out of an exclusive fullscreen game minimises it, and stopping there
+would cost the rest of the session for two keystrokes; everything before the
+minimise and everything after the restore is in the one file, on one timeline.
+
+**A recording that captured nothing at all leaves no file.** If capture never
+produced a frame the file would be a header with no picture in it — which the
+media library would index and draw as a tile that cannot be played — so it is
+removed and the run reports why:
+
+```text
+Nothing was recorded
+Nothing had been recorded, so no file was left.
+  - Restore the window if it is minimised
+  - Make sure it is on a desktop that is showing
+```
 
 One line per audio track follows, and each says what it came to. A track whose
 device produced nothing says so — a microphone muted in Windows still delivers
@@ -412,10 +452,15 @@ be recorded are listed by `--all` with the first reason that applies:
 | `zero-sized` | The client area has no pixels |
 | `content-protected` | `SetWindowDisplayAffinity`: the owner excluded it from capture, and it would record black |
 
-A **minimised** window is not excluded. It is a legitimate target — it is about
-to be restored — but its size is not final and Windows Graphics Capture produces
-no frames until it is, so the listing shows `minimised` in place of a size and
-the resolution output says so.
+A **minimised** window is not excluded *from the listing*. It is a window like
+any other and it is about to be restored, so it is shown, with `minimised` in
+place of a size and a note in the resolution output. What it cannot be is
+recorded while it stays that way: its size is not final and neither capture
+backend can produce a frame for it, so `record`, `watch` and `start_recording`
+all refuse it and say why
+([#383](https://github.com/wildware-uk/clipped/issues/383)). Listing it and
+refusing to record it are not in tension — the listing is how somebody finds the
+window they need to restore.
 
 ### Ambiguity is reported, never guessed
 

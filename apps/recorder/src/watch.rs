@@ -97,7 +97,7 @@ use clipped_windows::WindowInfo;
 
 use crate::cli::{RecordArgs, WatchArgs};
 use crate::config::{CaptureTarget, RecordingConfig};
-use crate::record::{resolve_window, settings_for, RecordError};
+use crate::record::{choose_window, settings_for, RecordError};
 use crate::shutdown::{install_ctrl_c_handler, CtrlCError, ShutdownSignal};
 
 /// How long the loop waits on the watcher before letting the clock move on.
@@ -1122,13 +1122,43 @@ fn wait_for_window(
     timeout: Duration,
     stop: &ShutdownSignal,
 ) -> Result<WindowInfo, String> {
+    wait_for_window_on(
+        &mut || clipped_windows::enumerate_windows().map_err(RecordError::from),
+        target,
+        timeout,
+        stop,
+    )
+}
+
+/// The same, looking at whatever desktop `describe` reports each time.
+///
+/// Split from [`wait_for_window`] around the one syscall, for the same reason
+/// [`crate::record::choose_window`] is split from `resolve_window`: what is left
+/// is every rule about when to keep waiting and when to give up, and it can be
+/// exercised against desktops a test constructed — including the one this
+/// function exists for, a window that is minimised on one look and drawing on
+/// the next (issue #383).
+fn wait_for_window_on(
+    describe: &mut dyn FnMut() -> Result<Vec<WindowInfo>, RecordError>,
+    target: &CaptureTarget,
+    timeout: Duration,
+    stop: &ShutdownSignal,
+) -> Result<WindowInfo, String> {
     let deadline = Instant::now() + timeout;
     let mut waited = false;
 
     loop {
-        let refusal = match resolve_window(target) {
+        let refusal = match describe().and_then(|desktop| choose_window(&desktop, target)) {
             Ok(window) => return Ok(window),
             Err(RecordError::Resolution(error)) => error.to_string(),
+            // Waited out for the same reason a window that has not appeared yet
+            // is: a game that starts minimised, or one somebody minimised while
+            // it was loading, is a window that is about to be recordable. Giving
+            // up at the first look would refuse a recording that the next second
+            // could have made, and carrying on regardless would record nothing
+            // at all (issue #383). If it is still minimised when the timeout
+            // runs out, this reason is what the console line says.
+            Err(minimised @ RecordError::TargetMinimised { .. }) => minimised.to_string(),
             Err(other) => return Err(other.to_string()),
         };
 
@@ -1618,5 +1648,107 @@ name = "test-game.exe"
         assert_eq!(record.encoder, args.encoder);
         assert_eq!(record.microphone, args.microphone);
         assert_eq!(record.system_audio, args.system_audio);
+    }
+
+    /// The game's window, drawing or minimised.
+    ///
+    /// The size is the same either way: Windows keeps answering for a minimised
+    /// window's geometry, so nothing downstream can tell the two apart by shape
+    /// — the flag is the whole of the difference (issue #383).
+    fn game_window(minimised: bool) -> WindowInfo {
+        WindowInfo::new(
+            clipped_windows::WindowHandle::from_raw(0x0001_04ac),
+            "Counter-Strike 2".to_owned(),
+            4242,
+            Some("cs2.exe".to_owned()),
+            clipped_windows::WindowGeometry::new(
+                clipped_windows::PixelSize::new(2560, 1440),
+                96,
+                clipped_windows::MonitorHandle::from_raw(1),
+            ),
+            minimised,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_game_that_starts_minimised_is_waited_for_rather_than_given_up_on() {
+        // The case `watch` exists for and the one nobody is watching a console
+        // for: a game launched to the taskbar, or minimised while it compiles
+        // shaders. Giving up at the first look would silently skip the session,
+        // and the automatic recorder would have nothing to say about why.
+        let looks = std::cell::Cell::new(0u32);
+        let mut desktop = || {
+            looks.set(looks.get() + 1);
+            Ok(vec![game_window(looks.get() == 1)])
+        };
+
+        let window = wait_for_window_on(
+            &mut desktop,
+            &CaptureTarget::ProcessName("cs2.exe".to_owned()),
+            Duration::from_secs(5),
+            &ShutdownSignal::new(),
+        )
+        .expect("a window that was restored on the second look is a window to record");
+
+        assert_eq!(window.title(), "Counter-Strike 2");
+        assert!(
+            !window.is_minimised(),
+            "the window handed to the recording is the restored one"
+        );
+        assert_eq!(
+            looks.get(),
+            2,
+            "the first look refused it and the wait should have taken a second"
+        );
+    }
+
+    #[test]
+    fn a_game_still_minimised_when_the_wait_runs_out_is_given_up_on_with_that_as_the_reason() {
+        // The other end of the same rule. Waiting is not waiting for ever, and
+        // the reason the console prints has to be the real one: "no window
+        // appeared" for a window that is there and minimised would send
+        // somebody looking for a game-detection fault.
+        let mut desktop = || Ok(vec![game_window(true)]);
+
+        let refusal = wait_for_window_on(
+            &mut desktop,
+            &CaptureTarget::ProcessName("cs2.exe".to_owned()),
+            Duration::ZERO,
+            &ShutdownSignal::new(),
+        )
+        .expect_err("a window that is still minimised is not one to record");
+
+        assert!(
+            refusal.contains("minimised") && refusal.contains("Counter-Strike 2"),
+            "the reason has to name the window and say what is wrong with it: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_target_that_names_no_window_at_all_is_also_waited_for() {
+        // The wait this function was written for in the first place, kept here
+        // so that the minimised case cannot be made to pass by breaking it: a
+        // game that has not drawn yet reaches the same loop by a different
+        // error, and it is the ordinary one.
+        let looks = std::cell::Cell::new(0u32);
+        let mut desktop = || {
+            looks.set(looks.get() + 1);
+            Ok(if looks.get() == 1 {
+                Vec::new()
+            } else {
+                vec![game_window(false)]
+            })
+        };
+
+        wait_for_window_on(
+            &mut desktop,
+            &CaptureTarget::ProcessName("cs2.exe".to_owned()),
+            Duration::from_secs(5),
+            &ShutdownSignal::new(),
+        )
+        .expect("a window that appeared on the second look is a window to record");
+
+        assert_eq!(looks.get(), 2);
     }
 }

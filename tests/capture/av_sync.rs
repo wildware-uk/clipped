@@ -981,6 +981,13 @@ fn capture_video(run: Duration, subject: Subject) -> VideoRun {
                     }
                 }
                 Ok(Acquisition::Timeout) => video.timeouts += 1,
+                // Nothing here minimises the subject, and a run in which
+                // something did is a run whose drift figures describe Alt-Tab
+                // rather than audio and video sliding apart.
+                Ok(Acquisition::TargetMinimised) => panic!(
+                    "the subject window was minimised during the run, so no figure measured \
+                     here means anything; run it again with the desktop left alone"
+                ),
                 Ok(Acquisition::SizeChanged(size)) => panic!(
                     "the captured window changed size to {size} during a run that never \
                      resized it"

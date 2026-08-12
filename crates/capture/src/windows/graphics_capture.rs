@@ -50,7 +50,7 @@ use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
-use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
 
 use crate::windows::apartment::ensure_multi_threaded_apartment;
 use crate::windows::device::CaptureDevice;
@@ -177,6 +177,22 @@ impl BackendDeclaration for WindowsGraphicsCapture {
             return Availability::Unavailable(Unavailable::UnsupportedTarget {
                 reason: "the target has excluded itself from capture with \
                          SetWindowDisplayAffinity, so Windows would deliver black frames",
+            });
+        }
+
+        if target.is_minimised() {
+            // The compositor is not composing the window, so it has nothing to
+            // hand over: capture starts, the frame pool is created, and no frame
+            // ever arrives. Declining is what turns that into a refusal before a
+            // file exists instead of an empty recording somebody finds
+            // afterwards (issue #383).
+            //
+            // Deliberately *after* the protection check. A window that is both
+            // protected and minimised should be told about the protection, which
+            // restoring it will not fix.
+            return Availability::Unavailable(Unavailable::UnsupportedTarget {
+                reason: "the window is minimised, so the compositor is not drawing it and \
+                         no frame would ever arrive",
             });
         }
 
@@ -328,6 +344,13 @@ impl CaptureBackend for GraphicsCaptureBackend {
                 // for why the `Closed` event is not enough on its own.
                 if running.target_has_gone() {
                     return Err(CaptureError::TargetLost { method: METHOD });
+                }
+                // And, on the same path and for the same reason, whether there
+                // is a reason for the silence that the caller can put to a user.
+                // The whole timeout has already been spent waiting, so this
+                // costs the caller's loop nothing that the timeout did not.
+                if running.target_is_minimised() {
+                    return Ok(Acquisition::TargetMinimised);
                 }
                 return Ok(Acquisition::Timeout);
             }
@@ -677,14 +700,37 @@ impl Running {
             // here rather than spanning the discard.
             self.gaps.forget();
             drop(frame);
+
+            // **The shape a window passes through while it is minimised is not a
+            // size to record at.** Reporting one as a `SizeChanged` ends the
+            // recording — `clipped_session` cannot follow a size change inside
+            // one file — for a window that is sitting there at the size it
+            // always was.
+            //
+            // Measured on Windows 11 build 26200, recording a 1280x720 window
+            // that was minimised for six seconds and restored: the compositor
+            // composed one frame whose `ContentSize` was **160x28**, the legacy
+            // shape Windows reduces a minimised window to, and it arrived
+            // *after* `IsIconic` had gone false again. The recording was
+            // finished at 160x28 the instant the window came back
+            // ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+            //
+            // What told it apart in that measurement was the window's own client
+            // area: `GetClientRect` answered 0x0, because a window that is
+            // minimised or part way through being restored has no client area at
+            // all. A window that has genuinely been resized has one, so this
+            // discards the transition and reports the resize exactly as before.
+            // One syscall, on a path that has already thrown a frame away.
+            if !self.target_has_a_client_area() {
+                return Ok(Taken::Nothing);
+            }
+
             return match frame_size(content_size) {
                 Some(size) => Ok(Taken::SizeChanged(size)),
-                // A window being minimised reports a zero-sized client area.
-                // That is not a size to reconfigure an encoder for, and the
-                // window is about to stop producing frames anyway, so it reads
-                // as nothing having arrived; capture resumes when it is
-                // restored, at which point the size is real and a genuine
-                // `SizeChanged` follows.
+                // A window can also report a zero-sized client area, which no
+                // encoder can be configured for. It reads as nothing having
+                // arrived, and a genuine `SizeChanged` follows once there is a
+                // real size to report.
                 None => Ok(Taken::Nothing),
             };
         }
@@ -801,6 +847,43 @@ impl Running {
         // handle is no longer a window is exactly what it is for; passing a
         // stale handle is sound and is the case being asked about.
         !unsafe { IsWindow(Some(window)) }.as_bool()
+    }
+
+    /// Whether the window being captured is minimised, and therefore not being
+    /// composed.
+    ///
+    /// Asked on exactly the path [`target_has_gone`](Self::target_has_gone) is
+    /// asked on, and only after it: a window that has been destroyed is not a
+    /// minimised one, and the recording is over rather than paused. So this is a
+    /// handful of `IsIconic` calls a second at most, never one per frame, and
+    /// `IsIconic` reads the window's own state.
+    ///
+    /// [`None`] window — a display target — is never minimised.
+    fn target_is_minimised(&self) -> bool {
+        let Some(window) = self.window else {
+            return false;
+        };
+        // SAFETY: `IsIconic` reads the window's style bits and is defined for
+        // any handle value; `target_has_gone` has just reported this one still
+        // names a window.
+        unsafe { IsIconic(window) }.as_bool()
+    }
+
+    /// Whether the window has a client area at all at this moment.
+    ///
+    /// False while it is minimised and while it is being restored, which is
+    /// exactly the window in which the compositor produces frames of the shape a
+    /// minimised window is reduced to. Asked only of a frame whose shape does not
+    /// match the pool's, to tell a window that has been *resized* from one that
+    /// is on its way back from the taskbar.
+    ///
+    /// Always true for a display target: there is no window to ask, and a
+    /// display's mode change is a real change that must be reported.
+    fn target_has_a_client_area(&self) -> bool {
+        let Some(window) = self.window else {
+            return true;
+        };
+        super::client_size(window).is_some()
     }
 
     /// Blocks until a frame arrives, the target closes, or `deadline` passes.
@@ -1499,6 +1582,42 @@ mod tests {
         .ok()
     }
 
+    /// Lets the test window process the messages Windows has sent it.
+    ///
+    /// The window is created on this thread and this thread spends its time
+    /// inside `acquire`, so without this it never handles a `WM_SIZE` and a
+    /// window told to restore stays half-restored for ever — reporting a client
+    /// area of the shape Windows collapsed it to, which is a *correct* answer
+    /// about a window nobody is running. A capture backend has to be judged
+    /// against a window that behaves like a window (AGENTS.md section 25).
+    fn pump_messages() {
+        let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+        loop {
+            // SAFETY: `message` is a live local; asking for every message of
+            // every window on this thread is what the `None` and the zeroes
+            // mean, and `PM_REMOVE` takes each one out of the queue.
+            let available = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::PeekMessageW(
+                    &raw mut message,
+                    None,
+                    0,
+                    0,
+                    windows::Win32::UI::WindowsAndMessaging::PM_REMOVE,
+                )
+            }
+            .as_bool();
+            if !available {
+                return;
+            }
+            // SAFETY: `message` was just filled in by `PeekMessageW`.
+            unsafe {
+                let _ =
+                    windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&raw const message);
+                windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&raw const message);
+            }
+        }
+    }
+
     /// A live capture of a real top-level window, or [`None`] on a machine that
     /// cannot provide one — having said so through [`skipped`].
     ///
@@ -1535,15 +1654,18 @@ mod tests {
     }
 
     #[test]
-    fn a_minimised_window_is_waited_out_rather_than_reported_as_a_size_or_a_loss() {
+    fn a_minimised_window_is_reported_as_minimised_rather_than_as_a_size_a_loss_or_silence() {
         // Minimise handling is part of issue #12's scope, so it is exercised
         // deliberately here rather than left to whatever a measurement run
         // happened to do. Windows reports a minimised window's client area as
-        // zero by zero and stops composing for it, and the two ways to get that
-        // wrong are both silent: passing the zero size on as a
-        // `SizeChanged` — which no encoder can be configured for — or reading
-        // the silence as the window having gone and finalising the recording
-        // while it is still on the taskbar.
+        // zero by zero and stops composing for it, and the three ways to get
+        // that wrong are all silent: passing the zero size on as a
+        // `SizeChanged` — which no encoder can be configured for — reading the
+        // silence as the window having gone and finalising the recording while
+        // it is still on the taskbar, or reporting it as an ordinary
+        // `Acquisition::Timeout`, which is indistinguishable from a paused game
+        // and is how a recording of a minimised window came to be a 791-byte
+        // file nobody was warned about (issue #383).
         let Some((mut backend, window)) = a_capture_of_a_real_window() else {
             return;
         };
@@ -1559,27 +1681,34 @@ mod tests {
                 windows::Win32::UI::WindowsAndMessaging::SW_MINIMIZE,
             )
         };
+        pump_messages();
 
+        let mut said_minimised = false;
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
+            pump_messages();
             match backend.acquire(Duration::from_millis(100)) {
                 Ok(Acquisition::Frame(_) | Acquisition::Timeout) => {}
-                Ok(Acquisition::SizeChanged(size)) => {
-                    // The type makes a zero size unrepresentable; what this
-                    // asserts is that the backend does not report the
-                    // minimised shape as a size to reconfigure for.
-                    assert!(
-                        size.width() > 1 && size.height() > 1,
-                        "a minimised window must not be reported as a capture size: {size}"
-                    );
-                    backend.resize(size).expect("the pool can be recreated");
-                }
+                Ok(Acquisition::TargetMinimised) => said_minimised = true,
+                Ok(Acquisition::SizeChanged(size)) => panic!(
+                    "nothing resized this window, so reporting {size} is the shape Windows \
+                     reduces a minimised window to being reported as a capture size — which \
+                     ends the recording, because a size change cannot be followed inside one \
+                     file (issue #383)"
+                ),
                 Err(error) => panic!(
                     "a minimised window is still a window, and must not be reported as \
                      anything else: {error}"
                 ),
             }
         }
+
+        assert!(
+            said_minimised,
+            "three seconds of acquisitions against a minimised window said only that nothing \
+             arrived; a session cannot tell that from a paused game, so it writes an empty \
+             file and reports it as an idle source (issue #383)"
+        );
 
         // SAFETY: `window` is still the live test window.
         let _ = unsafe {
@@ -1588,25 +1717,88 @@ mod tests {
                 windows::Win32::UI::WindowsAndMessaging::SW_RESTORE,
             )
         };
+        pump_messages();
 
-        // Restoring has to leave a capture that still works. A `STATIC` window
-        // with nothing drawing into it may legitimately compose nothing, so
-        // what is asserted is that acquisition keeps answering rather than that
-        // a frame arrives.
+        // Restoring has to leave a capture that still works and has to stop the
+        // backend saying the window is minimised: a report that never cleared
+        // would have a restored window recorded as a permanently minimised one.
+        // A `STATIC` window with nothing drawing into it may legitimately
+        // compose nothing, so what is asserted about frames is that acquisition
+        // keeps answering rather than that one arrives.
+        //
+        // **What this window cannot be used to assert**, and where the answer is
+        // instead. Restoring a real application's window makes the compositor
+        // produce one frame of the *minimised* shape after `IsIconic` has gone
+        // false — 160x28, measured on Windows 11 build 26200 — and reporting it
+        // as a size change finishes the recording of a window that is back on
+        // screen at the size it always was (issue #383). The backend now tells
+        // that apart by asking `GetClientRect`, which answers 0x0 for a window
+        // in that state. This window answers 146x28 instead, and keeps
+        // answering it: it is a `STATIC` window whose thread spends its life
+        // inside `acquire`, so its restore never completes and it really is
+        // that size — a correct answer about a window nobody is running, and
+        // not the state a recording meets. Asserting on it here would be
+        // asserting on the test's own artefact. The evidence for the restore
+        // behaviour is the end-to-end run recorded on the issue:
+        // `test-apps/video-pattern` minimised for five seconds mid-recording
+        // produced one 823-frame file that ended only when the window closed.
+        let mut still_minimised = false;
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
+            pump_messages();
             match backend.acquire(Duration::from_millis(100)) {
                 Ok(Acquisition::SizeChanged(size)) => {
                     backend.resize(size).expect("the pool can be recreated");
                 }
-                Ok(_) => {}
+                Ok(Acquisition::TargetMinimised) => still_minimised = true,
+                Ok(_) => still_minimised = false,
                 Err(error) => panic!("capture did not survive the window being restored: {error}"),
             }
         }
+        assert!(
+            !still_minimised,
+            "the window was restored and the backend is still reporting it as minimised"
+        );
 
         drop(backend);
         // SAFETY: `window` is live and was created on this thread.
         let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(window) };
+    }
+
+    #[test]
+    fn a_minimised_window_is_declined_before_a_recording_is_started_for_it() {
+        // The other half of issue #383, and the half that costs nothing to
+        // check: `select` asks every candidate before a file exists, so a
+        // backend that says yes here is a backend that opens an encoder session
+        // and a container header for a window it can never get a frame from.
+        let size = FrameSize::new(1320, 900).expect("1320x900 is a valid size");
+        let minimised = TargetProperties::new(TargetKind::Window, size).with_minimised(true);
+
+        if !WindowsGraphicsCapture::is_supported_here()
+            && skipped("GraphicsCaptureSession::IsSupported reports false here")
+        {
+            return;
+        }
+
+        match WindowsGraphicsCapture.availability(&minimised) {
+            Availability::Unavailable(Unavailable::UnsupportedTarget { reason }) => assert!(
+                reason.contains("minimised"),
+                "the reason has to name the thing the user can put right: {reason}"
+            ),
+            other => panic!("a minimised window must be declined, not accepted: {other:?}"),
+        }
+
+        // The same window, restored, is the ordinary case — without this the
+        // assertion above would pass just as well against a backend that
+        // declined every window there is.
+        assert!(
+            matches!(
+                WindowsGraphicsCapture
+                    .availability(&TargetProperties::new(TargetKind::Window, size)),
+                Availability::Available
+            ),
+            "a window that is not minimised is exactly what this backend is for"
+        );
     }
 
     #[test]

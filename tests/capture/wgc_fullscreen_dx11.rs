@@ -529,6 +529,14 @@ fn capture(app: &TestApp, method: clipped_capture::CaptureMethod) -> Outcome {
                 }
             }
             Ok(Acquisition::Timeout) => outcome.timeouts += 1,
+            // The subject goes fullscreen, not to the taskbar, so this is a
+            // fault rather than a measurement: every acquisition it covers is
+            // one this run did not get to look at the test pattern in.
+            Ok(Acquisition::TargetMinimised) => panic!(
+                "the subject window was minimised part way through the run, so nothing \
+                 measured here describes fullscreen capture; run it again with \
+                 the desktop left alone"
+            ),
             Ok(Acquisition::SizeChanged(size)) => {
                 // A fullscreen transition can legitimately change the shape of
                 // what is being captured, so this is followed rather than

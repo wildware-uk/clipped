@@ -1566,6 +1566,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::AlreadyRecording,
         ErrorCode::NotRecording,
         ErrorCode::TargetNotFound,
+        ErrorCode::TargetNotCapturable,
         ErrorCode::RecordingFailed,
         ErrorCode::TooManyConnections,
         ErrorCode::ShuttingDown,
@@ -1583,6 +1584,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::AlreadyRecording
             | ErrorCode::NotRecording
             | ErrorCode::TargetNotFound
+            | ErrorCode::TargetNotCapturable
             | ErrorCode::RecordingFailed
             | ErrorCode::TooManyConnections
             | ErrorCode::ShuttingDown

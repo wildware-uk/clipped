@@ -253,6 +253,7 @@ fn record_frames(
             Ok(Acquisition::Frame(frame)) => {
                 counters.captured += 1;
                 counters.missed_by_source += u64::from(frame.frames_missed().unwrap_or(0));
+                counters.note_drawing();
 
                 let clock = *clock.get_or_insert_with(|| {
                     // Beside the epoch, and nowhere else. This reading of *this
@@ -297,6 +298,23 @@ fn record_frames(
                 }
             }
             Ok(Acquisition::Timeout) => {}
+            Ok(Acquisition::TargetMinimised) => {
+                // **The recording continues.** Alt-tabbing out of an exclusive
+                // fullscreen game minimises it, so ending the session here would
+                // cost somebody the rest of their game for pressing Alt+Tab —
+                // far more than the silent stretch costs. The file keeps
+                // everything before the minimise and everything after the
+                // restore, on one timeline, and the frozen stretch between them
+                // is what the source actually did.
+                //
+                // What it must not do is pass in silence. `note_minimised` says
+                // so once per stretch, the count reaches the report and the
+                // summary the user reads, and a recording that turns out to have
+                // spent its whole life here leaves no file at all (see below).
+                // That is issue #383: the pipeline was right that there was
+                // nothing to record and wrong to keep it to itself.
+                counters.note_minimised();
+            }
             Ok(Acquisition::SizeChanged(size)) => {
                 // Matroska fixes a track's dimensions in the header, and the
                 // encoder is configured for one size, so there is no honest way
@@ -365,6 +383,7 @@ fn record_frames(
         frames_skipped_for_rate: counters.skipped_for_rate,
         frames_dropped_writer_behind: counters.dropped_writer_behind,
         frames_missed_by_source: counters.missed_by_source,
+        times_target_minimised: counters.minimised_stretches,
         packets_written: summary.packets,
         timestamps_corrected: summary.timestamps_corrected(),
         duration: summary.duration,
@@ -391,6 +410,7 @@ fn record_frames(
         frames_skipped_for_rate = report.frames_skipped_for_rate(),
         frames_dropped_writer_behind = report.frames_dropped_writer_behind(),
         frames_missed_by_source = report.frames_missed_by_source(),
+        times_target_minimised = report.times_target_minimised(),
         packets = report.packets_written(),
         timestamps_corrected = report.timestamps_corrected(),
         duration_ms = report.duration().as_millis(),
@@ -418,10 +438,71 @@ fn record_frames(
         );
     }
 
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(report),
+    conclude(report, failure)
+}
+
+/// What a finished recording turns out to be: the report, or the failure that
+/// takes its place — and whether the file it wrote is a recording at all.
+///
+/// Everything a recording's end depends on is decided here, and there are two
+/// decisions.
+///
+/// **A failure wins.** A recording that stopped because its encoder died or its
+/// drive filled has a diagnosis, and the diagnosis is what the user acts on.
+///
+/// **A recording no video reached is not a recording, and does not stay on
+/// disk.** What it is instead is a container header and however many empty audio
+/// tracks were declared — 791 bytes, in the case that raised
+/// [issue #383](https://github.com/wildware-uk/clipped/issues/383) — which the
+/// library indexes like any other file and draws as a tile that cannot be played
+/// (#56). So it is removed, and the recording is reported as
+/// [`SessionError::NoFrames`], whose message already says that capture produced
+/// no frame and that a window which is not drawing is the usual reason, and
+/// whose `FootageKept::Nothing` sentence already promises that no file was left.
+/// Before this, that promise was broken by exactly one path: capture that
+/// produced the single frame the encoder is opened against — enough to create
+/// the file — and then stopped, which is what a window minimised at the moment
+/// the recording started does.
+///
+/// The removal is deliberately **not** done when there is a failure to report.
+/// The file a failure left is evidence for that failure and its message is about
+/// the failure rather than about a missing recording; deleting it would also
+/// make `FootageKept::UpToTheFailure`'s "everything recorded before this plays"
+/// name a file that is no longer there.
+///
+/// A removal that itself fails is logged and otherwise ignored: there is nothing
+/// a caller could do about it, and the error a user is owed is the one about
+/// their recording rather than one about tidying up after it (AGENTS.md section
+/// 15).
+fn conclude(
+    report: RecordingReport,
+    failure: Option<SessionError>,
+) -> Result<RecordingReport, SessionError> {
+    if let Some(error) = failure {
+        return Err(error);
     }
+    if report.frames_encoded() > 0 {
+        return Ok(report);
+    }
+
+    let output = report.output();
+    match std::fs::remove_file(output) {
+        Ok(()) => tracing::info!(
+            output = %RedactedPath::new(output),
+            end_reason = report.end_reason().token(),
+            times_target_minimised = report.times_target_minimised(),
+            "no video reached the recording, so the empty file was removed rather than left \
+             to be indexed as a recording"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            output = %RedactedPath::new(output),
+            "no video reached the recording and the empty file could not be removed; it will \
+             not play"
+        ),
+    }
+
+    Err(SessionError::NoFrames)
 }
 
 /// How long a screenshot copy is polled before the loop waits for it.
@@ -636,6 +717,48 @@ struct Counters {
     skipped_for_rate: u64,
     dropped_writer_behind: u64,
     missed_by_source: u64,
+    /// How many separate stretches of the recording the window was minimised
+    /// for.
+    ///
+    /// Stretches rather than acquisitions: a window minimised for a minute is
+    /// one thing that happened, and counting the ten acquisitions a second it
+    /// produces would report a number about the acquisition timeout.
+    minimised_stretches: u64,
+    /// Whether the current stretch is still running, so that one stretch is
+    /// counted and logged once rather than ten times a second.
+    minimised_now: bool,
+}
+
+impl Counters {
+    /// Records an acquisition that found the window minimised.
+    ///
+    /// The log line is at `warn` and happens once per stretch: this is a
+    /// recording that is accumulating nothing, and a `watch` session has nobody
+    /// reading a console (AGENTS.md section 35 on not writing a line per frame).
+    fn note_minimised(&mut self) {
+        if self.minimised_now {
+            return;
+        }
+        self.minimised_now = true;
+        self.minimised_stretches += 1;
+        tracing::warn!(
+            frames_captured = self.captured,
+            "the recorded window was minimised, so nothing is being recorded; the recording \
+             is being kept open and resumes when the window is restored"
+        );
+    }
+
+    /// Records a frame arriving, which ends any stretch that was running.
+    fn note_drawing(&mut self) {
+        if !self.minimised_now {
+            return;
+        }
+        self.minimised_now = false;
+        tracing::info!(
+            frames_captured = self.captured,
+            "the recorded window was restored; the recording is receiving frames again"
+        );
+    }
 }
 
 /// Where a drained packet goes.
@@ -853,6 +976,7 @@ fn first_frame_device(
     format: &mut FrameFormat,
 ) -> Result<FrameDevice, SessionError> {
     let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
+    let mut minimised = false;
 
     while !stop.is_requested() && Instant::now() < deadline {
         match backend.acquire(ACQUIRE_TIMEOUT)? {
@@ -863,6 +987,21 @@ fn first_frame_device(
             // that was resized between being measured and being captured. The
             // second needs the backend rebuilt before it will produce anything.
             Acquisition::Timeout => {}
+            // Minimised between being measured — where it was not, or the
+            // recording would have been refused — and capture attaching. Waited
+            // out like any other silence, because the window may be restored
+            // within the ten seconds; what it adds is the reason, so that the
+            // `no frames` this ends in is explained rather than mysterious. Said
+            // once, on the way into the stretch.
+            Acquisition::TargetMinimised => {
+                if !minimised {
+                    minimised = true;
+                    tracing::warn!(
+                        "the window was minimised before capture produced its first frame; \
+                         waiting for it to be restored"
+                    );
+                }
+            }
             Acquisition::SizeChanged(size) => {
                 let resized = backend.resize(size)?;
                 if resized != *format {
@@ -1029,13 +1168,18 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
 
-    use clipped_capture::{CaptureTarget, FrameSize, PixelFormat};
+    use clipped_capture::{
+        CaptureTarget, CaptureTimestamp, FrameSize, FrameTexture, PixelFormat, SourceClock,
+        TextureKind,
+    };
     use clipped_encoder::{
         BitRate, EncodeError, EncodedPacket, EncoderConfig, EncoderKind, FrameRate, PictureKind,
         RateControl,
     };
     use clipped_muxer::{MuxError, TrackId};
     use clipped_replay::ReplayConfig;
+    use windows::core::Interface as _;
+    use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
     use super::*;
 
@@ -1044,22 +1188,49 @@ mod tests {
     enum Step {
         /// Nothing drew.
         Nothing,
+        /// The window drew, so a frame is handed over.
+        ///
+        /// Only usable on a backend given a texture by
+        /// [`ScriptedBackend::drawing`], because a frame is a texture and there
+        /// is nothing honest to put there otherwise.
+        Drew,
+        /// The window is minimised, so nothing will draw until it is restored.
+        Minimised,
         /// The target changed shape, which is what a window being dragged by
         /// its edge looks like from here.
         Resized(u32, u32),
     }
 
-    /// A capture backend that replays a script and never produces a frame.
+    /// A capture backend that replays a script.
     ///
-    /// A real frame would need a real Direct3D texture and therefore a GPU, and
-    /// the behaviour under test is what happens to the *format* on the way to
-    /// the first frame — which the script can drive without one.
+    /// Without a texture it never produces a frame, which is all the tests of
+    /// the wait for the first frame need: what they are about is what happens
+    /// to the *format* on the way to one. Given a texture by
+    /// [`drawing`](Self::drawing) it hands over real frames on that texture, and
+    /// the whole recording loop runs against it — an encoder opened on the
+    /// texture's own device, a real file, and a script that can put a minimised
+    /// stretch in the middle of a recording, which no test can do to a real
+    /// compositor without a window to minimise.
     #[derive(Debug)]
     struct ScriptedBackend {
         steps: VecDeque<Step>,
         format: FrameFormat,
         resizes: u32,
+        /// The texture every [`Step::Drew`] hands over, owned for the whole of
+        /// this backend's life and never recycled — which is exactly the
+        /// promise [`FrameTexture`] is documented to need.
+        texture: Option<ID3D11Texture2D>,
+        /// How many frames have been handed over, which is what spaces their
+        /// timestamps.
+        drawn: u64,
     }
+
+    /// How far apart the frames a scripted backend draws are, in nanoseconds.
+    ///
+    /// A tenth of a second: far enough inside the 60 frames a second the gate
+    /// admits that every frame the script draws reaches the encoder, so a test
+    /// counting frames is counting the script rather than the pacing rule.
+    const SCRIPTED_FRAME_INTERVAL_NANOS: u64 = 100_000_000;
 
     impl ScriptedBackend {
         fn new(format: FrameFormat, steps: impl IntoIterator<Item = Step>) -> Self {
@@ -1067,7 +1238,15 @@ mod tests {
                 steps: steps.into_iter().collect(),
                 format,
                 resizes: 0,
+                texture: None,
+                drawn: 0,
             }
+        }
+
+        /// The same backend, handing over `texture` for every [`Step::Drew`].
+        fn drawing(mut self, texture: ID3D11Texture2D) -> Self {
+            self.texture = Some(texture);
+            self
         }
     }
 
@@ -1086,9 +1265,33 @@ mod tests {
 
         fn acquire(&mut self, _timeout: Duration) -> Result<Acquisition<'_>, CaptureError> {
             match self.steps.pop_front() {
+                Some(Step::Drew) => {
+                    let handle = self
+                        .texture
+                        .as_ref()
+                        .expect("a script that draws was given a texture to draw on")
+                        .as_raw();
+                    self.drawn += 1;
+
+                    // SAFETY: `handle` is an `ID3D11Texture2D` this backend owns
+                    // for the whole of its life and never recycles, and the
+                    // frame borrows the backend mutably, so nothing derived from
+                    // it can outlive the texture.
+                    let texture = unsafe { FrameTexture::new(TextureKind::D3d11Texture2D, handle) };
+
+                    Ok(Acquisition::Frame(CapturedFrame::new(
+                        texture,
+                        self.format,
+                        CaptureTimestamp::from_source(
+                            SourceClock::PerformanceCounter,
+                            self.drawn * SCRIPTED_FRAME_INTERVAL_NANOS,
+                        ),
+                    )))
+                }
                 Some(Step::Resized(width, height)) => Ok(Acquisition::SizeChanged(
                     FrameSize::new(width, height).expect("a real size"),
                 )),
+                Some(Step::Minimised) => Ok(Acquisition::TargetMinimised),
                 Some(Step::Nothing) | None => Ok(Acquisition::Timeout),
             }
         }
@@ -1168,6 +1371,36 @@ mod tests {
     }
 
     #[test]
+    fn a_target_minimised_before_the_first_frame_is_waited_out_rather_than_failed_on() {
+        // A window minimised between being resolved — where it was not, or
+        // `apps/recorder` and `select` would both have refused the recording —
+        // and capture attaching. It is still a window and it is coming back, so
+        // the wait for the first frame runs on exactly as it does for a window
+        // that has not drawn yet; what must not happen is an error, a hang, or a
+        // frame format built out of the minimised shape (issue #383).
+        let mut format = format_of(1280, 720);
+        let mut backend =
+            ScriptedBackend::new(format, [Step::Minimised, Step::Minimised, Step::Minimised]);
+        let stop = StopAfter::polls(3);
+
+        let error = first_frame_device(&mut backend, &stop, &mut format)
+            .expect_err("a minimised window produces no frame to take a device from");
+
+        assert!(
+            matches!(error, SessionError::NoFrames),
+            "a minimised window is a window that produced no frames, not a failure of \
+             capture: {error}"
+        );
+        assert_eq!(backend.resizes, 0, "there was no size to adopt");
+        assert_eq!(
+            format,
+            format_of(1280, 720),
+            "the format must be the one capture reported, not one derived from the \
+             minimised shape"
+        );
+    }
+
+    #[test]
     fn a_target_that_never_changes_size_keeps_the_format_it_was_initialised_with() {
         let mut format = format_of(1280, 720);
         let mut backend = ScriptedBackend::new(format, [Step::Nothing]);
@@ -1222,6 +1455,101 @@ mod tests {
     fn a_writer_failure_with_nothing_else_wrong_is_reported_as_itself() {
         let reported = reported_failure(None, writer_failure());
         assert!(matches!(reported, SessionError::Mux(_)), "{reported}");
+    }
+
+    // ---- what a finished recording turns out to be --------------------------
+
+    /// A report for a recording that wrote `frames_encoded` frames to `output`.
+    fn finished(output: PathBuf, frames_encoded: u64) -> RecordingReport {
+        RecordingReport {
+            output,
+            capture_method: CaptureMethod::WindowsGraphicsCapture,
+            encoder: clipped_encoder::EncoderKind::Nvenc,
+            codec: Codec::Av1,
+            width: 1320,
+            height: 900,
+            requested_framerate: 60,
+            frames_captured: frames_encoded,
+            frames_encoded,
+            frames_skipped_for_rate: 0,
+            frames_dropped_writer_behind: 0,
+            frames_missed_by_source: 0,
+            times_target_minimised: u64::from(frames_encoded == 0),
+            packets_written: frames_encoded,
+            timestamps_corrected: 0,
+            duration: Duration::ZERO,
+            end_reason: EndReason::Stopped,
+            audio_tracks: Vec::new(),
+        }
+    }
+
+    /// A file with something in it, at a path of this test's own.
+    fn a_written_file(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("clipped-{name}-{}.mkv", std::process::id()));
+        std::fs::write(&path, b"a container header and nothing else").expect("a temporary file");
+        path
+    }
+
+    #[test]
+    fn a_recording_no_video_reached_leaves_no_file_behind() {
+        // The file issue #383 was raised about: 791 bytes of Matroska header
+        // with two empty audio tracks and no picture, produced by recording a
+        // minimised window. Capture handed over the one frame the encoder is
+        // opened against and then nothing, so the file was created and never
+        // written to. Left there it is indexed by the library and drawn as a
+        // tile that cannot be played, and the error the user is given already
+        // promises — in `FootageKept::Nothing` — that no file was left.
+        let output = a_written_file("empty-recording");
+
+        let error = conclude(finished(output.clone(), 0), None)
+            .expect_err("a recording with no video in it is not a recording");
+
+        assert!(
+            matches!(error, SessionError::NoFrames),
+            "the user should be told that capture produced no frame: {error}"
+        );
+        assert!(
+            !output.exists(),
+            "a recording that captured nothing must not be left on disk as though it were \
+             one: {}",
+            output.display()
+        );
+    }
+
+    #[test]
+    fn a_recording_with_video_in_it_keeps_its_file_and_its_report() {
+        // The other direction, and the one that makes the test above mean
+        // something: without it, a `conclude` that deleted every recording would
+        // pass just as well.
+        let output = a_written_file("real-recording");
+
+        let report = conclude(finished(output.clone(), 181), None)
+            .expect("a recording with frames in it is a recording");
+
+        assert_eq!(report.frames_encoded(), 181);
+        assert!(
+            output.exists(),
+            "the recording is the thing that cannot be made again (AGENTS.md section 17)"
+        );
+        std::fs::remove_file(&output).expect("the test's own file");
+    }
+
+    #[test]
+    fn a_recording_that_failed_keeps_its_file_and_reports_the_failure() {
+        // A failure has a diagnosis and the file is evidence for it. Deleting it
+        // would also make `FootageKept::UpToTheFailure` — "everything recorded
+        // before this was finished and plays" — name a file that is not there.
+        let output = a_written_file("failed-recording");
+
+        let error = conclude(finished(output.clone(), 0), Some(SessionError::WriterLost))
+            .expect_err("the recording failed");
+
+        assert!(
+            matches!(error, SessionError::WriterLost),
+            "the diagnosis is what the user acts on, not `no frames`: {error}"
+        );
+        assert!(output.exists(), "the failure's own evidence was removed");
+        std::fs::remove_file(&output).expect("the test's own file");
     }
 
     // ---- the disk guard, before anything is created ------------------------
@@ -1657,5 +1985,263 @@ mod tests {
         }
 
         panic!("the writer thread did not stop after refusing a packet");
+    }
+
+    // ---- the capture loop, against real frames ------------------------------
+    //
+    // Everything above stops short of `record_frames`, because the loop cannot
+    // be entered without a frame and a frame is a Direct3D texture. These tests
+    // create one — on the graphics hardware, or on WARP, which is part of
+    // Windows and is what makes this run on a hosted CI runner — and drive the
+    // whole of `record_frames` with it: the encoder is opened against the
+    // texture's own device, the file is a real Matroska file, and the report
+    // that comes back is the one a recording produces.
+    //
+    // That is the only way to test what a *minimised window mid-recording* does,
+    // short of a window to minimise. The behaviour is a rule about acquisitions
+    // and it lives in the loop; a test of the counter or of the report's
+    // sentence would leave the wiring between them free (issue #383).
+
+    /// A Direct3D 11 device, on the graphics hardware or failing that on WARP.
+    ///
+    /// [`None`] only on a machine that has neither, which no supported Windows
+    /// install is: WARP ships with the operating system. The fallback is what
+    /// lets these tests cover the loop on a runner with no usable GPU, and it is
+    /// the arrangement `crates/encoder`'s software encoder tests already use.
+    fn test_device() -> Option<windows::Win32::Graphics::Direct3D11::ID3D11Device> {
+        use windows::Win32::Graphics::Direct3D::{
+            D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
+        };
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        };
+
+        for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+            let mut device: Option<ID3D11Device> = None;
+            // SAFETY: no adapter is named, which is what these driver types
+            // require; the module handle is unused for them; the feature level
+            // list and the out-parameter are live locals; and
+            // `D3D11_SDK_VERSION` is the constant the header requires. On
+            // success `device` holds one reference, released on drop.
+            let created = unsafe {
+                D3D11CreateDevice(
+                    None,
+                    driver,
+                    windows::Win32::Foundation::HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )
+            };
+            if created.is_ok() {
+                if let Some(device) = device {
+                    return Some(device);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// A BGRA texture on `device`, filled with a flat grey.
+    ///
+    /// The picture does not matter here — what is under test is which
+    /// acquisitions are counted as what, not what the encoder made of them — but
+    /// the *format* does: `PixelFormat::Bgra8Unorm` is what the scripted format
+    /// declares, and the software encoder checks the two agree before it copies
+    /// anything (`crates/encoder/src/software/readback.rs`).
+    fn test_texture(
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        width: u32,
+        height: u32,
+    ) -> ID3D11Texture2D {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_DEFAULT,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let pixels = vec![0x40u8; (width as usize) * (height as usize) * 4];
+        let initial = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: width * 4,
+            SysMemSlicePitch: 0,
+        };
+
+        let mut texture: Option<ID3D11Texture2D> = None;
+        // SAFETY: the description and the initial data both describe the
+        // `pixels` buffer, which is live for the whole call and is not retained
+        // — Direct3D copies it into the texture — and the out-parameter is a
+        // live local. On success it holds one reference, released on drop.
+        unsafe { device.CreateTexture2D(&description, Some(&initial), Some(&mut texture)) }
+            .expect("a texture can be created on a device that was just created");
+        texture.expect("CreateTexture2D reported success without returning a texture")
+    }
+
+    /// Settings for a recording of the scripted backend into `recording`.
+    ///
+    /// The encoder is named rather than left automatic so that the recording is
+    /// made the same way on every machine — the software encoder needs no
+    /// encoding hardware, which is what lets this run where NVENC is not — and
+    /// the disk guard is turned off because what is under test is not the disk.
+    fn loop_settings(recording: &TemporaryRecording) -> RecordingSettings {
+        RecordingSettings::new(
+            crate::settings::CaptureTargetSettings::window(0x1234, TEST_SIZE.0, TEST_SIZE.1),
+            recording.path().to_path_buf(),
+        )
+        .with_minimum_free_space(0)
+        .with_codec(crate::settings::CodecPreference::Fixed(Codec::H264))
+        .with_encoder(crate::settings::EncoderPreference::Fixed(
+            EncoderKind::Software,
+        ))
+    }
+
+    /// Runs the whole recording loop over `steps` and returns what it reported.
+    fn recording_of(purpose: &str, steps: impl IntoIterator<Item = Step>) -> RecordingReport {
+        // Not a skip. WARP ships with Windows, so a machine that cannot create
+        // a device here is a broken one and this is a failure worth seeing —
+        // a test that quietly does nothing is worse than no test (AGENTS.md
+        // section 54).
+        let device =
+            test_device().expect("no Direct3D 11 device could be created, on hardware or on WARP");
+        let texture = test_texture(&device, TEST_SIZE.0, TEST_SIZE.1);
+
+        let format = format_of(TEST_SIZE.0, TEST_SIZE.1);
+        let recording = TemporaryRecording::new(purpose);
+        let settings = loop_settings(&recording);
+        let mut backend = ScriptedBackend::new(format, steps).drawing(texture);
+        // Far beyond the script, so the loop ends because it was asked to and
+        // not because the script ran out: the steps after the last one are
+        // ordinary timeouts, which is what an idle source looks like.
+        let stop = StopAfter::polls(40);
+
+        record_frames(
+            &settings,
+            &stop,
+            &mut backend,
+            format,
+            CaptureMethod::WindowsGraphicsCapture,
+            &crate::RecordingOutputs::default(),
+        )
+        .expect("a recording with frames in it is a recording")
+    }
+
+    #[test]
+    fn a_window_minimised_during_a_recording_is_counted_in_the_report_the_recording_produces() {
+        // Issue #383's second half, and the one that is invisible when it goes
+        // wrong: the recording carries on — alt-tabbing out of a fullscreen game
+        // minimises it, and ending the session there would cost somebody the
+        // rest of their game — but it must not carry on *in silence*. The count
+        // in the report is what the log line, the summary sentence and the
+        // desktop all read, and if the loop stops producing it the recording
+        // goes back to writing nothing and saying nothing about it.
+        //
+        // The first frame is the one the recording releases rather than encodes:
+        // it exists to say which device the textures are on.
+        let report = recording_of(
+            "minimised-mid-recording",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Drew,
+                Step::Drew,
+            ],
+        );
+
+        assert_eq!(
+            report.times_target_minimised(),
+            1,
+            "the stretch the window was minimised for reached nothing the user can see"
+        );
+        assert_eq!(
+            report.frames_captured(),
+            4,
+            "the recording must keep the frames either side of the minimise, on one timeline"
+        );
+        assert_eq!(
+            report.end_reason(),
+            EndReason::Stopped,
+            "a minimised window must not end the recording"
+        );
+        assert!(
+            report.frames_encoded() > 0,
+            "the frames either side of the minimise were captured and never encoded"
+        );
+    }
+
+    #[test]
+    fn a_recording_the_window_kept_drawing_through_reports_no_minimised_stretch() {
+        // The other direction, and what makes the test above mean something:
+        // without it a loop that counted every acquisition as a minimise, or
+        // reported a fixed 1, would pass just as well — and every ordinary
+        // recording would end with a sentence about a window nobody minimised.
+        let report = recording_of(
+            "never-minimised",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Nothing,
+                Step::Drew,
+            ],
+        );
+
+        assert_eq!(report.times_target_minimised(), 0);
+        assert_eq!(report.frames_captured(), 3);
+    }
+
+    #[test]
+    fn two_stretches_minimised_are_two_and_ten_acquisitions_of_one_are_still_one() {
+        // What the count is *of*. A window minimised for a minute produces ten
+        // acquisitions a second and is one thing that happened; a window
+        // minimised, restored and minimised again is two. Counting acquisitions
+        // would report a number about the acquisition timeout, and counting
+        // without noticing the frames in between would report one stretch for a
+        // whole session.
+        let report = recording_of(
+            "two-stretches",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Drew,
+            ],
+        );
+
+        assert_eq!(
+            report.times_target_minimised(),
+            2,
+            "five acquisitions in two stretches is two stretches"
+        );
+        assert_eq!(report.frames_captured(), 3);
     }
 }

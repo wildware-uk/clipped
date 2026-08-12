@@ -218,6 +218,7 @@ fn recorded(output: &Path, end_reason: EndReason) -> RecordingOutcome {
         frames_skipped_for_rate: 19,
         frames_dropped_writer_behind: 0,
         frames_missed_by_source: 0,
+        times_target_minimised: 0,
         packets_written: 181,
         timestamps_corrected: 0,
         duration: Duration::from_secs(6),

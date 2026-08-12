@@ -39,6 +39,7 @@ pub struct CaptureTargetSettings {
     width: u32,
     height: u32,
     content_protected: bool,
+    minimised: bool,
 }
 
 impl CaptureTargetSettings {
@@ -51,6 +52,7 @@ impl CaptureTargetSettings {
             width,
             height,
             content_protected: false,
+            minimised: false,
         }
     }
 
@@ -63,6 +65,7 @@ impl CaptureTargetSettings {
             width,
             height,
             content_protected: false,
+            minimised: false,
         }
     }
 
@@ -74,6 +77,25 @@ impl CaptureTargetSettings {
     #[must_use]
     pub const fn content_protected(mut self, protected: bool) -> Self {
         self.content_protected = protected;
+        self
+    }
+
+    /// Marks a window that was minimised when it was measured.
+    ///
+    /// Passed through for the same reason `content_protected` is: backend
+    /// selection declines a target no backend can produce a frame for, so a
+    /// recording of a minimised window is refused before an encoder is opened or
+    /// a file created rather than becoming an empty one
+    /// ([`TargetProperties::with_minimised`], issue #383).
+    ///
+    /// A caller that has already refused such a window itself — `apps/recorder`
+    /// does, so that the refusal can name the window — still sets this. The two
+    /// are not a duplicate check: this is the invariant, which holds for every
+    /// caller of this crate including the automatic session manager, and the
+    /// caller's is the message.
+    #[must_use]
+    pub const fn minimised(mut self, minimised: bool) -> Self {
+        self.minimised = minimised;
         self
     }
 
@@ -100,7 +122,9 @@ impl CaptureTargetSettings {
     pub(crate) fn properties(&self) -> Result<TargetProperties, SessionError> {
         let size =
             FrameSize::new(self.width, self.height).ok_or(SessionError::TargetHasNoPixels)?;
-        Ok(TargetProperties::new(self.kind, size).with_content_protected(self.content_protected))
+        Ok(TargetProperties::new(self.kind, size)
+            .with_content_protected(self.content_protected)
+            .with_minimised(self.minimised))
     }
 
     /// The target a backend is initialised against.
@@ -500,6 +524,33 @@ mod tests {
             target.properties(),
             Err(SessionError::TargetHasNoPixels)
         ));
+    }
+
+    #[test]
+    fn a_window_the_caller_measured_as_minimised_reaches_backend_selection_as_minimised() {
+        // The one thing `minimised` is for. A window minimised after it was
+        // measured still reports the size it had — `resolve` records the
+        // restored geometry — so the zero-size refusal above does not catch it,
+        // and this flag is the whole of what tells `select` that no backend can
+        // produce a frame for this target (issue #383). Dropped here, the
+        // invariant every caller of this crate relies on is silently gone and
+        // the recording becomes an empty file.
+        let minimised = CaptureTargetSettings::window(0x1234, 1280, 720)
+            .minimised(true)
+            .properties()
+            .expect("a window with pixels has properties");
+        assert!(
+            minimised.is_minimised(),
+            "backend selection was told nothing about a minimised window"
+        );
+
+        // The other direction, without which the assertion above would pass
+        // just as well against a target that always claimed to be minimised —
+        // which would refuse every recording there is.
+        let drawing = CaptureTargetSettings::window(0x1234, 1280, 720)
+            .properties()
+            .expect("a window with pixels has properties");
+        assert!(!drawing.is_minimised());
     }
 
     #[test]

@@ -46,3 +46,30 @@ pub use desktop_duplication::DesktopDuplication;
 pub use graphics_capture::WindowsGraphicsCapture;
 pub use pixel_sample::D3d11FrameSampler;
 pub use still::D3d11StillCopier;
+
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+use crate::FrameSize;
+
+/// The window's client area *now*, or [`None`] if it has no size or has gone.
+///
+/// Shared by both backends because both ask the same question for the same
+/// reason: the size a window is being recorded at came from an enumeration that
+/// is already stale, and the only authority on the size it is now is the window
+/// itself. Desktop Duplication crops to it every frame; Windows Graphics Capture
+/// compares a frame's shape against it to tell a genuine resize from the
+/// transient shape a window takes on while it is minimised or being restored
+/// ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+pub(super) fn client_size(window: HWND) -> Option<FrameSize> {
+    let mut rect = RECT::default();
+    // SAFETY: `rect` is a live local for the duration of the call, which is all
+    // `GetClientRect` requires of the pointer; a handle that has stopped being a
+    // window is reported through the return value.
+    unsafe { GetClientRect(window, &raw mut rect) }.ok()?;
+
+    FrameSize::new(
+        rect.right.saturating_sub(rect.left).unsigned_abs(),
+        rect.bottom.saturating_sub(rect.top).unsigned_abs(),
+    )
+}

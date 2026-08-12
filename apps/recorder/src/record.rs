@@ -54,6 +54,12 @@ pub enum RecordError {
     Enumeration(WindowsError),
     /// The target named no window, or more than one.
     Resolution(ResolveError),
+    /// The target named one window and it is minimised, so recording it would
+    /// produce nothing.
+    TargetMinimised {
+        /// The window, as a person would name it.
+        window: String,
+    },
     /// The recording itself failed.
     Session(SessionError),
 }
@@ -65,6 +71,11 @@ impl fmt::Display for RecordError {
             Self::Shutdown(error) => write!(formatter, "{error}"),
             Self::Enumeration(error) => write!(formatter, "{error}"),
             Self::Resolution(error) => write!(formatter, "{error}"),
+            Self::TargetMinimised { window } => write!(
+                formatter,
+                "{window} is minimised, so there would be nothing to record: Windows hands \
+                 over no frames for a window it is not drawing. Restore it and start again"
+            ),
             Self::Session(error) => write!(formatter, "{error}"),
         }
     }
@@ -77,6 +88,7 @@ impl Error for RecordError {
             Self::Shutdown(error) => Some(error),
             Self::Enumeration(error) => Some(error),
             Self::Resolution(error) => Some(error),
+            Self::TargetMinimised { .. } => None,
             Self::Session(error) => Some(error),
         }
     }
@@ -209,19 +221,79 @@ fn report_failure(error: &SessionError, output: &Path) {
 
 /// Enumerates the desktop and finds the one window the target names.
 ///
-/// Shared with [`crate::serve`], so a recording started over IPC points at the
-/// same window `record --window <TITLE>` would, resolved by the same rules and
-/// reporting the same candidates for an ambiguous one (AGENTS.md section 55).
+/// Shared with [`crate::serve`] and [`crate::watch`], so a recording started
+/// over IPC or by game detection points at the same window
+/// `record --window <TITLE>` would, resolved by the same rules, refused for the
+/// same reasons and reporting the same candidates for an ambiguous one
+/// (AGENTS.md section 55).
 ///
 /// # Errors
 ///
-/// [`RecordError::Enumeration`] if the desktop could not be described, and
-/// [`RecordError::Resolution`] if the target named no window or more than one.
+/// [`RecordError::Enumeration`] if the desktop could not be described,
+/// [`RecordError::Resolution`] if the target named no window or more than one,
+/// and [`RecordError::TargetMinimised`] if it named one that is minimised.
 pub(crate) fn resolve_window(target: &CaptureTarget) -> Result<WindowInfo, RecordError> {
-    let windows = enumerate_windows()?;
-    let window = resolve(&windows, &selector(target))?;
+    choose_window(&enumerate_windows()?, target)
+}
+
+/// Chooses the window to record from a desktop that has already been described.
+///
+/// Split from [`resolve_window`] around the one syscall, so that what is left is
+/// every rule a recording's target has to pass and can be exercised against a
+/// desktop a test constructed — which is what `clipped_windows::WindowInfo::new`
+/// is public for.
+///
+/// `crate::watch` applies the same rules to each desktop it enumerates while it
+/// waits for a game's window to appear, which is why this is reachable from
+/// there rather than private to this module.
+///
+/// # Errors
+///
+/// As [`resolve_window`], less the enumeration.
+pub(crate) fn choose_window(
+    windows: &[WindowInfo],
+    target: &CaptureTarget,
+) -> Result<WindowInfo, RecordError> {
+    let window = resolve(windows, &selector(target))?;
     log_target(window);
+
+    // Before anything is created. A minimised window is composed by nobody:
+    // Windows Graphics Capture asks the compositor for content it is not
+    // producing and Desktop Duplication would crop the corner of the desktop
+    // Windows parks the window in, so the whole pipeline starts, an encoder
+    // session opens, a container header is written and no frame ever arrives
+    // (issue #383). The refusal is here rather than left to the capture crate's
+    // own — which is the invariant every caller of `clipped-session` gets —
+    // because this is the layer that knows what the window is called, and
+    // "Spotify Premium is minimised" is an answer where "no capture backend can
+    // capture this target" is a puzzle (AGENTS.md section 45).
+    if window.is_minimised() {
+        return Err(RecordError::TargetMinimised {
+            window: describe(window),
+        });
+    }
+
     Ok(window.clone())
+}
+
+/// A window as a person would name it, for a message they are going to read.
+///
+/// The title first, because that is what is on the taskbar button somebody has
+/// to click to restore it, with the executable after it so that two windows of
+/// the same name are still told apart. A window with no title has only the
+/// executable, and one with neither is named by its handle rather than by
+/// nothing.
+///
+/// This is deliberately not what [`log_target`] records: a title is user content
+/// and does not belong in a log file (AGENTS.md section 14). It belongs in a
+/// sentence shown to the person whose window it is.
+fn describe(window: &WindowInfo) -> String {
+    match (window.title(), window.process_name()) {
+        ("", None) => format!("The window {}", window.handle()),
+        ("", Some(process)) => process.to_owned(),
+        (title, None) => title.to_owned(),
+        (title, Some(process)) => format!("{title} ({process})"),
+    }
 }
 
 /// Turns off the compatibility scaling Windows applies to a DPI-unaware
@@ -272,7 +344,13 @@ pub(crate) fn settings_for(config: &RecordingConfig, window: &WindowInfo) -> Rec
     let size = window.geometry().client_size();
     let target =
         CaptureTargetSettings::window(window.handle().as_u64(), size.width(), size.height())
-            .content_protected(window.is_content_protected());
+            .content_protected(window.is_content_protected())
+            // False by the time `resolve_window` has returned, which refuses a
+            // minimised window outright. It is passed through anyway because
+            // this function is also how a caller that resolved a window some
+            // other way reaches the session, and the session's own refusal is
+            // what protects that caller (`CaptureTargetSettings::minimised`).
+            .minimised(window.is_minimised());
 
     RecordingSettings::new(target, config.output.clone())
         .with_overwrite(config.overwrite)
@@ -358,15 +436,9 @@ fn log_target(window: &WindowInfo) {
         width = size.width(),
         height = size.height(),
         dpi = window.geometry().dpi(),
+        minimised = window.is_minimised(),
         "resolved the capture target"
     );
-
-    if window.is_minimised() {
-        tracing::warn!(
-            "the window is minimised, so it is not drawing and its size is not final; \
-             restore it before recording"
-        );
-    }
 }
 
 /// Says what was recorded, to whoever ran the command and to the log.
@@ -433,11 +505,112 @@ mod tests {
         )
     }
 
+    /// The same window, minimised.
+    ///
+    /// Windows keeps answering for its size while it is on the taskbar — the
+    /// window that raised issue #383 reported 1320x900 while minimised — so a
+    /// minimised window does not reach the recorder as a zero-sized one and
+    /// nothing downstream notices it by its shape.
+    fn minimised_window() -> WindowInfo {
+        let visible = window();
+        WindowInfo::new(
+            visible.handle(),
+            visible.title().to_owned(),
+            visible.process_id(),
+            visible.process_name().map(ToOwned::to_owned),
+            visible.geometry(),
+            true,
+            None,
+        )
+    }
+
     #[test]
     fn a_configuration_error_is_reported_as_itself_rather_than_wrapped_in_jargon() {
         let error = RecordError::from(ConfigError::ZeroProcessId);
         assert_eq!(error.to_string(), ConfigError::ZeroProcessId.to_string());
         assert!(error.source().is_some(), "the cause should stay reachable");
+    }
+
+    #[test]
+    fn recording_a_minimised_window_is_refused_and_the_refusal_names_the_window() {
+        // Issue #383. Every way of starting a recording in this process — the
+        // command line, `start_recording` over IPC, and game detection — resolves
+        // its window through here, so this is the one place the refusal has to
+        // be. Without it the whole pipeline starts for a window Windows is
+        // drawing for nobody: a capture session, an encoder session and a
+        // container header, and then no frame, ever.
+        //
+        // The desktop is constructed rather than enumerated, which is what
+        // `resolve_window` is split around: the syscall is the half that needs a
+        // machine, and every rule is in this half.
+        let desktop = [minimised_window()];
+        let target = CaptureTarget::ProcessName("cs2.exe".to_owned());
+
+        let error = choose_window(&desktop, &target)
+            .expect_err("a window nothing is drawing cannot be recorded");
+
+        let RecordError::TargetMinimised { .. } = &error else {
+            panic!("a minimised window should be refused as one, not as {error:?}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("Counter-Strike 2") && message.contains("cs2.exe"),
+            "the refusal has to name the window, because the user has several and this is \
+             the one to restore: {message}"
+        );
+        assert!(
+            message.contains("minimised"),
+            "and has to say why, or restoring it is a guess: {message}"
+        );
+        assert!(
+            message.contains("Restore it"),
+            "a refusal with nothing to do about it is an error code with a sentence around \
+             it (AGENTS.md section 45): {message}"
+        );
+    }
+
+    #[test]
+    fn the_same_window_restored_is_recorded_rather_than_refused() {
+        // The other direction, and what stops the refusal above being a refusal
+        // of everything: the two desktops differ in exactly one field.
+        let desktop = [window()];
+        let target = CaptureTarget::ProcessName("cs2.exe".to_owned());
+
+        let chosen = choose_window(&desktop, &target).expect("an ordinary window is recordable");
+        assert_eq!(chosen.handle(), window().handle());
+    }
+
+    #[test]
+    fn a_window_with_no_title_is_still_named_by_something_a_person_can_find() {
+        // A refusal that reads "  is minimised" is a refusal nobody can act on,
+        // and a window with no title is ordinary: a game's splash window, or one
+        // whose title has not been set yet.
+        let untitled = WindowInfo::new(
+            clipped_windows::WindowHandle::from_raw(0x0001_04ac),
+            String::new(),
+            4242,
+            Some("cs2.exe".to_owned()),
+            window().geometry(),
+            true,
+            None,
+        );
+        assert_eq!(describe(&untitled), "cs2.exe");
+
+        let anonymous = WindowInfo::new(
+            clipped_windows::WindowHandle::from_raw(0x0001_04ac),
+            String::new(),
+            4242,
+            None,
+            window().geometry(),
+            true,
+            None,
+        );
+        assert!(
+            describe(&anonymous).contains("104ac") || describe(&anonymous).contains("104AC"),
+            "a window Windows would name neither way is named by its handle, which is at \
+             least something to match against `list-windows`: {}",
+            describe(&anonymous)
+        );
     }
 
     #[test]
@@ -468,6 +641,29 @@ mod tests {
         assert_eq!(settings.resolution(), ResolutionSetting::Source);
         assert_eq!(settings.codec(), CodecPreference::Automatic);
         assert_eq!(settings.encoder(), EncoderPreference::Automatic);
+    }
+
+    #[test]
+    fn a_minimised_window_reaches_the_session_marked_minimised() {
+        // `record`, `start_recording` and `watch` all refuse a minimised window
+        // before they reach here, so this flag is for the caller that did not.
+        // `clipped-session` declines a minimised target itself — that is the
+        // invariant every caller of the crate gets, including the automatic
+        // session manager — and this is the only thing that tells it. Dropped
+        // here, the second refusal has nothing to act on and the recording is
+        // an empty file again (issue #383).
+        assert_eq!(
+            *settings_for(&config(), &minimised_window()).target(),
+            CaptureTargetSettings::window(0x0001_04ac, 2560, 1440).minimised(true)
+        );
+
+        // The other direction. Without it a pass-through hardcoded to `true`
+        // would satisfy the assertion above and refuse every recording there
+        // is.
+        assert_eq!(
+            *settings_for(&config(), &window()).target(),
+            CaptureTargetSettings::window(0x0001_04ac, 2560, 1440)
+        );
     }
 
     #[test]
