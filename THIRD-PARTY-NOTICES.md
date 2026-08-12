@@ -10,8 +10,52 @@ It is not a dependency list. Crates fetched from crates.io are recorded in
 `scripts/fetch-ffmpeg.ps1` into a gitignored directory and linked dynamically,
 so no FFmpeg code is redistributed here — see
 [docs/adr/0004-ffmpeg-dependency-strategy.md](docs/adr/0004-ffmpeg-dependency-strategy.md).
-Notices for the files a *release build* ships alongside Clipped belong with the
-packaging work, which does not exist yet.
+
+**A release ships more than this repository contains**, and the difference is
+where most of the licence obligations live: FFmpeg's DLLs, and the notices of
+every Rust crate compiled into the binaries.
+[docs/licensing.md](docs/licensing.md) is the list of what a release has to
+carry and where each item stands; `scripts/collect-notices.ps1` assembles the
+payload, and copies this file into it unchanged.
+
+## The GNU General Public License version 3 (text)
+
+**Where:** `licences/GPL-3.0.txt`
+
+**What:** the text of the GPL v3, verbatim. It is here because a release that
+ships FFmpeg has to install it, and the FFmpeg build does not contain it: LGPL
+v3 is written as a set of additional permissions on top of GPL v3, so section
+4(b) of the LGPL asks for both texts, and the artefact's own `LICENSE.txt` is
+the LGPL alone. `scripts/collect-notices.ps1` copies this file into the licences
+payload beside that one. See
+[docs/licensing.md](docs/licensing.md#section-4-of-the-lgpl-item-by-item).
+
+Nothing in Clipped is under the GPL, and nothing may be
+([ADR 0004](docs/adr/0004-ffmpeg-dependency-strategy.md)). This is a licence
+document being carried, not a licence being taken on.
+
+**Source:** [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg), `COPYING.GPLv3`
+at commit `9b6c8969e05b4f0b29f0f85cd501be6b3e582e6b` — the commit the pinned
+FFmpeg build was made from, so the text carried is the one that build's own
+licence refers to. SHA-256
+`8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903`.
+
+**Licence:** the document is copyright the Free Software Foundation and carries
+its own terms, reproduced below from the second paragraph of the file itself.
+Copying it verbatim, which is all that is done here and all that a release does,
+is what those terms permit.
+
+```text
+ Copyright (C) 2007 Free Software Foundation, Inc. <http://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+```
+
+**How it was produced, and what was changed:** downloaded from
+`https://raw.githubusercontent.com/FFmpeg/FFmpeg/9b6c8969e05b4f0b29f0f85cd501be6b3e582e6b/COPYING.GPLv3`
+and committed unmodified. Nothing may be edited in it — "changing it is not
+allowed" is the term above, and a licence text with a typo in it is no longer
+the licence.
 
 ## AMD Advanced Media Framework headers (AMF SDK)
 
