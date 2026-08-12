@@ -77,6 +77,20 @@
 //! A catalogue entry's own `default_settings` remain uninterpreted
 //! (SPEC.md section 31).
 //!
+//! And which moments in a recording would be worth a clip: [`highlights`] is
+//! the rule between `clipped-events`' vocabulary and `clipped-library`'s
+//! virtual clip ([issue
+//! #75](https://github.com/wildware-uk/clipped/issues/75), `docs/highlights.md`)
+//! — what each kind of event keeps either side of itself, how sure its source
+//! has to be, and how a firefight's worth of events becomes one highlight
+//! rather than twenty overlapping ones. It resolves through the same
+//! three-layer fold [`config`] uses, so a game's rules inherit the global ones.
+//! It creates nothing: generating the clips is
+//! [issue #76](https://github.com/wildware-uk/clipped/issues/76), and the
+//! settings file does not carry the rules yet
+//! ([issue #290](https://github.com/wildware-uk/clipped/issues/290)), so today
+//! every caller resolves the shipped defaults.
+//!
 //! # Threading
 //!
 //! Two threads, and the split is forced by AGENTS.md section 20 — a capture
@@ -146,6 +160,7 @@
 pub mod automatic;
 pub mod bookmarks;
 pub mod config;
+pub mod highlights;
 
 mod error;
 mod pacing;
