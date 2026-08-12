@@ -34,13 +34,23 @@
 //! ```
 //!
 //! `clips` and `bookmarks` are reserved and are **always empty in this build**.
-//! Nothing here can create either — a clip needs a recording running a replay
-//! buffer to save from, which is
-//! [issue #38](https://github.com/wildware-uk/clipped/issues/38), and bookmarks
-//! are M8 — and they are named now so that adding them later is an addition to
-//! the file rather than a change to its shape (AGENTS.md section 43). A reader
-//! must not infer from their presence that the features exist; `docs/sessions.md`
-//! says so in the same words.
+//! Nothing here can create either, and for two different reasons now. A clip
+//! needs a recording running a replay buffer to save from, which is
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38). Bookmarks
+//! *exist* ([issue #64](https://github.com/wildware-uk/clipped/issues/64)) and
+//! are not kept here: a bookmark is an offset into one recording rather than a
+//! moment in a session, so it lives in that recording's own sidecar beside it
+//! (`crate::bookmarks`, `docs/bookmarks.md`) — which is also the shape
+//! `clipped-storage`'s `bookmarks` table has. What no build has is a way to
+//! *take* one during an automatic session: `watch` serves no protocol, so
+//! nothing can reach it with an `add_bookmark`, and joining the two is
+//! [issue #232](https://github.com/wildware-uk/clipped/issues/232).
+//!
+//! Both keys are named here so that filling them later is an addition to the
+//! file rather than a change to its shape (AGENTS.md section 43). A reader must
+//! not infer from their presence that a session has none — for bookmarks, the
+//! answer is in the recordings' own files; `docs/sessions.md` says so in the
+//! same words.
 //!
 //! # Writing it safely
 //!
@@ -132,10 +142,10 @@ impl<'a> SidecarFile<'a> {
 
 /// A list this build always writes empty.
 ///
-/// A type rather than an empty `Vec` of something, because there is no
-/// something: nothing in this build can make a clip or a bookmark, so inventing
-/// a Rust type for one would be a type nobody can construct (AGENTS.md
-/// section 37).
+/// A type rather than an empty `Vec` of something, because nothing in an
+/// automatic session fills either list: no clip can be made at all, and a
+/// bookmark belongs to a recording's own sidecar rather than to this file. See
+/// the module documentation.
 #[derive(Debug)]
 struct Reserved;
 
@@ -418,11 +428,13 @@ mod tests {
     }
 
     #[test]
-    fn clips_and_bookmarks_are_written_as_empty_lists_and_nothing_can_fill_them() {
+    fn clips_and_bookmarks_are_written_as_empty_lists_in_a_session_file() {
         // The point of the assertion is not that they are empty today but that
         // they are *reserved*: a reader must be able to tell "no clips" from "a
         // file that predates clips", and a later milestone must not have to
-        // change the shape to add one.
+        // change the shape to add one. Bookmarks are empty here because they
+        // live beside the recording they are in rather than in the session —
+        // see `crate::bookmarks` and docs/bookmarks.md.
         let file = written();
         assert_eq!(file["clips"], Value::Array(vec![]));
         assert_eq!(file["bookmarks"], Value::Array(vec![]));

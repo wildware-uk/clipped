@@ -16,9 +16,9 @@
 //!
 //! # Commands whose subsystem does not exist yet
 //!
-//! Four of the commands the protocol defines belong to subsystems that are not
-//! built: a recording with a replay buffer, bookmarks, screenshots and the
-//! configuration API.
+//! Three of the commands the protocol defines belong to subsystems that are not
+//! built: a recording with a replay buffer, screenshots and the configuration
+//! API.
 //! They are [`UnbuiltCommand`], they are refused with
 //! [`ErrorCode::NotImplemented`] and the milestone and issue that build them,
 //! and there is deliberately nowhere for them to be handled — a command that
@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, ProtocolError};
 use crate::message::Request;
-use crate::status::{RecorderStatus, RecordingSummary};
+use crate::status::{BookmarkSummary, RecorderStatus, RecordingSummary};
 
 /// A command, parsed and known to be one this build understands.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +55,8 @@ pub enum Command {
     StartRecording(StartRecording),
     /// Stop the recording that is running.
     StopRecording(StopRecording),
+    /// Mark this moment in the recording that is running.
+    AddBookmark(AddBookmark),
     /// Stop serving, finish anything still being recorded, and exit.
     ///
     /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
@@ -80,6 +82,7 @@ impl Command {
             Self::GetStatus => "get_status",
             Self::StartRecording(_) => "start_recording",
             Self::StopRecording(_) => "stop_recording",
+            Self::AddBookmark(_) => "add_bookmark",
             Self::Shutdown(_) => "shutdown",
             Self::Unbuilt(command) => command.name(),
         }
@@ -99,6 +102,7 @@ impl Command {
             "get_status" => Ok(Self::GetStatus),
             "start_recording" => Ok(Self::StartRecording(parse_params(request)?)),
             "stop_recording" => Ok(Self::StopRecording(parse_params(request)?)),
+            "add_bookmark" => Ok(Self::AddBookmark(parse_params(request)?)),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => match UnbuiltCommand::from_name(name) {
                 Some(command) => Ok(Self::Unbuilt(command)),
@@ -124,6 +128,7 @@ impl Command {
             Self::Ping | Self::GetStatus => Ok(serde_json::Value::Null),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
+            Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
             Self::Unbuilt(_) => Ok(serde_json::Value::Null),
         }
@@ -181,8 +186,6 @@ pub enum UnbuiltCommand {
     /// #38](https://github.com/wildware-uk/clipped/issues/38) — so that is the
     /// issue this refusal names.
     SaveReplay,
-    /// `add_bookmark` — needs the bookmark store.
-    AddBookmark,
     /// `take_screenshot` — needs screenshot capture.
     TakeScreenshot,
     /// `apply_settings` — needs the configuration API.
@@ -195,7 +198,6 @@ pub enum UnbuiltCommand {
 /// here is a failure rather than a command that quietly stops being refused.
 pub const UNBUILT_COMMANDS: &[UnbuiltCommand] = &[
     UnbuiltCommand::SaveReplay,
-    UnbuiltCommand::AddBookmark,
     UnbuiltCommand::TakeScreenshot,
     UnbuiltCommand::ApplySettings,
 ];
@@ -206,7 +208,6 @@ impl UnbuiltCommand {
     pub const fn name(self) -> &'static str {
         match self {
             Self::SaveReplay => "save_replay",
-            Self::AddBookmark => "add_bookmark",
             Self::TakeScreenshot => "take_screenshot",
             Self::ApplySettings => "apply_settings",
         }
@@ -226,7 +227,6 @@ impl UnbuiltCommand {
     pub const fn subsystem(self) -> &'static str {
         match self {
             Self::SaveReplay => "a recording with a replay buffer",
-            Self::AddBookmark => "bookmarks",
             Self::TakeScreenshot => "screenshot capture",
             Self::ApplySettings => "the settings API",
         }
@@ -237,7 +237,7 @@ impl UnbuiltCommand {
     pub const fn milestone(self) -> &'static str {
         match self {
             Self::SaveReplay => "M3",
-            Self::AddBookmark | Self::TakeScreenshot => "M8",
+            Self::TakeScreenshot => "M8",
             Self::ApplySettings => "M7",
         }
     }
@@ -247,7 +247,6 @@ impl UnbuiltCommand {
     pub const fn tracking_issue(self) -> u32 {
         match self {
             Self::SaveReplay => 38,
-            Self::AddBookmark => 64,
             Self::TakeScreenshot => 67,
             Self::ApplySettings => 108,
         }
@@ -321,6 +320,46 @@ pub struct StopRecording {
     pub recording_id: Option<String>,
 }
 
+/// What to mark, and how far before the press to mark it.
+///
+/// Every field is optional, because the command a hotkey sends carries none of
+/// them: pressing the key is the whole interaction, and it must not stop to ask
+/// for a label while somebody is playing (SPEC.md section 25).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AddBookmark {
+    /// Which recording to mark, as
+    /// [`ActiveRecording::recording_id`](crate::ActiveRecording::recording_id)
+    /// reported it.
+    ///
+    /// Absent means "whatever is being recorded", which is what a hotkey and a
+    /// tray menu want. Naming it is what a window that had a particular
+    /// recording on screen does, so that a mark meant for a recording which
+    /// ended in the meantime does not land in its successor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<String>,
+    /// What to call the bookmark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// A colour, in whatever notation the interface writes; the recorder stores
+    /// it and does not interpret it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour: Option<String>,
+    /// How long the marked moment lasts. Absent means it is a moment rather
+    /// than a span.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    /// How far *before* this request the bookmark should be stamped.
+    ///
+    /// Absent means the recorder's own default, which is not zero: a person
+    /// presses the key after the thing they wanted to mark, so a bookmark
+    /// stamped at the press is reliably late. `docs/bookmarks.md` gives the
+    /// figure and the reasoning. A caller with no human reaction to allow for —
+    /// a plugin marking an event it detected itself — sends `0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead_seconds: Option<f64>,
+}
+
 /// How far a shutdown may go.
 ///
 /// The parameter exists because the two answers to "the user asked to exit and a
@@ -372,6 +411,11 @@ pub enum Reply {
     RecordingStopped {
         /// What it turned out to be.
         summary: RecordingSummary,
+    },
+    /// A moment was marked, and the mark is on disk.
+    BookmarkAdded {
+        /// Where it landed, which is not where the key was pressed.
+        bookmark: BookmarkSummary,
     },
     /// The recorder has stopped listening and is winding up.
     ///
@@ -497,6 +541,114 @@ mod tests {
 
         let back: Request = serde_json::from_str(&json).expect("and deserialises");
         assert_eq!(Command::from_request(&back).expect("it parses"), start);
+    }
+
+    #[test]
+    fn a_bookmark_is_a_command_this_build_performs_rather_than_one_it_refuses() {
+        // Issue #64 built the bookmark store, so `add_bookmark` stopped being
+        // an `UnbuiltCommand`. Leaving it in that list would mean the recorder
+        // refused every bookmark with "bookmarks arrive in M8" while the
+        // subsystem sat there working, and the refusal reads plausibly enough
+        // that nobody would question it.
+        assert_eq!(UnbuiltCommand::from_name("add_bookmark"), None);
+        assert!(
+            !UNBUILT_COMMANDS
+                .iter()
+                .any(|unbuilt| unbuilt.name() == "add_bookmark"),
+            "add_bookmark is still listed as unbuilt: {UNBUILT_COMMANDS:?}"
+        );
+        assert!(matches!(
+            Command::from_request(&request("add_bookmark", serde_json::Value::Null)),
+            Ok(Command::AddBookmark(_))
+        ));
+    }
+
+    #[test]
+    fn a_bare_bookmark_asks_for_nothing_and_gets_the_recorders_own_defaults() {
+        // What the hotkey and the tray item send. Every field absent has to
+        // mean "you decide", including the lead: a `lead_seconds` that
+        // defaulted to zero here would silently undo the reaction-time
+        // allowance for every caller that did not name one.
+        for params in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"invented_later": true}),
+        ] {
+            assert_eq!(
+                Command::from_request(&request("add_bookmark", params.clone())).expect("it parses"),
+                Command::AddBookmark(AddBookmark::default()),
+                "a bookmark carrying {params} must ask for nothing in particular"
+            );
+        }
+
+        let bare = AddBookmark::default();
+        assert_eq!(bare.lead_seconds, None);
+        assert_eq!(bare.label, None);
+        assert_eq!(bare.colour, None);
+        assert_eq!(bare.duration_seconds, None);
+        assert_eq!(bare.recording_id, None);
+    }
+
+    #[test]
+    fn every_bookmark_parameter_survives_the_request_it_is_carried_in() {
+        // Distinct values on purpose: a round trip whose fields could be
+        // confused with one another passes while the code swaps two of them.
+        let bookmark = Command::AddBookmark(AddBookmark {
+            recording_id: Some("r-7".to_owned()),
+            label: Some("triple kill".to_owned()),
+            colour: Some("#ffcc00".to_owned()),
+            duration_seconds: Some(12.5),
+            lead_seconds: Some(3.25),
+        });
+
+        let request = bookmark.to_request(11).expect("it can be represented");
+        assert_eq!(request.command, "add_bookmark");
+
+        let json = serde_json::to_string(&request).expect("it serialises");
+        let back: Request = serde_json::from_str(&json).expect("and deserialises");
+        let Command::AddBookmark(parsed) = Command::from_request(&back).expect("it parses") else {
+            panic!("an add_bookmark request parsed as something else");
+        };
+
+        assert_eq!(parsed.recording_id.as_deref(), Some("r-7"));
+        assert_eq!(parsed.label.as_deref(), Some("triple kill"));
+        assert_eq!(parsed.colour.as_deref(), Some("#ffcc00"));
+        assert_eq!(parsed.duration_seconds, Some(12.5));
+        assert_eq!(parsed.lead_seconds, Some(3.25));
+    }
+
+    #[test]
+    fn a_bookmark_reply_says_where_it_landed_and_not_only_that_it_was_taken() {
+        // The lead means the mark is not where the key was pressed. A reply
+        // that dropped either figure would leave an interface unable to say
+        // what it had just done.
+        let reply = Reply::BookmarkAdded {
+            bookmark: BookmarkSummary {
+                recording_id: "r-1".to_owned(),
+                at_seconds: 115.0,
+                pressed_at_seconds: 120.0,
+                lead_seconds: 5.0,
+                label: None,
+                colour: None,
+                duration_seconds: None,
+                bookmarks_file: r"D:\clips\session.bookmarks.json".to_owned(),
+                bookmarks_in_recording: 3,
+            },
+        };
+
+        let json = serde_json::to_string(&reply).expect("it serialises");
+        assert_eq!(
+            serde_json::from_str::<Reply>(&json).expect("and deserialises"),
+            reply
+        );
+        assert!(
+            json.contains("\"at_seconds\":115.0") && json.contains("\"pressed_at_seconds\":120.0"),
+            "both the mark and the press have to reach the wire: {json}"
+        );
+        assert!(
+            !json.contains("\"label\""),
+            "an unlabelled bookmark should not reach the wire as a null: {json}"
+        );
     }
 
     #[test]

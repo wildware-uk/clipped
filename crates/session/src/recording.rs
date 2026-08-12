@@ -72,12 +72,12 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(100);
 /// diagnosis rather than a wait.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Records `settings.target` until `stop` is raised, feeding `replay` as well
-/// as the file when one is given.
+/// Records `settings.target` until `stop` is raised, feeding `outputs` as well
+/// as the file.
 pub(crate) fn record(
     settings: &RecordingSettings,
     stop: &dyn crate::StopSignal,
-    replay: Option<&ReplayBuffer>,
+    outputs: &crate::RecordingOutputs<'_>,
 ) -> Result<RecordingReport, SessionError> {
     if settings.audio_requested() {
         // Said once, plainly, rather than left to be discovered in a file with
@@ -107,7 +107,7 @@ pub(crate) fn record(
         "capture started"
     );
 
-    let outcome = record_frames(settings, stop, backend.as_mut(), format, method, replay);
+    let outcome = record_frames(settings, stop, backend.as_mut(), format, method, outputs);
 
     // The backend is shut down here rather than being left to `Drop` so that
     // the display's duplication, or the compositor's frame pool, is released
@@ -134,8 +134,9 @@ fn record_frames(
     backend: &mut dyn CaptureBackend,
     mut format: FrameFormat,
     method: CaptureMethod,
-    replay: Option<&ReplayBuffer>,
+    outputs: &crate::RecordingOutputs<'_>,
 ) -> Result<RecordingReport, SessionError> {
+    let replay = outputs.replay;
     // Held for the whole of the recording: the encoder session is opened
     // against it and may not outlive it. `format` is passed by mutable
     // reference rather than by value because waiting for the first frame is
@@ -187,6 +188,7 @@ fn record_frames(
                     encoder.as_mut(),
                     encode_size,
                     &mut counters,
+                    outputs.progress,
                 ) {
                     failure = Some(error);
                     break;
@@ -345,6 +347,11 @@ struct PacketSinks<'sinks> {
 /// silent: the recording is already at the frame rate it was asked for, the
 /// writer is behind, or the frame's timestamp is on a clock this recording is
 /// not timed against.
+///
+/// `progress` is published *after* the frame has been submitted, and only then:
+/// what it says is "the recording contains this moment", which is the only
+/// answer a bookmark can be placed against (`crate::progress`).
+#[allow(clippy::too_many_arguments)]
 fn offer(
     frame: &CapturedFrame<'_>,
     clock: CaptureClock,
@@ -353,6 +360,7 @@ fn offer(
     encoder: &mut dyn VideoEncoder,
     size: (u32, u32),
     counters: &mut Counters,
+    progress: Option<&crate::RecordingProgress>,
 ) -> Result<(), SessionError> {
     let media = match clock.media_time(frame.timestamp()) {
         Ok(media) => media,
@@ -401,6 +409,12 @@ fn offer(
 
     encoder.submit(&source)?;
     counters.encoded += 1;
+    if let Some(progress) = progress {
+        // One relaxed store. This is the whole of the capture thread's
+        // involvement in bookmarks, and it is why a bookmark cannot delay a
+        // frame (AGENTS.md section 20).
+        progress.reached(Duration::from_nanos(nanos.unsigned_abs()));
+    }
     let packets = drain(encoder, sinks)?;
     report_submission_over_headroom(packets);
     Ok(())

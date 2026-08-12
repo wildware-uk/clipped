@@ -141,6 +141,15 @@ impl HotkeyAction {
     /// #38](https://github.com/wildware-uk/clipped/issues/38). So this stays
     /// [`Some`] and names what is genuinely absent, rather than naming a buffer
     /// that has been built.
+    ///
+    /// Adding a bookmark is [`None`] as of
+    /// [issue #64](https://github.com/wildware-uk/clipped/issues/64): the
+    /// recorder stores bookmarks and answers `add_bookmark`, so a build that
+    /// still said "bookmarks arrive in M8" would be telling a user a shipped
+    /// feature is unbuilt (AGENTS.md sections 27 and 54). What is missing in
+    /// *this* process is a handler, which is [`crate::Unhandled`]'s sentence
+    /// rather than this one, and wiring one in is
+    /// [issue #232](https://github.com/wildware-uk/clipped/issues/232).
     #[must_use]
     pub const fn planned_subsystem(self) -> Option<PlannedSubsystem> {
         match self {
@@ -149,10 +158,12 @@ impl HotkeyAction {
                 "M3",
                 38,
             )),
-            Self::AddBookmark => Some(PlannedSubsystem::new("bookmarks", "M8", 64)),
             Self::TakeScreenshot => Some(PlannedSubsystem::new("screenshot capture", "M8", 67)),
             Self::OpenOverlay => Some(PlannedSubsystem::new("the in-game overlay", "M5", 53)),
-            Self::ToggleRecording | Self::MuteMicrophone | Self::ToggleMicrophone => None,
+            Self::AddBookmark
+            | Self::ToggleRecording
+            | Self::MuteMicrophone
+            | Self::ToggleMicrophone => None,
         }
     }
 }
@@ -297,5 +308,15 @@ mod tests {
         // Recording exists (M1). What a build may be missing is a handler, and
         // that is a different sentence — see `Unhandled`.
         assert_eq!(HotkeyAction::ToggleRecording.planned_subsystem(), None);
+    }
+
+    #[test]
+    fn bookmarks_stopped_being_a_missing_subsystem_when_the_recorder_gained_them() {
+        // Issue #64 built the bookmark store and the `add_bookmark` command.
+        // A key that still said "bookmarks arrive in M8 (issue #64)" would be
+        // telling the user a shipped feature is unbuilt, which is the failure
+        // AGENTS.md section 54 names — and it is one nobody notices, because
+        // the sentence still reads plausibly.
+        assert_eq!(HotkeyAction::AddBookmark.planned_subsystem(), None);
     }
 }

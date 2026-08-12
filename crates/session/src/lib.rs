@@ -55,6 +55,16 @@
 //! [issue #38](https://github.com/wildware-uk/clipped/issues/38), so nothing in
 //! this workspace calls it outside its own tests.
 //!
+//! And the marks a person puts on a recording while it is being made:
+//! [`bookmarks`] is the bookmark store
+//! ([issue #64](https://github.com/wildware-uk/clipped/issues/64),
+//! `docs/bookmarks.md`) — where a bookmark goes, what it may carry, and the
+//! sidecar it is written to before the caller is told it was taken.
+//! [`RecordingProgress`] is what it is placed against: the recording's own
+//! position, published once per encoded frame, because timing a recording from
+//! outside is ahead of the file by however long the encoder took to open.
+//! `apps/recorder`'s `serve` subcommand answers `add_bookmark` with it.
+//!
 //! Per-game settings are modelled but not yet applied. [`config`] is the
 //! configuration API — global settings, per-game overrides that inherit from
 //! them, validation, and a versioned file that survives being opened by an
@@ -134,10 +144,12 @@
 //! ```
 
 pub mod automatic;
+pub mod bookmarks;
 pub mod config;
 
 mod error;
 mod pacing;
+mod progress;
 mod report;
 mod settings;
 mod stop;
@@ -153,6 +165,7 @@ mod windows;
 
 pub use error::SessionError;
 pub use pacing::FrameGate;
+pub use progress::RecordingProgress;
 pub use report::{EndReason, RecordingReport};
 pub use settings::{
     CaptureTargetSettings, CodecPreference, EncoderPreference, RecordingSettings,
@@ -184,7 +197,7 @@ pub fn record(
     settings: &RecordingSettings,
     stop: &dyn StopSignal,
 ) -> Result<RecordingReport, SessionError> {
-    recording::record(settings, stop, None)
+    recording::record(settings, stop, &RecordingOutputs::default())
 }
 
 /// Records `settings.target`, filling `replay` from the same encoder.
@@ -221,7 +234,88 @@ pub fn record_with_replay(
     stop: &dyn StopSignal,
     replay: &clipped_replay::ReplayBuffer,
 ) -> Result<RecordingReport, SessionError> {
-    recording::record(settings, stop, Some(replay))
+    recording::record(
+        settings,
+        stop,
+        &RecordingOutputs::default().with_replay(replay),
+    )
+}
+
+/// Everything a recording writes into as it goes, besides its own file.
+///
+/// One argument rather than one function per combination. Both members are
+/// optional and both are borrowed for the length of the recording, because the
+/// caller is what outlives it: a replay save runs on another thread while this
+/// one carries on recording, and a bookmark is taken by whichever thread the
+/// command arrived on.
+///
+/// **Neither can fail a recording.** A replay buffer copies bytes into memory it
+/// already owns, and progress is one relaxed atomic store per encoded frame.
+/// That is the whole of what a recording gives them, and it is what keeps
+/// AGENTS.md section 17's promise that nothing optional can cost somebody their
+/// footage.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecordingOutputs<'a> {
+    /// A rolling window of the last few minutes, filled from the same encoder.
+    pub replay: Option<&'a clipped_replay::ReplayBuffer>,
+    /// Where the recording has reached on its own timeline.
+    ///
+    /// What a manual bookmark is placed against
+    /// ([issue #64](https://github.com/wildware-uk/clipped/issues/64)). Without
+    /// it a caller can only time the recording from outside, which is ahead of
+    /// the file by however long the encoder took to open — see
+    /// [`RecordingProgress`].
+    pub progress: Option<&'a RecordingProgress>,
+}
+
+impl<'a> RecordingOutputs<'a> {
+    /// The same outputs, also filling `replay`.
+    #[must_use]
+    pub const fn with_replay(mut self, replay: &'a clipped_replay::ReplayBuffer) -> Self {
+        self.replay = Some(replay);
+        self
+    }
+
+    /// The same outputs, also publishing where the recording has reached.
+    #[must_use]
+    pub const fn with_progress(mut self, progress: &'a RecordingProgress) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+}
+
+/// Records `settings.target`, writing into `outputs` as well as into the file.
+///
+/// [`record`] and [`record_with_replay`] are this with one shape of `outputs`
+/// each; this is the one to call when a recording needs both, or needs
+/// [`RecordingProgress`] so that something can name a moment inside it while it
+/// is still being written.
+///
+/// # Errors
+///
+/// Exactly [`record`]'s.
+#[cfg(windows)]
+pub fn record_into(
+    settings: &RecordingSettings,
+    stop: &dyn StopSignal,
+    outputs: &RecordingOutputs<'_>,
+) -> Result<RecordingReport, SessionError> {
+    recording::record(settings, stop, outputs)
+}
+
+/// Recording is a Windows feature; this build has no capture backend.
+///
+/// # Errors
+///
+/// Always [`SessionError::UnsupportedPlatform`].
+#[cfg(not(windows))]
+pub fn record_into(
+    settings: &RecordingSettings,
+    stop: &dyn StopSignal,
+    outputs: &RecordingOutputs<'_>,
+) -> Result<RecordingReport, SessionError> {
+    let _ = (settings, stop, outputs);
+    Err(SessionError::UnsupportedPlatform)
 }
 
 /// Recording is a Windows feature; this build has no capture backend.

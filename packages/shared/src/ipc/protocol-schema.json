@@ -37,9 +37,9 @@
         "get_status",
         "start_recording",
         "stop_recording",
+        "add_bookmark",
         "shutdown",
         "save_replay",
-        "add_bookmark",
         "take_screenshot",
         "apply_settings"
       ],
@@ -104,6 +104,7 @@
       "values": [
         "recording",
         "status_events",
+        "bookmarks",
         "shutdown"
       ],
       "tolerates_unrecognised": true
@@ -128,6 +129,7 @@
         "status",
         "recording_started",
         "recording_stopped",
+        "bookmark_added",
         "shutting_down"
       ],
       "tolerates_unrecognised": false
@@ -151,6 +153,31 @@
         "target"
       ],
       "optional": []
+    },
+    "add_bookmark": {
+      "required": [],
+      "optional": [
+        "colour",
+        "duration_seconds",
+        "label",
+        "lead_seconds",
+        "recording_id"
+      ]
+    },
+    "bookmark_summary": {
+      "required": [
+        "at_seconds",
+        "bookmarks_file",
+        "bookmarks_in_recording",
+        "lead_seconds",
+        "pressed_at_seconds",
+        "recording_id"
+      ],
+      "optional": [
+        "colour",
+        "duration_seconds",
+        "label"
+      ]
     },
     "error_detail.not_implemented": {
       "required": [
@@ -255,6 +282,13 @@
       "optional": [
         "sustained_framerate"
       ]
+    },
+    "reply.bookmark_added": {
+      "required": [
+        "bookmark",
+        "reply"
+      ],
+      "optional": []
     },
     "reply.pong": {
       "required": [
@@ -374,6 +408,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "add_bookmark",
+      "params": "add_bookmark",
+      "reply": "reply.bookmark_added",
+      "available_in_this_build": true
+    },
+    {
       "name": "shutdown",
       "params": "shutdown",
       "reply": "reply.shutting_down",
@@ -381,12 +421,6 @@
     },
     {
       "name": "save_replay",
-      "params": null,
-      "reply": null,
-      "available_in_this_build": false
-    },
-    {
-      "name": "add_bookmark",
       "params": null,
       "reply": null,
       "available_in_this_build": false
@@ -512,6 +546,7 @@
         "features": [
           "recording",
           "status_events",
+          "bookmarks",
           "shutdown"
         ],
         "protocol_version": 1,
