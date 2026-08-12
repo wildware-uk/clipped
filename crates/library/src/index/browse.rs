@@ -800,11 +800,126 @@ mod tests {
         assert_eq!(page.sessions.len(), 1);
     }
 
+    /// A library of `sessions` sittings, newest last, each holding nothing.
+    ///
+    /// Rows in a real index rather than a limit handed straight to the private
+    /// function that clamps one, because the property this exists for belongs to
+    /// [`list_sessions`] and not to anything it happens to call: a test that
+    /// never read a page could not tell "the page a caller receives is clamped"
+    /// from "a function exists which would clamp one if it were called". What a
+    /// sitting holds is beside the point here — the clamp counts sittings — so
+    /// they hold nothing, which keeps two hundred of them cheap.
+    fn library_of(name: &str, sessions: usize) -> Database {
+        let database = library(name);
+        let connection = database.connection();
+        // One transaction for the lot. Two hundred commits would make this slow
+        // enough that somebody stops running it.
+        connection
+            .execute_batch("BEGIN")
+            .expect("a transaction begins");
+        connection
+            .execute(
+                "INSERT INTO games (game_id, name, first_seen_at) \
+                 VALUES ('cs2', 'cs2', '2026-08-11T00:00:00+01:00')",
+                [],
+            )
+            .expect("a game inserts");
+        for index in 0..sessions {
+            connection
+                .execute(
+                    "INSERT INTO sessions (session_id, game_id, started_at) \
+                     VALUES (?1, 'cs2', ?2)",
+                    params![
+                        session_id_of(index),
+                        // Distinct per sitting, so the newest-first order this
+                        // reasons about is total rather than a tie broken by
+                        // the identifier.
+                        format!("2026-08-11T{:02}:{:02}:00+01:00", index / 60, index % 60),
+                    ],
+                )
+                .expect("a session inserts");
+        }
+        connection.execute_batch("COMMIT").expect("it commits");
+        database
+    }
+
+    /// The identifier of the sitting [`library_of`] inserted `index`th.
+    fn session_id_of(index: usize) -> String {
+        format!("cs2-{index:04}")
+    }
+
     #[test]
     fn a_page_is_clamped_so_that_a_reply_can_always_be_sent() {
-        assert_eq!(page_limit(0), DEFAULT_PAGE_LIMIT);
-        assert_eq!(page_limit(10), 10);
-        assert_eq!(page_limit(100_000), MAX_PAGE_LIMIT);
+        // Read through `list_sessions`, which is what a caller calls: a clamp is
+        // only worth anything on the path an actual request takes. Whatever
+        // carries a page across a process boundary has to bound its own payload
+        // in bytes as well (`apps/recorder/src/library.rs`), but it can only do
+        // that to a page it was able to receive in the first place — an
+        // unclamped ten thousand is a query that walks the library.
+        const SESSIONS: usize = MAX_PAGE_LIMIT + 5;
+        let database = library_of("browse-clamp", SESSIONS);
+
+        let unasked = list_sessions(&database, &SessionListing::default()).expect("a page");
+        assert_eq!(
+            unasked.sessions.len(),
+            DEFAULT_PAGE_LIMIT,
+            "a caller that does not say gets the default rather than the library"
+        );
+
+        let asked = list_sessions(
+            &database,
+            &SessionListing {
+                limit: 10,
+                ..SessionListing::default()
+            },
+        )
+        .expect("a page");
+        assert_eq!(
+            asked.sessions.len(),
+            10,
+            "a limit inside the bound is answered exactly"
+        );
+
+        let greedy = list_sessions(
+            &database,
+            &SessionListing {
+                limit: 100_000,
+                ..SessionListing::default()
+            },
+        )
+        .expect("a page");
+        assert_eq!(
+            greedy.sessions.len(),
+            MAX_PAGE_LIMIT,
+            "a caller asking for the whole library gets a page of it"
+        );
+        // Clamping is not truncation: the five sittings it did not carry are
+        // still reachable. Asked for rather than compared to a string, because
+        // what the next request does with a cursor is the whole of what a cursor
+        // is for.
+        let rest = list_sessions(
+            &database,
+            &SessionListing {
+                limit: 100_000,
+                after: greedy.next.clone(),
+                ..SessionListing::default()
+            },
+        )
+        .expect("a page");
+        // The oldest `SESSIONS - MAX_PAGE_LIMIT` sittings are the ones left out,
+        // and a listing is newest first.
+        let left_out = (0..SESSIONS - MAX_PAGE_LIMIT)
+            .rev()
+            .map(session_id_of)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rest.sessions
+                .iter()
+                .map(|session| session.session_id.clone())
+                .collect::<Vec<_>>(),
+            left_out,
+            "the page after a clamped one carries exactly the sittings it left out"
+        );
     }
 
     #[test]
