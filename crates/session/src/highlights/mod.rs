@@ -2,9 +2,10 @@
 //! and how a burst of them becomes one highlight rather than twenty.
 //!
 //! [`clipped_events`] defines what happened; `clipped_library`'s virtual clip
-//! defines what a clip is. This module is the rule between them, and it is the
-//! only place the question "is that worth keeping" is answered
-//! (`docs/highlights.md`).
+//! defines what a clip is. This module is the rule between them — and, in
+//! `generate.rs`, the step that turns the moments those rules chose into the
+//! clips themselves. It is the only place the question "is that worth keeping"
+//! is answered (`docs/highlights.md`).
 //!
 //! # The whole model in one example
 //!
@@ -59,14 +60,31 @@
 //! authoritative feed and a detector watching the screen are not the same
 //! claim. A rule filters on the first and pads its window with the second.
 //!
-//! # What this module does not do
+//! # From a range to a clip
 //!
-//! **It creates nothing.** No clip, no file, no database row, no title. It
-//! takes events and returns the ranges that would be worth keeping; generating
-//! the clips is [issue #76](https://github.com/wildware-uk/clipped/issues/76),
-//! and it is a separate ticket because every rule here is testable against a
-//! constructed event stream, with no game, no GPU and no recording — which is
-//! what the tests in `tests.rs` are.
+//! [`HighlightGeneration`] is the other half, and it is where the detection
+//! chain finally produces something a user sees: for each merged range, a
+//! `clipped_library::VirtualClip` of the recording that holds it, titled after
+//! what happened and tagged by kind ([issue
+//! #76](https://github.com/wildware-uk/clipped/issues/76), `generate.rs`).
+//!
+//! **It writes no file, and no automatic generation ever will.** A virtual clip
+//! costs zero bytes, so a session's twenty highlights cost twenty rows rather
+//! than twenty re-encodes of footage the user already has — and a recorder that
+//! wrote them out would be filling the storage quota
+//! ([#93](https://github.com/wildware-uk/clipped/issues/93)) with copies, which
+//! automatic cleanup ([#111](https://github.com/wildware-uk/clipped/issues/111))
+//! would then make room for by deleting the originals. Rendering a file is what
+//! an export is for, at the moment somebody asks for one.
+//!
+//! It also never reaches into the replay buffer. A clip cut from the buffer is a
+//! file written at the moment of the save, because the packets are about to be
+//! evicted (`docs/replay-buffer.md`), and that is a capture mode — Highlights
+//! Only ([#77](https://github.com/wildware-uk/clipped/issues/77)) — rather than
+//! generation. A moment no finished file covers produces no clip and says which
+//! of the five cases it was.
+//!
+//! # What this module does not do
 //!
 //! **It does not read the settings file.** [`HighlightRules::read`] and
 //! [`HighlightRules::write`] are the section's format, and
@@ -90,6 +108,9 @@
 
 mod document;
 mod error;
+mod generate;
+#[cfg(test)]
+mod generation_tests;
 mod merge;
 mod resolve;
 mod rule;
@@ -98,6 +119,7 @@ mod rules;
 mod tests;
 
 pub use error::{HighlightRuleError, RuleSetting};
+pub use generate::{GeneratedHighlights, HighlightGeneration, NotGenerated, WithheldHighlight};
 pub use merge::Highlight;
 pub use resolve::{Decision, ResolvedHighlightRules, ResolvedRule, SkipReason};
 pub use rule::{
