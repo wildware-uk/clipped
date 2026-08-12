@@ -209,7 +209,7 @@ games ──┬── sessions ──┬── recordings ──┬── bookma
 | `session_game_candidates` | the games the catalogue could not choose between, for an unattributed session | none |
 | `recordings` | one media file: path, timings, dimensions, outcome, size, whether it is still there | none |
 | `clips` | a shorter file the user kept, and the window of the source it came from | nothing can create one |
-| `bookmarks` | a marked moment in a recording: offset, label, colour, duration | nothing can create one |
+| `bookmarks` | a marked moment in a recording: offset, label, colour, duration | the recorder takes them ([#64](https://github.com/wildware-uk/clipped/issues/64)) and writes them to a sidecar beside each recording; nothing indexes them into this table yet (`docs/bookmarks.md`) |
 | `session_events` | what happened during a session, in the vocabulary the sidecar already writes | none |
 | `tags`, `recording_tags`, `clip_tags` | free-form labels, and what they are on | none |
 | `settings`, `game_settings` | global settings and per-game overrides, as JSON values under opaque keys | none |

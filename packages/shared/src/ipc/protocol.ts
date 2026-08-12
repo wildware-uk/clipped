@@ -106,7 +106,7 @@ export type KnownEventStream = (typeof EVENT_STREAMS)[number];
 export type EventStream = Extensible<KnownEventStream>;
 
 /** The capabilities a recorder can advertise in its welcome. */
-export const FEATURES = ['recording', 'status_events', 'shutdown'] as const;
+export const FEATURES = ['recording', 'status_events', 'bookmarks', 'shutdown'] as const;
 
 /** A capability this build knows how to make use of. */
 export type KnownFeature = (typeof FEATURES)[number];
@@ -121,15 +121,15 @@ export type KnownFeature = (typeof FEATURES)[number];
  */
 export type Feature = Extensible<KnownFeature>;
 
-/** Every command the protocol defines, including the four no build performs yet. */
+/** Every command the protocol defines, including the three no build performs yet. */
 export const COMMANDS = [
   'ping',
   'get_status',
   'start_recording',
   'stop_recording',
+  'add_bookmark',
   'shutdown',
   'save_replay',
-  'add_bookmark',
   'take_screenshot',
   'apply_settings',
 ] as const;
@@ -199,6 +199,7 @@ export const REPLIES = [
   'status',
   'recording_started',
   'recording_stopped',
+  'bookmark_added',
   'shutting_down',
 ] as const;
 
@@ -315,6 +316,37 @@ export type ShutdownParams = {
   readonly finalise_recording?: boolean;
 };
 
+/**
+ * What to mark, and how far before this request to mark it.
+ *
+ * Every field is optional, because the request a hotkey or a tray item sends
+ * carries none of them: pressing the key is the whole interaction and must not
+ * stop to ask for a label while somebody is playing.
+ */
+export type AddBookmarkParams = {
+  /**
+   * Which recording to mark. Absent means "whatever is being recorded", which
+   * is what a hotkey wants; naming one keeps a mark meant for a recording that
+   * has since ended out of its successor.
+   */
+  readonly recording_id?: string;
+  /** What to call the bookmark. */
+  readonly label?: string;
+  /** A colour, in whatever notation this interface writes. */
+  readonly colour?: string;
+  /** How long the marked moment lasts. Absent means it is a moment. */
+  readonly duration_seconds?: number;
+  /**
+   * How far *before* this request the bookmark should be stamped.
+   *
+   * Absent means the recorder's own default, which is not zero: a person
+   * presses the key after the thing they wanted to mark, so a bookmark stamped
+   * at the press is reliably late (docs/bookmarks.md). Something with no human
+   * reaction to allow for sends `0`.
+   */
+  readonly lead_seconds?: number;
+};
+
 /** Which recording to stop. A type alias for the reason above. */
 export type StopRecordingParams = {
   /**
@@ -391,6 +423,14 @@ export interface RecordingStoppedReply {
   readonly summary: RecordingSummary;
 }
 
+/** A moment was marked, and the mark is on disk. */
+export interface BookmarkAddedReply {
+  /** The tag. */
+  readonly reply: 'bookmark_added';
+  /** Where it landed, which is not where the request was made. */
+  readonly bookmark: BookmarkSummary;
+}
+
 /**
  * The recorder has stopped listening and is winding up.
  *
@@ -417,7 +457,12 @@ export interface ShuttingDownReply {
  * outcome it does not know, which it must report rather than absorb.
  */
 export type Reply =
-  PongReply | StatusReply | RecordingStartedReply | RecordingStoppedReply | ShuttingDownReply;
+  | PongReply
+  | StatusReply
+  | RecordingStartedReply
+  | RecordingStoppedReply
+  | BookmarkAddedReply
+  | ShuttingDownReply;
 
 /** Nothing is being recorded. */
 export interface IdleStatus {
@@ -492,6 +537,42 @@ export interface RecordingSummary {
   readonly width: number;
   /** The encoded picture height. */
   readonly height: number;
+}
+
+/**
+ * A bookmark that was taken, as the recorder placed it.
+ *
+ * It carries where the bookmark *landed* rather than only confirming it was
+ * taken, because that is not where the key was pressed: the recorder stamps a
+ * bookmark `lead_seconds` earlier, to allow for the fact that a person presses
+ * the key after the thing they wanted to mark. An interface that showed the
+ * press would be showing a moment that is not the one in the file.
+ */
+export interface BookmarkSummary {
+  /** The recording it is in. */
+  readonly recording_id: string;
+  /** How far into that recording the marked moment is. */
+  readonly at_seconds: number;
+  /**
+   * Where the recording was when the request was made.
+   *
+   * `at_seconds` plus `lead_seconds`, except at the very start of a recording,
+   * where the offset is clamped at zero and this is the only record of where
+   * the press actually was.
+   */
+  readonly pressed_at_seconds: number;
+  /** How far before the request the bookmark was stamped. */
+  readonly lead_seconds: number;
+  /** What it is called, if anything. */
+  readonly label?: string;
+  /** The colour it was given, exactly as it was sent. */
+  readonly colour?: string;
+  /** How long the marked moment lasts, if that was said. */
+  readonly duration_seconds?: number;
+  /** The file the bookmarks of this recording are kept in. */
+  readonly bookmarks_file: string;
+  /** How many bookmarks this recording now has, including this one. */
+  readonly bookmarks_in_recording: number;
 }
 
 /** Which versions this recorder actually speaks. */

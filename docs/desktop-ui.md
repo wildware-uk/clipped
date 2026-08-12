@@ -180,7 +180,7 @@ only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
   Recording process `cs2.exe`          the status, not a control
   ─────────────────────────────
   Save Replay — needs a recording with a replay buffer (#38)   disabled
-  Add Bookmark — needs bookmarks (#64)                        disabled
+  Add Bookmark
   Stop Recording
   ─────────────────────────────
   Open Library
@@ -253,11 +253,17 @@ reason in its own label**. A notification-area menu has no tooltip and no help
 text, so the label is the only place a reason can go, and "greyed out with no
 explanation" is the failure AGENTS.md section 27 names.
 
-- **Save Replay** and **Add Bookmark** are commands the protocol defines and the
-  recorder refuses. Their labels are built from `UnbuiltCommand`'s own subsystem
-  and tracking issue — the same two facts the recorder puts in the
-  `not_implemented` refusal — so the day one is built, the menu stops claiming
-  it has not.
+- **Save Replay** is a command the protocol defines and the recorder refuses.
+  Its label is built from `UnbuiltCommand`'s own subsystem and tracking issue —
+  the same two facts the recorder puts in the `not_implemented` refusal — so the
+  day it is built, the menu stops claiming it has not.
+- **Add Bookmark** is what that looked like the day it happened. Issue #64 built
+  the bookmark store and the `add_bookmark` command, the refusal it quoted
+  stopped existing, and the item became a control: live while something is being
+  recorded, and disabled with `— nothing is being recorded` otherwise, because a
+  bookmark is an offset into a recording and there is nothing to put one in.
+  It sends no label and no colour — one click, and nowhere in a menu to type —
+  so it takes the same bare mark a hotkey would (`docs/bookmarks.md`).
 - **Open Library** and **Settings** raise the window and send it to that screen.
   Neither screen is written, and each says so and names the issue that builds it;
   that is a thing that happens, not a control that does nothing.
@@ -421,12 +427,21 @@ for days, and a toast when a recording starts would train the user to dismiss
 them without reading, taking the three that matter with it.
 
 Issue #110's scope also lists "replay saved", "bookmark added" and "screenshot
-taken". **None of them is here**, because no such event exists — `clipped_replay`
-can write a clip out of the retained segments (issue #37), but no build runs a
-recording with a buffer to save from (issue #38) and `save_replay` is a command
-this build refuses. Notifying about something no subsystem reports would be the
-invented state AGENTS.md section 27 forbids, and it would be the one thing worse
-than a missing notification: a user believing a clip was saved.
+taken". **None of them is here.** Two of the three do not exist at all:
+`clipped_replay` can write a clip out of the retained segments (issue #37), but
+no build runs a recording with a buffer to save from (issue #38) and
+`save_replay` is a command this build refuses. Notifying about something no
+subsystem reports would be the invented state AGENTS.md section 27 forbids, and
+it would be the one thing worse than a missing notification: a user believing a
+clip was saved.
+
+Bookmarks are the third, and they *do* exist now (issue #64). A "bookmark added"
+toast is still not here, and that is a decision rather than an omission: a
+bookmark is a thing the user just did on purpose, several times a session, while
+playing. A toast for each one is the nuisance the rule above is about. The tray
+reports a bookmark only when it **failed**, which is the one case the user
+cannot infer. Feedback that does not interrupt gameplay is what the overlay is
+for (issue #53).
 
 The same issue asks for non-critical notifications to be suppressed during
 gameplay. There are none to suppress — every category above is a failure — and a

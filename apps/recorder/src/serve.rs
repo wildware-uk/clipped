@@ -15,12 +15,27 @@
 //!
 //! # What it can actually do
 //!
-//! Start a recording, stop one, and say what it is doing — the same recording
-//! `record` makes, through the same `clipped-session` call, validated by the
-//! same code (AGENTS.md section 55). Every other command in the protocol
-//! belongs to a subsystem that is not built, and `clipped-ipc` refuses those
-//! before they reach this module at all, with the milestone and issue that
-//! build them.
+//! Start a recording, stop one, mark a moment in one, and say what it is doing.
+//! The recording is the one `record` makes, through the same `clipped-session`
+//! call, validated by the same code (AGENTS.md section 55). Every other command
+//! in the protocol belongs to a subsystem that is not built, and `clipped-ipc`
+//! refuses those before they reach this module at all, with the milestone and
+//! issue that build them.
+//!
+//! # Bookmarks, and what they are not allowed to cost
+//!
+//! `add_bookmark` is answered on the connection thread it arrived on. It reads
+//! one relaxed atomic — [`clipped_session::RecordingProgress`], which the
+//! recording publishes once per encoded frame — appends to a `Vec` behind the
+//! log's own mutex, and writes a small file. **None of that is on the recording
+//! thread**: `clipped_session::record` is handed the progress handle and never
+//! the bookmark log, so there is no lock, queue or file a bookmark shares with
+//! capture (AGENTS.md section 20, `docs/bookmarks.md`).
+//!
+//! The one piece of state a bookmark and a recording *do* share is
+//! [`RecordingState::current`], which the recording thread touches exactly twice
+//! — when it is stored and when its outcome is — and never per frame. The
+//! bookmark takes what it needs from it and lets go before it writes anything.
 //!
 //! # Threads
 //!
@@ -58,16 +73,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use clipped_ipc::{
-    features, ActiveRecording, Command, CommandHandler, EndReason, Endpoint, EventPublisher,
-    ProtocolError, RecorderStatus, RecordingSummary, Reply, Server, ServerError, StartRecording,
-    StopRecording, TransportError,
+    features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
+    Endpoint, EventPublisher, ProtocolError, RecorderStatus, RecordingSummary, Reply, Server,
+    ServerError, StartRecording, StopRecording, TransportError,
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
-use clipped_session::{RecordingReport, RecordingSettings};
+use clipped_session::bookmarks::{BookmarkError, BookmarkLog, BookmarkRequest};
+use clipped_session::{RecordingProgress, RecordingReport, RecordingSettings};
 
 use crate::cli::{RecordArgs, ServeArgs};
 use crate::config::{ConfigError, RecordingConfig};
@@ -82,6 +98,7 @@ fn features_of_this_build() -> Vec<String> {
     vec![
         features::RECORDING.to_owned(),
         features::STATUS_EVENTS.to_owned(),
+        features::BOOKMARKS.to_owned(),
     ]
 }
 
@@ -253,6 +270,9 @@ impl CommandHandler for RecorderService {
             Command::StopRecording(StopRecording { recording_id }) => Ok(Reply::RecordingStopped {
                 summary: self.recordings.stop(recording_id.as_deref())?,
             }),
+            Command::AddBookmark(request) => Ok(Reply::BookmarkAdded {
+                bookmark: self.recordings.bookmark(&request, SystemTime::now())?,
+            }),
             // Refused by `clipped-ipc` before dispatch, so that no handler can
             // answer a command whose subsystem does not exist (AGENTS.md
             // section 54). Reaching here would be a bug in that refusal.
@@ -310,6 +330,17 @@ struct Running {
     started: Instant,
     stop: crate::shutdown::ShutdownSignal,
     thread: Option<JoinHandle<()>>,
+    /// Where the recording has reached on its own timeline.
+    ///
+    /// The only honest source for a bookmark's offset: it is the media
+    /// timestamp of the last frame that reached the file, which is what a
+    /// bookmark has to name (`clipped_session::RecordingProgress`).
+    progress: RecordingProgress,
+    /// The bookmarks taken in this recording, and the file they live in.
+    ///
+    /// Shared so that the connection thread answering `add_bookmark` holds it
+    /// without holding [`RecordingState::current`] while it writes.
+    bookmarks: Arc<BookmarkLog>,
     /// [`None`] while it is still recording.
     outcome: Option<Result<RecordingReport, String>>,
 }
@@ -359,7 +390,8 @@ impl RecordingState {
             "starting a recording because the desktop application asked for one"
         );
 
-        let thread = spawn_recording(self, &id, settings, stop.clone());
+        let progress = RecordingProgress::new();
+        let thread = spawn_recording(self, &id, settings, stop.clone(), progress.clone());
 
         *current = Some(Running {
             id: id.clone(),
@@ -368,6 +400,8 @@ impl RecordingState {
             started: Instant::now(),
             stop,
             thread: Some(thread),
+            progress,
+            bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
             outcome: None,
         });
         let status = status_of(current.as_ref());
@@ -438,6 +472,90 @@ impl RecordingState {
             Ok(report) => Ok(summarise(&report)),
             Err(message) => Err(ProtocolError::new(ErrorCode::RecordingFailed, message)),
         }
+    }
+
+    /// Marks the moment the recording has reached, and writes it down.
+    ///
+    /// `now` is the wall clock, passed in so that this is testable without one
+    /// (AGENTS.md section 25). It is only what the bookmark is *stamped* with;
+    /// where the bookmark lands comes from the recording's own clock.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::NotRecording`] when nothing is being recorded, or when a
+    /// named recording is not the one running;
+    /// [`ErrorCode::InvalidParameters`] for a label, colour, duration or lead
+    /// the recorder will not store; and [`ErrorCode::Internal`] when the
+    /// bookmark was taken and could not be saved — which names the file, because
+    /// a full or disconnected drive is something only the user can fix
+    /// (AGENTS.md section 45).
+    fn bookmark(
+        &self,
+        request: &AddBookmark,
+        now: SystemTime,
+    ) -> Result<BookmarkSummary, ProtocolError> {
+        let wanted = bookmark_request(request)?;
+
+        // Everything this needs comes out of the lock here, and the lock is
+        // released before the file is written: the recording thread stores its
+        // outcome through this same mutex, and a bookmark that held it across a
+        // disk write would make a recording's end wait on one.
+        let (recording_id, progress, bookmarks) = {
+            let current = self.lock()?;
+            let Some(running) = current.as_ref().filter(|running| running.outcome.is_none()) else {
+                return Err(nothing_to_bookmark());
+            };
+            if let Some(named) = &request.recording_id {
+                if named != &running.id {
+                    return Err(ProtocolError::new(
+                        ErrorCode::NotRecording,
+                        format!("recording `{named}` is not the one this recorder is running"),
+                    ));
+                }
+            }
+            (
+                running.id.clone(),
+                running.progress.clone(),
+                Arc::clone(&running.bookmarks),
+            )
+        };
+
+        let Some(position) = progress.position() else {
+            // The recording has been started and has not yet put a frame in its
+            // file — the encoder is still opening, or the window has not drawn.
+            // There is no moment to mark, and marking zero would put the
+            // bookmark at a place the user was not looking at.
+            return Err(ProtocolError::new(
+                ErrorCode::NotRecording,
+                "the recording has not captured its first frame yet, so there is no moment to \
+                 mark",
+            ));
+        };
+
+        let taken = bookmarks
+            .add(&wanted, position, now)
+            .map_err(|error| bookmark_not_saved(&error))?;
+
+        tracing::info!(
+            recording = recording_id,
+            at_seconds = taken.at().as_secs_f64(),
+            lead_seconds = taken.lead().as_secs_f64(),
+            labelled = taken.label().is_some(),
+            bookmarks = bookmarks.count(),
+            "a moment was bookmarked in the recording"
+        );
+
+        Ok(BookmarkSummary {
+            recording_id,
+            at_seconds: taken.at().as_secs_f64(),
+            pressed_at_seconds: position.as_secs_f64(),
+            lead_seconds: taken.lead().as_secs_f64(),
+            label: taken.label().map(str::to_owned),
+            colour: taken.colour().map(str::to_owned),
+            duration_seconds: taken.duration().map(|span| span.as_secs_f64()),
+            bookmarks_file: bookmarks.path().to_string_lossy().into_owned(),
+            bookmarks_in_recording: u32::try_from(bookmarks.count()).unwrap_or(u32::MAX),
+        })
     }
 
     /// What the recorder is doing.
@@ -519,6 +637,7 @@ fn spawn_recording(
     id: &str,
     settings: RecordingSettings,
     stop: crate::shutdown::ShutdownSignal,
+    progress: RecordingProgress,
 ) -> JoinHandle<()> {
     let state = Arc::clone(state);
     let id = id.to_owned();
@@ -526,8 +645,9 @@ fn spawn_recording(
     thread::Builder::new()
         .name("clipped-recording".to_owned())
         .spawn(move || {
+            let outputs = clipped_session::RecordingOutputs::default().with_progress(&progress);
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                clipped_session::record(&settings, &stop)
+                clipped_session::record_into(&settings, &stop, &outputs)
             }));
 
             let outcome = match outcome {
@@ -635,6 +755,68 @@ fn nothing_to_stop() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotRecording, "nothing is being recorded")
 }
 
+/// The refusal for a bookmark with nothing to mark.
+///
+/// A separate sentence from [`nothing_to_stop`] because it answers a different
+/// question: somebody pressed the bookmark key and needs to know why nothing
+/// happened, and "nothing is being recorded" on its own reads like a fault
+/// (AGENTS.md section 45).
+fn nothing_to_bookmark() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::NotRecording,
+        "nothing is being recorded, so there is no recording to mark a moment in",
+    )
+}
+
+/// Reads the protocol's parameters into what `clipped-session` accepts.
+///
+/// Every bound — how long a label may be, how far before the press a bookmark
+/// may be stamped — belongs to `clipped_session::bookmarks`, because that is
+/// what has to store the result. A second set of limits here would be a second
+/// set of answers to one question (AGENTS.md section 55).
+fn bookmark_request(request: &AddBookmark) -> Result<BookmarkRequest, ProtocolError> {
+    let mut wanted = BookmarkRequest::new()
+        .with_label(request.label.clone())
+        .and_then(|wanted| wanted.with_colour(request.colour.clone()))
+        .map_err(invalid_bookmark)?;
+
+    if let Some(seconds) = request.duration_seconds {
+        wanted = wanted
+            .with_duration(Some(bookmark_seconds(seconds, "duration_seconds")?))
+            .map_err(invalid_bookmark)?;
+    }
+    if let Some(seconds) = request.lead_seconds {
+        wanted = wanted
+            .with_lead(bookmark_seconds(seconds, "lead_seconds")?)
+            .map_err(invalid_bookmark)?;
+    }
+    Ok(wanted)
+}
+
+/// A duration from a figure on the wire, which may be anything a JSON number
+/// can be.
+fn bookmark_seconds(value: f64, name: &'static str) -> Result<std::time::Duration, ProtocolError> {
+    std::time::Duration::try_from_secs_f64(value).map_err(|_| {
+        ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "`{name}` has to be a number of seconds that is not negative, and {value} is \
+                     not one"
+            ),
+        )
+    })
+}
+
+/// A bookmark the recorder will not store, as something the UI can render.
+fn invalid_bookmark(error: BookmarkError) -> ProtocolError {
+    ProtocolError::new(ErrorCode::InvalidParameters, error.to_string())
+}
+
+/// A bookmark that was taken and could not be written down.
+fn bookmark_not_saved(error: &BookmarkError) -> ProtocolError {
+    ProtocolError::new(ErrorCode::Internal, error.to_string())
+}
+
 /// The refusal for a lock a panic left poisoned.
 fn poisoned(what: &str) -> ProtocolError {
     ProtocolError::new(
@@ -686,5 +868,242 @@ fn codec_token(codec: clipped_encoder::Codec) -> &'static str {
         clipped_encoder::Codec::H264 => "h264",
         clipped_encoder::Codec::Hevc => "hevc",
         clipped_encoder::Codec::Av1 => "av1",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::atomic::AtomicU32;
+    use std::time::Duration;
+
+    use clipped_session::bookmarks::{BookmarkFile, DEFAULT_LEAD};
+
+    use super::*;
+
+    /// A directory of this test's own; several of these run at once.
+    fn scratch(name: &str) -> PathBuf {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+
+        let directory = std::env::temp_dir().join(format!(
+            "clipped-serve-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
+        directory
+    }
+
+    fn moment() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725)
+    }
+
+    /// A state holding a recording that has reached `position`.
+    ///
+    /// Built by hand rather than by starting one: what is under test is the
+    /// bookmark path, which needs a recording position and an output path and
+    /// nothing else. Capturing a real window would need a desktop, a GPU and an
+    /// encoder to test arithmetic and a file write.
+    fn recording_at(output: &Path, position: Option<Duration>) -> Arc<RecordingState> {
+        let state = Arc::new(RecordingState::new(EventPublisher::new()));
+        let progress = RecordingProgress::new();
+        if let Some(position) = position {
+            progress.reached(position);
+        }
+
+        *state.current.lock().expect("a fresh lock") = Some(Running {
+            id: "r-1".to_owned(),
+            output: output.to_path_buf(),
+            target: "process cs2.exe".to_owned(),
+            started: Instant::now(),
+            stop: crate::shutdown::ShutdownSignal::new(),
+            thread: None,
+            progress,
+            bookmarks: Arc::new(BookmarkLog::for_recording(output)),
+            outcome: None,
+        });
+        state
+    }
+
+    #[test]
+    fn a_bookmark_lands_before_the_request_and_is_on_disk_when_the_reply_is_sent() {
+        // Both halves of the ticket in one test: where the mark goes, and the
+        // fact that it is written *before* the caller is told it was taken. A
+        // recorder killed a moment later has already saved it.
+        let directory = scratch("taken");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = recording_at(&output, Some(Duration::from_secs(120)));
+
+        let summary = state
+            .bookmark(&AddBookmark::default(), moment())
+            .expect("a bookmark can be taken while a recording is running");
+
+        assert_eq!(summary.recording_id, "r-1");
+        assert_eq!(summary.pressed_at_seconds, 120.0);
+        assert_eq!(summary.lead_seconds, DEFAULT_LEAD.as_secs_f64());
+        assert_eq!(summary.at_seconds, 120.0 - DEFAULT_LEAD.as_secs_f64());
+        assert_eq!(summary.bookmarks_in_recording, 1);
+
+        let read = BookmarkFile::for_recording(&output)
+            .expect("the bookmark is on disk by the time the reply is built");
+        assert_eq!(read.bookmarks.len(), 1);
+        assert_eq!(
+            read.bookmarks[0].at().as_secs_f64(),
+            summary.at_seconds,
+            "the reply and the file have to agree about where the mark is"
+        );
+        assert_eq!(
+            summary.bookmarks_file,
+            output
+                .with_file_name("clipped-cs2.bookmarks.json")
+                .to_string_lossy()
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn every_parameter_a_caller_sends_reaches_the_bookmark_that_is_written() {
+        let directory = scratch("parameters");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = recording_at(&output, Some(Duration::from_secs(60)));
+
+        let summary = state
+            .bookmark(
+                &AddBookmark {
+                    recording_id: Some("r-1".to_owned()),
+                    label: Some("triple kill".to_owned()),
+                    colour: Some("#ffcc00".to_owned()),
+                    duration_seconds: Some(12.5),
+                    lead_seconds: Some(3.25),
+                },
+                moment(),
+            )
+            .expect("a fully specified bookmark can be taken");
+
+        assert_eq!(summary.at_seconds, 56.75);
+        assert_eq!(summary.lead_seconds, 3.25);
+        assert_eq!(summary.label.as_deref(), Some("triple kill"));
+        assert_eq!(summary.colour.as_deref(), Some("#ffcc00"));
+        assert_eq!(summary.duration_seconds, Some(12.5));
+
+        let written = &BookmarkFile::for_recording(&output)
+            .expect("it was written")
+            .bookmarks[0];
+        assert_eq!(written.at(), Duration::from_millis(56_750));
+        assert_eq!(written.lead(), Duration::from_millis(3_250));
+        assert_eq!(written.label(), Some("triple kill"));
+        assert_eq!(written.colour(), Some("#ffcc00"));
+        assert_eq!(written.duration(), Some(Duration::from_millis(12_500)));
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_bookmark_with_nothing_to_mark_is_refused_rather_than_written_somewhere() {
+        // Three ways there is nothing to mark, and each is a different sentence
+        // because each has a different answer for the user.
+        let directory = scratch("refused");
+        let output = directory.join("clipped-cs2.mkv");
+
+        let idle = Arc::new(RecordingState::new(EventPublisher::new()));
+        let error = idle
+            .bookmark(&AddBookmark::default(), moment())
+            .expect_err("nothing is being recorded");
+        assert_eq!(error.code, ErrorCode::NotRecording);
+
+        let starting = recording_at(&output, None);
+        let error = starting
+            .bookmark(&AddBookmark::default(), moment())
+            .expect_err("no frame has reached the file yet");
+        assert_eq!(error.code, ErrorCode::NotRecording);
+        assert!(
+            error.message.contains("first frame"),
+            "the refusal should say what is missing: {}",
+            error.message
+        );
+        assert!(
+            BookmarkFile::for_recording(&output).is_err(),
+            "a refused bookmark must not leave a file behind"
+        );
+
+        let running = recording_at(&output, Some(Duration::from_secs(30)));
+        let error = running
+            .bookmark(
+                &AddBookmark {
+                    recording_id: Some("r-9".to_owned()),
+                    ..AddBookmark::default()
+                },
+                moment(),
+            )
+            .expect_err("r-9 is not the recording that is running");
+        assert_eq!(error.code, ErrorCode::NotRecording);
+        assert!(error.message.contains("r-9"), "{}", error.message);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_bookmark_the_recorder_cannot_store_is_refused_with_which_field_was_wrong() {
+        let directory = scratch("invalid");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = recording_at(&output, Some(Duration::from_secs(30)));
+
+        for (request, expected) in [
+            (
+                AddBookmark {
+                    label: Some("x".repeat(1_000)),
+                    ..AddBookmark::default()
+                },
+                "label",
+            ),
+            (
+                AddBookmark {
+                    lead_seconds: Some(-1.0),
+                    ..AddBookmark::default()
+                },
+                "lead_seconds",
+            ),
+            (
+                AddBookmark {
+                    lead_seconds: Some(600.0),
+                    ..AddBookmark::default()
+                },
+                "lead",
+            ),
+            (
+                AddBookmark {
+                    duration_seconds: Some(f64::NAN),
+                    ..AddBookmark::default()
+                },
+                "duration_seconds",
+            ),
+        ] {
+            let error = state
+                .bookmark(&request, moment())
+                .expect_err("the recorder cannot store this bookmark");
+            assert_eq!(error.code, ErrorCode::InvalidParameters, "{request:?}");
+            assert!(
+                error.message.contains(expected),
+                "the refusal should name the field that was wrong: {}",
+                error.message
+            );
+        }
+
+        assert!(
+            BookmarkFile::for_recording(&output).is_err(),
+            "a bookmark the recorder refused must not have been written"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recorder_that_can_bookmark_says_so_in_its_handshake() {
+        // A UI decides whether to offer the control by asking here rather than
+        // by inferring it from a version, so a build that stores bookmarks and
+        // does not advertise them is one whose tray never offers the item.
+        assert!(features_of_this_build().contains(&clipped_ipc::features::BOOKMARKS.to_owned()));
     }
 }

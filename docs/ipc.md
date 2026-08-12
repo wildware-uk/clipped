@@ -300,7 +300,7 @@ closing.
 {"type":"welcome","protocol_version":1,
  "recorder":{"name":"clipped-recorder","version":"0.1.0"},
  "role":"control",
- "features":["recording","status_events"]}
+ "features":["recording","status_events","bookmarks"]}
 ```
 
 ```json
@@ -330,7 +330,7 @@ says what a build can express; a feature says what it can do, and the two are
 not the same — two recorders speaking protocol 1 can differ in what was compiled
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
-that. Today: `recording`, `status_events`, `shutdown`.
+that. Today: `recording`, `status_events`, `bookmarks`, `shutdown`.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
@@ -456,9 +456,9 @@ when a command's parameters are all optional.
 | `get_status` | none | `status` | yes |
 | `start_recording` | the `record` options, below | `recording_started` | yes |
 | `stop_recording` | `recording_id` (optional) | `recording_stopped` | yes |
+| `add_bookmark` | all optional, below | `bookmark_added` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 | `save_replay` | not yet defined | — | no — M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
-| `add_bookmark` | not yet defined | — | no — M8, [#64](https://github.com/wildware-uk/clipped/issues/64) |
 | `take_screenshot` | not yet defined | — | no — M8, [#67](https://github.com/wildware-uk/clipped/issues/67) |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
 
@@ -494,6 +494,41 @@ This recorder records **one thing at a time**: a second `start_recording` while
 one is running is refused with `already_recording` rather than queued. A second
 recording means a second encoder session and a second capture loop competing
 with the game the first one is recording.
+
+### `add_bookmark`
+
+Marks a moment in the recording that is running, without saving a clip. Every
+parameter is optional, because the request a hotkey or a tray item sends carries
+none of them.
+
+| Parameter | Meaning |
+| --- | --- |
+| `recording_id` | Which recording to mark. Absent means "whatever is being recorded". |
+| `label` | What to call it. At most 200 characters. |
+| `colour` | Any notation the interface likes, at most 64 characters; the recorder does not interpret it. |
+| `duration_seconds` | How long the marked moment lasts, up to an hour. Absent means it is a moment rather than a span. |
+| `lead_seconds` | How far *before* this request to stamp it. Absent means the recorder's default, which is **not zero**; at most 120 seconds. |
+
+```json
+{"type":"response","id":7,"outcome":{"ok":{
+  "reply":"bookmark_added",
+  "bookmark":{"recording_id":"r-1","at_seconds":115.0,"pressed_at_seconds":120.0,
+              "lead_seconds":5.0,
+              "bookmarks_file":"D:\clips\session.bookmarks.json",
+              "bookmarks_in_recording":3}}}}
+```
+
+The reply says where the bookmark **landed**, and that is not where the request
+was made: a person presses the key after the thing they wanted to mark, so the
+recorder stamps it `lead_seconds` earlier. An interface that showed
+`pressed_at_seconds` would be showing a moment that is not the one in the file.
+`docs/bookmarks.md` has the reasoning, the accuracy figures and the file the
+bookmarks are written to.
+
+Refused with `not_recording` when nothing is being recorded, when the named
+recording is not the one running, or when the recording has not captured its
+first frame yet — there is no moment to mark, and marking zero would put the
+bookmark somewhere the user was not looking.
 
 ### `stop_recording`
 

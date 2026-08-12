@@ -96,6 +96,48 @@ pub struct RecordingSummary {
     pub height: u32,
 }
 
+/// A bookmark that was taken, as the recorder placed it.
+///
+/// The reply to `add_bookmark`. It carries where the bookmark *landed* rather
+/// than only confirming it was taken, because where it landed is not where the
+/// key was pressed: a bookmark is stamped [`Self::lead_seconds`] earlier, to
+/// allow for the fact that a person presses the key after the thing they wanted
+/// to mark. A UI that showed the press instead would be showing a moment that is
+/// not the one in the file (`docs/bookmarks.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BookmarkSummary {
+    /// The recording it is in, as
+    /// [`ActiveRecording::recording_id`] reported it.
+    pub recording_id: String,
+    /// How far into that recording the marked moment is.
+    pub at_seconds: f64,
+    /// Where the recording was when the key was pressed.
+    ///
+    /// [`Self::at_seconds`] plus [`Self::lead_seconds`], except at the very
+    /// start of a recording, where the offset is clamped at zero and this is
+    /// the only record of where the press actually was.
+    pub pressed_at_seconds: f64,
+    /// How far before the press the bookmark was stamped.
+    pub lead_seconds: f64,
+    /// What it is called, if anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The colour it was given, exactly as the caller wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<String>,
+    /// How long the marked moment lasts, if that was said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    /// The file the bookmarks of this recording are kept in.
+    ///
+    /// Named so that a user who wants their marks without Clipped can find
+    /// them, and so that a support request can say which file to look at
+    /// (AGENTS.md section 32).
+    pub bookmarks_file: String,
+    /// How many bookmarks this recording now has, including this one.
+    pub bookmarks_in_recording: u32,
+}
+
 /// Why a recording ended.
 ///
 /// Mirrors `clipped_session::EndReason`. It is restated here rather than

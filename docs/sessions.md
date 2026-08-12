@@ -37,12 +37,18 @@ resolution change has not either. A container cannot span a gap and there is one
 encoder, so each of those produces a new file — and the session is what says the
 files belong together.
 
-A session groups **recordings, clips, bookmarks and events**. Recordings and
-events exist and are modelled. Clips wait on [#38] — one can be *written*
-([#37]) but no build runs a recording with a buffer to write from — and
-bookmarks are M8; nothing in this build can create either, so there is no Rust
-type for one and no invented data (AGENTS.md section 27). Both are reserved in the file format below so that
-adding them is an addition rather than a format change.
+A session groups **recordings, clips and events**. Recordings and events exist
+and are modelled. Clips wait on [#38] — one can be *written* ([#37]) but no
+build runs a recording with a buffer to write from — so there is no Rust type
+for one and no invented data (AGENTS.md section 27).
+
+**Bookmarks are not in this file.** They exist
+([#64](https://github.com/wildware-uk/clipped/issues/64), `docs/bookmarks.md`)
+and they belong to a *recording* rather than to a session: a bookmark is an
+offset into one file, so it lives in that file's own sidecar beside it, which is
+also the shape `clipped-storage`'s `bookmarks` table has. The `bookmarks` key
+below is reserved and stays empty; a reader looking for a session's marks reads
+the bookmark file of each of its recordings.
 
 ## Where the pieces are
 
@@ -318,8 +324,12 @@ one sitting, one file — produces a file named after the session and nothing el
 
 `clips` and `bookmarks` are **always empty in this build**. They are written so
 that a reader can tell "no clips" from "a file that predates clips", and so that
-[#38] and M8 add to the file rather than change its shape (AGENTS.md section 43).
-Their presence is not a claim that the features exist.
+filling either is an addition rather than a change of shape (AGENTS.md section
+43). Their presence is not a claim that a session has none: no build can make a
+clip at all ([#38]), and a session's bookmarks are in its recordings' own files
+(`docs/bookmarks.md`). Nothing can take a bookmark during an automatic session
+yet either — `watch` serves no protocol, so no `add_bookmark` can reach it, and
+joining the two is [#232](https://github.com/wildware-uk/clipped/issues/232).
 
 An ambiguous session writes its candidates instead of a name it did not earn:
 

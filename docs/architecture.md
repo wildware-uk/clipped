@@ -390,6 +390,7 @@ contributor working in it needs.
 | [sessions.md](sessions.md) | What a session is; how a launch becomes a recording; what happens on a crash, a fast restart, a second game and a suspend; the one capture mode this build has; and where a session is written down before M6's database exists | M4 |
 | [search.md](search.md) | The local search language: its syntax, what each term means, every message a malformed query produces, the limits of its text matching, and how a database-backed executor consumes the parsed query | M6 |
 | [waveforms.md](waveforms.md) | Per-track audio peaks for the timeline and the clip editor: what is stored and at what resolutions, the sidecar cache and its invalidation and cleanup rules, and where generation runs so that it cannot compete with a recording | M8 |
+| [bookmarks.md](bookmarks.md) | Marking a moment while it is being recorded: when a bookmark is stamped and why it is not at the key press, how accurate that is, why nothing about it touches capture, and the sidecar it is written to | M8 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 | [ipc.md](ipc.md) | The recorder control protocol: transport, framing, the handshake, the compatibility policy, the commands and events, and the security a local endpoint does and does not promise | M5 |
 | [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
@@ -400,6 +401,7 @@ All but [capture-pipeline.md](capture-pipeline.md),
 [av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md), [ipc.md](ipc.md),
 [game-detection.md](game-detection.md), [sessions.md](sessions.md),
 [editing.md](editing.md), [search.md](search.md) and [waveforms.md](waveforms.md)
+[bookmarks.md](bookmarks.md) and [editing.md](editing.md)
 are stubs today, stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection

@@ -1,5 +1,4 @@
-//! What a session *is*: the thing recordings, clips, bookmarks and events hang
-//! off.
+//! What a session *is*: the thing recordings, clips and events hang off.
 //!
 //! A session is one sitting with one game. It is not the same thing as a
 //! recording: a player who alt-F4s and comes straight back has had one sitting
@@ -14,11 +13,12 @@
 //! Recordings and events, because those are the two that exist. Clips wait on
 //! [issue #38](https://github.com/wildware-uk/clipped/issues/38) — writing one
 //! exists ([issue #37](https://github.com/wildware-uk/clipped/issues/37)) but
-//! no build runs a recording with a buffer to write from — and bookmarks
-//! are M8; nothing in this build can create one, so there is no type for one
-//! here and nothing pretends otherwise (AGENTS.md section 27). Both are
-//! reserved in the sidecar schema — see [`super::sidecar`] — so that adding
-//! them is not a format change.
+//! no build runs a recording with a buffer to write from. Bookmarks exist
+//! ([issue #64](https://github.com/wildware-uk/clipped/issues/64)) and are not
+//! modelled here: a bookmark is an offset into one recording, so it belongs to
+//! that recording's own sidecar ([`crate::bookmarks`]) rather than to the
+//! session that groups the files. Both are reserved in the session schema — see
+//! [`super::sidecar`] — so that filling either is not a format change.
 //!
 //! # Where it lives
 //!

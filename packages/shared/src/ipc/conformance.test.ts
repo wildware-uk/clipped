@@ -35,6 +35,9 @@ import { LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES } from './frame';
 import { parseClientMessage, parseServerMessage } from './parse';
 import type {
   ActiveRecording,
+  AddBookmarkParams,
+  BookmarkAddedReply,
+  BookmarkSummary,
   ClientMessage,
   CommandName,
   ConnectionRole,
@@ -245,6 +248,13 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     system_audio: 'optional',
   }),
   stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
+  add_bookmark: fields<AddBookmarkParams>({
+    recording_id: 'optional',
+    label: 'optional',
+    colour: 'optional',
+    duration_seconds: 'optional',
+    lead_seconds: 'optional',
+  }),
   shutdown: fields<ShutdownParams>({ finalise_recording: 'optional' }),
   active_recording: fields<ActiveRecording>({
     recording_id: 'required',
@@ -265,6 +275,17 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     width: 'required',
     height: 'required',
   }),
+  bookmark_summary: fields<BookmarkSummary>({
+    recording_id: 'required',
+    at_seconds: 'required',
+    pressed_at_seconds: 'required',
+    lead_seconds: 'required',
+    label: 'optional',
+    colour: 'optional',
+    duration_seconds: 'optional',
+    bookmarks_file: 'required',
+    bookmarks_in_recording: 'required',
+  }),
   'outcome.ok': fields<OkOutcome>({ ok: 'required' }),
   'outcome.error': fields<ErrorOutcome>({ error: 'required' }),
   'reply.pong': fields<PongReply>({ reply: 'required' }),
@@ -277,6 +298,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.recording_stopped': fields<RecordingStoppedReply>({
     reply: 'required',
     summary: 'required',
+  }),
+  'reply.bookmark_added': fields<BookmarkAddedReply>({
+    reply: 'required',
+    bookmark: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -342,13 +367,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'add_bookmark',
+    params: 'add_bookmark',
+    reply: 'reply.bookmark_added',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
     available_in_this_build: true,
   },
   { name: 'save_replay', params: null, reply: null, available_in_this_build: false },
-  { name: 'add_bookmark', params: null, reply: null, available_in_this_build: false },
   { name: 'take_screenshot', params: null, reply: null, available_in_this_build: false },
   { name: 'apply_settings', params: null, reply: null, available_in_this_build: false },
 ];
@@ -377,6 +407,8 @@ function replyDiscriminant(reply: Reply): string {
       return 'recording_started';
     case 'recording_stopped':
       return `recording_stopped.${reply.summary.end_reason}`;
+    case 'bookmark_added':
+      return 'bookmark_added';
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise
