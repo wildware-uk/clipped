@@ -9,6 +9,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# A virtual clip is a range of a recording that behaves like a clip with no file
+# behind it, so it is described in the edit document model's vocabulary rather
+# than a parallel one (#82, AGENTS.md section 55), and it says which event it
+# came from (#68). Both are layer 0. serde persists it.
+clipped-edit.workspace = true
+clipped-events.workspace = true
 # The logging facade. Storage accounting walks the user's library, and the two
 # things it can discover — a root it could not read, and a scan that ran out of
 # its budget — are exactly the diagnostics somebody investigating "why does the

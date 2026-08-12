@@ -46,3 +46,4 @@
 pub mod accounting;
 pub mod index;
 pub mod search;
+pub mod virtual_clip;
