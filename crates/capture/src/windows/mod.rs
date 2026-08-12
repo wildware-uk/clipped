@@ -14,6 +14,11 @@
 //! - [`DesktopDuplication`], the DXGI Desktop Duplication backend
 //!   ([issue #13](https://github.com/wildware-uk/clipped/issues/13)), which is
 //!   the fallback SPEC.md section 8 names below it.
+//! - [`D3d11FrameSampler`], which reads a few pixels back off a captured frame
+//!   so that a capture that has gone black can be noticed
+//!   ([issue #97](https://github.com/wildware-uk/clipped/issues/97)). It is not
+//!   a backend; it is the platform half of
+//!   [`BlackFrameWatch`](crate::BlackFrameWatch).
 //!
 //! # Apartments and devices
 //!
@@ -30,6 +35,8 @@ mod apartment;
 mod desktop_duplication;
 mod device;
 mod graphics_capture;
+mod pixel_sample;
 
 pub use desktop_duplication::DesktopDuplication;
 pub use graphics_capture::WindowsGraphicsCapture;
+pub use pixel_sample::D3d11FrameSampler;
