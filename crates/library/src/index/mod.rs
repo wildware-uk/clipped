@@ -64,14 +64,20 @@
 
 mod error;
 mod ingest;
-mod moment;
+/// Comparing and writing the moments the schema stores.
+///
+/// Visible to the rest of the crate rather than to this module alone: the trash
+/// writes `deleted_at` and reads it back to judge retention, and a second RFC
+/// 3339 writer beside this one would be two places for one format to drift
+/// (AGENTS.md section 55).
+pub(crate) mod moment;
 mod presence;
 mod scan;
 mod sidecar;
 mod summary;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
