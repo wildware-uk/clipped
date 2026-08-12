@@ -19,8 +19,14 @@ export interface RecorderStatusProps {
    * `tsconfig.base.json`: without it a caller could omit the property but not
    * pass the absence of one, and "there is no notice" is a value this block's
    * caller computes rather than a branch it takes.
+   *
+   * A `ReactNode` rather than a string, because one notice has somewhere to go:
+   * a recording a killed recorder left is a recording the window can open a
+   * screen for, and the sentence that names the file is where that link belongs
+   * (issue #52). Nothing here decides what a notice contains — that is the
+   * caller's, in `Shell.tsx` — and this block still only draws it.
    */
-  readonly notice?: string | undefined;
+  readonly notice?: ReactNode;
 }
 
 /**

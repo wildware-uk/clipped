@@ -1,14 +1,17 @@
 import { SCREENS, screensInGroup, type Screen } from '@clipped/shared';
 import { AppShell, RecorderStatus, ScreenNav, ScreenNotBuilt } from '@clipped/ui';
 import { useCallback, type ReactNode } from 'react';
-import { Route, Routes, useLocation, useNavigate } from 'react-router';
+import { Link, Route, Routes, useLocation, useNavigate } from 'react-router';
 
+import { ClipPlaybackScreen } from './ClipPlaybackScreen';
+import { CLIP_ROUTE, clipPath, isClipPath } from './clipPlayback';
 import { GamesScreen } from './GamesScreen';
 import { UnknownScreen } from './UnknownScreen';
 import {
   describeInterruption,
   describeRecorderLink,
   useRecorderLink,
+  type InterruptedRecording,
   type RecorderLinkState,
 } from './useRecorderLink';
 import { joinNotices, useTray } from './useTray';
@@ -18,6 +21,23 @@ const hrefFor = (screen: Screen): string => `#${screen.path}`;
 
 const screenFor = (pathname: string): Screen | undefined =>
   SCREENS.find((screen) => screen.path === pathname);
+
+/**
+ * The window's title for a path.
+ *
+ * `SCREENS` answers for the seven sidebar destinations. The playback screen is
+ * the eighth route and deliberately not one of them — it is opened for a
+ * particular recording rather than navigated to (issue #52) — so it is named
+ * here. Without this the taskbar, Alt+Tab and the screen reader's window
+ * announcement would all say "Clipped" and nothing else, on the one screen
+ * whose subject is a single file.
+ */
+function titleFor(pathname: string, screen: Screen | undefined): string {
+  if (screen !== undefined) {
+    return `Clipped — ${screen.label}`;
+  }
+  return isClipPath(pathname) ? 'Clipped — Playback' : 'Clipped';
+}
 
 /**
  * What a screen's route renders.
@@ -30,6 +50,38 @@ const screenFor = (pathname: string): Screen | undefined =>
  */
 function elementFor(screen: Screen, link: RecorderLinkState | null): ReactNode {
   return screen.id === 'games' ? <GamesScreen link={link} /> : <ScreenNotBuilt screen={screen} />;
+}
+
+/**
+ * The sidebar's notice, with a way in to the recording it is about.
+ *
+ * `describeInterruption` is still the sentence — it is the wording ADR 0006's
+ * recovery produces, and it stays a tested pure function of the interruption —
+ * and this adds the one destination that goes with it. A recorder that died
+ * mid-recording is the only recording this window can name (`clipPlayback.ts`),
+ * so it is the only way in the playback screen has until the library index can
+ * be reached (issue #305).
+ *
+ * The link does not claim the recording will play. It leads to the screen that
+ * says what state the recording is in and what stands between this window and
+ * playing it — a thing that happens, rather than a control that does nothing
+ * (AGENTS.md section 27), which is the same bargain the tray's Open Library
+ * keeps.
+ */
+function noticeFor(
+  trayNotice: string | undefined,
+  interrupted: InterruptedRecording | null,
+): ReactNode {
+  if (interrupted === null) {
+    return trayNotice;
+  }
+
+  return (
+    <>
+      {joinNotices(trayNotice, describeInterruption(interrupted))}{' '}
+      <Link to={clipPath(interrupted.recording_id)}>Open this recording</Link>
+    </>
+  );
 }
 
 /**
@@ -48,7 +100,7 @@ export function Shell(): ReactNode {
   // The window title is what a person reads in the taskbar, in Alt+Tab and in
   // the window switcher, so it says which screen is open rather than only which
   // application it is.
-  useWindowTitle(screen ? `Clipped — ${screen.label}` : 'Clipped');
+  useWindowTitle(titleFor(pathname, screen));
 
   const goTo = useCallback(
     (destination: Screen) => {
@@ -111,15 +163,18 @@ export function Shell(): ReactNode {
          * sentence, which is the only surface Clipped has that can hold one
          * (AGENTS.md section 45, issue #50).
          *
-         * There are still no controls *here*: a "Try again" control for a link
+         * There is still no *control* here: a "Try again" control for a link
          * that has given up is issue #221, and a Start Recording button belongs
          * with the screens that have somewhere to put it. The tray is where the
-         * application is driven from until then.
+         * application is driven from until then. The one link the notice can
+         * carry leads to the interrupted recording's own screen, which says
+         * more about it than a sidebar has room for (issue #52) — a destination
+         * rather than an action.
          */
         <RecorderStatus
           state={recorder.state}
           detail={recorder.detail}
-          notice={joinNotices(trayNotice, describeInterruption(interrupted))}
+          notice={noticeFor(trayNotice, interrupted)}
         />
       }
     >
@@ -127,6 +182,13 @@ export function Shell(): ReactNode {
         {SCREENS.map((entry) => (
           <Route key={entry.id} path={entry.path} element={elementFor(entry, link)} />
         ))}
+        {/*
+         * The eighth route, and the only one not in `SCREENS`: a screen opened
+         * for a particular recording rather than a destination in the sidebar,
+         * so putting it in that array would put "Playback" in the navigation
+         * with no recording to show (issue #52).
+         */}
+        <Route path={CLIP_ROUTE} element={<ClipPlaybackScreen view={{ link, interrupted }} />} />
         <Route path="*" element={<UnknownScreen />} />
       </Routes>
     </AppShell>
