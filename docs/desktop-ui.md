@@ -1049,9 +1049,28 @@ is not:
 
 The table's parent identifiers are not trusted alone, for the same reason: a
 process whose creator has exited goes on naming a number Windows may since have
-given to Clipped. A candidate must also have started no earlier than Clipped
-did, which is the comparison `clipped_windows::ProcessTree` makes about the same
-hazard.
+given to Clipped, or to something Clipped started. So every link of the chain —
+not only the process being asked about — is held against the two processes'
+creation times, which Windows guarantees are ordered: a process must have
+started no earlier than the parent the table gives it, and no later than the
+moment the table was read.
+
+Per link matters. The walk passes through strangers' identifiers on its way up,
+and one stale link anywhere in the chain would hang a whole third-party subtree
+beneath Clipped, making every process under it silently unrecordable — the same
+bug as issue #390, pointed at somebody else's application. Checking the
+candidate alone cannot see it: a process younger than Clipped passes that check
+and is then claimed through a reused parent identifier two links further up.
+
+Those are the two comparisons `clipped_windows::ProcessTree` makes about the
+same hazard, and they are made again here rather than shared for an architectural
+reason rather than an oversight: `tests/integration/tests/workspace_layering.rs`
+allows the desktop crate exactly one member of the recorder's workspace,
+`clipped-ipc`, so that closing the window can never reach capture or encoding
+(ADR 0002). The one difference is what an unknown creation time means. That tree
+refuses a candidate it cannot time, because refusing costs an interval of a
+game's audio and is retried a moment later; here refusing means offering to
+record Clipped's own webview, so an unanswered link is left to the table.
 
 The recorder is then asked for a `pid`, and resolves the window itself. One set
 of rules about what a recordable window is, in the recorder (AGENTS.md section
@@ -2085,7 +2104,17 @@ no process, and a window belonging to Clipped itself — is a function of
 written-down windows and is tested as one; `this_application.rs`'s membership
 rules are tested against written-down process trees, and its one Windows-facing
 claim is tested by spawning a child process and reading the real process table.
-What no test reaches is the hook delivering a real window handle, because that
-needs a desktop with windows on it. That is verified by hand, against the case
-that produced issue #390: open the developer tools, return to the window, and
-read what the button offers.
+
+The wire between the two — `look_at` asking `this_application::includes` about
+the window's process — is tested against the desktop window, which exists in
+every session and belongs to a system process. That is the direction with the
+severe failure: a constant `true`, a negation, or this process's identifier
+passed in place of the window's would mark every window as Clipped's, and the
+record control would then be unable to offer anything at all. The other
+direction, a constant `false`, would restore issue #390 rather than disable the
+control, and no test reaches it: it needs a window belonging to Clipped's own
+webview host, which cannot be raised without opening a window.
+
+That, and the hook delivering a real window handle, are verified by hand against
+the case that produced issue #390: open the developer tools, return to the
+window, and read what the button offers.

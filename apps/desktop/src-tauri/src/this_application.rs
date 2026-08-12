@@ -38,29 +38,57 @@
 //! - **It answers about the browser process only**, where "everything this
 //!   process started" also covers the helpers it starts in turn.
 //!
-//! # Identifier reuse, and the comparison that defeats it
+//! # Identifier reuse, and the comparisons that defeat it
 //!
 //! The process table records the identifier of a process's creator, and never
 //! says whether it still means anything: a process whose creator has exited
 //! goes on naming a number Windows is free to hand out again — quite possibly
-//! to this process. Read naively, the table would then claim some
-//! long-running application as Clipped's own child, and the record control
-//! would stop offering it for as long as both were running, with nothing on
-//! screen to explain why.
+//! to this process, or to something this process started. Read naively, the
+//! table would then claim some long-running application as Clipped's own, and
+//! the record control would stop offering it for as long as both were running,
+//! with nothing on screen to explain why.
 //!
-//! So a candidate must also have started no earlier than this process did,
-//! which no process created before Clipped can manage. It is the same
-//! comparison `clipped_windows::ProcessTree` makes about the same hazard, for
-//! the same reason.
+//! So parentage is not believed on its own. Every link of the chain is held
+//! against the two processes' creation times, which Windows guarantees are
+//! ordered:
+//!
+//! | Rule | Rejects |
+//! | --- | --- |
+//! | a process started no earlier than the parent the table gives it | a link whose creator exited and whose identifier has since come round again |
+//! | a process started no later than the moment the table was read | an identifier recycled between the table being read and the process being opened |
+//!
+//! **Every link, and not only the process being asked about.** The walk passes
+//! through strangers' identifiers on its way up, so one stale link anywhere in
+//! the chain is enough to hang a whole third-party subtree beneath Clipped —
+//! and each process under it becomes silently unrecordable, which is the same
+//! bug as the one this module fixes, pointed at somebody else's application.
+//! Checking only the candidate would miss exactly that: a process younger than
+//! Clipped, whose *own* start time therefore says nothing, reached through a
+//! parent identifier that has been reused.
+//!
+//! Those are the two comparisons `clipped_windows::ProcessTree` makes about the
+//! same hazard, for the same reason, and the rule for an unknown start time is
+//! the one difference — see [`consistent_with`]. They are made again here
+//! rather than shared, and that is not a second implementation by accident:
+//! `tests/integration/tests/workspace_layering.rs` allows this crate exactly
+//! one member of the recorder's workspace, `clipped-ipc`, so that closing this
+//! window can never reach capture or encoding (ADR 0002). `clipped-windows` is
+//! not that one, and linking it to borrow a two-line comparison would put the
+//! capture layer inside the window's process.
 //!
 //! # Cost, measured
 //!
 //! One read of the process table per foreground change, on the thread that runs
-//! the message loop. Measured on a Windows 11 machine with 377 processes
-//! running: **7 ms** for a whole call, of which 5 ms is
-//! `CreateToolhelp32Snapshot` itself — a kernel copy of the process table, so a
-//! release build does not make it cheaper. Following the chain of parents
-//! afterwards is tens of microseconds.
+//! the message loop, and one `OpenProcess` per link of the chain walked
+//! afterwards.
+//!
+//! Measured by asking about every one of the 360 processes running on a Windows
+//! 11 machine, a debug build: **5.6 ms median and 7.1 ms at the 95th
+//! percentile** for a whole call, of which 5.6 ms is `CreateToolhelp32Snapshot`
+//! itself — a kernel copy of the process table, so a release build does not make
+//! it cheaper. Walking the chain and timing every link of it is the remaining
+//! **15 µs median, 113 µs at the very worst**, which is three parts in a
+//! thousand of the call and is why the per-link comparison is affordable at all.
 //!
 //! That is worth paying here and would not be anywhere near a capture: a
 //! foreground change is somebody switching windows, so it happens at human
@@ -81,6 +109,7 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, FILETIME, HAN
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -110,14 +139,20 @@ pub(crate) fn includes(process_id: u32) -> bool {
         return false;
     }
 
+    let this_process = std::process::id();
+
     match process_parentage() {
-        Ok(table) => started_by(
-            &table,
-            process_id,
-            std::process::id(),
-            started_at(process_id),
-            this_process_started_at(),
-        ),
+        Ok((table_read_at, table)) => {
+            started_by(&table, process_id, this_process, table_read_at, |of| {
+                if of == this_process {
+                    // A value that cannot change, and this is the one process
+                    // on the chain that is asked about on every single call.
+                    this_process_started_at()
+                } else {
+                    started_at(of)
+                }
+            })
+        }
         Err(error) => {
             report_once(&format!(
                 "Clipped could not read the process table, so it cannot tell its own webview host \
@@ -143,46 +178,30 @@ struct Parentage {
     parent_process_id: u32,
 }
 
-/// Whether `application` started `process`, given a process table and when the
-/// two of them started.
+/// Whether `application` started `process`, following the table's parent
+/// identifiers upwards and checking every link against `started_at`.
 ///
 /// Strictly descended: a process is not started by itself, which is why
 /// [`includes`] answers that case before asking this.
 ///
 /// Every rule about *who belongs* is here and is a function of numbers, so the
 /// cases that matter — a webview host two generations down, a process naming a
-/// parent that has exited, an identifier that has come round again, a table
-/// that describes a loop — are tested against written-down process trees rather
-/// than against whatever the machine happens to be running (AGENTS.md section
-/// 25).
-///
-/// A start time [`None`] is one Windows would not give, which is a question
-/// unanswered rather than evidence of a stranger: the table decides alone.
+/// parent that has exited, an identifier that has come round again part way up
+/// the chain, a table that describes a loop — are tested against written-down
+/// process trees rather than against whatever the machine happens to be running
+/// (AGENTS.md section 25). `started_at` is a function rather than a pair of
+/// times for the same reason: a test writes the tree's creation times down
+/// beside its parentage, and [`includes`] passes the one that asks Windows.
 fn started_by(
     table: &[Parentage],
     process: u32,
     application: u32,
-    started: Option<u64>,
-    application_started: Option<u64>,
+    table_read_at: u64,
+    started_at: impl Fn(u32) -> Option<u64>,
 ) -> bool {
-    // Windows guarantees creation times are ordered, so a process created by
-    // another cannot predate it — and no reading of the table can make it so.
-    // Equality passes: the file time's resolution is coarser than the interval
-    // in which a process can create another, and demanding a strict inequality
-    // would refuse a webview host started in the same tick as the window.
-    if let (Some(started), Some(application_started)) = (started, application_started) {
-        if started < application_started {
-            return false;
-        }
-    }
-
-    descends_from(table, process, application)
-}
-
-/// Whether the table's parent identifiers lead from `process` up to
-/// `application`.
-fn descends_from(table: &[Parentage], process: u32, application: u32) -> bool {
     let mut step = process;
+    let mut step_started = started_at(step);
+
     // Bounded by the number of processes: a chain of parents cannot visit more
     // processes than exist. That is also what makes a table describing a loop
     // — which cannot happen, but which would otherwise hang the thread drawing
@@ -194,27 +213,76 @@ fn descends_from(table: &[Parentage], process: u32, application: u32) -> bool {
             // nothing further to follow.
             return false;
         };
-        if row.parent_process_id == application {
-            return true;
-        }
+        let parent = row.parent_process_id;
         // The idle process, which is where every chain ends.
-        if row.parent_process_id == 0 {
+        if parent == 0 {
             return false;
         }
-        step = row.parent_process_id;
+
+        // Before the identifier is compared with this application's, because
+        // the last link of the chain is a link like any other: an unbelievable
+        // one there is what would claim a stranger as this process's own child.
+        let parent_started = started_at(parent);
+        if !consistent_with(step_started, parent_started, table_read_at) {
+            return false;
+        }
+        if parent == application {
+            return true;
+        }
+
+        step = parent;
+        step_started = parent_started;
     }
 
     false
 }
 
-/// Every process running now, by identifier and creator.
+/// Whether a process's creation time is consistent with the parent the process
+/// table claimed for it.
+///
+/// See the identifier-reuse table in the module documentation: the process must
+/// have existed when the table was read, and must not predate the parent it
+/// names. Equality passes both ways — the file time's resolution is coarser
+/// than the interval in which a process can create another or be created and
+/// enumerated, and demanding a strict inequality would refuse a webview host
+/// started in the same tick as the window.
+///
+/// A start time [`None`] is one Windows would not give, which is a question
+/// unanswered rather than evidence of a stranger, so the table decides that
+/// link alone. That is where this parts company with
+/// `clipped_windows::ProcessTree`, which refuses a candidate it cannot time:
+/// there, refusing costs an interval of a game's audio and is retried a moment
+/// later, whereas refusing here means offering to record Clipped's own webview,
+/// which is the bug this module exists to fix. Opening a process for
+/// `PROCESS_QUERY_LIMITED_INFORMATION` is refused for the handful of protected
+/// processes on the machine, none of which Clipped can have started.
+fn consistent_with(process: Option<u64>, parent: Option<u64>, table_read_at: u64) -> bool {
+    let (Some(process), Some(parent)) = (process, parent) else {
+        return true;
+    };
+
+    process <= table_read_at && process >= parent
+}
+
+/// Every process running now, by identifier and creator, and the moment just
+/// before they were read.
+///
+/// The two are returned together because the order they are produced in is a
+/// rule and not a detail. The moment is read *first*, and creation times are
+/// read against it afterwards, so that a process wearing an identifier only
+/// since the table was copied is refused and looked at again on the next
+/// foreground change. The other order would quietly admit exactly that
+/// identifier, and no test can see which order two adjacent statements are in —
+/// so the clock is read here, beside the table, rather than by a caller who
+/// could put it anywhere.
 ///
 /// # Errors
 ///
 /// The Windows error, when the process table cannot be produced at all — the
 /// machine being in trouble rather than an ordinary condition. Individual rows
 /// are never dropped: the enumeration either works or does not.
-fn process_parentage() -> Result<Vec<Parentage>, windows::core::Error> {
+fn process_parentage() -> Result<(u64, Vec<Parentage>), windows::core::Error> {
+    let read_at = file_time_now();
     let snapshot = Snapshot::take()?;
 
     let mut entry = PROCESSENTRY32W {
@@ -243,7 +311,7 @@ fn process_parentage() -> Result<Vec<Parentage>, windows::core::Error> {
         }
     }
 
-    Ok(rows)
+    Ok((read_at, rows))
 }
 
 /// A process-table snapshot, closed when this value is dropped.
@@ -310,6 +378,17 @@ fn this_process_started_at() -> Option<u64> {
     *STARTED.get_or_init(|| creation_time(unsafe { GetCurrentProcess() }))
 }
 
+/// Now, in the same 100-nanosecond ticks a creation time is expressed in.
+///
+/// The coarse clock rather than `GetSystemTimePreciseAsFileTime`: this is
+/// compared against process creation times, which Windows records at the same
+/// resolution, so the precise one would cost a serialising instruction to
+/// produce digits nothing on the other side of the comparison has.
+fn file_time_now() -> u64 {
+    // SAFETY: takes nothing and returns a `FILETIME` by value.
+    ticks(unsafe { GetSystemTimeAsFileTime() })
+}
+
 /// When the process behind `process` started, in 100-nanosecond ticks.
 fn creation_time(process: HANDLE) -> Option<u64> {
     let mut created = FILETIME::default();
@@ -323,7 +402,16 @@ fn creation_time(process: HANDLE) -> Option<u64> {
     // first is wanted.
     unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
 
-    Some(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
+    Some(ticks(created))
+}
+
+/// A file time as the one number it is: 100-nanosecond ticks since 1601.
+///
+/// Windows splits it across two 32-bit halves because the structure predates a
+/// compiler that could return a 64-bit integer; comparing the halves separately
+/// is the classic way to get a time comparison wrong.
+fn ticks(time: FILETIME) -> u64 {
+    u64::from(time.dwHighDateTime) << 32 | u64::from(time.dwLowDateTime)
 }
 
 /// Says something to a developer's console, the first time only.
@@ -353,6 +441,10 @@ mod tests {
     /// When it started, in the file time's 100-nanosecond ticks.
     const THIS_STARTED: u64 = 133_000_000_000_000_000;
 
+    /// When the process table was read: after everything in these written-down
+    /// trees started, which is the ordinary case.
+    const TABLE_READ_AT: u64 = THIS_STARTED + 1_000_000_000;
+
     fn row(process_id: u32, parent_process_id: u32) -> Parentage {
         Parentage {
             process_id,
@@ -360,16 +452,32 @@ mod tests {
         }
     }
 
-    /// Whether `process` is one this application started, with both start times
-    /// known and `process` the younger — which is the ordinary case, and leaves
-    /// the table to answer.
+    /// The creation times of a written-down tree, by identifier.
+    ///
+    /// Anything not named started half a second after this application, which
+    /// every process this application could have started did, and so leaves the
+    /// table to answer; a test about a creation time names the ones it is
+    /// about.
+    fn started(named: &[(u32, u64)]) -> impl Fn(u32) -> Option<u64> + '_ {
+        move |of| {
+            Some(
+                named
+                    .iter()
+                    .find(|(process, _)| *process == of)
+                    .map_or(THIS_STARTED + 5_000_000, |(_, at)| *at),
+            )
+        }
+    }
+
+    /// Whether `process` is one this application started, with every creation
+    /// time in the ordinary order.
     fn started_by_this_application(table: &[Parentage], process: u32) -> bool {
         started_by(
             table,
             process,
             THIS,
-            Some(THIS_STARTED + 5_000_000),
-            Some(THIS_STARTED),
+            TABLE_READ_AT,
+            started(&[(THIS, THIS_STARTED)]),
         )
     }
 
@@ -412,7 +520,7 @@ mod tests {
         // the wrong way would do exactly that.
         let table = vec![row(THIS, 900), row(900, 4)];
 
-        assert!(!started_by(&table, 900, THIS, Some(1), Some(THIS_STARTED)));
+        assert!(!started_by_this_application(&table, 900));
     }
 
     #[test]
@@ -449,25 +557,98 @@ mod tests {
                 &table,
                 5_000,
                 THIS,
-                Some(THIS_STARTED - 1),
-                Some(THIS_STARTED)
+                TABLE_READ_AT,
+                started(&[(THIS, THIS_STARTED), (5_000, THIS_STARTED - 1)]),
             ),
             "a process that existed before this one cannot be a child of it"
         );
         assert!(
-            started_by(&table, 5_000, THIS, Some(THIS_STARTED), Some(THIS_STARTED)),
+            started_by(
+                &table,
+                5_000,
+                THIS,
+                TABLE_READ_AT,
+                started(&[(THIS, THIS_STARTED), (5_000, THIS_STARTED)]),
+            ),
             "the same tick is not before: a webview host started with the window reads this way"
         );
     }
 
     #[test]
-    fn a_start_time_windows_would_not_give_leaves_the_table_to_answer() {
+    fn a_reused_identifier_part_way_up_the_chain_never_claims_a_stranger() {
+        // The hazard a check on the candidate alone cannot see, and the reason
+        // every link is checked rather than the first.
+        //
+        // 6_000 is this application's webview host, started after it. 8_000 is
+        // somebody else's application, started by a process that has since
+        // exited and whose identifier Windows has since given to that webview
+        // host — so the table now reads as though this application started it,
+        // two links up. 8_000 is *younger* than this application, so its own
+        // start time says nothing; what is impossible is the link between it
+        // and the identifier it names, and only that link says so.
+        //
+        // Left unchecked, every process under 8_000 becomes unrecordable for
+        // as long as both are running, with nothing on screen to explain it.
+        let table = vec![row(THIS, 900), row(6_000, THIS), row(8_000, 6_000)];
+        let times = started(&[
+            (THIS, THIS_STARTED),
+            (6_000, THIS_STARTED + 5_000_000),
+            (8_000, THIS_STARTED + 1_000_000),
+        ]);
+
+        assert!(
+            !started_by(&table, 8_000, THIS, TABLE_READ_AT, &times),
+            "another application's process must not be claimed through a link that has been reused"
+        );
+        assert!(
+            started_by(&table, 6_000, THIS, TABLE_READ_AT, &times),
+            "and the real webview host, whose links all hold, still is this application's"
+        );
+    }
+
+    #[test]
+    fn an_identifier_recycled_since_the_table_was_read_is_not_claimed() {
+        // The table said 53_008 was this process's child, and when it was read
+        // that was true. By the time the process is opened to be timed, 53_008
+        // has exited and Windows has given the number to something that started
+        // after the table was copied — so the process being asked about is not
+        // the process the table described.
+        let table = vec![row(THIS, 900), row(53_008, THIS)];
+
+        assert!(
+            !started_by(
+                &table,
+                53_008,
+                THIS,
+                TABLE_READ_AT,
+                started(&[(THIS, THIS_STARTED), (53_008, TABLE_READ_AT + 1)]),
+            ),
+            "a process that did not exist when the table was read is not in it"
+        );
+        assert!(
+            started_by(
+                &table,
+                53_008,
+                THIS,
+                TABLE_READ_AT,
+                started(&[(THIS, THIS_STARTED), (53_008, TABLE_READ_AT)]),
+            ),
+            "the same tick is not after: a process created as the table was copied reads this way"
+        );
+    }
+
+    #[test]
+    fn a_start_time_windows_would_not_give_leaves_that_link_to_the_table() {
         // Refusing to decide without one would turn a permission failure into
         // a record control that offers Clipped's own webview again.
         let table = vec![row(THIS, 900), row(53_008, THIS)];
 
-        assert!(started_by(&table, 53_008, THIS, None, Some(THIS_STARTED)));
-        assert!(started_by(&table, 53_008, THIS, Some(THIS_STARTED), None));
+        assert!(started_by(&table, 53_008, THIS, TABLE_READ_AT, |of| {
+            (of != 53_008).then_some(THIS_STARTED)
+        }));
+        assert!(started_by(&table, 53_008, THIS, TABLE_READ_AT, |of| {
+            (of != THIS).then_some(THIS_STARTED)
+        }));
     }
 
     #[test]
@@ -499,6 +680,7 @@ mod tests {
         let child_is_ours = includes(child.id());
         let creator = process_parentage()
             .expect("the process table can always be read")
+            .1
             .into_iter()
             .find(|row| row.process_id == std::process::id())
             .expect("a process is in its own process table")

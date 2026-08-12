@@ -346,6 +346,8 @@ fn process_name(process_id: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
     use super::*;
 
     /// A window of another application, on screen, owned by a process that is
@@ -455,5 +457,47 @@ mod tests {
         };
 
         assert!(!worth_offering(&orphan));
+    }
+
+    #[test]
+    fn a_window_this_application_did_not_draw_is_read_as_somebody_elses_and_offered() {
+        // The one line none of the rules above reaches: `look_at` asking
+        // `this_application::includes` about *the window's* process. Nothing
+        // in this file would notice a miswiring there, and the consequence is
+        // not a cosmetic one — a constant `true`, a negation, or this process's
+        // identifier passed in place of the window's marks every window as
+        // Clipped's own, `worth_offering` then refuses all of them, and the
+        // record control has nothing to offer for anything the user does. It
+        // is the primary control on the Home screen, so it would be dead in
+        // the shipped application while all 77 tests and clippy passed.
+        //
+        // The desktop window stands in for "a window Clipped did not draw",
+        // and it is the one window that can be asked for without opening one:
+        // it exists in every session, needs no display, and belongs to a system
+        // process started at boot — which is neither this process nor anything
+        // this process could have started.
+        //
+        // SAFETY: takes nothing, and the handle it returns is only ever passed
+        // back to Windows.
+        let desktop = unsafe { GetDesktopWindow() };
+        let seen = look_at(desktop).expect("Windows describes the desktop window");
+
+        assert_ne!(
+            seen.process_id, 0,
+            "the desktop window has an owning process, which is what makes this a real question"
+        );
+        assert_ne!(
+            seen.process_id,
+            std::process::id(),
+            "and it is not this process, so the answer below is about the window's process"
+        );
+        assert!(
+            !seen.this_application,
+            "a window belonging to a system process is not Clipped"
+        );
+        assert!(
+            worth_offering(&seen),
+            "so the record control is still able to offer something"
+        );
     }
 }
