@@ -517,6 +517,28 @@ pub fn default_output_directory() -> Option<PathBuf> {
     )
 }
 
+/// Where installed highlight plugins live.
+///
+/// `<Clipped's per-user directory>/plugins`, one directory per plugin, each
+/// holding a `plugin.json` and the executable it names
+/// ([docs/plugin-api.md](../../../docs/plugin-api.md)). The per-user directory
+/// is `clipped-logging`'s answer, which is the same one the log, the encoder's
+/// capability cache and the user's own game catalogue use — a second opinion
+/// about where Clipped keeps its files is exactly what that crate exists to
+/// prevent.
+///
+/// Returns `None` when the environment describes no per-user directory at all,
+/// which on Windows means `%LOCALAPPDATA%` is unset. That is a machine with no
+/// plugins rather than an error, and it is treated as one.
+///
+/// **Nothing puts a plugin there.** Installing one is a manual step today
+/// ([issue #338](https://github.com/wildware-uk/clipped/issues/338) is what
+/// starts one during a recording; packaging is not built), so this answers
+/// where to look rather than where something was put.
+pub fn plugins_directory() -> Option<PathBuf> {
+    clipped_logging::application_directory().map(|directory| directory.join("plugins"))
+}
+
 /// The generated name for a recording started at `now`.
 ///
 /// Sortable, unambiguous and free of characters Windows forbids in a file name,

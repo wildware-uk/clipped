@@ -254,7 +254,19 @@ fn record_frames(
                 counters.captured += 1;
                 counters.missed_by_source += u64::from(frame.frames_missed().unwrap_or(0));
 
-                let clock = *clock.get_or_insert_with(|| CaptureClock::start_at(frame.timestamp()));
+                let clock = *clock.get_or_insert_with(|| {
+                    // Beside the epoch, and nowhere else. This reading of *this
+                    // process's* monotonic clock is what places a moment timed
+                    // outside the recording — a plugin's event — inside the
+                    // file, and the two readings are only interchangeable
+                    // because nothing happens between them (`crate::progress`,
+                    // `crate::plugins`, docs/plugin-api.md). It is one
+                    // `OnceLock` store on the first frame and cannot block.
+                    if let Some(progress) = outputs.progress {
+                        progress.timeline_began(Instant::now());
+                    }
+                    CaptureClock::start_at(frame.timestamp())
+                });
                 // The epoch exists from here, so the audio sources can be given
                 // one. Started once, on the first frame the recording keeps, and
                 // not before: a packet has nowhere to go on a timeline that has

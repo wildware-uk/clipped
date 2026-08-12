@@ -32,6 +32,8 @@
 //!  wait on the process watcher              wait for the game's window
 //!  drive the session manager  ──spawn──▶    capture, encode, mux
 //!  collect a finished recording ◀──────     return what it turned out to be
+//!  take what the plugins said   ◀──────     plugin thread
+//!                                           poll the supervisor, drain events
 //! ```
 //!
 //! One recording at a time, which the session manager already guarantees:
@@ -40,6 +42,25 @@
 //! and this thread has to keep waiting on the watcher — otherwise a game
 //! exiting would not be noticed until the recording it should have ended had
 //! ended by itself.
+//!
+//! The third thread is `clipped_session::plugins`, which starts the highlight
+//! plugins that support the game being recorded and is deliberately neither of
+//! the other two: the recording thread may not wait on a plugin (AGENTS.md
+//! section 20) and neither may this one, which has a process watcher to answer.
+//! What crosses back is what the plugins reported and what went wrong with them,
+//! taken here once round the loop and put in front of the user.
+//!
+//! # Plugins, and why none of them runs yet
+//!
+//! `run` reads the plugins directory at start-up and says what is installed and
+//! what was refused. None of it is *enabled*: starting a plugin needs the
+//! consent the user gave to what it declares, nothing records that yet
+//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), and
+//! enabling one uninvited would make `docs/privacy.md`'s register false — all
+//! three bundled plugins open a loopback socket. So each recording names the
+//! installed plugins that claim the game it is of and says they are not enabled,
+//! which is the honest state rather than a silence
+//! (`clipped_session::plugins::installed_but_not_enabled`).
 //!
 //! # Stopping
 //!
@@ -60,10 +81,15 @@ use clipped_game_detection::{
     Next, ProcessWatcher, WatchConfig, WatchError as DetectionError, WatchEvent,
 };
 use clipped_logging::RedactedPath;
+use clipped_plugins::{
+    discover, InstalledPlugin, ObservedProcess, SessionDetails, SupervisionEvent, SupervisionPolicy,
+};
 use clipped_session::automatic::{
     AutomaticSettings, RecordingId, RecordingOutcome, RecordingOutcomeSummary, RecordingRequest,
     Session, SessionAction, SessionManager,
 };
+use clipped_session::plugins::{installed_but_not_enabled, PluginOutcome, SessionPlugins};
+use clipped_session::{RecordingOutputs, RecordingProgress};
 use clipped_windows::WindowInfo;
 
 use crate::cli::{RecordArgs, WatchArgs};
@@ -194,6 +220,7 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
     let mut driver = Driver {
         manager,
         plan,
+        installed_plugins: installed_plugins(),
         running: None,
     };
     let stopped_by = driver.watch(&mut watcher, &signal);
@@ -309,6 +336,39 @@ fn announce(directory: &Path, watcher: &ProcessWatcher, manager: &SessionManager
     }
 }
 
+/// Reads the plugins directory, and says what is there.
+///
+/// Nothing is skipped silently: a directory that is not a usable plugin is
+/// reported with the reason it was refused, because a user who dropped one in
+/// and cannot see it needs to be told that its manifest names an executable
+/// which is not there (AGENTS.md section 15).
+///
+/// A machine with no plugins directory has no plugins, which is every machine
+/// until somebody installs one, and is not worth a word.
+fn installed_plugins() -> Vec<InstalledPlugin> {
+    let Some(directory) = crate::config::plugins_directory() else {
+        return Vec::new();
+    };
+
+    let discovery = discover(&directory);
+    for rejected in &discovery.rejected {
+        tracing::warn!(
+            plugin = %RedactedPath::new(&rejected.directory),
+            reason = %rejected.reason,
+            "something under the plugins directory is not a usable plugin"
+        );
+        eprintln!("A plugin could not be read: {}", rejected.reason);
+    }
+    for plugin in &discovery.installed {
+        tracing::info!(
+            plugin = %plugin.id(),
+            name = plugin.manifest().name(),
+            "a plugin is installed"
+        );
+    }
+    discovery.installed
+}
+
 /// Says whether a previous run left footage nobody has claimed.
 ///
 /// This is the moment to ask. A recorder that was killed left a file that plays
@@ -368,6 +428,13 @@ fn report_interrupted_recordings(directory: &Path) {
 struct Driver {
     manager: SessionManager,
     plan: RecordingPlan,
+    /// What was found under the plugins directory when this command started.
+    ///
+    /// Read once. A plugin appearing while a game is being recorded is not a
+    /// plugin this run starts: discovery reads manifests off a disk somebody
+    /// else is writing to, and doing it again every second would be the
+    /// filesystem polling AGENTS.md section 18 rules out.
+    installed_plugins: Vec<InstalledPlugin>,
     running: Option<Running>,
 }
 
@@ -377,6 +444,11 @@ struct Running {
     id: RecordingId,
     stop: ShutdownSignal,
     thread: JoinHandle<RecordingOutcome>,
+    /// The plugins attached to this recording, on a thread of their own.
+    ///
+    /// Dropped when the recording is collected, which stops every one of them
+    /// whether or not this loop asked politely first.
+    plugins: SessionPlugins,
 }
 
 impl Driver {
@@ -386,6 +458,12 @@ impl Driver {
         let mut detection_stopped: Option<String> = None;
 
         loop {
+            // Before anything else, and every time round: what a plugin had to
+            // say is only useful while the recording it belongs to is running,
+            // and a `PluginTrouble` nobody reads is one that was logged and
+            // forgotten (AGENTS.md section 45).
+            self.report_plugin_activity();
+
             if let Some(finished) = self.collect_finished() {
                 let actions =
                     self.manager
@@ -442,6 +520,12 @@ impl Driver {
         }
 
         let running = self.running.take().expect("just checked");
+
+        // The plugins first: the recording has ended, so what they were
+        // attached to is gone, and stopping them is bounded by the supervision
+        // policy however badly they behave.
+        report_plugin_outcome(&running.id, running.plugins.finish());
+
         let outcome = running.thread.join().unwrap_or_else(|_| {
             // `spawn_recording` catches the panic itself, so this is a panic in
             // the catch or a thread that was killed; either way the file has
@@ -452,6 +536,30 @@ impl Driver {
             }
         });
         Some((running.id, outcome))
+    }
+
+    /// Puts what this recording's plugins have said in front of the user.
+    fn report_plugin_activity(&mut self) {
+        let Some(running) = self.running.as_ref() else {
+            return;
+        };
+        for report in running.plugins.take_reports() {
+            report_plugin_event(&report);
+        }
+
+        // Taken and counted rather than left to accumulate. Writing them
+        // against the recording is issue #71; until that exists, an event
+        // reaching this point has nowhere to go, and pretending otherwise
+        // would be a feature that looks finished (AGENTS.md section 54).
+        let events = running.plugins.take_events();
+        if !events.is_empty() {
+            tracing::info!(
+                session = running.id.session.as_str(),
+                index = running.id.index,
+                events = events.len(),
+                "this recording's plugins reported events; nothing stores them yet (issue #71)"
+            );
+        }
     }
 
     /// Carries out what the session manager decided.
@@ -513,12 +621,134 @@ impl Driver {
         let plan = self.plan.clone();
         let signal = stop.clone();
 
+        // The recording's own account of its timeline, which is the only thing
+        // the capture thread gives a plugin: the instant its first frame fixed
+        // the epoch. Everything else about a plugin happens on the thread
+        // `SessionPlugins` starts (AGENTS.md section 20).
+        let progress = RecordingProgress::new();
+        let plugins = self.attach_plugins(&request, &progress);
+        let recording_progress = progress.clone();
+
         let thread = thread::Builder::new()
             .name("clipped-automatic-recording".to_owned())
-            .spawn(move || record_process(&request, &plan, &signal))
+            .spawn(move || record_process(&request, &plan, &signal, &recording_progress))
             .expect("a thread can be started to record on");
 
-        self.running = Some(Running { id, stop, thread });
+        self.running = Some(Running {
+            id,
+            stop,
+            thread,
+            plugins,
+        });
+    }
+
+    /// Starts the plugins for the game this recording is of.
+    ///
+    /// None of them, today, and it says which ones those would have been: see
+    /// the module documentation for why a plugin nobody enabled is named rather
+    /// than started.
+    fn attach_plugins(
+        &self,
+        request: &RecordingRequest,
+        progress: &RecordingProgress,
+    ) -> SessionPlugins {
+        let session = SessionDetails {
+            session: request.recording.session.as_str().to_owned(),
+            process: ObservedProcess::new(&request.image_name, request.process_id),
+        };
+
+        for plugin in installed_but_not_enabled(&self.installed_plugins, &session.process) {
+            tracing::info!(
+                plugin = %plugin.id(),
+                game = request.game.slug(),
+                "a plugin supports this game and has not been enabled, so it was not started; \
+                 nothing records which plugins are enabled yet (issue #282)"
+            );
+            eprintln!(
+                "{} supports {} and is installed, but nothing in this build can record that you \
+                 enabled it, so it is not running.",
+                plugin.manifest().name(),
+                request.game.display_name()
+            );
+        }
+
+        SessionPlugins::start(
+            // Empty until issue #282: an `EnabledPlugin` is what consent
+            // produces, and nothing stores consent yet. The wiring below is
+            // real and is exercised by `clipped_session::plugins`' tests
+            // against real plugin processes.
+            Vec::new(),
+            session,
+            progress,
+            SupervisionPolicy::default(),
+        )
+    }
+}
+
+/// Puts one thing the supervisor said in front of the user.
+///
+/// A plugin's trouble is reported rather than logged and forgotten, because an
+/// integration that silently never works is worse than one that says why
+/// (AGENTS.md section 45). Only the two that are worth interrupting somebody for
+/// reach the console: a plugin saying something is wrong that they can act on,
+/// and a plugin being given up on. A replacement is a log line, because the
+/// recorder handling it is the point.
+fn report_plugin_event(report: &SupervisionEvent) {
+    match report {
+        SupervisionEvent::Ready { plugin } => {
+            tracing::info!(%plugin, "a plugin is running");
+        }
+        SupervisionEvent::Problem { plugin, message } => {
+            tracing::warn!(%plugin, problem = %message, "a plugin reported a problem");
+            eprintln!("{plugin}: {message}");
+        }
+        SupervisionEvent::Restarting {
+            plugin,
+            trouble,
+            attempt,
+            after,
+        } => {
+            tracing::warn!(
+                %plugin,
+                %trouble,
+                attempt,
+                after_seconds = after.as_secs_f32(),
+                "a plugin is being started again"
+            );
+        }
+        SupervisionEvent::Disabled { plugin, trouble } => {
+            tracing::warn!(%plugin, %trouble, "a plugin was stopped for the rest of this recording");
+            eprintln!("{plugin} was stopped for the rest of this recording: {trouble}");
+            eprintln!("  The recording itself is unaffected.");
+        }
+    }
+}
+
+/// Says what a recording's plugins came to, once it has ended.
+fn report_plugin_outcome(recording: &RecordingId, outcome: PluginOutcome) {
+    for report in &outcome.reports {
+        report_plugin_event(report);
+    }
+    if outcome.health.is_empty() {
+        return;
+    }
+
+    tracing::info!(
+        session = recording.session.as_str(),
+        index = recording.index,
+        plugins = outcome.health.len(),
+        events = outcome.events.len(),
+        dropped = outcome.inbox.dropped,
+        "this recording's plugins have finished"
+    );
+
+    // A timeline missing marks has to say so rather than look complete
+    // (AGENTS.md section 27).
+    if outcome.lost_anything() {
+        eprintln!(
+            "Some events reported during this recording were lost, so its timeline is \
+             incomplete."
+        );
     }
 }
 
@@ -590,8 +820,9 @@ fn record_process(
     request: &RecordingRequest,
     plan: &RecordingPlan,
     stop: &ShutdownSignal,
+    progress: &RecordingProgress,
 ) -> RecordingOutcome {
-    let outcome = attempt(request, plan, stop);
+    let outcome = attempt(request, plan, stop, progress);
 
     // An attempt that produced nothing is said out loud. The summary printed
     // when the session ends counts files, so a recording that never happened
@@ -617,6 +848,7 @@ fn attempt(
     request: &RecordingRequest,
     plan: &RecordingPlan,
     stop: &ShutdownSignal,
+    progress: &RecordingProgress,
 ) -> RecordingOutcome {
     let game = request.game.display_name();
     let args = plan.args_for(request.process_id, &request.output);
@@ -639,8 +871,14 @@ fn attempt(
     );
 
     let settings = settings_for(&config, &window);
+    // `record_into` rather than `record`, for the one output this command needs:
+    // where the recording's timeline begins. That is what places a plugin's
+    // event inside the file (`clipped_session::plugins`), and publishing it is
+    // one `OnceLock` store on the first frame — nothing the capture thread can
+    // wait on.
+    let outputs = RecordingOutputs::default().with_progress(progress);
     match std::panic::catch_unwind(AssertUnwindSafe(|| {
-        clipped_session::record(&settings, stop)
+        clipped_session::record_into(&settings, stop, &outputs)
     })) {
         Ok(Ok(report)) => RecordingOutcome::Recorded(Box::new(report)),
         Ok(Err(error)) => session_failure(&error, game, &config.output),

@@ -116,6 +116,29 @@
 //! #269](https://github.com/wildware-uk/clipped/issues/269)), so a generated
 //! highlight does not reach a user's library today.
 //!
+//! And the game's own account of what happened while it was being recorded:
+//! [`plugins`] is what starts a highlight plugin during a recording
+//! ([issue #338](https://github.com/wildware-uk/clipped/issues/338)).
+//! `clipped-plugins` is the contract and deliberately starts nothing itself —
+//! its supervisor is a state machine over a clock reading its owner supplies —
+//! and this crate is that owner, because a plugin's event is a *position in a
+//! recording* and this is where a recording's timeline exists.
+//! [`plugins::SessionPlugins`] creates the supervisor, attaches the plugins
+//! whose manifest claims the game that launched, polls it once a second on a
+//! thread of its own and stops everything when the recording ends. Nothing in
+//! the capture path waits on any of it: the only thing a recording gives a
+//! plugin is [`RecordingProgress::timeline_began`], one `OnceLock` store on the
+//! first frame.
+//!
+//! Two things it deliberately does not do. Nothing yet produces a
+//! `clipped_plugins::EnabledPlugin` in a shipped build, because nothing records
+//! which plugins the user enabled
+//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), so a
+//! session names the plugins it cannot start rather than starting them
+//! uninvited; and the events it drains are handed over rather than stored,
+//! because writing them against the recording is
+//! [issue #71](https://github.com/wildware-uk/clipped/issues/71).
+//!
 //! # Threading
 //!
 //! Two threads plus one per audio source, and the split is forced by AGENTS.md
@@ -202,6 +225,7 @@ pub mod config;
 pub mod disk;
 pub mod failure;
 pub mod highlights;
+pub mod plugins;
 pub mod screenshot;
 
 mod error;

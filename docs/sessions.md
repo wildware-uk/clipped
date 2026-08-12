@@ -109,6 +109,39 @@ that reaches the recorder.
 6. `clipped_session::record` runs on a thread of its own until the game's window
    goes or the manager raises the stop signal, and finalises the file on every
    path out.
+7. Alongside it, `clipped_session::plugins` runs the highlight plugins for that
+   game on a third thread — below.
+
+## The plugins a recording runs
+
+Each recording gets a `clipped_session::plugins::SessionPlugins`
+([#338](https://github.com/wildware-uk/clipped/issues/338)), which owns the
+`clipped_plugins::PluginSupervisor`, starts the plugins whose manifest claims
+the process being recorded, polls it once a second, drains the events it
+produces and stops everything when the recording ends
+([docs/plugin-api.md](plugin-api.md)).
+
+Three facts about it are worth having in one place:
+
+- **It is a third thread, and neither of the other two.** The recording thread
+  may not wait on a plugin (AGENTS.md section 20), and neither may the loop
+  waiting on the process watcher — it has a game exiting to notice. The only
+  thing a recording gives a plugin is the instant its first frame fixed the
+  capture epoch, which is one `OnceLock` store (`RecordingProgress`).
+- **Plugins start with the recording's first frame, not with the game.** A
+  plugin says how long *ago* something happened and the host owns the timeline
+  it is placed on, so there has to be a timeline first. A recording that never
+  captured a frame — no window appeared — starts no plugin, and a session with
+  two recordings in it runs its plugins twice, once per file.
+- **Nothing is enabled, so nothing starts.** Starting a plugin needs the consent
+  the user recorded against what it declares, and nothing records that yet
+  ([#282](https://github.com/wildware-uk/clipped/issues/282)). `watch` reads the
+  plugins directory, says what is installed and what was refused, and names any
+  installed plugin that claims the game it is about to record as one it is not
+  starting. [docs/privacy.md](privacy.md) is why enabling one uninvited is not
+  an option. What a plugin reports is likewise handed over rather than kept:
+  storing events against the recording is
+  [#71](https://github.com/wildware-uk/clipped/issues/71).
 
 ## The decisions, and why each one is what it is
 

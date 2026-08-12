@@ -614,6 +614,14 @@ silently (AGENTS.md section 15) — a user who dropped a plugin into that folder
 and cannot see it needs to be told that its manifest names an executable that is
 not there.
 
+The directory is `plugins` inside Clipped's own per-user directory —
+`%LOCALAPPDATA%\Clipped\plugins` on Windows — which is the same per-user
+directory the log, the encoder's capability cache and the user's own game
+catalogue live in. `clipped-recorder watch` reads it once, when it starts, and
+says what it found: reading it again every second would be the filesystem
+polling AGENTS.md section 18 rules out, and a plugin that appeared while a game
+was being recorded is not one that run has consent for anyway.
+
 Directories are read in sorted order, so two runs of the same machine produce
 the same list. Two plugins declaring the same identifier are not both loaded:
 the first in that order keeps it and the second is refused, because every event
@@ -645,6 +653,17 @@ anything, which is the same shape and the same reasoning as
 `clipped_session::automatic` ([sessions.md](sessions.md)). One thread per
 *running plugin* is unavoidable and is the one reading its output, because a
 pipe has no timed read.
+
+**The owner is `clipped_session::plugins::SessionPlugins`**
+([#338](https://github.com/wildware-uk/clipped/issues/338)), which is the thread
+the left-hand column of that diagram runs on: a recording's own thread neither
+attaches, drains nor polls. It starts when the recording's first frame fixes the
+epoch, because that is where the timeline an event is placed on begins — see
+[Timing](#timing) — so a recording that never captured a frame starts no plugin,
+and one plugin session belongs to one *recording* rather than to one session.
+`SessionPlugins::finish` is `detach`, followed by polling until every plugin has
+gone or the stop grace has passed; the longest a recording can spend ending its
+plugins is that grace plus one poll, whatever the plugins do.
 
 A supervisor that is not polled costs a recording nothing. Events keep arriving,
 the queue keeps bounding them; what does not happen is a hung plugin being
@@ -1314,19 +1333,31 @@ by the change that found it, because settling it changes a plugin's behaviour.
 Stated plainly, because the gap between this document and the running
 application is the thing most likely to be misread (AGENTS.md section 7):
 
-- **Nothing attaches a supervisor to a recording session**
-  ([issue #338](https://github.com/wildware-uk/clipped/issues/338)).
-  `clipped-session` does not create one, so `plugins/league`, `plugins/cs2` and
-  `plugins/dota2` run when they are started by hand and are never started by
-  Clipped. This
-  document previously said the wiring belonged with the first integration; it
-  did not — an integration is a plugin and the wiring is in `crates/session`,
-  and putting them in one change would have meant neither being reviewed
-  properly.
+- **Nothing enables a plugin, so a recording still starts none**
+  ([issue #282](https://github.com/wildware-uk/clipped/issues/282)). The
+  *wiring* exists as of
+  [issue #338](https://github.com/wildware-uk/clipped/issues/338):
+  `clipped_session::plugins` creates the supervisor, attaches the plugins it is
+  given, polls it once a second on a thread of its own and stops them when the
+  recording ends, and `clipped-recorder watch` drives it. What it is given is an
+  empty list, because starting a plugin needs an `EnabledPlugin` and the only
+  thing that produces one is the consent the user recorded against its
+  declaration — which nothing stores yet. A recording therefore names the
+  installed plugins that claim the game it is of and says they are not enabled,
+  rather than starting them uninvited; `docs/privacy.md` is why that is not a
+  detail. So `plugins/league`, `plugins/cs2` and `plugins/dota2` still run only
+  when they are started by hand.
+- **Nothing keeps what a plugin reports**
+  ([issue #71](https://github.com/wildware-uk/clipped/issues/71)). A recording
+  drains its plugins' events and places each one on its own timeline; the seam
+  where they are handed over is `SessionPlugins::take_events`, and no caller
+  writes them to `clipped-storage` against the recording yet. Today they are
+  counted in the log and go no further.
 - **Nothing installs a plugin.** `plugins/league`, `plugins/cs2` and
-  `plugins/dota2` each build an executable and have a `plugin.json` beside it; putting the two in a
-  directory under the plugins folder is a manual step, and there is no packaging
-  step that does it.
+  `plugins/dota2` each build an executable and have a `plugin.json` beside it;
+  putting the two in a directory under the plugins folder — `plugins` inside
+  Clipped's per-user directory, `%LOCALAPPDATA%\Clipped\plugins` on Windows — is
+  a manual step, and there is no packaging step that does it.
 - **The reference plugin's fixtures are constructed, not captured.**
   `plugins/cs2/tests/payloads/` was written against the documented Game State
   Integration payload, because Counter-Strike 2 was not installed on the machine
