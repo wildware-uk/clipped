@@ -315,6 +315,12 @@ query compiler checked against this matcher, not instead of it.
 The games view is not a page — it is every game at once, which is what SPEC.md
 section 17 draws, and it is counted by SQLite rather than by walking rows.
 
+These are the cost of the read itself, which is what this crate is answerable
+for. Carrying a page to the desktop application adds a serialisation of it, once
+to size the page against the frame budget and once to send it
+(`apps/recorder/src/library.rs`); that is not measured here, and it is a pass
+over a hundred-odd kilobytes rather than a query.
+
 Memory is bounded by the page rather than by the library: a search reads session
 rows a batch of 256 at a time and never holds more than one batch.
 
