@@ -189,6 +189,7 @@ name = "clipped-audio"
 version = "0.1.0"
 dependencies = [
  "clipped-logging",
+ "clipped-media-validation",
  "clipped-windows",
  "tracing",
  "tracing-subscriber",
