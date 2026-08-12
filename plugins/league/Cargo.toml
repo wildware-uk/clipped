@@ -1,0 +1,64 @@
+[package]
+name = "clipped-league-plugin"
+description = "Highlight plugin reporting League of Legends events from the Live Client Data API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# A plugin is an executable a user installs beside a `plugin.json`
+# (docs/plugin-api.md), not a library anybody depends on. Nothing in this
+# workspace may name it, and `tests/integration/tests/workspace_layering.rs`
+# is what holds that to more than an intention.
+publish = false
+
+[dependencies]
+# The plugin contract: the wire this plugin speaks, the manifest the host reads
+# and the report types it prints (issue #69). A plugin written in Rust uses
+# these rather than hand-building JSON the host is about to parse, so the two
+# sides cannot disagree about the wire — which is the whole reason the crate
+# exports them. MPL-2.0.
+clipped-plugins.workspace = true
+# The event vocabulary (issue #68). This plugin's entire job is turning one
+# game's words into these, and nothing above the plugin boundary can tell which
+# game produced one (AGENTS.md section 33). MPL-2.0.
+clipped-events.workspace = true
+# The Live Client Data API answers with JSON, and an event's payload is a
+# `serde_json::Map`. Dual MIT/Apache-2.0.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# WinHTTP: the HTTPS client this plugin polls `127.0.0.1:2999` with.
+#
+# It is the operating system's own HTTP stack, which is why there is no TLS
+# crate here. Three things follow from that, and they are the reason for the
+# choice (AGENTS.md section 10, "is the functionality small enough to implement
+# safely ourselves?" — a TLS client is not, and a TLS *dependency* would be
+# `rustls` and `ring` and their transitive graph for one loopback request a
+# second):
+#
+# - The certificate exception League's self-signed certificate needs is set on
+#   one request handle, not on a process-wide trust store (`src/live_api.rs`).
+# - `WINHTTP_ACCESS_TYPE_NO_PROXY` is what makes the manifest's "loopback"
+#   declaration true rather than nearly true: a machine with a system proxy
+#   configured must not be able to send this request anywhere else.
+# - `windows` is already pinned in the root manifest for the reason it gives,
+#   so this costs no new crate in the lockfile at all.
+#
+# The feature list is the honest inventory of what this crate names:
+#
+# - Win32_Foundation            ERROR_INSUFFICIENT_BUFFER, and the error type
+#                               `windows_core` reads `GetLastError` into
+# - Win32_Networking_WinHttp    the session, the connection, the request, the
+#                               security flags and the read loop
+#
+# Dual MIT/Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+] }
+
+[lints]
+workspace = true

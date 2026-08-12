@@ -1,0 +1,129 @@
+{
+  "activePlayer": {
+    "currentGold": 1240.0,
+    "level": 11,
+    "riotId": "Rosalind#EU1",
+    "riotIdGameName": "Rosalind",
+    "riotIdTagLine": "EU1",
+    "summonerName": "",
+    "teamRelativeColors": true
+  },
+  "allPlayers": [
+    {
+      "championName": "Ahri",
+      "isBot": false,
+      "isDead": false,
+      "level": 11,
+      "position": "MIDDLE",
+      "riotId": "Rosalind#EU1",
+      "riotIdGameName": "Rosalind",
+      "riotIdTagLine": "EU1",
+      "scores": { "assists": 1, "creepScore": 118, "deaths": 1, "kills": 1, "wardScore": 9.4 },
+      "summonerName": "",
+      "team": "ORDER"
+    },
+    {
+      "championName": "Leona",
+      "isBot": false,
+      "isDead": false,
+      "level": 10,
+      "position": "UTILITY",
+      "riotId": "Bramble#EU1",
+      "riotIdGameName": "Bramble",
+      "riotIdTagLine": "EU1",
+      "scores": { "assists": 2, "creepScore": 21, "deaths": 0, "kills": 1, "wardScore": 24.1 },
+      "summonerName": "",
+      "team": "ORDER"
+    },
+    {
+      "championName": "Zed",
+      "isBot": false,
+      "isDead": true,
+      "level": 11,
+      "position": "MIDDLE",
+      "riotId": "Kestrel#EUW",
+      "riotIdGameName": "Kestrel",
+      "riotIdTagLine": "EUW",
+      "respawnTimer": 12.5,
+      "scores": { "assists": 0, "creepScore": 131, "deaths": 1, "kills": 0, "wardScore": 3.2 },
+      "summonerName": "",
+      "team": "CHAOS"
+    },
+    {
+      "championName": "Garen",
+      "isBot": false,
+      "isDead": false,
+      "level": 12,
+      "position": "TOP",
+      "riotId": "Marlowe#EUW",
+      "riotIdGameName": "Marlowe",
+      "riotIdTagLine": "EUW",
+      "scores": { "assists": 0, "creepScore": 145, "deaths": 1, "kills": 1, "wardScore": 5.0 },
+      "summonerName": "",
+      "team": "CHAOS"
+    }
+  ],
+  "events": {
+    "Events": [
+      { "EventID": 0, "EventName": "GameStart", "EventTime": 0.03 },
+      { "EventID": 1, "EventName": "MinionsSpawning", "EventTime": 65.0 },
+      {
+        "EventID": 2,
+        "EventName": "ChampionKill",
+        "EventTime": 213.4,
+        "KillerName": "Rosalind#EU1",
+        "VictimName": "Kestrel#EUW",
+        "Assisters": ["Bramble#EU1"]
+      },
+      { "EventID": 3, "EventName": "FirstBrick", "EventTime": 402.1, "KillerName": "Bramble#EU1" },
+      {
+        "EventID": 4,
+        "EventName": "TurretKilled",
+        "EventTime": 402.1,
+        "TurretKilled": "Turret_T2_L_03_A",
+        "KillerName": "Bramble#EU1",
+        "Assisters": ["Rosalind#EU1"]
+      },
+      {
+        "EventID": 5,
+        "EventName": "ChampionKill",
+        "EventTime": 470.9,
+        "KillerName": "Marlowe#EUW",
+        "VictimName": "Rosalind#EU1",
+        "Assisters": []
+      },
+      {
+        "EventID": 6,
+        "EventName": "ChampionKill",
+        "EventTime": 631.2,
+        "KillerName": "Bramble#EU1",
+        "VictimName": "Marlowe#EUW",
+        "Assisters": ["Rosalind#EU1"]
+      },
+      {
+        "EventID": 7,
+        "EventName": "DragonKill",
+        "EventTime": 700.5,
+        "DragonType": "Fire",
+        "Stolen": "False",
+        "KillerName": "Rosalind#EU1",
+        "Assisters": ["Bramble#EU1"]
+      },
+      {
+        "EventID": 8,
+        "EventName": "ChampionKill",
+        "EventTime": 903.0,
+        "KillerName": "Kestrel#EUW",
+        "VictimName": "Bramble#EU1",
+        "Assisters": ["Marlowe#EUW"]
+      }
+    ]
+  },
+  "gameData": {
+    "gameMode": "CLASSIC",
+    "gameTime": 912.4,
+    "mapName": "Map11",
+    "mapNumber": 11,
+    "mapTerrain": "Infernal"
+  }
+}

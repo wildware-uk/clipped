@@ -1,0 +1,64 @@
+{
+  "activePlayer": {
+    "currentGold": 500.0,
+    "level": 1,
+    "riotId": "Rosalind#EU1",
+    "riotIdGameName": "Rosalind",
+    "riotIdTagLine": "EU1",
+    "summonerName": "",
+    "teamRelativeColors": true
+  },
+  "allPlayers": [
+    {
+      "championName": "Ahri",
+      "isBot": false,
+      "isDead": false,
+      "level": 1,
+      "position": "MIDDLE",
+      "riotId": "Rosalind#EU1",
+      "riotIdGameName": "Rosalind",
+      "riotIdTagLine": "EU1",
+      "scores": { "assists": 0, "creepScore": 0, "deaths": 0, "kills": 0, "wardScore": 0.0 },
+      "summonerName": "",
+      "team": "ORDER"
+    },
+    {
+      "championName": "Leona",
+      "isBot": false,
+      "isDead": false,
+      "level": 1,
+      "position": "UTILITY",
+      "riotId": "Bramble#EU1",
+      "riotIdGameName": "Bramble",
+      "riotIdTagLine": "EU1",
+      "scores": { "assists": 0, "creepScore": 0, "deaths": 0, "kills": 0, "wardScore": 0.0 },
+      "summonerName": "",
+      "team": "ORDER"
+    },
+    {
+      "championName": "Zed",
+      "isBot": false,
+      "isDead": false,
+      "level": 1,
+      "position": "MIDDLE",
+      "riotId": "Kestrel#EUW",
+      "riotIdGameName": "Kestrel",
+      "riotIdTagLine": "EUW",
+      "scores": { "assists": 0, "creepScore": 0, "deaths": 0, "kills": 0, "wardScore": 0.0 },
+      "summonerName": "",
+      "team": "CHAOS"
+    }
+  ],
+  "events": {
+    "Events": [
+      { "EventID": 0, "EventName": "GameStart", "EventTime": 0.03 }
+    ]
+  },
+  "gameData": {
+    "gameMode": "CLASSIC",
+    "gameTime": 4.6,
+    "mapName": "Map11",
+    "mapNumber": 11,
+    "mapTerrain": "Default"
+  }
+}

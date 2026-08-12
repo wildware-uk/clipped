@@ -126,12 +126,21 @@ without being placed in a layer.
 | --- | --- | --- |
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
-| 2 | `clipped-muxer` | layers 0–1 |
+| 2 | `clipped-muxer`, `clipped-league-plugin` (plugin) | layers 0–1 |
 | 3 | `clipped-replay`, `clipped-export` | layers 0–2 |
 | 4 | `clipped-session` | layers 0–3 |
 | 5 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–4 |
 | 6 | `clipped-video-pattern` (test application) | layers 0–5 |
 | 7 | `clipped-fullscreen-dx11` (test application) | layers 0–6 |
+
+`clipped-league-plugin` is in `plugins/`, not `crates/`: it is a game
+integration ([docs/plugin-api.md](docs/plugin-api.md)), which is an executable
+the recorder *starts* rather than a crate anything links. Nothing may depend on
+it, which would argue for the top of the stack beside the test applications —
+but the top of the stack also permits depending on everything below, and a
+plugin that reached `clipped-session` would be a game's protocol inside the
+recording engine. Layer 2 is what makes the real rule enforceable: a plugin may
+name the plugin contract and the event vocabulary, and nothing else here.
 
 Layers 6 and 7 are the controlled test applications in `test-apps/`, which
 capture tests point at instead of an installed game

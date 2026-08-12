@@ -1,0 +1,37 @@
+{
+  "allPlayers": [
+    {
+      "championName": "Ahri",
+      "isBot": false,
+      "isDead": false,
+      "level": 11,
+      "position": "MIDDLE",
+      "riotId": "Rosalind#EU1",
+      "riotIdGameName": "Rosalind",
+      "riotIdTagLine": "EU1",
+      "scores": { "assists": 1, "creepScore": 118, "deaths": 1, "kills": 1, "wardScore": 9.4 },
+      "summonerName": "",
+      "team": "ORDER"
+    }
+  ],
+  "events": {
+    "Events": [
+      { "EventID": 0, "EventName": "GameStart", "EventTime": 0.03 },
+      {
+        "EventID": 1,
+        "EventName": "ChampionKill",
+        "EventTime": 213.4,
+        "KillerName": "Rosalind#EU1",
+        "VictimName": "Kestrel#EUW",
+        "Assisters": []
+      }
+    ]
+  },
+  "gameData": {
+    "gameMode": "CLASSIC",
+    "gameTime": 220.1,
+    "mapName": "Map11",
+    "mapNumber": 11,
+    "mapTerrain": "Default"
+  }
+}

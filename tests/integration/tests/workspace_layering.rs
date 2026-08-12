@@ -84,7 +84,20 @@ const LAYERS: &[&[&str]] = &[
         "clipped-waveform",
     ],
     // Consumers of encoded output. `clipped-muxer` writes it to a container.
-    &["clipped-muxer"],
+    //
+    // `clipped-league-plugin` is a game integration from `plugins/`
+    // (docs/plugin-api.md) and is here rather than up with the executables for
+    // a reason worth stating, because "it is a binary, put it at the top" is
+    // the obvious wrong answer. A plugin is not linked into anything: it is a
+    // separate process the recorder starts, so nothing may depend on it, and
+    // the top of the stack is where the *test applications* go for exactly that
+    // reason. But the top of the stack also permits depending on everything
+    // below it, and a plugin that reached `clipped-session` would be a game
+    // integration inside the recording engine — the arrangement the process
+    // boundary exists to prevent. Sitting here is what makes the real rule
+    // enforceable: a plugin may name the plugin contract and the event
+    // vocabulary, and nothing else this workspace builds.
+    &["clipped-muxer", "clipped-league-plugin"],
     // `clipped-replay` holds a rolling window of encoded packets in memory so
     // that a hotkey pressed after something interesting can still save it, and
     // then writes that clip out (docs/replay-buffer.md).

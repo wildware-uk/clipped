@@ -6,9 +6,19 @@ resolver = "2"
 # --workspace --all-targets` and `cargo build --workspace` cover them: a test
 # application nobody compiles is a capture test that stops running, and finding
 # that out during a capture investigation is the worst possible moment.
+#
+# `plugins/*` are the game integrations (docs/plugin-api.md). A plugin is an
+# executable a user installs, not a crate anything here links, so it could have
+# been a workspace of its own — and it deliberately is not, for the reason the
+# test applications are members: `cargo fmt`, `cargo clippy --workspace`,
+# `cargo build --workspace`, `cargo test --workspace` and `cargo deny` reach a
+# member, and a plugin nobody compiles is an integration that stops working
+# without anybody finding out. Nothing in the product may depend on one, which
+# `tests/integration/tests/workspace_layering.rs` asserts.
 members = [
     "apps/recorder",
     "crates/*",
+    "plugins/*",
     "test-apps/*",
     "tests/integration",
     "tests/media",

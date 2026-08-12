@@ -202,63 +202,92 @@ the decision is recorded rather than discovered in a diff.
 
 ## Register of network communication
 
-**Clipped currently performs no network communication of either class.** The
-table below is empty by design, and it is the change that introduces network
-communication that fills in its own row.
+**Clipped itself — the recorder and the desktop application — performs no
+network communication of either class.** One bundled *plugin* does, and it is
+the row below.
 
 | Feature | Class | Destination | Default | Opt-in |
 | --- | --- | --- | --- | --- |
-| *(none yet)* | | | | |
+| League of Legends highlight plugin | Loopback | `127.0.0.1:2999`, connect only | Off | Enabling the plugin, whose declaration is this row in the words `plugin.json` says it in |
 
-Two things are anticipated but **not implemented**, and neither has any code
-behind it today. They are listed so that the shape of a future row is clear,
-not to imply they exist:
+What that row means, in full, because a register entry that has to be decoded
+is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design):
+
+- **What is sent:** an HTTP `GET` of `/liveclientdata/allgamedata`, with no
+  body, no cookie and no authorisation header. Nothing about the machine, the
+  user or the recording is in the request, and nothing is ever sent anywhere
+  else.
+- **When:** once a second, only while the plugin is attached to a running
+  League of Legends process. Never when the game is not running, because the
+  plugin is not running either.
+- **What comes back:** the match's own state — the event list, the match clock
+  and the players in it. It is read for kills, deaths, assists and the result,
+  and what reaches the recording is the events, with the game's own fields
+  attached. It is never sent anywhere.
+- **When the network is unreachable or the API is not there:** nothing happens.
+  The plugin keeps polling, says why in the log, tells the user after a minute
+  of silence, and the recording is unaffected — capture never waits on it, and
+  a plugin that fails is a plugin that stops, not a recording that stops.
+- **The proxy question, since it decides whether "loopback" is true:** the
+  request is made with `WINHTTP_ACCESS_TYPE_NO_PROXY`, so a system proxy
+  configured on the machine cannot route it off the machine.
+
+One thing is anticipated but **not implemented**, and has no code behind it
+today. It is listed so that the shape of a future row is clear, not to imply it
+exists:
 
 - **Update checking.** If added, a plain request for a version file with no
   query parameters, no install identifier and no usage data attached, off
   unless the user enables it. It would gain a register row and a setting at
   that point.
-- **Highlight plugin game feeds (M9).** Loopback listeners or connections to a
-  game's local telemetry or Game State Integration endpoint, active only while
-  the relevant plugin is enabled. See below.
 
 ## Plugin network access
 
-Everything in this section is **policy to be implemented in Milestone 9
-(Highlight Plugin API)**, alongside the plugin contract and plugin manager. No
-plugin system exists yet, so none of this is enforced today. It is written now
-so that M9 is built to it rather than retrofitted.
+This section was written as **policy to be implemented in Milestone 9
+(Highlight Plugin API)**. Two parts of it are now implemented and one is not,
+so the state of each is stated where it appears rather than left to be inferred
+([docs/plugin-api.md](plugin-api.md) is how, and `crates/plugins` is where).
 
-**Declaration.** A plugin declares its network access in its manifest: the
-class (loopback or outbound), the destinations, whether it listens or connects,
-and the purpose in one line. A plugin that declares nothing is a plugin that is
-permitted nothing.
+**Declaration** — *implemented*. A plugin declares its network access in its
+manifest: the class (loopback or outbound), the destinations, whether it
+listens or connects, and the purpose in one line. A plugin that declares
+nothing is a plugin that is permitted nothing. A declaration that contradicts
+itself — `loopback` naming an address that is not the loopback address, or an
+`outbound` grant naming `127.0.0.1` — is refused rather than shown.
 
-**Consent.** The plugin manager shows the declaration before the user enables
-the plugin, in plain terms — "listens on 127.0.0.1 for Counter-Strike 2 game
-state", not a permissions grid. Enabling the plugin is the consent. If an
-update changes the declaration — most importantly, if it adds outbound access
-where there was only loopback — the consent lapses and the user is asked again
-before the plugin runs.
+**Consent** — *implemented, and not yet shown to anybody*. The declaration is a
+value the user's consent is recorded against, and a plugin whose declaration
+has changed since it was allowed cannot be started until they are asked again —
+"the consent lapses", enforced by a type. What does not exist yet is the screen
+that shows it ([issue #281](https://github.com/wildware-uk/clipped/issues/281)),
+so today the only way to read a bundled plugin's declaration is its
+`plugin.json` and the row in the register above.
 
-**Mediation.** Plugins reach the network through an interface the host
-provides, not by opening their own sockets, so that requests can be checked
-against the declaration. A request outside the declaration is refused, logged
-and surfaced to the user, and the plugin is disabled until they decide what to
-do. None of this may affect the recording: a plugin that is refused, that hangs
-or that panics must not stall or stop capture. That requirement comes from
-SPEC.md section 2, which says that background analysis must never interfere with
-the game, and from AGENTS.md sections 17 and 18.
+**Mediation** — **not implemented**. This paragraph described plugins reaching
+the network through an interface the host provides, so that requests could be
+checked against the declaration. That is not what M9 built: a plugin is a
+separate process and opens its own sockets, so the declaration is checked,
+rendered and consented to, and it is not a sandbox.
+[Issue #280](https://github.com/wildware-uk/clipped/issues/280) is where an
+AppContainer or job object makes it enforceable — possible *because* a plugin is
+a process — and `NetworkAccess::ENFORCEMENT` is the sentence the user is shown
+in the meantime, which does not overstate it. The rest of the paragraph holds
+and is implemented: none of this may affect the recording, and a plugin that
+hangs, floods or panics is stopped without capture noticing. That requirement
+comes from SPEC.md section 2, which says that background analysis must never
+interfere with the game, and from AGENTS.md sections 17 and 18.
 
 **What enforcement can honestly promise.** How strong that mediation is depends
-on the isolation model M9 chooses, and that choice is not yet made. For an
-out-of-process or sandboxed plugin, the host can genuinely prevent undeclared
-network access. For a plugin loaded in-process as native code, it cannot: such
-a plugin can call the operating system directly, and the declaration is a
-contract backed by review and by the plugin being open to inspection, not a
-sandbox. Whichever model is picked, the plugin manager must state which
-guarantee the user is actually getting rather than implying the stronger one.
-The isolation decision belongs in an ADR under `docs/adr/`.
+on the isolation model, and M9 chose **out of process**: a plugin is a directory
+with an executable in it, which the recorder starts, talks to over a pipe and
+can kill. That choice is what makes enforcement possible at all — an
+in-process native plugin could call the operating system directly and could
+never be held to a declaration — and it is the reason the promise above can
+one day be kept. It is not kept today: nothing yet confines the child, and the
+plugin manager must state the guarantee the user is actually getting rather
+than implying the stronger one. The decision is argued in
+[plugin-api.md](plugin-api.md) and belongs in an ADR
+([issue #279](https://github.com/wildware-uk/clipped/issues/279)).
 
 **No exemptions.** Plugins shipped with Clipped declare their network access on
 the same terms as third-party ones and appear in the register above.

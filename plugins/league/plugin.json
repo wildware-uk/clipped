@@ -1,0 +1,17 @@
+{
+  "contract": 1,
+  "id": "league-of-legends",
+  "name": "League of Legends",
+  "version": "0.1.0",
+  "description": "Reports kills, deaths, assists, match start and end, and the result, from the Live Client Data API.",
+  "executable": "clipped-league-plugin.exe",
+  "supports": { "executables": ["League of Legends.exe"] },
+  "network": [
+    {
+      "class": "loopback",
+      "direction": "connect",
+      "endpoint": "127.0.0.1:2999",
+      "purpose": "reads the Live Client Data API the running game serves"
+    }
+  ]
+}
