@@ -38,11 +38,21 @@
 //! `apps/recorder`'s `watch` subcommand is the driver that carries out what it
 //! decides.
 //!
-//! **There is no audio track yet.** A recording written here has one video
-//! stream and nothing else; wiring `clipped-audio` in is
-//! [issue #180](https://github.com/wildware-uk/clipped/issues/180). A caller
-//! that asked for a microphone or system audio is told so once, at `warn`,
-//! rather than being left to discover it in the file (AGENTS.md section 54).
+//! **A recording has sound in it.** [`RecordingSettings::with_system_audio`] and
+//! [`RecordingSettings::with_microphone`] each add a named, independent audio
+//! track fed by its own `clipped-audio` capture on its own thread
+//! ([issue #180](https://github.com/wildware-uk/clipped/issues/180)); [`audio`]
+//! is the wiring and `docs/av-sync.md` is the timing model it implements. Both
+//! default to [`AudioSourceSetting::Off`], so a library caller that says nothing
+//! gets a video-only file and no microphone is opened behind its back.
+//!
+//! What is *not* here is routing: a compatibility mix
+//! ([issue #29](https://github.com/wildware-uk/clipped/issues/29)), the game's
+//! own process tree ([issue #26](https://github.com/wildware-uk/clipped/issues/26))
+//! and per-application tracks
+//! ([issue #27](https://github.com/wildware-uk/clipped/issues/27)) are M2. A
+//! recording made today has at most one system-audio track — the whole output
+//! endpoint — and one microphone track.
 //!
 //! A recording can also fill a replay buffer: [`record_with_replay`] copies
 //! every packet it writes to the file into a `clipped_replay::ReplayBuffer` as
@@ -93,8 +103,8 @@
 //!
 //! # Threading
 //!
-//! Two threads, and the split is forced by AGENTS.md section 20 — a capture
-//! thread may not wait on the filesystem:
+//! Two threads plus one per audio source, and the split is forced by AGENTS.md
+//! section 20 — a capture thread may not wait on the filesystem:
 //!
 //! ```text
 //!  caller's thread                        muxing thread
@@ -103,7 +113,13 @@
 //!  submit it to the encoder                 │              │
 //!  drain packets ──── bounded queue ──────▶ │ write_packet │──▶ recording.mkv
 //!  poll the stop signal                     │              │
-//!  repeat                                   └──────────────┘
+//!  repeat                                   │              │
+//!                                           │              │
+//!  audio thread (one per source)            │              │
+//!  ─────────────────────────────            │              │
+//!  read a buffer from the endpoint          │              │
+//!  place it on the timeline                 │              │
+//!  queue it ────────── same queue ────────▶ │ write_samples│
 //! ```
 //!
 //! Capture and encoding share one thread because a captured texture may not
@@ -127,7 +143,15 @@
 //! is the reference, the first frame kept fixes the epoch
 //! ([`clipped_capture::CaptureClock`]), and every timestamp that reaches the
 //! container has been through one conversion in one place. Nothing here reads a
-//! clock to stamp a frame.
+//! clock to stamp a frame or a sample.
+//!
+//! That includes the audio: each buffer is placed through
+//! `CaptureClock::media_time_on`, naming the clock WASAPI reports on, and the
+//! offset between the endpoint's own account of a moment and the track's is
+//! *measured* with `clipped_capture::DriftEstimator` rather than assumed —
+//! [`AudioSyncReport`] is what it found. The rule about audio that precedes the
+//! epoch is applied here too: it is trimmed at the epoch, to the sample, rather
+//! than left for the writer to clamp onto the first instant of the file.
 //!
 //! # Example
 //!
@@ -172,6 +196,8 @@ mod settings;
 mod stop;
 
 #[cfg(windows)]
+mod audio;
+#[cfg(windows)]
 mod encoding;
 #[cfg(windows)]
 mod muxing;
@@ -185,10 +211,10 @@ pub use error::SessionError;
 pub use failure::{FailureKind, FootageKept, RecordingFailure};
 pub use pacing::FrameGate;
 pub use progress::RecordingProgress;
-pub use report::{EndReason, RecordingReport};
+pub use report::{AudioSyncReport, AudioTrackReport, EndReason, RecordingReport};
 pub use settings::{
-    CaptureTargetSettings, CodecPreference, EncoderPreference, RecordingSettings,
-    ResolutionSetting, DEFAULT_FRAMERATE,
+    AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,
+    RecordingSettings, ResolutionSetting, DEFAULT_FRAMERATE,
 };
 pub use stop::StopSignal;
 

@@ -15,6 +15,14 @@ authors.workspace = true
 clipped-capture.workspace = true
 clipped-encoder.workspace = true
 clipped-muxer.workspace = true
+# The endpoints a recording's audio tracks come from (#180, `src/audio`). This
+# crate is the only one that holds both `clipped-audio` and `clipped-muxer`,
+# which is what the dependency table in README.md means by putting the routing
+# between two layer-1 subsystems in layer 3: neither of them may depend on the
+# other, and the timestamp bridge between them —
+# `CaptureClock::media_time_on` — is deliberately something a caller has to name
+# a clock for (docs/av-sync.md).
+clipped-audio.workspace = true
 # The rolling window of encoded segments a replay save is built from
 # (docs/replay-buffer.md). This crate is where it attaches, because this is
 # where the encoder's packets are drained: the buffer is a second consumer of
@@ -99,6 +107,12 @@ windows = { workspace = true, features = [
 # in this workspace presents the same argument syntax and the same usage errors
 # (the root manifest says why).
 clap.workspace = true
+# AGENTS.md section 22: a recording this crate produced is inspected with
+# `ffprobe` rather than taken on trust. `src/audio/tests.rs` drives the real
+# muxing thread over scripted captures and asserts on the file that comes out —
+# the streams, their codec, sampling rate and channel count, and how far apart
+# the tracks are.
+clipped-media-validation.workspace = true
 
 [lints]
 workspace = true

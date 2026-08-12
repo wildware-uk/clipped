@@ -12,10 +12,30 @@
 //! initialise it           returns the frame format the encoder is configured from
 //! acquire one frame       the only way to learn which device the textures are on
 //! open the encoder        against that device, so no frame is ever copied across adapters
+//! open the audio          the endpoints' formats are what the audio tracks declare
 //! create the file         the encoder's parameter sets are the container's codec header
 //! ── loop ──              acquire, admit, submit, drain, queue
+//!    first frame          fixes the epoch, and starts the audio threads on it
+//! stop the audio          before the queue closes, so the last samples are written
 //! flush and finalise      on every path out, including a panic
 //! ```
+//!
+//! # Where audio joins
+//!
+//! Two moments, and they are apart for a reason. The endpoints are **opened**
+//! before the file is created, because Matroska fixes a track's sampling rate
+//! and channel count in the header and neither is knowable until a device has
+//! been asked. The threads that read them are **started** at the first video
+//! frame, because that frame is the recording's epoch and nothing can be placed
+//! on the timeline until there is one (`docs/av-sync.md`). What happens in
+//! between — the endpoint running while the encoder opens and the file is
+//! created — is audio describing moments before the recording, and
+//! `crate::audio::placement` trims it at the epoch rather than letting the
+//! writer stack it on the first instant of the file.
+//!
+//! The threads are stopped and joined before [`crate::muxing::MuxingThread`] is
+//! finished, because each holds a handle to its queue and the writer's loop ends
+//! when the last handle is dropped.
 //!
 //! The one surprising step is the third. `CaptureBackend` hands out textures
 //! and never its device, because the device is the backend's for its whole life
@@ -46,11 +66,12 @@ use clipped_logging::{RedactedPath, SessionContext, SessionId};
 use clipped_muxer::{MkvWriter, RecordingLayout, VideoCodec, VideoTrack};
 use clipped_replay::ReplayBuffer;
 
+use crate::audio::{self, AudioThreads, OpenSource};
 use crate::encoding;
 use crate::error::SessionError;
 use crate::muxing::{MuxingThread, SpaceGuard, SpaceState};
 use crate::pacing::FrameGate;
-use crate::report::{EndReason, RecordingReport};
+use crate::report::{AudioTrackReport, EndReason, RecordingReport};
 use crate::settings::RecordingSettings;
 use crate::windows::device::FrameDevice;
 
@@ -79,15 +100,6 @@ pub(crate) fn record(
     stop: &dyn crate::StopSignal,
     outputs: &crate::RecordingOutputs<'_>,
 ) -> Result<RecordingReport, SessionError> {
-    if settings.audio_requested() {
-        // Said once, plainly, rather than left to be discovered in a file with
-        // no sound in it (AGENTS.md section 54).
-        tracing::warn!(
-            "audio was asked for and this build cannot record it: the recording will have a \
-             video track and nothing else. Wiring clipped-audio into a session is issue #180"
-        );
-    }
-
     let method = choose_backend(settings)?;
     let mut backend = registered_backend(method)
         .ok_or_else(|| SessionError::BackendNotRegistered {
@@ -160,11 +172,22 @@ fn record_frames(
     let _entered = span.enter();
 
     let mut encoder = opened.encoder;
-    let writer = open_output(settings, encoder.as_ref(), opened.codec, encode_size)?;
+    // Before the file, because a track's sampling rate and channel count go in
+    // the container's header and only the device knows them. A source that
+    // cannot be opened fails the recording here, while nothing has been
+    // created and while the user can still act on it.
+    let sources = audio::open(settings)?;
+    let layout = audio::declare(
+        video_track(encoder.as_ref(), opened.codec, encode_size),
+        &sources,
+    );
+
+    let writer = open_output(settings, &layout)?;
     let muxing = MuxingThread::start(
         writer,
         SpaceGuard::new(settings.output(), settings.minimum_free_space()),
-    );
+        &layout,
+    )?;
     let sinks = PacketSinks {
         muxing: &muxing,
         replay,
@@ -173,6 +196,8 @@ fn record_frames(
     let mut counters = Counters::default();
     let mut gate = FrameGate::new(settings.framerate())?;
     let mut clock = None;
+    let mut sources = Some(sources);
+    let mut audio_threads: Option<AudioThreads> = None;
     let mut end_reason = EndReason::Stopped;
     let mut failure = None;
     let mut low_space_reported = false;
@@ -220,6 +245,14 @@ fn record_frames(
                 counters.missed_by_source += u64::from(frame.frames_missed().unwrap_or(0));
 
                 let clock = *clock.get_or_insert_with(|| CaptureClock::start_at(frame.timestamp()));
+                // The epoch exists from here, so the audio sources can be given
+                // one. Started once, on the first frame the recording keeps, and
+                // not before: a packet has nowhere to go on a timeline that has
+                // not begun (`docs/av-sync.md`).
+                if let Some(sources) = sources.take() {
+                    audio_threads = start_audio(sources, &layout, clock, &muxing);
+                }
+
                 if let Err(error) = offer(
                     &frame,
                     clock,
@@ -263,12 +296,19 @@ fn record_frames(
     }
 
     // The finalisation, in order: the encoder is told the stream has ended and
-    // drained of the pictures it was holding back, then the queue is closed and
-    // the trailer written. A failure in the first does not skip the second.
+    // drained of the pictures it was holding back, the audio threads are stopped
+    // and joined, then the queue is closed and the trailer written. A failure in
+    // any of them does not skip the ones after it.
     if let Err(error) = flush(encoder.as_mut(), &sinks, &mut counters) {
         failure.get_or_insert(error);
     }
     encoder.shut_down();
+
+    // Before `muxing.finish`, and this order is load-bearing: each audio thread
+    // holds a clone of the writer's queue, and the writer's loop only ends once
+    // the last of them has been dropped. Joining them here is also what puts
+    // their final buffers into the file rather than into a closed channel.
+    let audio_tracks = stop_audio(audio_threads, &muxing);
 
     let summary = match muxing.finish() {
         Ok(summary) => summary,
@@ -292,7 +332,20 @@ fn record_frames(
         timestamps_corrected: summary.timestamps_corrected(),
         duration: summary.duration,
         end_reason,
+        audio_tracks,
     };
+
+    if summary.audio_tracks_without_packets > 0 {
+        // The muxer counted the tracks nothing was ever written to; each source
+        // has already said what it produced, and this is the file's own account
+        // of the same fact. Both are worth having: a track can be empty because
+        // its device was silent, and it can be empty because everything it
+        // produced preceded the recording.
+        tracing::warn!(
+            empty_audio_tracks = summary.audio_tracks_without_packets,
+            "the recording has audio tracks with no audio in them"
+        );
+    }
 
     tracing::info!(
         output = %RedactedPath::new(report.output()),
@@ -332,6 +385,44 @@ fn record_frames(
         Some(error) => Err(error),
         None => Ok(report),
     }
+}
+
+/// Starts the threads reading a recording's audio sources, if it has any.
+///
+/// [`None`] for a recording with no audio at all, which is what
+/// `--microphone none --system-audio none` produces: nothing is opened, nothing
+/// is started, and nothing is said about it.
+fn start_audio(
+    sources: Vec<OpenSource>,
+    layout: &RecordingLayout,
+    clock: CaptureClock,
+    muxing: &MuxingThread,
+) -> Option<AudioThreads> {
+    (!sources.is_empty()).then(|| AudioThreads::start(sources, layout, clock, muxing))
+}
+
+/// Stops the audio threads and collects what each source produced.
+///
+/// Empty for a recording that had none. The count of buffers the writer had no
+/// room for is read from the queue rather than summed from the reports, because
+/// a thread that panicked has no report and the buffers it lost are still
+/// missing from the file.
+fn stop_audio(threads: Option<AudioThreads>, muxing: &MuxingThread) -> Vec<AudioTrackReport> {
+    let tracks = threads.map_or_else(Vec::new, |mut threads| threads.finish());
+
+    let dropped = muxing.audio_buffers_dropped();
+    if dropped > 0 {
+        // A fault, and one nothing else would report: audio is gone from the
+        // file, in holes wherever the disk could not keep up. Said once, at the
+        // end, with the total.
+        tracing::warn!(
+            buffers_dropped_writer_behind = dropped,
+            "audio was lost because the thread writing the recording could not keep up; the \
+             tracks have holes in them where those buffers should have been"
+        );
+    }
+
+    tracks
 }
 
 /// Which of the loop's failure and the writer thread's failure a user is told
@@ -615,12 +706,36 @@ fn first_frame_device(
     Err(SessionError::NoFrames)
 }
 
-/// Creates the output file with a track describing what the encoder produces.
+/// The video track describing what the encoder produces.
+///
+/// Deliberately no `with_frame_rate`. `--framerate` is the ceiling the capture
+/// loop holds a recording to, not the rate it achieved: a 30 fps source recorded
+/// with the default `--framerate 60` produces a real 30 fps file.
+/// `clipped-muxer` writes a declared rate into the stream's `avg_frame_rate`
+/// (`crates/muxer/src/writer.rs`), which is by definition the *average* the file
+/// carries, so declaring the ceiling there is incorrect codec metadata
+/// (AGENTS.md section 22). Measured rather than argued: putting the rate back
+/// and recording the 30 fps test pattern gave `ffprobe` `60/1 fps, 115 decoded
+/// frames` over 3.806 s.
+///
+/// Leaving it out lets a player derive the rate from the timestamps, which are
+/// the recording's own account of when its frames happened. The encoder is still
+/// configured for the ceiling; what that costs is in `docs/recorder-cli.md` and
+/// is [issue #191](https://github.com/wildware-uk/clipped/issues/191).
+fn video_track(encoder: &dyn VideoEncoder, codec: Codec, size: (u32, u32)) -> VideoTrack {
+    VideoTrack::new(container_codec(codec), size.0, size.1)
+        // The encoder's out-of-band header: the sequence and picture parameter
+        // sets for H.264 and HEVC, the sequence header for AV1. Matroska needs
+        // it in the track entry, before the first frame, which is why
+        // `VideoEncoder::parameter_sets` is available from the moment a session
+        // opens (`crates/encoder/src/backend.rs`).
+        .with_codec_private(encoder.parameter_sets().to_vec())
+}
+
+/// Creates the output file with every track the recording will contain.
 fn open_output(
     settings: &RecordingSettings,
-    encoder: &dyn VideoEncoder,
-    codec: Codec,
-    size: (u32, u32),
+    layout: &RecordingLayout,
 ) -> Result<MkvWriter, SessionError> {
     // The recordings directory is Clipped's own and is created by the recording
     // that goes in it, which is what keeps a run that records nothing from
@@ -644,32 +759,7 @@ fn open_output(
             .map_err(|source| SessionError::OutputDirectory { source })?;
     }
 
-    // Deliberately no `with_frame_rate`. `--framerate` is the ceiling the
-    // capture loop holds a recording to, not the rate it achieved: a 30 fps
-    // source recorded with the default `--framerate 60` produces a real 30 fps
-    // file. `clipped-muxer` writes a declared rate into the stream's
-    // `avg_frame_rate` (`crates/muxer/src/writer.rs`), which is by definition
-    // the *average* the file carries, so declaring the ceiling there is
-    // incorrect codec metadata (AGENTS.md section 22). Measured rather than
-    // argued: putting the rate back and recording the 30 fps test pattern gave
-    // `ffprobe` `60/1 fps, 115 decoded frames` over 3.806 s.
-    // Leaving it out lets a player derive the rate from the timestamps, which
-    // are the recording's own account of when its frames happened. The
-    // encoder is still configured for the ceiling; what that costs is in
-    // `docs/recorder-cli.md` and is
-    // [issue #191](https://github.com/wildware-uk/clipped/issues/191).
-    let track = VideoTrack::new(container_codec(codec), size.0, size.1)
-        // The encoder's out-of-band header: the sequence and picture parameter
-        // sets for H.264 and HEVC, the sequence header for AV1. Matroska needs
-        // it in the track entry, before the first frame, which is why
-        // `VideoEncoder::parameter_sets` is available from the moment a session
-        // opens (`crates/encoder/src/backend.rs`).
-        .with_codec_private(encoder.parameter_sets().to_vec());
-
-    Ok(MkvWriter::create(
-        settings.output(),
-        &RecordingLayout::new(track),
-    )?)
+    Ok(MkvWriter::create(settings.output(), layout)?)
 }
 
 /// Refuses a recording the drive has no room to make.
@@ -1214,12 +1304,31 @@ mod tests {
         crate::muxing::SpaceGuard::new(recording.path(), 0)
     }
 
+    /// The layout the tests below record into: one video track and no audio.
+    ///
+    /// What is under test here is the replay tap, which is a video path; the
+    /// audio side has its own file (`crate::audio`).
+    fn video_only_layout() -> RecordingLayout {
+        RecordingLayout::new(
+            VideoTrack::new(VideoCodec::H264, TEST_SIZE.0, TEST_SIZE.1)
+                .with_codec_private(H264_PARAMETER_SETS.to_vec()),
+        )
+    }
+
     /// A real Matroska writer over a temporary file.
     fn writer_for(recording: &TemporaryRecording) -> MkvWriter {
-        let track = VideoTrack::new(VideoCodec::H264, TEST_SIZE.0, TEST_SIZE.1)
-            .with_codec_private(H264_PARAMETER_SETS.to_vec());
-        MkvWriter::create(recording.path(), &RecordingLayout::new(track))
+        MkvWriter::create(recording.path(), &video_only_layout())
             .expect("a recording can be created in the temporary directory")
+    }
+
+    /// A muxing thread over a temporary file, with the disk guard turned off.
+    fn muxing_for(recording: &TemporaryRecording) -> MuxingThread {
+        MuxingThread::start(
+            writer_for(recording),
+            unguarded(recording),
+            &video_only_layout(),
+        )
+        .expect("a layout with no audio tracks has nothing to refuse")
     }
 
     /// A thirty-second buffer at the rate a 1080p60 recording is given.
@@ -1239,7 +1348,7 @@ mod tests {
         // buffer is dropped the buffer holds nothing; if the wrong packet is
         // pushed the bytes below do not match the frame they claim to be.
         let recording = TemporaryRecording::new("replay-tap");
-        let muxing = MuxingThread::start(writer_for(&recording), unguarded(&recording));
+        let muxing = muxing_for(&recording);
         let buffer = replay_buffer();
         let sinks = PacketSinks {
             muxing: &muxing,
@@ -1294,7 +1403,7 @@ mod tests {
         // The other half of the option: attaching a buffer is what a caller
         // chooses, and a recording without one must be untouched by any of it.
         let recording = TemporaryRecording::new("no-replay");
-        let muxing = MuxingThread::start(writer_for(&recording), unguarded(&recording));
+        let muxing = muxing_for(&recording);
         let sinks = PacketSinks {
             muxing: &muxing,
             replay: None,
@@ -1316,7 +1425,7 @@ mod tests {
         // then report the failure, which is a buffer describing a recording
         // that does not exist.
         let recording = TemporaryRecording::new("refused-packet");
-        let muxing = MuxingThread::start(writer_for(&recording), unguarded(&recording));
+        let muxing = muxing_for(&recording);
 
         // An empty packet is what the writer refuses (`MuxError::EmptyPacket`),
         // and the writer thread stops at its first failure — so after this the

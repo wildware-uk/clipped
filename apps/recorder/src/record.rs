@@ -29,8 +29,8 @@ use std::path::Path;
 
 use clipped_logging::RedactedPath;
 use clipped_session::{
-    record, CaptureTargetSettings, CodecPreference, EncoderPreference, RecordingFailure,
-    RecordingReport, RecordingSettings, ResolutionSetting, SessionError,
+    record, AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,
+    RecordingFailure, RecordingReport, RecordingSettings, ResolutionSetting, SessionError,
 };
 use clipped_windows::{
     enumerate_windows, resolve, DpiAwareness, ResolveError, TargetSelector, WindowInfo,
@@ -300,14 +300,25 @@ pub(crate) fn settings_for(config: &RecordingConfig, window: &WindowInfo) -> Rec
                 EncoderPreference::Fixed(clipped_encoder::EncoderKind::Software)
             }
         })
-        // The two audio selections default to `default`, so most invocations
-        // ask for audio without meaning to. The session says so once rather
-        // than writing a silent file and letting the user find out
-        // (AGENTS.md section 54).
-        .with_audio_requested(
-            config.microphone != AudioDeviceSelection::Disabled
-                || config.system_audio != AudioDeviceSelection::Disabled,
-        )
+        // Both default to `default`, so an invocation that says nothing about
+        // audio records the output device and the microphone — which is what
+        // the product does (SPEC.md section 11). `none` on either turns that
+        // source off entirely: no device is opened and no track is declared.
+        .with_system_audio(audio_source(&config.system_audio))
+        .with_microphone(audio_source(&config.microphone))
+}
+
+/// The session's vocabulary for a command line's audio selection.
+///
+/// The two enumerations are separate for the reason `clipped_session::settings`
+/// gives for existing at all: a command-line front end that named
+/// `clipped-audio`'s types would be reaching two layers past the crate it calls.
+fn audio_source(selection: &AudioDeviceSelection) -> AudioSourceSetting {
+    match selection {
+        AudioDeviceSelection::Default => AudioSourceSetting::SystemDefault,
+        AudioDeviceSelection::Disabled => AudioSourceSetting::Off,
+        AudioDeviceSelection::Named(name) => AudioSourceSetting::Named(name.clone()),
+    }
 }
 
 /// Records what the arguments resolved to, once, before anything uses them.
@@ -366,6 +377,13 @@ fn log_target(window: &WindowInfo) {
 /// (docs/recorder-cli.md).
 fn report_completion(report: &RecordingReport) {
     eprintln!("{report}");
+
+    // One line per audio track, because "the recording has sound in it" is not
+    // something a user should have to open the file to find out — and because
+    // an empty track has a cause the line names (AGENTS.md section 45).
+    for track in report.audio_tracks() {
+        eprintln!("  {track}");
+    }
 
     if report.frames_dropped_writer_behind() > 0 {
         // Separated from the summary because it is the one figure that means
@@ -490,26 +508,46 @@ mod tests {
     }
 
     #[test]
-    fn audio_is_reported_as_asked_for_unless_both_sources_were_turned_off() {
-        // The defaults ask for both, so almost every invocation reaches the
-        // session wanting audio it cannot have — and the one thing that must
-        // not happen is a silent file and no word about it.
-        assert!(settings_for(&config(), &window()).audio_requested());
+    fn each_audio_selection_reaches_the_session_as_the_source_it_named() {
+        // The defaults ask for both, so an invocation that says nothing about
+        // audio records the output device and the microphone. A selection that
+        // parsed and was then flattened into "audio: yes" is a control that
+        // silently does something else (AGENTS.md section 27), and this mapping
+        // is the only place it could happen.
+        let defaults = settings_for(&config(), &window());
+        assert_eq!(defaults.system_audio(), &AudioSourceSetting::SystemDefault);
+        assert_eq!(defaults.microphone(), &AudioSourceSetting::SystemDefault);
 
-        let microphone_only = RecordingConfig {
+        let named = RecordingConfig {
+            microphone: AudioDeviceSelection::Named("Yeti".to_owned()),
             system_audio: AudioDeviceSelection::Disabled,
             ..config()
         };
-        assert!(settings_for(&microphone_only, &window()).audio_requested());
+        let named = settings_for(&named, &window());
+        assert_eq!(
+            named.microphone(),
+            &AudioSourceSetting::Named("Yeti".to_owned()),
+            "the device somebody named has to reach the session, not merely `on`"
+        );
+        assert_eq!(named.system_audio(), &AudioSourceSetting::Off);
+    }
 
+    #[test]
+    fn turning_both_sources_off_asks_the_session_for_a_video_only_recording() {
+        // `--microphone none --system-audio none`: no device is opened, no
+        // track is declared, and nothing is said about audio.
         let silent = RecordingConfig {
             microphone: AudioDeviceSelection::Disabled,
             system_audio: AudioDeviceSelection::Disabled,
             ..config()
         };
+        let settings = settings_for(&silent, &window());
+
+        assert!(settings.system_audio().is_off());
+        assert!(settings.microphone().is_off());
         assert!(
-            !settings_for(&silent, &window()).audio_requested(),
-            "somebody who asked for no audio should not be warned about audio"
+            !settings.records_audio(),
+            "somebody who asked for no audio should have no audio device opened"
         );
     }
 }

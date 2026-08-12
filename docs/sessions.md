@@ -374,17 +374,28 @@ Three mechanisms carry most of it, and none of them is new to this section:
 | The output drive is unplugged | Whatever reached the drive before it went | `end_reason=output-unavailable` | Reconnect the drive; record to an internal one if it recurs |
 | The GPU driver resets | Everything up to the reset, finalised | `graphics-device-lost`, naming the driver reset rather than "encoding stopped" | Record again — a new encoder opens on the recovered device |
 | The encoder session table is full | Nothing was recorded; it failed to open | `encoder-unavailable`, naming the encoder | Close other recording or streaming applications; pick another encoder |
+| An audio device is unplugged mid-recording | Everything, including the track: it becomes silence of the right length | A warning, and how much of the track was silence when the recording ends | Plug it back in; the capture picks it up again |
+| An audio device cannot be opened at the start | Nothing was recorded; it failed before the file existed | `audio-unavailable`, naming the track | Connect the device, choose another, or record with that source turned off |
 | The recorder process is killed | Everything up to the last closed cluster | Nothing at the time. `clipped-recorder recover` finds it on the next launch | Keep it or discard it — see below |
 | The window changes size | Everything up to the change | `end_reason=target-resized`; a second recording follows in the same session | Nothing |
 | The machine sleeps | Everything up to the suspend | `system-resumed` in the session's events; a second recording follows | Nothing |
 | A metadata write fails | The video, always | A warning; the session is in memory until the next change | Nothing |
 
-Three of the failures SPEC.md section 35 lists are **not** covered here, and are
-not claimed to be: an audio device removed, a microphone changed and an HDR
-change. A recording has no audio track at all yet
-([#180](https://github.com/wildware-uk/clipped/issues/180)), so there is no
-device to lose; a high dynamic range capture is refused before it starts with a
-message naming [#99](https://github.com/wildware-uk/clipped/issues/99). Capture
+Two of the audio failures SPEC.md section 35 lists — a device removed and a
+microphone changed — are handled a layer down rather than by anything in this
+table, and the answer is the same for both: the track becomes silence of exactly
+the right length and the capture keeps looking for the device, because a
+recording in progress is worth more than the audio it is missing
+(`docs/audio-routing.md`, AGENTS.md sections 16 and 17). Nothing about the
+session ends, and the recording's report says afterwards how much of each track
+was synthesised silence. A device that cannot be opened when the recording
+*starts* is a different matter and does fail it: `audio-unavailable`, before any
+file exists, because a recording made silently without the microphone somebody
+asked for is one they find out about when it cannot be made again.
+
+The remaining one, an HDR change, is **not** covered here and is not claimed to
+be: a high dynamic range capture is refused before it starts with a message
+naming [#99](https://github.com/wildware-uk/clipped/issues/99). Capture
 failures — a display disconnected, a backend that stops producing frames —
 surface as `capture-lost` with whatever `clipped-capture` said, and fallback
 between backends is [#97](https://github.com/wildware-uk/clipped/issues/97).
