@@ -35,6 +35,26 @@ authors.workspace = true
 #
 # Dual MIT/Apache-2.0.
 toml = "1.1"
+
+# The same format, the other direction: `toml` reads a file into values and
+# `toml_edit` changes a file that already exists without reformatting the rest
+# of it.
+#
+# That is not a nicety here, it is the whole point of the third bullet above.
+# The user's overlay is a file we tell people to hand-edit and to write comments
+# in, and issue #45 puts a settings screen on top of the same file. Rendering
+# the parsed document back — which is what `toml` alone can do — would mean that
+# excluding one game from the UI silently deletes every comment and every
+# arrangement of blocks the user chose in it (AGENTS.md section 56). A backup
+# would make that recoverable rather than not destructive.
+#
+# It costs one crate and nothing else: `indexmap`, `winnow`, `toml_datetime`,
+# `toml_parser` and `toml_writer` are already in the lockfile underneath `toml`,
+# and `Cargo.lock` gained exactly this one line.
+#
+# Dual MIT/Apache-2.0.
+toml_edit = "0.25.13"
+
 # The catalogue's shapes are deserialised, and the workspace pins one serde for
 # the reason its manifest gives.
 serde = { workspace = true, features = ["derive"] }

@@ -23,7 +23,12 @@
 //! Two of the three parts this crate will have. The **game catalogue**
 //! ([issue #42](https://github.com/wildware-uk/clipped/issues/42)) answers
 //! "given a running process, which game is this?" from data a contributor can
-//! edit. The **process watcher**
+//! edit — and, since
+//! [#45](https://github.com/wildware-uk/clipped/issues/45), data the user can
+//! edit too: [`catalogue::Overlay`] registers a game Clipped does not know,
+//! renames one, and excludes one, and
+//! [`catalogue::Catalogue::explain_process`] says why a process matched what it
+//! did. The **process watcher**
 //! ([issue #41](https://github.com/wildware-uk/clipped/issues/41)) reports what
 //! started and what stopped, debounced so that a launcher handing over to a
 //! game is one launch rather than three, and without polling for it.
