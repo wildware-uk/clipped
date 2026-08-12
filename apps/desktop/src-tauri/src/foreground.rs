@@ -469,7 +469,8 @@ mod tests {
         // Clipped's own, `worth_offering` then refuses all of them, and the
         // record control has nothing to offer for anything the user does. It
         // is the primary control on the Home screen, so it would be dead in
-        // the shipped application while all 77 tests and clippy passed.
+        // the shipped application while the whole suite and clippy stayed
+        // green.
         //
         // The desktop window stands in for "a window Clipped did not draw",
         // and it is the one window that can be asked for without opening one:
