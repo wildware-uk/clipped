@@ -17,7 +17,8 @@
 //! # Commands whose subsystem does not exist yet
 //!
 //! Four of the commands the protocol defines belong to subsystems that are not
-//! built: the replay buffer, bookmarks, screenshots and the configuration API.
+//! built: a recording with a replay buffer, bookmarks, screenshots and the
+//! configuration API.
 //! They are [`UnbuiltCommand`], they are refused with
 //! [`ErrorCode::NotImplemented`] and the milestone and issue that build them,
 //! and there is deliberately nowhere for them to be handled — a command that
@@ -170,7 +171,15 @@ fn parse_params<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, 
 /// act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnbuiltCommand {
-    /// `save_replay` — needs the replay buffer.
+    /// `save_replay` — needs a recording that is running a replay buffer.
+    ///
+    /// Not the buffer itself, which exists: [issue
+    /// #37](https://github.com/wildware-uk/clipped/issues/37) wrote
+    /// `clipped_replay::save_clip` and `clipped_session::record_with_replay`
+    /// fills a buffer while it records. What no build does is *start* such a
+    /// recording or route a save request to one, and that is [issue
+    /// #38](https://github.com/wildware-uk/clipped/issues/38) — so that is the
+    /// issue this refusal names.
     SaveReplay,
     /// `add_bookmark` — needs the bookmark store.
     AddBookmark,
@@ -216,7 +225,7 @@ impl UnbuiltCommand {
     #[must_use]
     pub const fn subsystem(self) -> &'static str {
         match self {
-            Self::SaveReplay => "the replay buffer",
+            Self::SaveReplay => "a recording with a replay buffer",
             Self::AddBookmark => "bookmarks",
             Self::TakeScreenshot => "screenshot capture",
             Self::ApplySettings => "the settings API",
@@ -237,7 +246,7 @@ impl UnbuiltCommand {
     #[must_use]
     pub const fn tracking_issue(self) -> u32 {
         match self {
-            Self::SaveReplay => 37,
+            Self::SaveReplay => 38,
             Self::AddBookmark => 64,
             Self::TakeScreenshot => 67,
             Self::ApplySettings => 108,

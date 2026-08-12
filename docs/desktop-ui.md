@@ -179,8 +179,8 @@ only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
 ```text
   Recording process `cs2.exe`          the status, not a control
   ─────────────────────────────
-  Save Replay — needs the replay buffer (#37)      disabled
-  Add Bookmark — needs bookmarks (#64)            disabled
+  Save Replay — needs a recording with a replay buffer (#38)   disabled
+  Add Bookmark — needs bookmarks (#64)                        disabled
   Stop Recording
   ─────────────────────────────
   Open Library
@@ -243,8 +243,8 @@ disc is the one mark whose fill carries both grounds by itself.
 The recorder cannot report one: `RecorderStatus` is `idle` or `recording`, the
 replay buffer exists as a crate and nothing in `serve` runs it, and a tray that
 showed buffering would be showing something nobody measured (AGENTS.md section
-27). It arrives with the buffer, in
-[issue #37](https://github.com/wildware-uk/clipped/issues/37).
+27). It arrives with the recording that runs a buffer, in
+[issue #38](https://github.com/wildware-uk/clipped/issues/38).
 
 ### Nothing offered that would do nothing
 
@@ -421,9 +421,10 @@ for days, and a toast when a recording starts would train the user to dismiss
 them without reading, taking the three that matter with it.
 
 Issue #110's scope also lists "replay saved", "bookmark added" and "screenshot
-taken". **None of them is here**, because no such event exists — saving a replay
-from the retained segments is issue #37, and `save_replay` is a command this
-build refuses. Notifying about something no subsystem reports would be the
+taken". **None of them is here**, because no such event exists — `clipped_replay`
+can write a clip out of the retained segments (issue #37), but no build runs a
+recording with a buffer to save from (issue #38) and `save_replay` is a command
+this build refuses. Notifying about something no subsystem reports would be the
 invented state AGENTS.md section 27 forbids, and it would be the one thing worse
 than a missing notification: a user believing a clip was saved.
 

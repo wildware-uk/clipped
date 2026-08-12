@@ -15,7 +15,7 @@
 //! [`ErrorDetail`] carries the machine-readable particulars for the two codes
 //! that have any: which versions the recorder speaks, and which milestone a
 //! missing subsystem belongs to. A UI that shows "Save replay — not in this
-//! build (M3, issue #37)" is telling the truth; one that shows a greyed-out
+//! build (M3, issue #38)" is telling the truth; one that shows a greyed-out
 //! button with no explanation is not (AGENTS.md section 27).
 //!
 //! # Unknown codes and unknown details
@@ -241,7 +241,8 @@ pub enum ErrorDetail {
     },
     /// Which subsystem is missing, and where it is being built.
     NotImplemented {
-        /// The subsystem in the user's words: "the replay buffer".
+        /// The subsystem in the user's words: "a recording with a replay
+        /// buffer".
         subsystem: String,
         /// The milestone that builds it, such as `M3`.
         milestone: String,
@@ -303,15 +304,15 @@ mod tests {
 
     #[test]
     fn a_missing_subsystem_names_the_milestone_and_the_issue_that_builds_it() {
-        let error = ProtocolError::not_implemented("the replay buffer", "M3", 37);
+        let error = ProtocolError::not_implemented("a recording with a replay buffer", "M3", 38);
 
         assert_eq!(error.code, ErrorCode::NotImplemented);
         assert_eq!(
             error.detail,
             Some(ErrorDetail::NotImplemented {
-                subsystem: "the replay buffer".to_owned(),
+                subsystem: "a recording with a replay buffer".to_owned(),
                 milestone: "M3".to_owned(),
-                tracking_issue: 37,
+                tracking_issue: 38,
             }),
             "the UI has to be able to say which build this arrives in"
         );

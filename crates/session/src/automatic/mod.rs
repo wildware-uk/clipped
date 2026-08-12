@@ -97,8 +97,10 @@
 //! exits, keep everything. The other three are not offered here rather than
 //! being offered and doing nothing (AGENTS.md section 27). Match Recording
 //! needs the highlight provider API (M9); Highlights Only and Manual/Replay
-//! Buffer need a replay buffer that can be *saved* from, which is
-//! [issue #37](https://github.com/wildware-uk/clipped/issues/37) and
+//! Buffer need a recording that *runs* a replay buffer and a way to ask it for
+//! a clip. Writing the clip exists
+//! ([issue #37](https://github.com/wildware-uk/clipped/issues/37)); starting
+//! such a recording and driving a save is
 //! [issue #38](https://github.com/wildware-uk/clipped/issues/38).
 //!
 //! Per-game settings are not applied here either. This module decides *when* to

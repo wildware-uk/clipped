@@ -104,7 +104,7 @@ line and will appear in a configuration file.
 
 | Action | Name | Default | What is behind it today |
 | --- | --- | --- | --- |
-| Save replay | `save_replay` | `Ctrl`+`F10` | Nothing: the replay buffer is M3, [#37](https://github.com/wildware-uk/clipped/issues/37) |
+| Save replay | `save_replay` | `Ctrl`+`F10` | Nothing: the buffer and its save exist ([#37](https://github.com/wildware-uk/clipped/issues/37)), but no build runs a recording with one, which is M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
 | Add bookmark | `add_bookmark` | `Ctrl`+`F9` | Nothing: bookmarks are M8, [#64](https://github.com/wildware-uk/clipped/issues/64) |
 | Take screenshot | `take_screenshot` | — | Nothing: screenshots are M8, [#67](https://github.com/wildware-uk/clipped/issues/67) |
 | Start or stop recording | `toggle_recording` | — | Recording exists; a handler has to be supplied |
@@ -120,7 +120,7 @@ any of them.
 
 **A press with nothing behind it says so.** It is reported as `Unhandled`,
 carrying the milestone and issue where there is one — "Save replay is not in
-this build: the replay buffer arrives in M3 (issue #37)" — and as "nothing in
+this build: a recording with a replay buffer arrives in M3 (issue #38)" — and as "nothing in
 this process handles Start or stop recording" where the subsystem exists and
 this process simply was not given a handler. Nothing is ever swallowed, and no
 handler is ever faked to make a key appear to work (AGENTS.md section 54).

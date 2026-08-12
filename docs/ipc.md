@@ -457,7 +457,7 @@ when a command's parameters are all optional.
 | `start_recording` | the `record` options, below | `recording_started` | yes |
 | `stop_recording` | `recording_id` (optional) | `recording_stopped` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
-| `save_replay` | not yet defined | — | no — M3, [#37](https://github.com/wildware-uk/clipped/issues/37) |
+| `save_replay` | not yet defined | — | no — M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
 | `add_bookmark` | not yet defined | — | no — M8, [#64](https://github.com/wildware-uk/clipped/issues/64) |
 | `take_screenshot` | not yet defined | — | no — M8, [#67](https://github.com/wildware-uk/clipped/issues/67) |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
@@ -618,9 +618,10 @@ issue:
 ```json
 {"type":"response","id":3,"outcome":{"error":{
   "code":"not_implemented",
-  "message":"the replay buffer is not in this build",
-  "detail":{"detail":"not_implemented","subsystem":"the replay buffer",
-            "milestone":"M3","tracking_issue":37}}}}
+  "message":"a recording with a replay buffer is not in this build",
+  "detail":{"detail":"not_implemented",
+            "subsystem":"a recording with a replay buffer",
+            "milestone":"M3","tracking_issue":38}}}}
 ```
 
 They are refused **before dispatch**, so there is no handler for one to be wired

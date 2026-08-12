@@ -393,9 +393,12 @@ mod tests {
     fn the_unbuilt_items_name_the_subsystem_and_the_issue_that_builds_it() {
         let model = tray_model(&attached(RecorderStatus::Idle), Some(&game()));
 
+        // #38 and not #37: #37 built the replay buffer and its save, so a menu
+        // that still named it would be telling a user a shipped feature is
+        // unbuilt. What is missing is a recording running one.
         assert_eq!(
             model.save_replay.label,
-            "Save Replay — needs the replay buffer (#37)"
+            "Save Replay — needs a recording with a replay buffer (#38)"
         );
         assert_eq!(
             model.add_bookmark.label,

@@ -510,7 +510,7 @@ export interface UnsupportedProtocolVersionDetail {
 export interface NotImplementedDetail {
   /** The tag. */
   readonly detail: 'not_implemented';
-  /** The subsystem in the user's words: "the replay buffer". */
+  /** The subsystem in the user's words: "a recording with a replay buffer". */
   readonly subsystem: string;
   /** The milestone that builds it, such as `M3`. */
   readonly milestone: string;
