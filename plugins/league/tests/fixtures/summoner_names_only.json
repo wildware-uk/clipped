@@ -32,9 +32,9 @@
         "EventID": 2,
         "EventName": "ChampionKill",
         "EventTime": 388.2,
-        "KillerName": "Marlowe",
-        "VictimName": "Rosalind",
-        "Assisters": ["Kestrel"]
+        "KillerName": "Marlowe#EUW",
+        "VictimName": "Rosalind#EU1",
+        "Assisters": ["Kestrel#EUW"]
       }
     ]
   },

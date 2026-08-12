@@ -36,6 +36,6 @@ other people (docs/privacy.md) — and point a test at it.
 | `ended_in_a_win.json` | The same match again, finished. A superset of the two above, so the three read in order are three polls of one match. |
 | `ended_in_a_loss.json` | A different match with no kills in it at all, lost. |
 | `no_active_player.json` | Spectating: there is no active player to attribute a kill to. |
-| `summoner_names_only.json` | A client that reports summoner names rather than Riot IDs. |
+| `summoner_names_only.json` | A client that reports the player as a summoner name, with an event list that has started carrying Riot IDs — the mixed shape a patch produces, and the one case where a name is matched without its tag. |
 | `later_patch.json` | Fields and event names this build has never heard of. |
 | `not_in_a_game.json` | What the endpoint answers with when there is no match. |
