@@ -29,7 +29,7 @@
 
 use windows::Win32::System::Threading::{
     GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
-    THREAD_MODE_BACKGROUND_END, THREAD_PRIORITY_LOWEST,
+    THREAD_MODE_BACKGROUND_END, THREAD_PRIORITY_LOWEST, THREAD_PRIORITY_NORMAL,
 };
 
 use crate::service::WorkerPriority;
@@ -64,18 +64,53 @@ pub(crate) fn enter() -> WorkerPriority {
     WorkerPriority::new(lowest && scheduling == LOWEST, background, observed)
 }
 
-/// Takes the calling thread back out of background mode.
+/// Undoes [`enter`], both halves of it.
 ///
-/// Only meaningful if [`enter`] managed it. Called before the worker thread
-/// ends, so that a thread returned to a pool — which this crate does not do
-/// today, but a future host might — is not left in background I/O mode.
+/// Called before the worker thread ends, so that a thread returned to a pool —
+/// which this crate does not do today, but a future host might — is neither left
+/// in background I/O mode nor left three levels below normal. Ending background
+/// mode does not restore the scheduling priority: `THREAD_MODE_BACKGROUND_END`
+/// puts back whatever was set before background mode began, which here was
+/// `THREAD_PRIORITY_LOWEST`, so the second call is what actually makes the
+/// thread ordinary again.
 pub(crate) fn leave() {
     // SAFETY: as in `enter`.
     let thread = unsafe { GetCurrentThread() };
     // SAFETY: as in `enter`. Failing here means the thread was not in
     // background mode, which is the state this is trying to reach.
     let _ = unsafe { SetThreadPriority(thread, THREAD_MODE_BACKGROUND_END) };
+    // SAFETY: as in `enter`; the value is a documented priority constant.
+    let _ = unsafe { SetThreadPriority(thread, THREAD_PRIORITY_NORMAL) };
 }
 
 /// What `GetThreadPriority` reports for a thread at `THREAD_PRIORITY_LOWEST`.
 pub(crate) const LOWEST: i32 = THREAD_PRIORITY_LOWEST.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaving_the_background_puts_the_thread_back_to_an_ordinary_priority() {
+        // On a thread of its own: this changes the priority of whichever thread
+        // it runs on, and the test harness's threads are not this test's to
+        // alter.
+        std::thread::spawn(|| {
+            let entered = enter();
+            assert!(entered.is_lowest(), "{entered:?}");
+            leave();
+
+            // SAFETY: a pseudo-handle to the calling thread, valid here.
+            let thread = unsafe { GetCurrentThread() };
+            // SAFETY: as above.
+            let after = unsafe { GetThreadPriority(thread) };
+            assert_eq!(
+                after, THREAD_PRIORITY_NORMAL.0,
+                "leave() ended background mode but left the thread at {after}, so a thread \
+                 handed back to a pool would still be below normal"
+            );
+        })
+        .join()
+        .expect("the test thread finishes");
+    }
+}

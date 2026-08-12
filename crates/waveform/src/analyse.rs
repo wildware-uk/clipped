@@ -72,6 +72,62 @@ const NO_TIMESTAMP: i64 = i64::MIN;
 /// the work.
 const PACKETS_PER_CHECKPOINT: u32 = 64;
 
+/// How many times one packet is offered to a decoder before it is given up on.
+///
+/// libavcodec's contract is that a single drain is enough, so the second attempt
+/// is the one that succeeds and anything beyond it is a decoder misbehaving.
+/// Bounded because an unbounded retry would spin the worker thread on one packet
+/// rather than reporting a problem.
+const SEND_ATTEMPTS: u32 = 4;
+
+/// What became of one packet offered to a decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    /// The decoder took it.
+    Accepted,
+    /// The decoder refused it outright, saying this.
+    Refused(c_int),
+    /// The decoder kept asking for its output to be read and never took the
+    /// packet, which contradicts libavcodec's own contract.
+    NeverAccepted,
+}
+
+/// Offers one packet to a decoder, reading the decoder's output first whenever
+/// it asks for that, until the packet is taken or refused.
+///
+/// `AVERROR(EAGAIN)` from `avcodec_send_packet` is documented as "output must be
+/// read before this packet is accepted". It is not a bad packet: the answer is
+/// to drain and offer **the same packet** again. Answering it the way a
+/// rejection is answered drops the audio in that packet from the waveform with
+/// nothing in the log to say so — a gap indistinguishable from silence, which is
+/// precisely the outcome [`crate::WaveformError`] documents this crate as
+/// avoiding.
+///
+/// Separated from the FFI, and taking the two operations as closures, so that
+/// the retry can be tested: a libavcodec audio decoder cannot be made to return
+/// `EAGAIN` here on demand, so a test that drove a real decoder would assert
+/// nothing about the path this exists for.
+fn offer_packet(
+    mut send: impl FnMut() -> c_int,
+    mut drain: impl FnMut() -> Result<(), WaveformError>,
+) -> Result<Delivery, WaveformError> {
+    for _ in 0..SEND_ATTEMPTS {
+        let code = send();
+        if code >= 0 || code == AVERROR_EOF {
+            // `AVERROR_EOF` means the decoder has already been told the stream
+            // ended and will take nothing more. Re-sending would not help;
+            // reading what it still holds would.
+            drain()?;
+            return Ok(Delivery::Accepted);
+        }
+        if code != AVERROR_EAGAIN {
+            return Ok(Delivery::Refused(code));
+        }
+        drain()?;
+    }
+    Ok(Delivery::NeverAccepted)
+}
+
 /// The most audio streams one recording is analysed for.
 ///
 /// SPEC.md section 11 describes four; a file from elsewhere can declare more,
@@ -484,21 +540,34 @@ impl Track {
         packet: *mut ffi::AVPacket,
         scratch: &mut Vec<f32>,
     ) -> Result<(), WaveformError> {
-        // SAFETY: the context is live and open, and the packet is live and
-        // belongs to this stream. libavcodec copies what it needs.
-        let code = unsafe { ffi::avcodec_send_packet(self.context, packet) };
-        if code < 0 && code != AVERROR_EAGAIN && code != AVERROR_EOF {
-            // A packet a decoder rejects is a damaged one; the rest of the
-            // track is still worth summarising, so this is logged rather than
-            // abandoning the file.
-            debug!(
+        let context = self.context;
+        let delivery = offer_packet(
+            // SAFETY: the context is live and open, and the packet is live and
+            // belongs to this stream. libavcodec copies what it needs.
+            || unsafe { ffi::avcodec_send_packet(context, packet) },
+            || self.drain(scratch),
+        )?;
+
+        match delivery {
+            Delivery::Accepted => {}
+            Delivery::Refused(code) => {
+                // A packet a decoder refuses outright is a damaged one; the
+                // rest of the track is still worth summarising, so this is
+                // logged rather than abandoning the file.
+                debug!(
+                    stream = self.stream_index,
+                    error = %describe(code),
+                    "a packet could not be decoded and was skipped"
+                );
+            }
+            Delivery::NeverAccepted => warn!(
                 stream = self.stream_index,
-                error = %describe(code),
-                "a packet could not be decoded and was skipped"
-            );
-            return Ok(());
+                attempts = SEND_ATTEMPTS,
+                "a decoder would not accept a packet even after its output was read, so the \
+                 waveform is missing that audio"
+            ),
         }
-        self.drain(scratch)
+        Ok(())
     }
 
     /// Tells the decoder there are no more packets and accumulates what it was
@@ -735,4 +804,77 @@ fn describe(code: c_int) -> String {
     // SAFETY: the buffer holds a NUL-terminated string written above.
     let text = unsafe { CStr::from_ptr(buffer.as_ptr()) };
     format!("{} ({code})", text.to_string_lossy())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drives [`offer_packet`] over a scripted sequence of decoder answers and
+    /// reports what it did: the outcome, how many times the packet was sent,
+    /// and how many times the decoder's output was read.
+    fn offer(answers: &[c_int]) -> (Delivery, usize, usize) {
+        let mut sent = 0usize;
+        let mut drained = 0usize;
+        let delivery = offer_packet(
+            || {
+                let code = answers.get(sent).copied().unwrap_or(0);
+                sent += 1;
+                code
+            },
+            || {
+                drained += 1;
+                Ok(())
+            },
+        )
+        .expect("draining does not fail here");
+        (delivery, sent, drained)
+    }
+
+    #[test]
+    fn a_packet_a_decoder_is_not_ready_for_is_offered_again_rather_than_dropped() {
+        // FFmpeg's contract for `AVERROR(EAGAIN)` from `avcodec_send_packet` is
+        // "output must be read before this packet is accepted". `submit`'s
+        // caller unreferences the packet the moment it returns, so a run that
+        // reads the output and then moves on has thrown that audio away: a gap
+        // in the waveform indistinguishable from silence.
+        let (delivery, sent, drained) = offer(&[AVERROR_EAGAIN, AVERROR_EAGAIN, 0]);
+        assert_eq!(delivery, Delivery::Accepted);
+        assert_eq!(sent, 3, "the packet was not offered again after draining");
+        assert_eq!(
+            drained, 3,
+            "the decoder's output was not read before each retry and after acceptance"
+        );
+    }
+
+    #[test]
+    fn a_packet_taken_first_time_costs_one_send_and_one_drain() {
+        assert_eq!(offer(&[0]), (Delivery::Accepted, 1, 1));
+        // A decoder already flushed will take nothing more, so re-sending would
+        // not help; what it still holds is still worth reading.
+        assert_eq!(offer(&[AVERROR_EOF]), (Delivery::Accepted, 1, 1));
+    }
+
+    #[test]
+    fn a_packet_the_decoder_refuses_is_skipped_without_retrying_it() {
+        // A damaged packet rather than a full decoder. Retrying it would read
+        // the rest of the file more slowly for nothing.
+        let einval = -(ffi::EINVAL as c_int);
+        let (delivery, sent, drained) = offer(&[einval]);
+        assert_eq!(delivery, Delivery::Refused(einval));
+        assert_eq!(sent, 1);
+        assert_eq!(drained, 0);
+    }
+
+    #[test]
+    fn a_decoder_that_never_takes_a_packet_is_given_up_on_rather_than_spun_on() {
+        // This contradicts libavcodec's own contract, so it should not happen;
+        // an unbounded retry would hang the worker thread on one packet if it
+        // ever did.
+        let forever = vec![AVERROR_EAGAIN; 64];
+        let (delivery, sent, drained) = offer(&forever);
+        assert_eq!(delivery, Delivery::NeverAccepted);
+        assert_eq!(sent, SEND_ATTEMPTS as usize);
+        assert_eq!(drained, SEND_ATTEMPTS as usize);
+    }
 }

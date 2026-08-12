@@ -72,6 +72,7 @@ use tracing::{debug, info, warn};
 
 use crate::analyse::{analyse_paced, Continue, Pace};
 use crate::cache::WaveformCache;
+use crate::source::SourceIdentity;
 use crate::waveform::WaveformState;
 use crate::WaveformError;
 
@@ -472,6 +473,11 @@ fn run(
 
     while let Some(recording) = next(shared) {
         let redacted = clipped_logging::RedactedPath::new(&recording);
+        // Read before the analysis rather than after, so that a recording
+        // rewritten while it was being read is not remembered as a failure of
+        // the file that replaced it. The entry then describes the version that
+        // failed, `still_describes` refuses it, and the new file is analysed.
+        let before = SourceIdentity::of(&recording).ok();
         let state = match analyse_paced(&recording, shared.as_ref()) {
             Ok(waveform) => {
                 if let Err(error) = cache.store(&waveform) {
@@ -495,6 +501,20 @@ fn run(
             }
             Err(error) => {
                 debug!(recording = %redacted, error = %error, "no waveform for this recording");
+                // Written down, or this file is re-read from end to end on
+                // every lookup for ever: `waveform` re-requests anything the
+                // cache calls `Pending`, and an entry that was never stored is
+                // `Pending` for good. Only when the recording could be stat-ed
+                // — an entry keyed on nothing would match nothing.
+                if let Some(source) = &before {
+                    if let Err(cause) = cache.remember_failure(source, &error) {
+                        warn!(
+                            recording = %redacted,
+                            error = %cause,
+                            "a failed analysis could not be cached, so it will be attempted again"
+                        );
+                    }
+                }
                 WaveformState::Unavailable(error)
             }
         };

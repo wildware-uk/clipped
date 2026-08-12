@@ -66,3 +66,10 @@ clipped-ffmpeg-runtime.workspace = true
 # cache tests write into, rather than a fifth copy of "a directory that deletes
 # itself".
 clipped-media-validation.workspace = true
+
+# `tests/privacy.rs` renders this crate's own log lines through a real
+# subscriber and asserts that no directory component reaches them. The claim in
+# the `clipped-logging` note above is about hand-written call sites, which
+# `crates/logging/tests/privacy.rs` explicitly does not cover, so it has to be
+# held to here. Same version as that crate's dev-dependency.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -50,6 +50,21 @@ pub(crate) const MAGIC: [u8; 8] = *b"CLIPWAVE";
 /// The format this build writes, and the only one it reads.
 pub(crate) const VERSION: u16 = 1;
 
+/// The flag that says an entry records why there is no waveform rather than a
+/// waveform.
+///
+/// A recording that cannot be decoded has to be written down, or every lookup
+/// misses and asks for the whole file to be read again ([`crate::WaveformCache::remember_failure`]).
+/// It is a flag rather than a second file name so that one entry per recording
+/// stays the rule: invalidation, pruning and the budget all work on it unchanged.
+pub(crate) const FLAG_UNAVAILABLE: u16 = 0x0001;
+
+/// The longest failure reason written into an entry.
+///
+/// Reasons are this crate's own messages, which are a line long; the bound is
+/// against a pathological FFmpeg string rather than against anything expected.
+const MAX_REASON_BYTES: usize = 1_024;
+
 /// The most audio tracks one entry may describe.
 ///
 /// A bound on what a corrupt header can make this allocate. Far above the
@@ -98,27 +113,30 @@ impl core::fmt::Display for Corrupt {
     }
 }
 
+/// What one cache entry holds.
+#[derive(Debug)]
+pub(crate) enum Entry {
+    /// Peaks.
+    Ready(Waveform),
+    /// The recording was analysed and produced none, and this is what the
+    /// attempt said.
+    Failed {
+        /// Which version of which recording failed.
+        source: SourceIdentity,
+        /// What the failed attempt reported.
+        reason: String,
+    },
+}
+
 /// Writes a waveform as the bytes of a cache entry.
 pub(crate) fn encode(waveform: &Waveform) -> Vec<u8> {
-    let source = waveform.source();
-    let path = source.path().to_string_lossy().into_owned();
-    let path = path.as_bytes();
-
     let mut bytes = Vec::with_capacity(estimate(waveform));
-    bytes.extend_from_slice(&MAGIC);
-    bytes.extend_from_slice(&VERSION.to_le_bytes());
-    // Flags. Nothing uses them yet; a reader of version 1 ignores them, so the
-    // first use of one has to be a change a reader can ignore.
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    bytes.extend_from_slice(&narrow_u16(waveform.tracks().len()).to_le_bytes());
-    // A 32-bit length, unlike every other string here, because a path is the
-    // one field whose length this crate does not choose. Truncating it to fit a
-    // `u16` would write a length that disagreed with the bytes that followed,
-    // which is the one kind of corruption a reader cannot detect.
-    bytes.extend_from_slice(&narrow_u32(path.len()).to_le_bytes());
-    bytes.extend_from_slice(&source.size().to_le_bytes());
-    bytes.extend_from_slice(&source.modified_nanos().to_le_bytes());
-    bytes.extend_from_slice(path);
+    write_header(
+        &mut bytes,
+        waveform.source(),
+        0,
+        narrow_u16(waveform.tracks().len()),
+    );
 
     for track in waveform.tracks() {
         let descriptor = track.descriptor();
@@ -148,6 +166,41 @@ pub(crate) fn encode(waveform: &Waveform) -> Vec<u8> {
     bytes
 }
 
+/// Writes an entry that records why a recording produced no waveform.
+pub(crate) fn encode_failure(source: &SourceIdentity, reason: &str) -> Vec<u8> {
+    let reason = truncate(reason, MAX_REASON_BYTES).as_bytes();
+    let mut bytes = Vec::with_capacity(reason.len() + 512);
+    write_header(&mut bytes, source, FLAG_UNAVAILABLE, 0);
+    bytes.extend_from_slice(&narrow_u16(reason.len()).to_le_bytes());
+    bytes.extend_from_slice(reason);
+    bytes
+}
+
+/// Writes the part of an entry that does not depend on what kind of entry it is.
+///
+/// Identical for both kinds by design: pruning reads the identity out of the
+/// front of every entry without knowing or caring which kind it found.
+fn write_header(bytes: &mut Vec<u8>, source: &SourceIdentity, flags: u16, tracks: u16) {
+    let path = source.path().to_string_lossy().into_owned();
+    let path = path.as_bytes();
+
+    bytes.extend_from_slice(&MAGIC);
+    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    // Flags. Bit 0 is [`FLAG_UNAVAILABLE`]; the rest are unused, and a reader
+    // ignores them, so the next one defined has to be a change an older reader
+    // is right to ignore.
+    bytes.extend_from_slice(&flags.to_le_bytes());
+    bytes.extend_from_slice(&tracks.to_le_bytes());
+    // A 32-bit length, unlike every other string here, because a path is the
+    // one field whose length this crate does not choose. Truncating it to fit a
+    // `u16` would write a length that disagreed with the bytes that followed,
+    // which is the one kind of corruption a reader cannot detect.
+    bytes.extend_from_slice(&narrow_u32(path.len()).to_le_bytes());
+    bytes.extend_from_slice(&source.size().to_le_bytes());
+    bytes.extend_from_slice(&source.modified_nanos().to_le_bytes());
+    bytes.extend_from_slice(path);
+}
+
 /// How large the encoding will be, so that it is built in one allocation.
 fn estimate(waveform: &Waveform) -> usize {
     let peaks: usize = waveform
@@ -160,7 +213,7 @@ fn estimate(waveform: &Waveform) -> usize {
 }
 
 /// Reads a cache entry.
-pub(crate) fn decode(bytes: &[u8]) -> Result<Waveform, Corrupt> {
+pub(crate) fn decode(bytes: &[u8]) -> Result<Entry, Corrupt> {
     let mut reader = Reader::new(bytes);
     if reader.take(MAGIC.len())? != MAGIC {
         return Err(Corrupt::NotAWaveformFile);
@@ -169,7 +222,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Waveform, Corrupt> {
     if version != VERSION {
         return Err(Corrupt::Version(version));
     }
-    let _flags = reader.u16()?;
+    let flags = reader.u16()?;
     let track_count = usize::from(reader.u16()?);
     if track_count > MAX_TRACKS {
         return Err(Corrupt::Implausible("track count"));
@@ -180,11 +233,19 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Waveform, Corrupt> {
     let path = reader.text(path_length)?;
     let source = SourceIdentity::from_parts(PathBuf::from(path), size, modified);
 
+    if flags & FLAG_UNAVAILABLE != 0 {
+        let reason_length = usize::from(reader.u16()?);
+        return Ok(Entry::Failed {
+            source,
+            reason: reader.text(reason_length)?,
+        });
+    }
+
     let mut tracks = Vec::with_capacity(track_count);
     for _ in 0..track_count {
         tracks.push(decode_track(&mut reader)?);
     }
-    Ok(Waveform::new(source, tracks))
+    Ok(Entry::Ready(Waveform::new(source, tracks)))
 }
 
 /// Reads just the identity from the front of an entry.
@@ -354,10 +415,18 @@ mod tests {
         )
     }
 
+    /// The peaks of an entry that is supposed to hold some.
+    fn peaks_of(entry: Entry) -> Waveform {
+        match entry {
+            Entry::Ready(waveform) => waveform,
+            Entry::Failed { reason, .. } => panic!("expected peaks, found a failure: {reason}"),
+        }
+    }
+
     #[test]
     fn an_entry_survives_a_round_trip_track_for_track_and_peak_for_peak() {
         let original = waveform();
-        let decoded = decode(&encode(&original)).expect("the entry reads back");
+        let decoded = peaks_of(decode(&encode(&original)).expect("the entry reads back"));
 
         assert_eq!(decoded.source(), original.source());
         assert_eq!(decoded.tracks().len(), 2);
@@ -378,9 +447,71 @@ mod tests {
             SourceIdentity::from_parts(PathBuf::from("silent.mkv"), 7, 8),
             Vec::new(),
         );
-        let decoded = decode(&encode(&empty)).expect("the entry reads back");
+        let decoded = peaks_of(decode(&encode(&empty)).expect("the entry reads back"));
         assert!(decoded.is_silent());
         assert_eq!(decoded.source().size(), 7);
+    }
+
+    #[test]
+    fn a_failure_entry_reads_back_as_a_failure_and_not_as_a_silent_recording() {
+        // The distinction this flag exists for. A recording that could not be
+        // decoded and a recording that genuinely has no audio are both "no
+        // tracks" on the wire, and confusing them would tell a timeline that a
+        // broken file is silent.
+        let source = SourceIdentity::from_parts(PathBuf::from("truncated.mkv"), 99, 7);
+        let bytes = encode_failure(&source, "the container could not be opened");
+
+        match decode(&bytes).expect("the entry reads back") {
+            Entry::Failed {
+                source: read,
+                reason,
+            } => {
+                assert_eq!(read, source);
+                assert_eq!(reason, "the container could not be opened");
+            }
+            Entry::Ready(waveform) => {
+                panic!(
+                    "a failure entry decoded as {} tracks of peaks",
+                    waveform.tracks().len()
+                )
+            }
+        }
+
+        // And pruning reads its identity out of the front exactly as it does
+        // for peaks, so a failure entry is invalidated and swept like any other.
+        assert_eq!(
+            decode_identity(&bytes).expect("the header reads back"),
+            source
+        );
+    }
+
+    #[test]
+    fn a_failure_entry_cut_short_is_refused_at_every_length() {
+        let bytes = encode_failure(
+            &SourceIdentity::from_parts(PathBuf::from("truncated.mkv"), 99, 7),
+            "a reason of some length",
+        );
+        for length in 0..bytes.len() {
+            assert!(
+                decode(&bytes[..length]).is_err(),
+                "a {length}-byte prefix of a {}-byte failure entry decoded",
+                bytes.len()
+            );
+        }
+        assert!(decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn a_reason_longer_than_the_format_holds_is_cut_rather_than_mis_declared() {
+        let source = SourceIdentity::from_parts(PathBuf::from("truncated.mkv"), 1, 1);
+        let bytes = encode_failure(&source, &"é".repeat(MAX_REASON_BYTES));
+        match decode(&bytes).expect("the entry still reads back") {
+            Entry::Failed { reason, .. } => {
+                assert!(reason.len() <= MAX_REASON_BYTES, "{}", reason.len());
+                assert!(reason.chars().all(|character| character == 'é'));
+            }
+            Entry::Ready(_) => panic!("a failure entry decoded as peaks"),
+        }
     }
 
     #[test]

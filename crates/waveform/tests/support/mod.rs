@@ -149,6 +149,67 @@ fn run_ffmpeg(tools: &MediaTools, sources: &[(&Path, &str)], destination: &Path)
     );
 }
 
+/// Writes a Matroska file shaped like a real recording: one video stream that
+/// dominates the bytes, and several tracks of **compressed** audio.
+///
+/// The measurement in `tests/cost.rs` is otherwise taken over raw PCM in a WAV
+/// with no video, which is not the workload — a recording is a container whose
+/// video packets are most of what the demuxer reads, and whose audio has to be
+/// decoded rather than copied. Both are excluded from a WAV, so a figure taken
+/// from one cannot be extrapolated to the other; this is the file that closes
+/// that gap.
+///
+/// Returns `false` when this checkout has no `ffmpeg.exe`, having already
+/// reported the skip.
+pub(crate) fn write_recording_shaped_container(
+    destination: &Path,
+    seconds: u32,
+    audio_tracks: usize,
+    video_kilobits: u32,
+) -> bool {
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return false;
+    };
+
+    let mut command = Command::new(tools.ffmpeg());
+    command.arg("-nostdin").arg("-y");
+    command
+        .args(["-f", "lavfi", "-i"])
+        .arg(format!("testsrc=size=1280x720:rate=30:duration={seconds}"));
+    for track in 0..audio_tracks {
+        // A different tone per track, so the tracks are not identical work.
+        let hertz = 220 + 110 * track;
+        command
+            .args(["-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency={hertz}:duration={seconds}"));
+    }
+
+    command.args(["-map", "0:v"]);
+    for track in 0..audio_tracks {
+        command.args(["-map", &format!("{}:a", track + 1)]);
+    }
+    command
+        // `testsrc` is a synthetic pattern and compresses to almost nothing, so
+        // an encode of it produces a file whose video does not dominate — the
+        // opposite of a recording, and the whole point of this container.
+        // Noise defeats that and puts the bitrate where it was asked for.
+        .args(["-vf", "noise=alls=48:allf=t+u"])
+        .args(["-c:v", "libopenh264", "-b:v"])
+        .arg(format!("{video_kilobits}k"))
+        // AAC rather than PCM: what a recording actually carries, and what
+        // makes the audio half of this a decode rather than a memcpy.
+        .args(["-c:a", "aac", "-b:a", "160k"])
+        .arg(destination);
+
+    let output = command.output().expect("ffmpeg can be started");
+    assert!(
+        output.status.success(),
+        "ffmpeg failed to write a recording-shaped container: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 /// Writes a Matroska file with a video stream and no audio at all, which is
 /// what every recording Clipped writes today looks like (issue #180).
 ///

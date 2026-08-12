@@ -5,6 +5,16 @@
 //! (AGENTS.md section 15). None of them are fatal to anything: a waveform that
 //! could not be produced is a timeline drawn without one
 //! ([`WaveformState`](crate::WaveformState)), not a failed recording.
+//!
+//! # Every path here is a [`RedactedPath`]
+//!
+//! These messages are written to the log, so a raw path in one of them puts
+//! `C:\Users\<account>\...` into a support file (AGENTS.md section 13,
+//! docs/logging.md "Privacy"). No variant holds a [`std::path::Path`], and the
+//! one free-text field left — [`WaveformError::Cache::detail`] — is a
+//! `&'static str` so that a path cannot be formatted into it. That is a
+//! compile-time constraint rather than a convention, because a convention is
+//! what failed here first.
 
 use core::fmt;
 use core::time::Duration;
@@ -54,9 +64,29 @@ pub enum WaveformError {
     /// costs the time to compute them again and nothing else.
     Cache {
         /// What was being attempted.
-        detail: String,
+        ///
+        /// A `&'static str` rather than a `String`, so that the file being
+        /// acted on cannot be formatted into it: this error is logged, and the
+        /// cache lives under `%LOCALAPPDATA%`, which begins with the account
+        /// name. The file goes in `entry`, reduced.
+        detail: &'static str,
+        /// What was being read or written, reduced for logs.
+        entry: RedactedPath,
         /// What the operating system said.
         cause: io::Error,
+    },
+    /// An earlier attempt to summarise this recording failed, and the cache
+    /// remembers that rather than reading the whole file again every time a
+    /// timeline asks.
+    ///
+    /// The remembered failure belongs to one version of the recording: a file
+    /// that is repaired, replaced or re-encoded no longer matches the entry and
+    /// is analysed again (`docs/waveforms.md`, "Invalidation").
+    Remembered {
+        /// The recording, reduced for logs.
+        path: RedactedPath,
+        /// What the failed attempt said, as it was written into the entry.
+        reason: String,
     },
 }
 
@@ -84,9 +114,18 @@ impl fmt::Display for WaveformError {
             Self::Cancelled => {
                 formatter.write_str("waveform generation was stopped before it finished")
             }
-            Self::Cache { detail, cause } => {
-                write!(formatter, "the waveform cache could not {detail}: {cause}")
-            }
+            Self::Cache {
+                detail,
+                entry,
+                cause,
+            } => write!(
+                formatter,
+                "the waveform cache could not {detail} ({entry}): {cause}"
+            ),
+            Self::Remembered { path, reason } => write!(
+                formatter,
+                "{path} produced no waveform when it was last analysed: {reason}"
+            ),
         }
     }
 }

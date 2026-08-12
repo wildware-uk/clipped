@@ -20,13 +20,25 @@
 //! does not show the previous waveform. There is no separate invalidation step
 //! to forget to run.
 //!
+//! # What an entry holds
+//!
+//! Either the peaks, or the reason there are none. The second kind matters as
+//! much as the first: without it a recording that cannot be decoded misses on
+//! every lookup, and every miss asks for the whole file to be read again — so a
+//! recording truncated by a crash would be re-demuxed on every timeline redraw
+//! for the rest of the library's life. Both kinds carry the same
+//! [`SourceIdentity`] header, so both are invalidated, pruned and counted the
+//! same way.
+//!
 //! # Cleanup
 //!
-//! [`WaveformCache::prune`] does two things, in this order:
+//! [`WaveformCache::prune`] does three things, in this order:
 //!
 //! 1. Deletes entries whose recording no longer exists. A library where the user
 //!    deletes clips would otherwise accumulate peaks for files that are gone.
-//! 2. Deletes the least recently written entries until the directory is inside
+//! 2. Deletes temporaries an interrupted store left behind. Nothing else can:
+//!    they are named so that no lookup will ever open one.
+//! 3. Deletes the least recently written entries until the directory is inside
 //!    its byte budget.
 //!
 //! "Least recently written" rather than least recently *used*: recording a use
@@ -52,6 +64,17 @@ use crate::WaveformError;
 
 /// The extension every cache entry has.
 pub const ENTRY_EXTENSION: &str = "cwf";
+
+/// The extension a half-written entry carries until the rename that finishes it.
+///
+/// Deliberately not [`ENTRY_EXTENSION`], so that a lookup can never read one.
+const TEMPORARY_EXTENSION: &str = "cwf.writing";
+
+/// What [`Path::extension`] reports for a [`TEMPORARY_EXTENSION`] file.
+///
+/// `Path::extension` returns only the part after the last dot, so the two have
+/// to be spelled separately; a test holds them in agreement.
+const TEMPORARY_SUFFIX: &str = "writing";
 
 /// The directory under Clipped's per-user data directory that entries live in.
 const DIRECTORY_NAME: &str = "waveforms";
@@ -125,8 +148,12 @@ impl WaveformCache {
     ///
     /// Never an error. A recording that has no entry, or whose entry belongs to
     /// an older version of the file, is [`WaveformState::Pending`] — something
-    /// to generate, not something to report. Only a recording that cannot be
-    /// looked at at all is [`WaveformState::Unavailable`].
+    /// to generate, not something to report.
+    ///
+    /// [`WaveformState::Unavailable`] has two sources: a recording that cannot
+    /// be stat-ed at all, and a recording an earlier analysis already read from
+    /// end to end and got nothing from
+    /// ([`remember_failure`](Self::remember_failure)).
     #[must_use]
     pub fn lookup(&self, path: impl AsRef<Path>) -> WaveformState {
         let path = path.as_ref();
@@ -157,8 +184,18 @@ impl WaveformCache {
         };
 
         match format::decode(&bytes) {
-            Ok(waveform) if waveform.source().still_describes(&current) => {
+            Ok(format::Entry::Ready(waveform)) if waveform.source().still_describes(&current) => {
                 WaveformState::Ready(waveform)
+            }
+            Ok(format::Entry::Failed { source, reason }) if source.still_describes(&current) => {
+                // An earlier analysis read this whole file and got nothing.
+                // Reporting that is the difference between a timeline redraw
+                // costing a lookup and costing a re-demux of a multi-gigabyte
+                // recording, every time, for ever.
+                WaveformState::Unavailable(WaveformError::Remembered {
+                    path: current.redacted(),
+                    reason,
+                })
             }
             Ok(_) => {
                 // The recording changed, or two paths' digests collided. Either
@@ -199,15 +236,54 @@ impl WaveformCache {
     /// caller may log and carry on: the waveform in hand is still usable, and
     /// the only cost is computing it again next time.
     pub fn store(&self, waveform: &Waveform) -> Result<(), WaveformError> {
+        self.write_entry(waveform.source(), format::encode(waveform))
+    }
+
+    /// Writes down that a recording could not be summarised, and why.
+    ///
+    /// Without this a recording that cannot be decoded is [`Pending`] for ever:
+    /// every lookup misses, every miss asks for another analysis, and every
+    /// analysis re-reads and re-demuxes the whole file. The failures AGENTS.md
+    /// section 16 says to expect — a recording truncated by a crash, an audio
+    /// codec this build has no decoder for, audio past the analyser's length
+    /// bound — are exactly the ones that repeat, so remembering the answer is
+    /// what keeps a timeline redraw from being a multi-gigabyte read.
+    ///
+    /// The entry names the identity the failure belongs to, so it stops
+    /// applying the moment the recording changes: a file repaired, replaced or
+    /// re-encoded is analysed again with no separate invalidation step.
+    ///
+    /// [`Pending`]: WaveformState::Pending
+    ///
+    /// # Errors
+    ///
+    /// As [`store`](Self::store), and for the same reason a caller may ignore
+    /// it: the cost of not writing this down is a repeated analysis.
+    pub fn remember_failure(
+        &self,
+        source: &SourceIdentity,
+        reason: &WaveformError,
+    ) -> Result<(), WaveformError> {
+        self.write_entry(source, format::encode_failure(source, &reason.to_string()))
+    }
+
+    /// Writes `bytes` as the entry for `source`.
+    ///
+    /// Written to a temporary file in the same directory and renamed over the
+    /// destination, so a process that dies mid-write leaves either the previous
+    /// entry or none.
+    fn write_entry(&self, source: &SourceIdentity, bytes: Vec<u8>) -> Result<(), WaveformError> {
         fs::create_dir_all(&self.root).map_err(|cause| WaveformError::Cache {
-            detail: format!("create its directory at {}", self.root.display()),
+            detail: "create its directory",
+            entry: clipped_logging::RedactedPath::new(&self.root),
             cause,
         })?;
 
-        let entry = self.entry_path(waveform.source());
-        let temporary = entry.with_extension(format!("{ENTRY_EXTENSION}.writing"));
-        fs::write(&temporary, format::encode(waveform)).map_err(|cause| WaveformError::Cache {
-            detail: format!("write {}", temporary.display()),
+        let entry = self.entry_path(source);
+        let temporary = entry.with_extension(TEMPORARY_EXTENSION);
+        fs::write(&temporary, bytes).map_err(|cause| WaveformError::Cache {
+            detail: "write an entry",
+            entry: clipped_logging::RedactedPath::new(&temporary),
             cause,
         })?;
         fs::rename(&temporary, &entry).map_err(|cause| {
@@ -216,7 +292,8 @@ impl WaveformCache {
             // pruning to find it, since it matches no recording.
             let _ = fs::remove_file(&temporary);
             WaveformError::Cache {
-                detail: format!("replace {}", entry.display()),
+                detail: "replace an entry",
+                entry: clipped_logging::RedactedPath::new(&entry),
                 cause,
             }
         })
@@ -240,7 +317,8 @@ impl WaveformCache {
             Ok(()) => Ok(()),
             Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(cause) => Err(WaveformError::Cache {
-                detail: format!("remove {}", entry.display()),
+                detail: "remove an entry",
+                entry: clipped_logging::RedactedPath::new(&entry),
                 cause,
             }),
         }
@@ -261,25 +339,41 @@ impl WaveformCache {
         let mut surviving = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some(ENTRY_EXTENSION) {
-                continue;
-            }
             let Ok(metadata) = entry.metadata() else {
                 continue;
             };
 
-            match self.recording_of(&path) {
-                Some(recording) if recording.exists() => {
+            let suffix = path.extension().and_then(|extension| extension.to_str());
+            if suffix == Some(ENTRY_EXTENSION) {
+                if self
+                    .recording_of(&path)
+                    .is_some_and(|source| source.exists())
+                {
                     surviving.push((path, metadata.len(), metadata.modified().ok()));
-                }
-                Some(_) | None => {
+                } else if remove(&path, "the recording is gone") {
                     // Either the recording is gone or the entry could not be
                     // read at all. Both are dead weight.
-                    if remove(&path, "the recording is gone") {
-                        report.entries_removed += 1;
-                        report.orphans_removed += 1;
-                        report.bytes_removed += metadata.len();
-                    }
+                    report.entries_removed += 1;
+                    report.orphans_removed += 1;
+                    report.bytes_removed += metadata.len();
+                }
+            } else if suffix == Some(TEMPORARY_SUFFIX) {
+                // A store killed between its write and its rename. Nothing else
+                // ever deletes one of these: a lookup only opens `<key>.cwf`, so
+                // an abandoned temporary is invisible to every other path in
+                // this module and would sit in the directory for ever without
+                // ever counting towards the budget that is supposed to bound it.
+                //
+                // A temporary another process is writing *right now* is not at
+                // risk on Windows, where a file open without
+                // `FILE_SHARE_DELETE` cannot be removed at all. Where it can be,
+                // the worst outcome is that the other store's rename fails and
+                // its waveform is computed again, which is the cheapest failure
+                // in this crate.
+                if remove(&path, "a store was interrupted before it finished") {
+                    report.entries_removed += 1;
+                    report.temporaries_removed += 1;
+                    report.bytes_removed += metadata.len();
                 }
             }
         }
@@ -346,6 +440,7 @@ fn read_up_to(file: &mut fs::File, buffer: &mut [u8]) -> usize {
 pub struct PruneReport {
     entries_removed: usize,
     orphans_removed: usize,
+    temporaries_removed: usize,
     bytes_removed: u64,
     remaining_bytes: u64,
 }
@@ -356,14 +451,23 @@ pub struct PruneReport {
 /// volume — is logged and left. Pruning is housekeeping; there is nothing here
 /// worth failing a caller over.
 fn remove(path: &Path, why: &str) -> bool {
+    // Redacted, never `path.display()`: an entry lives under `%LOCALAPPDATA%`,
+    // which begins with the account name, and a debug log is a file somebody
+    // attaches to a bug report (AGENTS.md section 13, docs/logging.md
+    // "Privacy"). The entry's own name is a digest of the recording's path, so
+    // the reduced form loses nothing that identifies which entry this was.
     match fs::remove_file(path) {
         Ok(()) => {
-            debug!(entry = %path.display(), reason = why, "removed a cached waveform");
+            debug!(
+                entry = %clipped_logging::RedactedPath::new(path),
+                reason = why,
+                "removed a cached waveform"
+            );
             true
         }
         Err(cause) => {
             warn!(
-                entry = %path.display(),
+                entry = %clipped_logging::RedactedPath::new(path),
                 error = %cause,
                 "a waveform cache entry could not be removed"
             );
@@ -373,7 +477,7 @@ fn remove(path: &Path, why: &str) -> bool {
 }
 
 impl PruneReport {
-    /// How many entries were deleted, for either reason.
+    /// How many files were deleted, for any of the three reasons.
     #[must_use]
     pub fn entries_removed(&self) -> usize {
         self.entries_removed
@@ -383,6 +487,15 @@ impl PruneReport {
     #[must_use]
     pub fn orphans_removed(&self) -> usize {
         self.orphans_removed
+    }
+
+    /// How many of those were temporaries an interrupted store left behind.
+    ///
+    /// Normally zero. A number that keeps growing means stores are being killed
+    /// part way through, which is worth knowing about.
+    #[must_use]
+    pub fn temporaries_removed(&self) -> usize {
+        self.temporaries_removed
     }
 
     /// How many bytes the deletions freed.
@@ -515,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_left_behind_when_a_store_is_interrupted() {
+    fn a_finished_store_leaves_only_the_entry_it_wrote() {
         let directory = TemporaryDirectory::new("waveform-cache");
         let cache = WaveformCache::at(directory.file("cache"));
         let path = recording(&directory, "match.mkv", 16);
@@ -530,6 +643,145 @@ mod tests {
             .collect();
         assert_eq!(remaining.len(), 1, "{remaining:?}");
         assert!(remaining[0].ends_with(".cwf"), "{remaining:?}");
+    }
+
+    #[test]
+    fn the_temporary_a_killed_store_leaves_behind_is_swept_by_pruning() {
+        let directory = TemporaryDirectory::new("waveform-cache");
+        let cache = WaveformCache::at(directory.file("cache"));
+        let path = recording(&directory, "match.mkv", 16);
+        cache
+            .store(&waveform_for(&path, 10))
+            .expect("the entry can be written");
+
+        // Exactly what a process killed between `store`'s `fs::write` and its
+        // `fs::rename` leaves behind: the temporary, written, never renamed.
+        // Written by hand because the alternative is killing a process.
+        let identity = SourceIdentity::of(&path).expect("the recording exists");
+        let abandoned = cache
+            .entry_path(&identity)
+            .with_extension(TEMPORARY_EXTENSION);
+        fs::write(&abandoned, vec![0u8; 4_096]).expect("the temporary can be written");
+
+        // Nothing else in this module can ever remove it: a lookup only opens
+        // `<key>.cwf`, so it is invisible to every other path here and would sit
+        // in the directory for ever, uncounted against the budget that is
+        // supposed to bound the directory.
+        assert!(cache.lookup(&path).is_ready(), "the finished entry reads");
+
+        let report = cache.prune();
+        assert_eq!(
+            report.temporaries_removed(),
+            1,
+            "the abandoned temporary was not swept"
+        );
+        assert!(report.bytes_removed() >= 4_096);
+        assert!(!abandoned.exists(), "{}", abandoned.display());
+        assert!(
+            cache.lookup(&path).is_ready(),
+            "pruning took the finished entry as well"
+        );
+    }
+
+    #[test]
+    fn a_temporary_is_named_so_that_no_lookup_can_read_it() {
+        // `prune` matches on `Path::extension`, which is only the part after
+        // the last dot, so the two spellings have to agree or the sweep above
+        // silently stops finding anything.
+        let temporary = Path::new("entry").with_extension(TEMPORARY_EXTENSION);
+        assert_eq!(
+            temporary.extension().and_then(|suffix| suffix.to_str()),
+            Some(TEMPORARY_SUFFIX)
+        );
+        assert_ne!(TEMPORARY_SUFFIX, ENTRY_EXTENSION);
+    }
+
+    #[test]
+    fn a_remembered_failure_is_reported_rather_than_left_to_be_analysed_again() {
+        let directory = TemporaryDirectory::new("waveform-cache");
+        let cache = WaveformCache::at(directory.file("cache"));
+        let path = recording(&directory, "truncated.mkv", 16);
+        let identity = SourceIdentity::of(&path).expect("the recording exists");
+
+        cache
+            .remember_failure(
+                &identity,
+                &WaveformError::TooLong {
+                    limit: Duration::from_secs(8 * 3_600),
+                },
+            )
+            .expect("the entry can be written");
+
+        let state = cache.lookup(&path);
+        // Not `Pending`. `Pending` is what makes the service read the whole file
+        // again, and again, and again.
+        assert!(
+            !matches!(state, WaveformState::Pending),
+            "a remembered failure came back as something to generate"
+        );
+        assert!(!state.is_ready());
+        assert!(state.tracks().is_empty());
+        match state.reason() {
+            Some(WaveformError::Remembered { reason, .. }) => {
+                assert!(reason.contains("8 hours"), "{reason}");
+            }
+            other => panic!("expected a remembered failure, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_remembered_failure_stops_applying_once_the_recording_changes() {
+        let directory = TemporaryDirectory::new("waveform-cache");
+        let cache = WaveformCache::at(directory.file("cache"));
+        let path = recording(&directory, "truncated.mkv", 16);
+        let identity = SourceIdentity::of(&path).expect("the recording exists");
+        cache
+            .remember_failure(&identity, &WaveformError::Cancelled)
+            .expect("the entry can be written");
+        assert!(cache.lookup(&path).reason().is_some());
+
+        // A recording repaired, replaced with a good copy, or re-encoded. The
+        // remembered failure was about the old file and must not outlive it.
+        fs::write(&path, vec![1u8; 999]).expect("the recording can be replaced");
+        assert!(
+            matches!(cache.lookup(&path), WaveformState::Pending),
+            "a replaced recording is still remembered as a failure"
+        );
+
+        // And peaks may then be stored over the failure entry, at the same key.
+        cache
+            .store(&waveform_for(&path, 10))
+            .expect("the entry can be overwritten");
+        assert!(cache.lookup(&path).is_ready());
+    }
+
+    #[test]
+    fn a_cache_error_names_what_failed_without_naming_the_directories_above_it() {
+        let directory = TemporaryDirectory::new("waveform-cache");
+        // A file where the cache's parent directory would be, so that the
+        // directory cannot be created. The name stands in for the account name
+        // in `C:\Users\<account>\AppData\Local\Clipped\waveforms`, which is
+        // what a raw path in this message puts into a support log (AGENTS.md
+        // section 13).
+        let obstruction = directory.file("pretend-account-name");
+        fs::write(&obstruction, b"not a directory").expect("the file can be written");
+
+        let cache = WaveformCache::at(obstruction.join("waveforms"));
+        let path = recording(&directory, "match.mkv", 16);
+        let error = cache
+            .store(&waveform_for(&path, 10))
+            .expect_err("no directory can be created underneath a file");
+
+        assert!(matches!(error, WaveformError::Cache { .. }), "{error:?}");
+        let message = error.to_string();
+        assert!(
+            message.contains("waveforms#"),
+            "the message does not say which directory failed: {message}"
+        );
+        assert!(
+            !message.contains("pretend-account-name"),
+            "the message leaked a directory component: {message}"
+        );
     }
 
     #[test]

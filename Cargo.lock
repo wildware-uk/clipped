@@ -395,6 +395,7 @@ dependencies = [
  "clipped-media-validation",
  "rusty_ffmpeg",
  "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 

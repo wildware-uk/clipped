@@ -172,6 +172,65 @@ fn a_recording_is_generated_once_and_then_read_from_the_cache() {
 }
 
 #[test]
+fn a_recording_that_cannot_be_decoded_is_analysed_once_rather_than_on_every_lookup() {
+    let directory = TemporaryDirectory::new("waveform-service");
+    // A recording truncated by a crash, or written by something that was
+    // killed: a file that exists, can be stat-ed, and holds no container
+    // FFmpeg can open. AGENTS.md section 16 says to expect exactly this.
+    let path = directory.file("truncated.mkv");
+    std::fs::write(&path, b"this was a recording once").expect("the file can be written");
+
+    let service = WaveformService::start(
+        WaveformCache::at(directory.file("cache")),
+        ServiceOptions::new(),
+    );
+
+    assert!(matches!(service.waveform(&path), WaveformState::Pending));
+    wait_for("the first analysis to finish", || service.finished() == 1);
+
+    // Suspended, so the worker takes nothing off the queue from here on:
+    // anything these lookups ask for is still sitting in it to be counted.
+    service.suspend_for_recording();
+
+    // The call a timeline makes on every redraw. Without the failure written
+    // down, each of these misses the cache, is told `Pending`, and queues
+    // another full read and re-demux of the file — for a real recording, of
+    // several gigabytes, which is precisely the background disk load the
+    // priority and suspension design exists to avoid (AGENTS.md section 18).
+    for _ in 0..5 {
+        let state = service.waveform(&path);
+        assert!(!state.is_ready());
+        assert!(state.tracks().is_empty());
+        assert!(
+            state.reason().is_some(),
+            "the timeline was not told why there is no waveform"
+        );
+    }
+
+    assert_eq!(
+        service.queued(),
+        0,
+        "an undecodable recording was queued for analysis again on every lookup"
+    );
+    assert_eq!(service.finished(), 1);
+
+    // And a repaired recording is analysed again: what is remembered belongs to
+    // the version of the file that failed, not to the path.
+    write_wav(
+        &path,
+        48_000,
+        &[vec![Tone::at(0.2, 0.8), Tone::silence(0.2)]],
+    );
+    assert!(matches!(service.waveform(&path), WaveformState::Pending));
+    assert_eq!(service.queued(), 1);
+    service.resume();
+    wait_for("the repaired recording to be analysed", || {
+        service.finished() == 2
+    });
+    assert!(service.waveform(&path).is_ready());
+}
+
+#[test]
 fn the_queue_is_bounded_and_drops_the_oldest_waiting_request() {
     let directory = TemporaryDirectory::new("waveform-service");
     let service = WaveformService::start(
