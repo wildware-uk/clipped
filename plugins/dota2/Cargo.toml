@@ -1,0 +1,60 @@
+[package]
+name = "clipped-dota2-plugin"
+description = "Highlight plugin reporting Dota 2 events from Game State Integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# A library and a binary rather than a binary alone. The binary is the plugin
+# the host starts; the library is everything it does, so that the parsing, the
+# diffing and the configuration file can be tested without a process, a socket
+# or an installed game (AGENTS.md section 23). `tests/` reads the committed
+# sample payloads through the library for the same reason.
+[lib]
+name = "clipped_dota2_plugin"
+path = "src/lib.rs"
+
+# The name the manifest's `executable` field points at. Keep the two in step:
+# `plugin.json` names a file, and a plugin whose manifest names an executable
+# that is not there is refused by `clipped_plugins::discover` — which
+# `tests/manifest.rs` asserts rather than trusts.
+[[bin]]
+name = "clipped-dota2-plugin"
+path = "src/main.rs"
+
+[dependencies]
+# The event vocabulary this plugin reports in (issue #68). Dota's own words —
+# `roshan`, `radiant`, `kill_streak` — never leave this crate except inside an
+# event payload, which nothing above the plugin interprets.
+clipped-events = { workspace = true }
+# The plugin contract (issue #69): the wire, the reports and the timing rule.
+# A plugin written in Rust uses these types rather than hand-building the JSON
+# the host is about to parse (docs/plugin-api.md, "Writing a plugin").
+clipped-plugins = { workspace = true }
+# Where the user's own Clipped directory is. The Game State Integration auth
+# token is generated once and has to survive a restart of this plugin, because
+# Dota reads the configuration file at start-up and would otherwise be posting
+# a token from a previous run (`gsi::secret`). MPL-2.0.
+clipped-logging = { workspace = true }
+# A Game State Integration payload is JSON, and so is every line of the plugin
+# wire. Dual MIT/Apache-2.0.
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Where Dota 2 is installed, read from Steam's own library index on the local
+# disk. This crate deliberately does not open a handle to the game process to
+# ask it where it lives: AGENTS.md section 34 rules out anything that resembles
+# inspecting another process, and `clipped-game-detection` already reads
+# Steam's library folders and application manifests (AGENTS.md section 55).
+# MPL-2.0.
+clipped-game-detection = { workspace = true }
+# The operating system's random number generator, for the auth token that keeps
+# the loopback listener from accepting whatever arrives (docs/privacy.md). One
+# function, `ProcessPrng`, from the namespace named below. Dual MIT/Apache-2.0.
+windows = { workspace = true, features = ["Win32_Security_Cryptography"] }
+
+[lints]
+workspace = true

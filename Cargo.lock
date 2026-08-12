@@ -220,6 +220,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-dota2-plugin"
+version = "0.1.0"
+dependencies = [
+ "clipped-events",
+ "clipped-game-detection",
+ "clipped-logging",
+ "clipped-plugins",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
 name = "clipped-edit"
 version = "0.1.0"
 dependencies = [

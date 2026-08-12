@@ -98,6 +98,7 @@ apps/
     recorder/       The recording process, which runs independently of the UI
     desktop/        The Tauri desktop application (placeholder until M5)
 crates/            The Rust libraries the recorder is assembled from
+plugins/           The highlight plugins shipped with Clipped, one executable each
 packages/          TypeScript packages consumed by the desktop application
 tests/             Capture, audio, integration and performance suites
 docs/              Architecture, subsystem documentation and ADRs
@@ -126,15 +127,15 @@ without being placed in a layer.
 | --- | --- | --- |
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
-| 2 | `clipped-muxer`, `clipped-league-plugin` (plugin, see below), `clipped-cs2-plugin` (plugin, see below) | layers 0–1 |
+| 2 | `clipped-muxer`, `clipped-league-plugin`, `clipped-cs2-plugin`, `clipped-dota2-plugin` (plugins, see below) | layers 0–1 |
 | 3 | `clipped-replay`, `clipped-export` | layers 0–2 |
 | 4 | `clipped-session` | layers 0–3 |
 | 5 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–4 |
 | 6 | `clipped-video-pattern` (test application) | layers 0–5 |
 | 7 | `clipped-fullscreen-dx11` (test application) | layers 0–6 |
 
-`clipped-league-plugin` and `clipped-cs2-plugin` are in `plugins/`, not
-`crates/`: they are game integrations
+`clipped-league-plugin`, `clipped-cs2-plugin` and `clipped-dota2-plugin` are in
+`plugins/`, not `crates/`: they are game integrations
 ([docs/plugin-api.md](docs/plugin-api.md)), which are executables the recorder
 *starts* rather than crates anything links. Layering is not what governs them,
 and no layer could: whichever one they sat at, every layer above would be free

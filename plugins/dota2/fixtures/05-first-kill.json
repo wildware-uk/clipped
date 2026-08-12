@@ -1,0 +1,49 @@
+{
+  "provider": {
+    "name": "Dota 2",
+    "appid": 570,
+    "version": 47,
+    "timestamp": 1770000765
+  },
+  "map": {
+    "name": "start",
+    "matchid": "8421997461",
+    "game_time": 615,
+    "clock_time": 615,
+    "daytime": true,
+    "nightstalker_night": false,
+    "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+    "paused": false,
+    "win_team": "none",
+    "customgamename": ""
+  },
+  "player": {
+    "activity": "playing",
+    "kills": 1,
+    "deaths": 0,
+    "assists": 0,
+    "last_hits": 34,
+    "denies": 4,
+    "kill_streak": 1,
+    "team_name": "radiant",
+    "gold": 1806,
+    "gpm": 389,
+    "xpm": 441
+  },
+  "hero": {
+    "id": 25,
+    "name": "npc_dota_hero_lina",
+    "level": 7,
+    "alive": true,
+    "respawn_seconds": 0,
+    "health": 794,
+    "max_health": 1180,
+    "health_percent": 67,
+    "mana": 210,
+    "max_mana": 795,
+    "mana_percent": 26,
+    "silenced": false,
+    "stunned": false,
+    "smoked": false
+  }
+}

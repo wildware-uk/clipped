@@ -85,7 +85,8 @@ const LAYERS: &[&[&str]] = &[
     ],
     // Consumers of encoded output. `clipped-muxer` writes it to a container.
     //
-    // `clipped-league-plugin` and `clipped-cs2-plugin` are game integrations
+    // `clipped-league-plugin`, `clipped-cs2-plugin` and `clipped-dota2-plugin`
+    // are game integrations
     // from `plugins/` (docs/plugin-api.md), and layering is not what governs
     // them: a plugin is a separate process the recorder starts rather than a
     // crate anything links, so both directions are asserted directly by
@@ -100,6 +101,7 @@ const LAYERS: &[&[&str]] = &[
         "clipped-muxer",
         "clipped-league-plugin",
         "clipped-cs2-plugin",
+        "clipped-dota2-plugin",
     ],
     // `clipped-replay` holds a rolling window of encoded packets in memory so
     // that a hotkey pressed after something interesting can still save it, and
@@ -336,7 +338,11 @@ fn test_only_packages_are_never_linked_into_the_product() {
 /// (docs/plugin-api.md) — so the two rules that matter about it are not
 /// "which layer", and the two tests below assert them instead of trusting a
 /// comment. Adding a plugin to the workspace means adding it here.
-const PLUGINS: &[&str] = &["clipped-league-plugin", "clipped-cs2-plugin"];
+const PLUGINS: &[&str] = &[
+    "clipped-league-plugin",
+    "clipped-cs2-plugin",
+    "clipped-dota2-plugin",
+];
 
 /// The only crates of this workspace a plugin may name.
 ///

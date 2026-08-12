@@ -1,0 +1,32 @@
+{
+  "provider": {
+    "name": "Dota 2",
+    "appid": 570,
+    "version": 47,
+    "timestamp": 1770000060
+  },
+  "map": {
+    "name": "start",
+    "matchid": "8421997461",
+    "game_time": -90,
+    "clock_time": -90,
+    "daytime": true,
+    "game_state": "DOTA_GAMERULES_STATE_HERO_SELECTION",
+    "paused": false,
+    "win_team": "none",
+    "customgamename": ""
+  },
+  "player": {
+    "activity": "playing",
+    "kills": 0,
+    "deaths": 0,
+    "assists": 0,
+    "last_hits": 0,
+    "denies": 0,
+    "kill_streak": 0,
+    "team_name": "radiant",
+    "gold": 625,
+    "gpm": 0,
+    "xpm": 0
+  }
+}

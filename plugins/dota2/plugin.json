@@ -1,0 +1,17 @@
+{
+  "contract": 1,
+  "id": "dota-2",
+  "name": "Dota 2",
+  "version": "0.1.0",
+  "description": "Reports kills, deaths, assists and match results from Dota 2's Game State Integration.",
+  "executable": "clipped-dota2-plugin.exe",
+  "supports": { "executables": ["dota2.exe"] },
+  "network": [
+    {
+      "class": "loopback",
+      "direction": "listen",
+      "endpoint": "127.0.0.1:3213",
+      "purpose": "receives Dota 2 game state from Dota 2 on this computer"
+    }
+  ]
+}
