@@ -3,17 +3,22 @@
 Clipped records games without being told to, which means it has to know what a
 game is. `clipped-game-detection` is where that knowledge lives.
 
-**Status: the game catalogue exists ([#42]), the process watcher exists ([#41])
-and Steam detection exists ([#43]).** The watcher reports what started and what
-stopped; the catalogue can say which game a process is; Steam can say which of
-its applications an executable belongs to, which is what the catalogue's
-strongest matching rung needs. Nothing in *this* crate joins the watcher to the
-other two, deliberately — the layer that asks one about the other, and starts a
-recording, is the session manager in `clipped-session` ([#46],
+**Status: the game catalogue exists ([#42]), the process watcher exists ([#41]),
+Steam detection exists ([#43]) and a user can correct all of it ([#45]).** The
+watcher reports what started and what stopped; the catalogue can say which game
+a process is; Steam can say which of its applications an executable belongs to,
+which is what the catalogue's strongest matching rung needs; and a user can
+register a game nothing recognises, rename one, or exclude one that should never
+be recorded. Nothing in *this* crate joins the watcher to the others,
+deliberately — the layer that asks one about the other, and starts a recording,
+is the session manager in `clipped-session` ([#46],
 [sessions.md](sessions.md)), because deciding what to do about a game is not
-detection's business. The other launchers are [#44], and the user-facing
-registration screen is [#45]. This document grows a section per part as they
-land, and marks the rest as intent (AGENTS.md section 7).
+detection's business. The other launchers are [#44], and the screen that drives
+the registration API is [#63]/[#107]. This document grows a section per part as
+they land, and marks the rest as intent (AGENTS.md section 7).
+
+[#63]: https://github.com/wildware-uk/clipped/issues/63
+[#107]: https://github.com/wildware-uk/clipped/issues/107
 
 [#41]: https://github.com/wildware-uk/clipped/issues/41
 [#42]: https://github.com/wildware-uk/clipped/issues/42
@@ -87,7 +92,7 @@ machine-written files where none of the three reasons applies.
 | --- | --- | --- |
 | Where | compiled in from `crates/game-detection/data/games.toml` | `%LOCALAPPDATA%\Clipped\games.toml` |
 | Whose | the project's | the user's |
-| Edited by | a pull request | the user, or the registration UI ([#45]) |
+| Edited by | a pull request | the user by hand, or the registration API ([#45]) |
 | On update | replaced wholesale | never touched |
 | If the schema changes | rewritten by us | migrated, with a backup |
 
@@ -96,6 +101,9 @@ An overlay entry whose `game_id` matches a shipped one **replaces it entirely**
 shipped entry but never correct one, and would leave "which of the two `name`
 fields won?" as a question about somebody's own file. An overlay entry with an
 identifier of its own is simply another entry.
+
+For correcting Clipped's own entries rather than replacing them, the overlay has
+a second kind of block: see [Registering, renaming and excluding](#registering-renaming-and-excluding).
 
 ### Matching, and the precedence order
 
@@ -205,6 +213,18 @@ Both files carry `schema_version`, which is the version of the *format* and not
 of Clipped. It changes when the shape of an entry changes and at no other time,
 so adding a game never touches it. It is version 1 today.
 
+`[[decision]]` blocks ([#45]) were added to version 1 rather than making a
+version 2, and that is worth justifying because it is the sort of decision that
+is wrong later. Clipped has never been released — there is no build in anybody's
+hands that would meet a file it cannot read — and a version 2 whose only change
+was "there may now be blocks you have never seen" would migrate every existing
+overlay: a backup, a rewrite, and the user's comments moved into a `.bak` file,
+for a conversion that changes nothing. **After the first release the answer is
+the other one**: a build in use is a build that can meet a newer file, and being
+told "this file is from a newer Clipped" is worth a rewrite that says so. Until
+then, a build old enough not to know `[[decision]]` refuses the file as an
+unknown key and leaves it exactly as it is, which is the behaviour that matters.
+
 | What Clipped finds | What happens |
 | --- | --- |
 | The current version | Read directly. The file is not rewritten, so a user's comments and layout survive. |
@@ -251,6 +271,150 @@ for the same reason it is separate from the seed data: it is the user's, it
 should be editable by hand, and it should be obvious where it is.
 
 [#55]: https://github.com/wildware-uk/clipped/issues/55
+
+### Registering, renaming and excluding
+
+Detection is sometimes wrong, and everything above is what it is wrong *with*.
+So a user can register an executable Clipped does not know, rename a game, and
+exclude one that should never be recorded ([#45], SPEC.md section 6). All three
+are the same file — the overlay above — through
+`clipped_game_detection::catalogue::Overlay`, which is the API the settings
+screen ([#63], [#107]) drives. There is deliberately no second store: a game the
+user added is a catalogue entry, matched by the same rules and loaded by the same
+loader as one Clipped ships (AGENTS.md section 55).
+
+#### Two kinds of block
+
+```toml
+schema_version = 1
+
+# A game nobody has contributed upstream: an entry of my own.
+[[game]]
+game_id = "obscure-game"
+name = "Obscure Game"
+
+[[game.executables]]
+name = "obscure-game.exe"
+
+# A game Clipped ships, and what I decided about it.
+[[decision]]
+game_id = "counter-strike-2"
+name = "CS2"
+
+[[decision]]
+game_id = "some-launcher"
+excluded = true
+```
+
+A `[[decision]]` names a `game_id` and says only what the user changed. It is
+applied on top of whichever entry has that identifier — shipped or their own —
+after the overlay's entries have been applied.
+
+| | Written as | Why not the other way |
+| --- | --- | --- |
+| Describing a game yourself | `[[game]]` | — |
+| Renaming a game Clipped ships | `[[decision]]` | A replacement entry would also freeze that game's executables, launcher identifier and icon at whatever this build shipped. The next release adds the executable a publisher renamed, and the one person it never reaches is the user who typed a shorter name. |
+| Excluding a game | `[[decision]]` | **An exclusion is not a deletion.** The entry stays and the decision sits over it, so an update that changes the entry — or re-adds one this build does not have — cannot resurrect a game somebody excluded. |
+
+Two consequences worth stating:
+
+- **An excluded entry is still in the catalogue.** It is listed, it is found by
+  `game_id`, and a session recorded before the exclusion still has a game to be
+  filed under. What it never does is match a process, which is what stops a
+  recording — there is no second switch anywhere else to keep in step.
+- **A decision about a game no catalogue has is kept**, and reported by
+  `Catalogue::pending_decisions`. Dropping it is the resurrection above wearing
+  a different hat: a user who excludes a game and then runs a build whose seed
+  data does not list it would find the exclusion quietly gone the next time it
+  did.
+
+#### The operations
+
+| Operation | What it does |
+| --- | --- |
+| `Overlay::load` | The shipped catalogue with this overlay applied — the list a screen shows, each entry carrying its source and what was decided about it. |
+| `Overlay::register` | Adds a `[[game]]`. The identifier is derived from the name (`My Game` → `my-game`) and made unique against everything already catalogued, so registering a game whose name collides with a shipped one adds a game rather than replacing it. |
+| `Overlay::rename` / `clear_rename` | Changes the user's own entry where they have one, and writes a decision where the entry is Clipped's. `Entry::renamed_from` is the name underneath, so "reset" is an offer a screen can make. |
+| `Overlay::exclude` / `include` | Writes or removes `excluded = true`. Including a game again removes the block rather than leaving `excluded = false` behind. |
+| `Overlay::forget` | Removes the user's entry for a game and any decision about it: undo everything I said about this one. |
+
+Every operation **states what the file should say** rather than toggling
+anything. Excluding an excluded game is not an error, clearing a rename that is
+not there is not an error, and asking for what the file already says writes
+nothing at all — so a screen driving a checkbox has no state of its own to keep
+in step.
+
+An executable is registered by **file name**, not by path, so a registration
+still matches after the game moves to another drive; a path qualifier is
+available for the case that needs one — two games shipping the same executable
+name — at the cost of that. A game that is uninstalled simply stops matching:
+its entry stays, listed, until the user forgets it.
+
+#### What an edit does, in order
+
+1. **Reads the file through the loader that will read it at start-up.** A file
+   this build could not load is not written to, and the edit fails saying so.
+   Refusing to *read* a newer build's file preserves nothing on its own: the
+   user opens the settings screen on the machine that is a version behind, sees
+   a list without their entries, changes one thing, and the *save* is what
+   destroys the file. The settings store learned this the same way ([#108],
+   AGENTS.md section 56).
+2. **Edits the document rather than a rendering of it.** The file is changed
+   with `toml_edit`, so comments, ordering and layout survive an edit made from
+   a screen. This file is one users are told to hand-edit and comment; a screen
+   that silently deleted what they wrote in it would be destroying their data.
+3. **Reads the result back before writing it**, through the same parser and the
+   same validation the loader uses. A change that would not load — a rename to
+   an empty name, an executable with a directory in it — fails with the message
+   the loader would have given, and nothing is written.
+4. **Writes through a temporary file and a rename**, so an interrupted write
+   leaves the previous file rather than half of a new one.
+
+The window between step 1 and step 4 is the one the settings store documents:
+cross-process locking is [#194] and nothing smaller closes it.
+
+[#108]: https://github.com/wildware-uk/clipped/issues/108
+[#194]: https://github.com/wildware-uk/clipped/issues/194
+
+#### Why a process matched what it did
+
+A wrong detection is only fixable if a user can see what matched and why, so
+`Catalogue::explain_process` returns the same answer `match_process` does —
+computed once, by the same code — together with every entry that took an
+interest and the verdict it reached:
+
+| Verdict | What it means |
+| --- | --- |
+| `Claimed(rung)` | The entry matched at that rung. |
+| `Excluded(rung)` | It would have, and the user excluded the game. |
+| `PathElsewhere { fragment }` | The executable name matched and the game is running from somewhere the entry does not name. This is what a moved game looks like. |
+| `PathUnknown { fragment }` | The name matched a path-qualified rule and no path was reported. The ordinary cause is a protected process an unelevated Clipped cannot open. |
+
+Entries that took no interest are not listed: nine hundred entries saying "that
+is not my executable" is not a diagnosis.
+
+#### What is deliberately not here
+
+**Per-game settings.** SPEC.md section 6 also asks for "disable capture per
+game" and per-game overrides. An exclusion covers *never record this*, which is
+the same observable behaviour; a setting that leaves a game recognised while
+turning its recording off belongs to the configuration API ([#108],
+[configuration.md](configuration.md)), which already has a per-game section and
+already owns the settings file. Building a second one here would be the accident
+AGENTS.md section 55 exists to prevent. `default_settings` on an entry is still
+carried and interpreted by nothing.
+
+#### Testing it
+
+| What | Where | Needs |
+| --- | --- | --- |
+| That a rename survives an update that changes the shipped entry, that an exclusion is not a deletion, and that a decision with no game is kept | `src/catalogue/mod.rs` | nothing |
+| That an excluded entry never matches, never breaks a tie, and says so in a report; and every verdict a report can carry | `src/catalogue/matching.rs` | nothing |
+| Every edit: the file that must not be overwritten, the change that must not be written, the comments that must survive, the identifier that must not collide | `src/catalogue/overlay/edits.rs` | a temporary directory |
+| The whole flow through the public API — unrecognised, registered, recognised, excluded, explained | `tests/registration.rs` | a temporary directory |
+
+No test touches `%LOCALAPPDATA%`: every one of them names its own directory
+(AGENTS.md section 25).
 
 ## Launcher detection
 

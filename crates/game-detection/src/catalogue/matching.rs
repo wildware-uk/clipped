@@ -46,6 +46,27 @@
 //! this file claims it means. The same applies at the front of a fragment:
 //! `common/Portal` must not be found inside `.../uncommon/Portal/...`.
 //!
+//! # An excluded entry never matches
+//!
+//! A game the user excluded ([`super::decision`]) is skipped: it cannot win,
+//! and it cannot make anything else ambiguous either. The process therefore
+//! matches whatever would have matched if that entry were not there, which is
+//! usually nothing — and nothing is what stops a recording starting, with no
+//! second mechanism anywhere else to keep in step (AGENTS.md section 55).
+//!
+//! The entry itself stays in the catalogue. It is still listed, still found by
+//! `game_id`, and an update that changes it changes it; what the user decided
+//! sits over it rather than deleting it, so a later release cannot resurrect a
+//! game somebody excluded.
+//!
+//! # Why every answer can explain itself
+//!
+//! "This recorded the wrong game" is only actionable if a user can see *what*
+//! matched and *why*, so [`explain`] reports every entry that took an interest
+//! in a process and the verdict it reached, and [`best_match`] is that report
+//! with the verdicts thrown away. One code path, so the explanation cannot
+//! describe a decision the matcher did not take (issue #45).
+//!
 //! # What is deliberately not a match key
 //!
 //! `child_processes`. A game's helper is not the game, and treating the list
@@ -165,21 +186,123 @@ impl Match<'_> {
     }
 }
 
-/// Applies the precedence order to a whole catalogue.
-pub(crate) fn best_match<'a>(entries: &'a [Entry], candidate: &ProcessCandidate<'_>) -> Match<'a> {
-    let scored: Vec<(&Entry, MatchStrength)> = entries
+/// What one entry made of one process.
+///
+/// Only entries that took an interest get one: an entry none of whose
+/// executable names match is not a verdict, it is the other nine hundred
+/// entries in the catalogue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Verdict {
+    /// The entry claimed the process at this rung.
+    Claimed(MatchStrength),
+    /// It would have claimed the process at this rung, and the user excluded
+    /// the game, so it was not considered further.
+    Excluded(MatchStrength),
+    /// An executable name matched a rule qualified by a path, and no path was
+    /// reported for the process, so the qualifier could not be checked.
+    ///
+    /// The ordinary cause is a protected or higher-integrity process, which an
+    /// unelevated Clipped cannot open to ask (`docs/game-detection.md`).
+    PathUnknown {
+        /// The fragment the rule wanted.
+        fragment: String,
+    },
+    /// An executable name matched a rule qualified by a path, and the process
+    /// is running from somewhere else.
+    ///
+    /// This is the verdict a user needs when they moved a game: the entry is
+    /// right about the executable and wrong about where it lives.
+    PathElsewhere {
+        /// The fragment the rule wanted.
+        fragment: String,
+    },
+}
+
+/// One entry's verdict on one process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Considered<'a> {
+    entry: &'a Entry,
+    verdict: Verdict,
+}
+
+impl<'a> Considered<'a> {
+    /// The entry.
+    #[must_use]
+    pub const fn entry(&self) -> &'a Entry {
+        self.entry
+    }
+
+    /// What it made of the process.
+    #[must_use]
+    pub const fn verdict(&self) -> &Verdict {
+        &self.verdict
+    }
+}
+
+/// A match, and every entry that had an opinion about it.
+///
+/// What a diagnostics or settings screen shows when somebody asks why Clipped
+/// recorded — or did not record — what it did (issue #45). The outcome is the
+/// same value [`Catalogue::match_process`](super::Catalogue::match_process)
+/// returns, computed here rather than beside it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchReport<'a> {
+    outcome: Match<'a>,
+    considered: Vec<Considered<'a>>,
+}
+
+impl<'a> MatchReport<'a> {
+    /// What the catalogue decided.
+    #[must_use]
+    pub const fn outcome(&self) -> &Match<'a> {
+        &self.outcome
+    }
+
+    /// Every entry that took an interest, in catalogue order.
+    #[must_use]
+    pub fn considered(&self) -> &[Considered<'a>] {
+        &self.considered
+    }
+
+    /// The decision alone.
+    #[must_use]
+    pub fn into_outcome(self) -> Match<'a> {
+        self.outcome
+    }
+}
+
+/// Applies the precedence order to a whole catalogue, and says how.
+pub(crate) fn explain<'a>(
+    entries: &'a [Entry],
+    candidate: &ProcessCandidate<'_>,
+) -> MatchReport<'a> {
+    let considered: Vec<Considered<'a>> = entries
         .iter()
-        .filter_map(|entry| strength(entry, candidate).map(|strength| (entry, strength)))
+        .filter_map(|entry| consider(entry, candidate).map(|verdict| Considered { entry, verdict }))
         .collect();
 
-    let Some(best) = scored.iter().map(|(_, strength)| *strength).max() else {
-        return Match::None;
+    let best = considered
+        .iter()
+        .filter_map(|considered| match considered.verdict {
+            Verdict::Claimed(strength) => Some(strength),
+            Verdict::Excluded(_) | Verdict::PathUnknown { .. } | Verdict::PathElsewhere { .. } => {
+                None
+            }
+        })
+        .max();
+
+    let Some(best) = best else {
+        return MatchReport {
+            outcome: Match::None,
+            considered,
+        };
     };
 
-    let mut winners: Vec<&Entry> = scored
+    let mut winners: Vec<&Entry> = considered
         .iter()
-        .filter(|(_, strength)| *strength == best)
-        .map(|(entry, _)| *entry)
+        .filter(|considered| considered.verdict == Verdict::Claimed(best))
+        .map(|considered| considered.entry)
         .collect();
 
     // Rung first, file second: only entries that already tied on specificity
@@ -188,7 +311,7 @@ pub(crate) fn best_match<'a>(entries: &'a [Entry], candidate: &ProcessCandidate<
         winners.retain(|entry| entry.source().is_overlay());
     }
 
-    match winners.len() {
+    let outcome = match winners.len() {
         1 => Match::One {
             entry: winners[0],
             strength: best,
@@ -197,11 +320,20 @@ pub(crate) fn best_match<'a>(entries: &'a [Entry], candidate: &ProcessCandidate<
             entries: winners,
             strength: best,
         },
+    };
+    MatchReport {
+        outcome,
+        considered,
     }
 }
 
-/// The strongest rung one entry reaches for one candidate, if any.
-fn strength(entry: &Entry, candidate: &ProcessCandidate<'_>) -> Option<MatchStrength> {
+/// Applies the precedence order to a whole catalogue.
+pub(crate) fn best_match<'a>(entries: &'a [Entry], candidate: &ProcessCandidate<'_>) -> Match<'a> {
+    explain(entries, candidate).into_outcome()
+}
+
+/// What one entry makes of one candidate, or `None` if it says nothing at all.
+fn consider(entry: &Entry, candidate: &ProcessCandidate<'_>) -> Option<Verdict> {
     if let (Some(launcher), Some((kind, app_id))) = (entry.launcher(), candidate.launcher()) {
         // An entry with no recorded identifier says nothing about *which* game
         // the launcher started, so matching on the launcher alone would make
@@ -211,26 +343,61 @@ fn strength(entry: &Entry, candidate: &ProcessCandidate<'_>) -> Option<MatchStre
                 .app_id()
                 .is_some_and(|recorded| recorded.eq_ignore_ascii_case(app_id))
         {
-            return Some(MatchStrength::LauncherIdentity);
+            return Some(claimed(entry, MatchStrength::LauncherIdentity));
         }
     }
 
     let path = candidate.executable_path().map(normalise_path);
-    entry
+    let mut strength: Option<MatchStrength> = None;
+    // The most informative reason a qualified rule did not match, kept for the
+    // case where nothing matched at all: "your game is somewhere else" is worth
+    // saying, and it is the only thing that explains a game that stopped being
+    // recorded after it was moved.
+    let mut elsewhere: Option<&str> = None;
+    let mut unknown: Option<&str> = None;
+
+    for rule in entry
         .executables()
         .iter()
         .filter(|rule| equal_names(rule.name(), candidate.executable_name()))
-        .filter_map(|rule| match rule.path_contains() {
-            None => Some(MatchStrength::ExecutableName),
+    {
+        match rule.path_contains() {
+            None => strength = strength.max(Some(MatchStrength::ExecutableName)),
             // A qualified rule that cannot be checked does not fall back to
             // matching on the name: the qualifier is there precisely because
             // the name alone is not enough to be sure.
-            Some(fragment) => path
-                .as_deref()
-                .filter(|path| covers_segments(path, &normalise_path(fragment)))
-                .map(|_| MatchStrength::QualifiedPath),
+            Some(fragment) => match path.as_deref() {
+                None => unknown = unknown.or(Some(fragment)),
+                Some(path) if covers_segments(path, &normalise_path(fragment)) => {
+                    strength = strength.max(Some(MatchStrength::QualifiedPath));
+                }
+                Some(_) => elsewhere = elsewhere.or(Some(fragment)),
+            },
+        }
+    }
+
+    if let Some(strength) = strength {
+        return Some(claimed(entry, strength));
+    }
+    elsewhere
+        .map(|fragment| Verdict::PathElsewhere {
+            fragment: fragment.to_owned(),
         })
-        .max()
+        .or_else(|| {
+            unknown.map(|fragment| Verdict::PathUnknown {
+                fragment: fragment.to_owned(),
+            })
+        })
+}
+
+/// A rung an entry reached, as a verdict — which is not a claim if the user
+/// excluded the game.
+fn claimed(entry: &Entry, strength: MatchStrength) -> Verdict {
+    if entry.is_excluded() {
+        Verdict::Excluded(strength)
+    } else {
+        Verdict::Claimed(strength)
+    }
 }
 
 /// Compares two file names the way Windows compares them.
@@ -764,6 +931,196 @@ name = "a-game.exe"
 
         let outcome = catalogue.match_process(&ProcessCandidate::new("anticheat-service.exe"));
         assert_eq!(outcome, Match::None);
+    }
+
+    #[test]
+    fn an_excluded_game_is_never_the_answer() {
+        let catalogue = seed(SHARED_NAME).overlaid_with(overlay(
+            r#"
+[[decision]]
+game_id = "half-life-2"
+excluded = true
+"#,
+        ));
+
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("hl2.exe")
+                .with_path(r"D:\Steam\steamapps\common\Half-Life 2\hl2.exe"),
+        );
+        assert_eq!(
+            outcome,
+            Match::None,
+            "an excluded game must not match at all, however well it matches"
+        );
+
+        // Its neighbour is untouched: an exclusion is about one game.
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("hl2.exe")
+                .with_path(r"D:\Steam\steamapps\common\Team Fortress 2\hl2.exe"),
+        );
+        assert_eq!(matched_id(&outcome), "team-fortress-2");
+    }
+
+    #[test]
+    fn excluding_one_of_two_tied_entries_leaves_the_other_answering() {
+        // Ambiguity is what a user meets when two publishers ship
+        // `launcher.exe`, and excluding the one they do not want is how they
+        // resolve it. An excluded entry that still counted towards the tie
+        // would leave the answer ambiguous for ever.
+        let catalogue = seed(THREE_LAUNCHERS).overlaid_with(overlay(
+            r#"
+[[decision]]
+game_id = "first-game"
+excluded = true
+
+[[decision]]
+game_id = "second-game"
+excluded = true
+"#,
+        ));
+
+        let outcome = catalogue.match_process(&ProcessCandidate::new("launcher.exe"));
+        assert_eq!(matched_id(&outcome), "third-game");
+    }
+
+    #[test]
+    fn an_excluded_entry_says_so_rather_than_going_quiet() {
+        // `Match::None` alone would leave a user with a game that never records
+        // and no way to find out why. The report is what a diagnostics screen
+        // shows, and it names the entry and the rung it would have won on.
+        let catalogue = seed(SHARED_NAME).overlaid_with(overlay(
+            r#"
+[[decision]]
+game_id = "half-life-2"
+excluded = true
+"#,
+        ));
+
+        let report = catalogue.explain_process(
+            &ProcessCandidate::new("hl2.exe")
+                .with_path(r"D:\Steam\steamapps\common\Half-Life 2\hl2.exe"),
+        );
+        assert_eq!(report.outcome(), &Match::None);
+        let considered = report.considered();
+        assert_eq!(considered.len(), 2, "{considered:?}");
+        assert_eq!(considered[0].entry().game_id().as_str(), "half-life-2");
+        assert_eq!(
+            considered[0].verdict(),
+            &Verdict::Excluded(MatchStrength::QualifiedPath)
+        );
+        assert_eq!(
+            considered[1].verdict(),
+            &Verdict::PathElsewhere {
+                fragment: "steamapps/common/Team Fortress 2".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_report_says_the_game_is_somewhere_else_rather_than_saying_nothing() {
+        // The verdict a user needs after moving a game off the drive the entry
+        // names: the entry is right about the executable and wrong about where
+        // it lives, which no amount of staring at `Match::None` reveals.
+        let catalogue = seed(SHARED_NAME);
+        let report = catalogue.explain_process(
+            &ProcessCandidate::new("hl2.exe").with_path(r"E:\Moved\Half-Life 2\hl2.exe"),
+        );
+
+        assert_eq!(report.outcome(), &Match::None);
+        let fragments: Vec<&Verdict> = report
+            .considered()
+            .iter()
+            .map(Considered::verdict)
+            .collect();
+        assert_eq!(
+            fragments,
+            [
+                &Verdict::PathElsewhere {
+                    fragment: "steamapps/common/Half-Life 2".to_owned()
+                },
+                &Verdict::PathElsewhere {
+                    fragment: "steamapps/common/Team Fortress 2".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_distinguishes_a_path_it_could_not_read_from_one_that_did_not_match() {
+        // An unelevated Clipped cannot open a protected process to ask where it
+        // is running from, and "we could not look" is a different answer from
+        // "we looked and it is elsewhere" — the first is not the entry's fault.
+        let catalogue = seed(SHARED_NAME);
+        let report = catalogue.explain_process(&ProcessCandidate::new("hl2.exe"));
+
+        assert_eq!(report.outcome(), &Match::None);
+        assert_eq!(
+            report.considered()[0].verdict(),
+            &Verdict::PathUnknown {
+                fragment: "steamapps/common/Half-Life 2".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_report_names_the_entry_that_won_and_the_rung_it_won_on() {
+        let catalogue = seed(SHARED_NAME);
+        let report = catalogue.explain_process(
+            &ProcessCandidate::new("hl2.exe")
+                .with_path(r"D:\Steam\steamapps\common\Half-Life 2\hl2.exe"),
+        );
+
+        assert_eq!(
+            report.considered()[0].verdict(),
+            &Verdict::Claimed(MatchStrength::QualifiedPath)
+        );
+        assert_eq!(matched_id(report.outcome()), "half-life-2");
+    }
+
+    #[test]
+    fn a_process_nothing_claims_is_considered_by_nothing() {
+        // The report is not "every entry in the catalogue and why not": nine
+        // hundred entries saying "that is not my executable" is not a
+        // diagnosis.
+        let catalogue = seed(THREE_LAUNCHERS);
+        let report = catalogue.explain_process(&ProcessCandidate::new("notepad.exe"));
+        assert_eq!(report.outcome(), &Match::None);
+        assert!(report.considered().is_empty(), "{:?}", report.considered());
+    }
+
+    #[test]
+    fn the_report_and_the_answer_are_the_same_answer() {
+        // `match_process` is `explain_process` with the reasons discarded, and
+        // this is what stops that ever becoming two implementations that
+        // disagree about a game.
+        let catalogue = seed(SHARED_NAME).overlaid_with(overlay(
+            r#"
+[[game]]
+game_id = "my-own-game"
+name = "My Own Game"
+[[game.executables]]
+name = "hl2.exe"
+
+[[decision]]
+game_id = "team-fortress-2"
+excluded = true
+"#,
+        ));
+
+        for candidate in [
+            ProcessCandidate::new("hl2.exe"),
+            ProcessCandidate::new("hl2.exe")
+                .with_path(r"D:\Steam\steamapps\common\Half-Life 2\hl2.exe"),
+            ProcessCandidate::new("hl2.exe")
+                .with_path(r"D:\Steam\steamapps\common\Team Fortress 2\hl2.exe"),
+            ProcessCandidate::new("notepad.exe"),
+        ] {
+            assert_eq!(
+                catalogue.explain_process(&candidate).into_outcome(),
+                catalogue.match_process(&candidate),
+                "the report and the answer disagreed about {candidate:?}"
+            );
+        }
     }
 
     #[test]

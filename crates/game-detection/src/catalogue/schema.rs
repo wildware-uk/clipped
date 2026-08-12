@@ -42,11 +42,12 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use super::decision::Decision;
 use super::entry::{
     CaptureCompatibility, CaptureSupport, Entry, EntrySource, ExecutableRule, GameId, Launcher,
     LauncherKind, SettingValue,
 };
-use super::error::{CatalogueError, EntryLocation, EntryProblem};
+use super::error::{CatalogueError, DecisionProblem, EntryLocation, EntryProblem};
 use super::matching::normalise_path;
 
 /// One step from one schema version to the next.
@@ -94,6 +95,9 @@ pub(crate) const MIGRATIONS: &[Migration] = &[];
 pub(crate) struct Parsed {
     /// The entries, in file order.
     pub(crate) entries: Vec<Entry>,
+    /// The user's decisions about entries, in file order. Always empty for the
+    /// seed data, which is refused if it carries any.
+    pub(crate) decisions: Vec<Decision>,
     /// The document to write back, when migrating produced a different one.
     /// `None` when the file was already current.
     pub(crate) migrated: Option<MigratedDocument>,
@@ -169,8 +173,10 @@ pub(crate) fn parse(
             message: error.to_string(),
         })?;
 
+    let (entries, decisions) = validate(raw, file)?;
     Ok(Parsed {
-        entries: validate(raw, file)?,
+        entries,
+        decisions,
         migrated,
     })
 }
@@ -244,6 +250,12 @@ struct RawFile {
     schema_version: u32,
     #[serde(default)]
     game: Vec<RawGame>,
+    /// The user's decisions about entries. Named `decision` rather than
+    /// `override` because the latter is a reserved word in Rust and a field
+    /// spelled `r#override` in the reader of a file people hand-edit is a
+    /// papercut waiting for whoever adds the next key.
+    #[serde(default)]
+    decision: Vec<RawDecision>,
 }
 
 /// One `[[game]]` block.
@@ -273,6 +285,19 @@ struct RawExecutable {
     path_contains: Option<String>,
 }
 
+/// One `[[decision]]` block.
+///
+/// Both fields are optional and one of them has to be there: a block that says
+/// nothing is a half-finished edit, and accepting it would leave a user looking
+/// at a decision in their file that changes nothing.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDecision {
+    game_id: String,
+    name: Option<String>,
+    excluded: Option<bool>,
+}
+
 /// A `[game.launcher]` table.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -296,7 +321,10 @@ struct RawCapture {
 /// contributor fixing it re-runs the check, so reporting one precise problem is
 /// worth more than a list whose later halves are usually consequences of the
 /// first.
-fn validate(raw: RawFile, file: &EntrySource) -> Result<Vec<Entry>, CatalogueError> {
+fn validate(
+    raw: RawFile,
+    file: &EntrySource,
+) -> Result<(Vec<Entry>, Vec<Decision>), CatalogueError> {
     let mut entries = Vec::with_capacity(raw.game.len());
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -306,7 +334,70 @@ fn validate(raw: RawFile, file: &EntrySource) -> Result<Vec<Entry>, CatalogueErr
         entries.push(entry);
     }
 
-    Ok(entries)
+    Ok((entries, validate_decisions(raw.decision, file)?))
+}
+
+/// Turns the `[[decision]]` blocks into decisions, or into the first problem.
+///
+/// The seed data may not carry any. A decision is what a *user* decided about
+/// an entry somebody else wrote; Clipped shipping one would be Clipped
+/// disagreeing with its own catalogue, which is a change to the entry.
+fn validate_decisions(
+    raw: Vec<RawDecision>,
+    file: &EntrySource,
+) -> Result<Vec<Decision>, CatalogueError> {
+    let mut decisions: Vec<Decision> = Vec::with_capacity(raw.len());
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+
+    for (index, decision) in raw.into_iter().enumerate() {
+        let position = index + 1;
+        // Which is also the check that this is not the seed data: the shipped
+        // catalogue is not a file on anybody's disk, and it may not decide
+        // things about itself.
+        let Some(path) = file.path() else {
+            return Err(CatalogueError::DecisionInSeedData { position });
+        };
+
+        let fail = |problem| CatalogueError::InvalidDecision {
+            file: file.clone(),
+            position,
+            game_id: decision.game_id.clone(),
+            problem,
+        };
+
+        let game_id =
+            GameId::parse(&decision.game_id).ok_or_else(|| fail(DecisionProblem::GameIdInvalid))?;
+
+        match seen.entry(game_id.as_str().to_owned()) {
+            MapEntry::Occupied(occupied) => {
+                return Err(fail(DecisionProblem::Duplicated {
+                    first_at: *occupied.get(),
+                }));
+            }
+            MapEntry::Vacant(vacant) => {
+                vacant.insert(position);
+            }
+        }
+
+        let name = match decision.name {
+            None => None,
+            Some(name) if name.trim().is_empty() => return Err(fail(DecisionProblem::NameEmpty)),
+            Some(name) => Some(name),
+        };
+        let excluded = decision.excluded.unwrap_or(false);
+        if name.is_none() && decision.excluded.is_none() {
+            return Err(fail(DecisionProblem::Empty));
+        }
+
+        decisions.push(Decision {
+            game_id,
+            name,
+            excluded,
+            path: path.to_owned(),
+        });
+    }
+
+    Ok(decisions)
 }
 
 /// Validates one entry, given where it is and what has been seen before it.
@@ -479,6 +570,9 @@ fn validate_game(
         default_settings,
         highlight_providers,
         source: file.clone(),
+        // Applied afterwards, by whoever put the two files together: a
+        // decision in this file may be about an entry in the other one.
+        decision: None,
     })
 }
 
