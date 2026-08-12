@@ -58,6 +58,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod foreground;
+mod notification_policy;
+mod notifications;
+mod toast;
 mod tray;
 mod tray_icon;
 mod tray_model;
@@ -148,6 +151,11 @@ fn main() {
             // the tray's first menu already knows what to offer to record.
             foreground::follow_the_foreground_window();
 
+            // Before the tray, because both report a startup failure through the
+            // same one-sentence notice and a missing tray is the more important
+            // of the two: it changes what closing the window does.
+            let mut notifier = notifications::install(&handle, &app.state::<RecorderLink>());
+
             if let Err(error) = tray::install(&handle, &app.state::<RecorderLink>()) {
                 // Not fatal. A window that shows the recorder's state is still
                 // worth having, and saying what is missing beats exiting
@@ -171,6 +179,14 @@ fn main() {
                         if let RecorderLinkEvent::State(state) = &event {
                             tray::refresh(&handle, state);
                         }
+
+                        // Then whatever is worth interrupting the user for,
+                        // which is a short list and deliberately so
+                        // (`notification_policy`, issue #110). This thread owns
+                        // the policy because it is the only thing that consults
+                        // it; showing a toast is a WinRT call and a tenth of a
+                        // second at worst, and nothing here is drawing a window.
+                        notifier.consider(&handle, &event);
 
                         if let Err(error) = handle.emit(LINK_EVENT, &event) {
                             // The window has gone; the recorder has not, and

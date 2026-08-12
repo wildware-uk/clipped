@@ -299,6 +299,300 @@ was in the notification area before, with its tooltip reading
 `Clipped — not recording`, and was still there afterwards reading the same thing.
 Several other applications' icons did not come back in the same interval.
 
+## Notifications
+
+A notification in Clipped is a **Windows toast**, and it is the third of three
+surfaces rather than a second copy of either of the others (issue #110).
+
+| Surface | Carries | Reaches you when |
+| --- | --- | --- |
+| The tray | State: the icon's mark, the tooltip, the menu's first line. | You look at it. |
+| The window | Sentences: the link's state, an interrupted recording's file, whatever the tray had to report. | It is open and in front of you. |
+| A notification | One failure, with one thing to do about it. | You closed the window to the tray an hour ago and are in a game. |
+
+That last row is the whole argument for having notifications at all. The recorder
+is a separate process precisely so that it can go on recording with no window
+open ([ADR 0002](adr/0002-separate-recorder-process.md)), and the hours it spends
+that way are exactly the hours in which a user needs to be told that it has
+stopped. Neither of the other two surfaces can reach them.
+
+### What is notified
+
+Everything, and there is no more:
+
+| What the recorder link reports | Notified | Why |
+| --- | --- | --- |
+| `State(Connecting)` | no | Transient; the tray icon already says it. |
+| `State(Attached { Idle })` | no | Recordings starting and stopping are the ordinary course of a day. |
+| `State(Attached { Recording })` | no | As above. It is what the icon's mark is for. |
+| `State(Reconnecting)` | no | A blip that usually fixes itself in a second. A toast per blip is the nuisance. |
+| `State(Unavailable)` | **yes** | The link has given up. Nothing is being recorded and nothing further will be tried unless asked. |
+| `RecordingInterrupted` | **yes** | A recorder died mid-recording. There is a playable file, and nothing else will ever say where. |
+| `RecordingFailed` | **yes** | A recording ended because something went wrong, and the state that follows it is only "idle". |
+
+Those seven rows are the whole of `RecorderLinkEvent` and `RecorderLinkState`.
+The rule they encode is that **only failures interrupt anybody**: a recorder runs
+for days, and a toast when a recording starts would train the user to dismiss
+them without reading, taking the three that matter with it.
+
+Issue #110's scope also lists "replay saved", "bookmark added" and "screenshot
+taken". **None of them is here**, because no such event exists — saving a replay
+from the retained segments is issue #37, and `save_replay` is a command this
+build refuses. Notifying about something no subsystem reports would be the
+invented state AGENTS.md section 27 forbids, and it would be the one thing worse
+than a missing notification: a user believing a clip was saved.
+
+The same issue asks for non-critical notifications to be suppressed during
+gameplay. There are none to suppress — every category above is a failure — and a
+critical one is never withheld, because in a game is exactly when a user most
+needs to know that nothing is being recorded. That is the rule, and the empty set
+is what satisfies it.
+
+### Nothing is announced twice
+
+Two rules, both about not becoming a nuisance:
+
+- **A state that has not changed raises nothing.** The link republishes whole
+  states rather than deltas, and an identical one is not news. Giving up *again*
+  after a "Try again" is not the same state twice — `Connecting` came between —
+  and is announced, because otherwise a retry that failed would look like one
+  that worked.
+- **The state the application opened in raises nothing.** A notification is for
+  something that happened while you were away. Without this an installation with
+  no recorder beside it (issue #226) would toast on every launch, saying what the
+  window in front of the user is already saying.
+
+### Every notification has something to do
+
+A failure that arrives with nothing to act on is the message AGENTS.md section 45
+exists to prevent, so each of the three carries a button, and the policy only
+ever offers one this build can actually perform:
+
+| Notification | Says | Button |
+| --- | --- | --- |
+| Recording failed | The recorder's own sentence, and where the file it wrote up to the failure is. | **Show the file** — File Explorer, with the recording selected. |
+| Recording interrupted | What was being recorded, that it was not resumed, and where the file is. | **Show the file** |
+| Recorder unavailable | Why the link gave up. | **Try again** — `RecorderLink::retry`, and the window is raised to watch it. |
+
+`recording_failed` carries a recording identifier and no path, so the file is
+named from the last `Recording` status the window saw — and **only** when that
+status's `recording_id` is the one the failure names. A failure for a recording
+this window never saw claims no file at all and falls back to **Open Clipped**,
+which raises the window carrying the sentence. Guessing that the last file seen
+was the one that failed would put somebody else's recording in front of the user.
+
+"Try again" is likewise conditional. `RecorderLink::retry` does nothing to a link
+that never had a recorder to talk to — no endpoint could be named, or no
+executable found — so for one of those the button is **Open Clipped** instead. A
+button that would do nothing is worse than no button (AGENTS.md section 27).
+
+Clicking the *body* of a toast raises the window rather than performing the
+action, which is the platform convention and means neither click does nothing.
+
+#### Keeping the button connected to its handler
+
+There is no COM activator (see below), so the handler that performs a button's
+action lives in **this** process, attached to the `ToastNotification` object
+`Activated` is raised on. That object is reference-counted and this process holds
+the only reference it will ever have. Release it and the object is destroyed
+while its toast is still on screen or still in the Action Centre; whether Windows
+keeps a reference of its own is neither documented nor promised, and a button
+whose handler *might* have been freed is the control AGENTS.md section 27
+forbids.
+
+So `src/toast.rs` keeps every toast it shows — the last twenty, which is Windows'
+own per-application Action Centre limit and therefore every toast the user can
+still click, bounded rather than unbounded in a process that runs for days.
+
+This is the whole reason `tauri-winrt-notification` is not used. Its
+`Toast::show` builds the `ToastNotification`, attaches the handler, shows it and
+returns `Result<()>`, dropping the object on the way out and giving the caller no
+way to hold it.
+
+**What has not been verified:** that a click actually reaches the handler on a
+real desktop. Nothing short of clicking a real toast can establish it, and that
+has to be done on a machine nobody else is using. The tests assert the button
+reaches the toast's XML under the argument the handler matches on, and that a
+shown notification is retained — not that the click arrives. The button's
+presence in the XML is not evidence that it works, and this section will say so
+until somebody has clicked one.
+
+### Switching categories off
+
+Per-category switches, in `notifications.json` in Clipped's configuration
+directory — `%APPDATA%\uk.wildware.clipped\notifications.json`:
+
+```json
+{
+  "version": 1,
+  "recording_failed": true,
+  "recording_interrupted": true,
+  "recorder_unavailable": true
+}
+```
+
+Every category defaults to on, because all three are failures. A missing field
+takes its default and an unknown field is ignored, so a file written by an older
+or a newer Clipped still works; a `version` from the future is refused rather
+than guessed at (AGENTS.md sections 30 and 43). There is no file until somebody
+writes one, and that is the ordinary case rather than a fault.
+
+A leading byte-order mark is dropped before the file is parsed. JSON has no such
+thing, but this file is edited by hand on Windows and both Notepad and
+`Out-File -Encoding utf8` under Windows PowerShell write one — which is exactly
+how the first end-to-end run of this feature was done, and the notification it
+was supposed to switch off arrived. A settings file that looks right and does not
+work is not a trap worth keeping.
+
+**The Settings screen is issue #51**, and until it exists this file is where the
+switches are. That is why a file which exists and cannot be read is reported
+through the startup notice — naming the file, what is wrong with it, and the
+categories it may contain — rather than ignored: somebody has switched something
+off and it has not taken effect. Clipped notifies about everything in the
+meantime, so a broken settings file can never be the reason a user is not told
+that nothing is being recorded.
+
+The other place these can be switched off is Windows' own Settings →
+Notifications page, which is per-application and not per-category. It is Windows'
+switch rather than Clipped's, and Clipped does not try to reflect or override it.
+
+#### This file is a second configuration store, and why
+
+Clipped has a configuration API — `crates/session/src/config`, issue #108 — with
+defaults, types, validation, layered resolution and migrations, and it writes
+`%LOCALAPPDATA%\Clipped\settings.json`. Notification switches are settings and
+belong in it. Two preference files in two directories is the duplication AGENTS.md
+section 55 forbids.
+
+They are not in it because **the desktop application may not link the crate it
+lives in**, and that is a rule with a test behind it:
+`tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
+permits this crate exactly one member of the repository's workspace,
+`clipped-ipc`. `clipped-session` sits above capture, audio, encoding, muxing and
+replay, so naming it here would put the recording engine inside the window's
+process — the separation [ADR 0002](adr/0002-separate-recorder-process.md) exists
+to make, and the reason closing or crashing a window cannot interrupt a
+recording. Reading `settings.json` from here directly would instead be a second
+implementation of that file's versioning, migration and validation, against the
+file the user's recording settings live in, which is worse than a second file.
+
+**Issue #252** is the fix: move the configuration API to a crate at the
+protocol's layer that both ends may link, or serve it over IPC. Either makes
+these three booleans ordinary settings, migrates this file into `settings.json`
+and deletes it. That migration is why this file carries a `version`, and why a
+category's key is documented as stable above.
+
+### Why neither notification crate
+
+`tauri-plugin-notification`'s desktop `show()` is `let _ = notification.show()`,
+so a failure to hand the toast over is discarded without a word (AGENTS.md
+section 15), and on Windows it offers neither a button nor an activation handler
+— which makes the action of section 45 impossible.
+
+The crate beneath it, `tauri-winrt-notification`, offers both, and is not used
+either: its `show()` drops the `ToastNotification` the handler is attached to,
+for the reason set out above. What is left after that is about thirty lines of
+XML document building, which `src/toast.rs` holds directly against the `windows`
+crate this application already depends on — rather than a fork of a crate for the
+sake of one `Result` type.
+
+**What `Show` returning `Ok` does and does not mean.** It means the notification
+platform accepted the notification. It does **not** mean a toast was displayed:
+`tauri-winrt-notification`'s own `without_library.rs` example says so in a
+comment — "this returns success in every case, including when the toast isn't
+shown" — and the obvious case is a user who has switched Clipped off on Windows'
+Settings → Notifications page. An earlier draft of this document claimed the
+`Result` was a reason to prefer that crate over the plugin. It is not; the button
+and the handler are.
+
+A toast that could not be handed over at all is still not lost. Its title and
+body go to the window instead, through the same `tray-notice` channel a failed
+tray action uses. That raises the window, which is more intrusive than a toast —
+and losing a failure notice silently is the one outcome that is not allowed.
+
+### The AppUserModelID
+
+A toast is filed by the AppUserModelID it was shown under: that identifier
+decides the name on the notification, the entry on Windows' Settings →
+Notifications page, and how the Action Centre groups it. Clipped's is its bundle
+identifier, `uk.wildware.clipped`, and on startup it registers a `DisplayName`
+for it under `HKCU\Software\Classes\AppUserModelId` so that all three say
+"Clipped".
+
+Whether that registration is *required* was measured rather than assumed, on
+Windows 11 26200, with a probe that showed the same toast under three identifiers
+and then read `ToastNotificationManager::History` back:
+
+| App ID | `show()` | In the Action Centre |
+| --- | --- | --- |
+| An identifier registered nowhere | `Ok` | yes |
+| The same identifier with a `DisplayName` in `HKCU` | `Ok` | yes |
+| Windows PowerShell's own AppUserModelID | `Ok` | yes |
+
+So toasts are delivered either way and the registration buys the name, not the
+delivery — which is why a registration that fails is logged and carried on from
+rather than treated as fatal. It is one `HKCU` value, needs no elevation, and
+leaves at most an empty key behind.
+
+There is deliberately **no COM activator**. Registering one would let Windows
+start Clipped from a notification, which is not a reason to start a recorder
+supervisor. The consequence is that the button works while Clipped is running —
+whether the toast is on screen or has fallen into the Action Centre, because the
+handler lives in this process — and a toast clicked after Clipped has exited does
+nothing.
+
+### What was actually seen
+
+The application was run with `CLIPPED_RECORDER_EXE` naming an executable that
+exits without ever listening, so the link exhausted its restart budget and
+reached `Unavailable`. Three runs, with the notification history cleared before
+each and read back afterwards:
+
+| `notifications.json` | Toasts under `uk.wildware.clipped` |
+| --- | --- |
+| absent | 1 |
+| `{"version": 1, "recorder_unavailable": false}` | 0 |
+| `{"version": 1, "recording_failed": false}` | 1 |
+
+The last row is the one worth having: switching a category off silences that
+category and leaves the others alone. This is what the toast was, read out of the
+history:
+
+```xml
+<toast duration="long"><visual><binding template="ToastGeneric"><text id="1">Recorder unavailable</text><text id="2">The recorder exited with status 1 within 10s without listening on \\.\pipe\clipped-recorder.1; its diagnostics are in the Clipped log directory. 4 attempts to reach or start a recorder failed, so nothing is being recorded and no more will be made without being asked.</text></binding></visual><actions><action content="Try again" arguments="action"/></actions></toast>
+```
+
+The second run was the one that found the byte-order mark: with the file written
+by `Out-File -Encoding utf8`, the toast arrived anyway and the console carried
+`Clipped could not read its notification settings … Every notification is
+switched on until that file is corrected or deleted.` The failure was reported
+rather than swallowed, which is what that path is for — and the mark is now
+dropped, which is why the table above reads 0.
+
+**Those three runs predate `src/toast.rs`**, and were made through
+`tauri-winrt-notification`. What carries them across the rewrite is that the
+document above is composed byte for byte by the current code:
+`toast::tests::the_document_is_the_one_a_toast_was_seen_delivered_from` asserts
+exactly this string. What changed is who holds the `ToastNotification` after
+`Show` returns, not what Windows is handed — so the delivery and the
+category-switch behaviour those runs established still stand, and the button's
+*activation* remains the thing nobody has yet observed.
+
+### Still to be verified on a real desktop
+
+One thing, and it needs a machine nobody else is using, because it puts a toast
+on screen:
+
+- **Click the button on each of the three notifications and confirm the action
+  runs**: File Explorer opens with the recording selected, "Try again" restarts
+  the link and raises the window, "Open Clipped" raises the window carrying the
+  sentence. Then dismiss a toast to the Action Centre and click it there, which
+  is the case the retention in `src/toast.rs` exists for.
+
+Until that is done, acceptance criterion 3 of issue #110 — "error notifications
+lead to an action, not just a message" — is **not** met. A button in the XML is
+not an action; it is a button in the XML.
+
 ## Decisions
 
 ### Tauri 2, React 19, Vite 7

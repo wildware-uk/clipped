@@ -101,9 +101,36 @@ clipped-ipc = { path = "../../../crates/ipc", version = "0.1.0" }
 # that closing this window can never reach capture or encoding. The version is
 # the one the root workspace pins, so a machine with both checkouts built
 # compiles one copy of it. Dual MIT/Apache-2.0.
+#
+# `Data_Xml_Dom` and `UI_Notifications` are the Windows toast a notification is
+# (issue #110, `src/toast.rs`), and `Foundation` is the event handler its button
+# is delivered through. Neither `tauri-plugin-notification` nor the
+# `tauri-winrt-notification` crate beneath it can be used for this:
+#
+# - the plugin's desktop `show()` is `let _ = notification.show()`, and it
+#   offers neither a button nor an activation handler on Windows. A notification
+#   with nothing to do about it is the message AGENTS.md section 45 exists to
+#   prevent, and one that fails in silence is section 15;
+# - the crate's `Toast::show` builds the `ToastNotification`, attaches the
+#   `Activated` handler, shows it and returns `Result<()>` — dropping the object
+#   the handler is attached to, and giving the caller no way to hold it. Clipped
+#   has to keep it, or its button may have no handler left to run when it is
+#   clicked (`src/toast.rs`).
+#
+# The alternative to these two features is a fork of that crate, for the sake of
+# thirty lines of XML document building this crate can hold itself.
 windows = { version = "0.62", features = [
+    "Data_Xml_Dom",
+    "Foundation",
+    "UI_Notifications",
     "Win32_Foundation",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# The notification settings file: which categories the user wants. `serde` comes
+# with Tauri either way; naming both here is what deny.toml's `wildcards =
+# "deny"` asks of a dependency this crate actually uses. Dual MIT/Apache-2.0.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
