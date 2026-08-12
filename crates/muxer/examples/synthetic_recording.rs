@@ -108,6 +108,27 @@ struct Arguments {
     #[arg(long, default_value_t = 2)]
     audio_tracks: u16,
 
+    /// Which audio track a player should choose on its own.
+    ///
+    /// Zero — the compatibility mix — is what a real recording marks (SPEC.md
+    /// section 13). Any other value is worth being able to write because a
+    /// container that simply enables the *first* track of each kind produces the
+    /// same file as one that carried the flag, so a test of the flag needs a
+    /// recording whose default track is not the first one
+    /// (`crates/muxer/tests/mp4_remux.rs`).
+    #[arg(long, default_value_t = 0)]
+    default_audio_track: u16,
+
+    /// How far into the recording the audio starts, in milliseconds.
+    ///
+    /// Zero writes a recording whose tracks all begin together, which is what a
+    /// real one does. A non-zero value is the case a remux has to preserve: the
+    /// audio track's own timeline starts later than the video's, and a copy that
+    /// rebased each track onto its own first packet would silently pull the
+    /// sound forward by this much (`crates/muxer/tests/mp4_remux.rs`).
+    #[arg(long, default_value_t = 0)]
+    audio_offset_ms: u64,
+
     /// How many seconds apart the keyframes are.
     ///
     /// Worth being able to change: a keyframe is one of the three things that
@@ -165,7 +186,7 @@ fn record(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
         let mut track = AudioTrack::new(AudioCodec::PcmS16Le, SAMPLE_RATE, 2)
             .with_name(name)
             .with_language(Language::ENGLISH);
-        if index == 0 {
+        if index == arguments.default_audio_track {
             track = track.as_default();
         }
         layout = layout.with_audio_track(track);
@@ -186,6 +207,7 @@ fn record(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
         (arguments.seconds * 1000.0 / AUDIO_PACKET.as_millis() as f64).round() as u64;
 
     let started = Instant::now();
+    let audio_offset = Duration::from_millis(arguments.audio_offset_ms);
     let mut next_frame = 0_u64;
     let mut next_audio_packet = 0_u64;
     let mut output = io::stdout().lock();
@@ -195,7 +217,7 @@ fn record(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     // interleaving queue inside libavformat shallow.
     loop {
         let video_at = frame_interval * u32::try_from(next_frame)?;
-        let audio_at = AUDIO_PACKET * u32::try_from(next_audio_packet)?;
+        let audio_at = audio_offset + AUDIO_PACKET * u32::try_from(next_audio_packet)?;
         let (video_left, audio_left) = (next_frame < frames, next_audio_packet < audio_packets);
         let next_at = match (video_left, audio_left) {
             (true, true) => video_at.min(audio_at),
@@ -214,7 +236,7 @@ fn record(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
             encoder.encode_frame(next_frame, frame_interval, &mut writer)?;
             next_frame += 1;
         } else {
-            audio.write_packet(next_audio_packet, &mut writer)?;
+            audio.write_packet(next_audio_packet, audio_offset, &mut writer)?;
             next_audio_packet += 1;
         }
 
@@ -259,13 +281,22 @@ impl ToneGenerator {
         }
     }
 
-    /// Writes packet `index` of every track.
-    fn write_packet(&mut self, index: u64, writer: &mut MkvWriter) -> Result<(), Box<dyn Error>> {
+    /// Writes packet `index` of every track, `offset` into the recording.
+    fn write_packet(
+        &mut self,
+        index: u64,
+        offset: Duration,
+        writer: &mut MkvWriter,
+    ) -> Result<(), Box<dyn Error>> {
         let frames_per_packet = (SAMPLE_RATE as u64 * AUDIO_PACKET.as_millis() as u64) / 1000;
         let first_frame = index * frames_per_packet;
-        let timestamp = PacketTimestamp::from_nanos(i64::try_from(
-            first_frame * 1_000_000_000 / u64::from(SAMPLE_RATE),
-        )?);
+        // The offset moves the packet on the recording's timeline and not the
+        // tone inside it: the audio starts later, rather than starting on time
+        // and being labelled wrongly.
+        let timestamp = PacketTimestamp::from_nanos(
+            i64::try_from(first_frame * 1_000_000_000 / u64::from(SAMPLE_RATE))?
+                + i64::try_from(offset.as_nanos())?,
+        );
 
         for track in 0..self.tracks {
             // 440 Hz on the first track, 660 Hz on the second, and so on.

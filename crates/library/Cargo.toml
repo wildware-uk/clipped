@@ -8,5 +8,57 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The logging facade. Storage accounting walks the user's library, and the two
+# things it can discover — a root it could not read, and a scan that ran out of
+# its budget — are exactly the diagnostics somebody investigating "why does the
+# reported figure look wrong" needs. MIT.
+tracing.workspace = true
+
+# For `RedactedPath`. Every path accounting could log is a path inside the
+# user's own profile — a storage root is `C:\Users\<account>\Videos\Clipped\...`
+# — so the account name and the folders somebody chose are reduced before they
+# reach a log file (docs/logging.md, "Privacy"; AGENTS.md section 13).
+# `clipped-logging` is layer 0 and this crate is layer 1, so this follows the
+# dependency direction.
+clipped-logging.workspace = true
+
+# How much of a volume is free, and how large it is: `GetDiskFreeSpaceExW`.
+# Target-specific so that the platform-neutral half of this crate still compiles
+# and its unit tests still run on a contributor's other machine; the call itself
+# lives behind `#[cfg(windows)]` in `src/accounting/windows/` (AGENTS.md
+# section 5). The feature list is the exact set of namespaces that file names.
+# Dual MIT/Apache-2.0.
+# The calendar a `date:` term is compared against (`src/search/date.rs`).
+# `time::Date` is exactly what this needs — a date with no time and no zone,
+# ordered chronologically, validated against the Gregorian calendar — and
+# hand-rolling a second one here would put a second leap-year rule in the
+# product (AGENTS.md section 55). It also removes an adapter from issue #56:
+# the indexer holds an `OffsetDateTime`, and `OffsetDateTime::date()` is
+# already the day a row belongs to. `std` is the only feature named; nothing
+# here formats, parses or asks the operating system the time. Taken from the
+# workspace, which says why the version is pinned there.
+time = { workspace = true, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+# `tests/accounting_privacy.rs` renders real log output through a real
+# subscriber and asserts on the bytes that would have reached a log file, which
+# is the only way to prove a path was reduced before it was recorded. The same
+# approach as `crates/logging/tests/privacy.rs`. MIT.
+tracing-subscriber = "0.3"
+
+# `examples/scan_cost.rs` builds a synthetic library of a requested size and
+# times a scan of it, which is where the figures in docs/storage-management.md
+# come from. It takes arguments, and every executable in this workspace presents
+# the same argument syntax and the same usage errors (the root manifest says
+# why).
+clap.workspace = true
+
 [lints]
 workspace = true

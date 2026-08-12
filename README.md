@@ -125,7 +125,7 @@ without being placed in a layer.
 | Layer | Crates | Depends on |
 | --- | --- | --- |
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
-| 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
+| 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
 | 3 | `clipped-replay` | layers 0–2 |
 | 4 | `clipped-session` | layers 0–3 |
@@ -229,14 +229,17 @@ is not responsible for, and where it sits in this stack.
 | [docs/prerequisites.md](docs/prerequisites.md) | Toolchains, SDKs and driver expectations |
 | [docs/architecture.md](docs/architecture.md) | Subsystems, boundaries and ADRs |
 | [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
+| [docs/licensing.md](docs/licensing.md) | What a release has to carry, and the LGPL obligations FFmpeg brings |
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 | [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |
 | [docs/game-detection.md](docs/game-detection.md) | The game catalogue, its matching rules and how to add a game |
 | [docs/editing.md](docs/editing.md) | What an edit is, the two kinds of time it is written in, where it is stored and how a document from an older build is read |
+| [docs/storage-management.md](docs/storage-management.md) | What the library occupies, how accurate that figure is, and the limits configured against it |
 
-The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49, #42 and
-#82 and are listed here so those tickets do not each have to edit this table.
+The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49, #42, #82
+and #93 and are listed here so those tickets do not each have to edit this
+table.
 
 ## Contributing
 
@@ -265,7 +268,13 @@ are MPL-2.0 ones; GPL-only dependencies are not, and a dependency with unclear
 licensing should not be added at all. See
 [CONTRIBUTING.md](CONTRIBUTING.md#licensing-and-dependencies).
 
-Third-party code that lives in this repository — currently the NVENC bindings
-generated from NVIDIA's MIT-licensed `nvEncodeAPI.h` — is listed with the
-notices its licence requires in
+Third-party code that lives in this repository — the encoder bindings generated
+from NVIDIA's, AMD's and Intel's headers, all MIT — is listed with the notices
+its licence requires in
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Distributing Clipped is a separate question again, because a release ships
+FFmpeg's LGPL v3 libraries and several hundred Rust crates that this repository
+does not contain. What a release has to carry, which of it exists today, and how
+the FFmpeg relinking permission was tested are in
+[docs/licensing.md](docs/licensing.md).
