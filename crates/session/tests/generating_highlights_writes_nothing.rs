@@ -1,7 +1,7 @@
 //! The promise automatic highlight generation exists to keep: it produces clips
 //! a user can watch and it writes nothing at all.
 //!
-//! Three tests, because each one covers what the others cannot.
+//! Three arguments, because each one covers what the others cannot.
 //!
 //! The first is the measurement [issue
 //! #76](https://github.com/wildware-uk/clipped/issues/76) asks for. Its
