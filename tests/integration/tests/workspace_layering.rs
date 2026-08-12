@@ -96,7 +96,16 @@ const LAYERS: &[&[&str]] = &[
     // repeats (AGENTS.md section 55). The dependency points one way: nothing in
     // `clipped-muxer` knows a replay buffer exists, which is what keeps a
     // recording and a clip written by the same code.
-    &["clipped-replay"],
+    //
+    // `clipped-export` is beside it and not above it: the two have nothing to
+    // do with each other — a replay is a window of packets held in memory, an
+    // export is a document rendered from files on disk — and both are here for
+    // the same reason, which is that they drive `clipped-muxer` to write a
+    // file rather than containing a second Matroska implementation. An export
+    // also *reads* containers, which nothing below layer 2 exposes, so it names
+    // `rusty_ffmpeg` directly under the amendment issue #155 made to ADR 0004,
+    // exactly as `clipped-waveform` does.
+    &["clipped-replay", "clipped-export"],
     // Application logic that coordinates every subsystem above.
     &["clipped-session"],
     // Executables and test-only packages.
@@ -111,7 +120,12 @@ const LAYERS: &[&[&str]] = &[
     // `fullscreen-dx11` is `video-pattern` pointed at a whole display, and
     // shares its renderer and its pattern rather than owning a second copy, so
     // it has to sit above it.
-    &["clipped-fullscreen-dx11"],
+    //
+    // `process-tree-audio` is here for the same reason: its child process plays
+    // a tone through `video-pattern`'s render stream, which is the workspace's
+    // one copy of "open the default output endpoint and feed it" (AGENTS.md
+    // section 55).
+    &["clipped-fullscreen-dx11", "clipped-process-tree-audio"],
 ];
 
 fn workspace_root() -> PathBuf {

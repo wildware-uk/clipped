@@ -1,7 +1,7 @@
-import { type RecorderStatus, type RecordingStatus } from '@clipped/shared';
+import { type ProtocolError, type RecorderStatus, type RecordingStatus } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /**
  * Where the window's link with the recorder process stands.
@@ -42,28 +42,72 @@ export type RecorderLinkState =
  */
 export type InterruptedRecording = Omit<RecordingStatus, 'state'>;
 
+/**
+ * A recording that ended because something went wrong, as the window saw it.
+ *
+ * The event carries a recording identifier and a refusal, and no path — so the
+ * file is named from the last `recording` status this window saw, and **only**
+ * when that status is the recording the failure names. A failure for a recording
+ * this window never saw claims no file, because guessing that the last file seen
+ * was the one that failed would put a different recording in front of somebody
+ * diagnosing this one. That is the same rule `src-tauri/src/notifications.rs`
+ * applies to the toast's "Show the file" button, kept in one form in each
+ * process.
+ */
+export interface RecordingFailure {
+  /** Which recording failed. */
+  readonly recording_id: string;
+  /** The recorder's own refusal: a stable code, and a sentence for a person. */
+  readonly error: ProtocolError;
+  /** The file it was writing, when this window knows which that was. */
+  readonly output: string | null;
+  /** When this window was told. The protocol carries no time of its own. */
+  readonly seenAt: Date;
+}
+
 /** Everything the Rust side sends on the `recorder-link` event. */
 type RecorderLinkEvent =
   | { readonly event: 'state'; readonly [key: string]: unknown }
   | ({ readonly event: 'recording_interrupted' } & InterruptedRecording)
-  | { readonly event: 'recording_failed'; readonly [key: string]: unknown };
+  | {
+      readonly event: 'recording_failed';
+      readonly recording_id: string;
+      readonly error: ProtocolError;
+    };
 
 /**
  * Everything the window knows about the recorder.
  *
- * Two fields rather than one because they answer different questions and have
- * different lifetimes. `link` is where the connection stands *now*; `interrupted`
- * is something that happened, stays true afterwards, and is the whole of what
+ * Four fields rather than one because they answer different questions and have
+ * different lifetimes.
+ *
+ * `link` is where the connection stands *now*, and `observedAt` is when that was
+ * last true. The pair is what stops a figure inside a status being read as
+ * current: `elapsed_ms` is measured at the moment the recorder answered, and a
+ * status from four minutes ago says a recording had run for eight seconds
+ * (AGENTS.md section 27). Nothing polls, because the link republishes on every
+ * change; what the Diagnostics screen needs is not a fresher figure but an honest
+ * label on the one there is.
+ *
+ * `interrupted` and `failed` are things that *happened*, stay true afterwards,
+ * and are each dropped by the state that follows them about a second later.
+ * `interrupted` is the whole of what
  * [ADR 0006](../../../docs/adr/0006-recorder-lifetime-and-supervision.md)'s
  * recovery produces — "recovery names the file; it does not resume the
- * recording". Folding it into `link` would lose it at the next state change,
- * which for a killed recorder is about a second later.
+ * recording". `failed` is the one thing a support report about a failed recording
+ * is for: a recorder that stayed up reports the failure once and then reports
+ * "idle", and after that nothing in the window remembers that anything went wrong
+ * (issue #101).
  */
 export interface RecorderLinkView {
   /** Where the link with the recorder stands, or `null` outside the window. */
   readonly link: RecorderLinkState | null;
+  /** When `link` was last set, or `null` if it never has been. */
+  readonly observedAt: Date | null;
   /** The most recent recording a recorder died in the middle of, if any. */
   readonly interrupted: InterruptedRecording | null;
+  /** The most recent recording that ended because something failed, if any. */
+  readonly failed: RecordingFailure | null;
 }
 
 /** The name the Rust side emits under. */
@@ -109,7 +153,17 @@ function inTauriWindow(): boolean {
  */
 export function useRecorderLink(): RecorderLinkView {
   const [state, setState] = useState<RecorderLinkState | null>(null);
+  const [observedAt, setObservedAt] = useState<Date | null>(null);
   const [interrupted, setInterrupted] = useState<InterruptedRecording | null>(null);
+  const [failed, setFailed] = useState<RecordingFailure | null>(null);
+  /*
+   * The last recording this window saw the recorder running, which is the only
+   * way a `recording_failed` can be given a file: the event carries an
+   * identifier and no path. A ref rather than state because nothing renders it —
+   * it is read inside the subscription, where a state value would be the one
+   * captured when the effect ran, which is `null` for ever.
+   */
+  const lastRecording = useRef<RecordingStatus | null>(null);
 
   useEffect(() => {
     if (!inTauriWindow()) {
@@ -119,10 +173,19 @@ export function useRecorderLink(): RecorderLinkView {
     let current = true;
     let superseded = false;
 
+    /** Records a state and when it was seen, so a stale figure reads as one. */
+    const observe = (link: RecorderLinkState): void => {
+      if (link.link === 'attached' && link.status.state === 'recording') {
+        lastRecording.current = link.status;
+      }
+      setState(link);
+      setObservedAt(new Date());
+    };
+
     invoke<RecorderLinkState>('recorder_link_state')
       .then((answer) => {
         if (current && !superseded) {
-          setState(answer);
+          observe(answer);
         }
       })
       .catch((error: unknown) => {
@@ -130,7 +193,7 @@ export function useRecorderLink(): RecorderLinkView {
         // here is a bug rather than a state. Reporting it as "unavailable" with
         // the reason is better than an interface that shows nothing at all.
         if (current && !superseded) {
-          setState({ link: 'unavailable', reason: String(error) });
+          observe({ link: 'unavailable', reason: String(error) });
         }
       });
 
@@ -141,7 +204,7 @@ export function useRecorderLink(): RecorderLinkView {
 
       if (payload.event === 'state') {
         superseded = true;
-        setState(withoutTag<RecorderLinkState>(payload));
+        observe(withoutTag<RecorderLinkState>(payload));
         return;
       }
 
@@ -152,11 +215,23 @@ export function useRecorderLink(): RecorderLinkView {
         // window closes, because it stays true — nothing later makes that file
         // any less real.
         setInterrupted(withoutTag<InterruptedRecording>(payload));
+        return;
       }
 
-      // `recording_failed` is a recording that failed while the recorder stayed
-      // up, which the state that follows it already describes. Giving it a
-      // notice of its own is issue #53.
+      if (payload.event === 'recording_failed') {
+        // A recording that failed while the recorder stayed up. The state that
+        // follows it a moment later is "idle", which is true and says nothing
+        // about what happened, so this is kept: it is what a support report
+        // about a failed recording is made of (issue #101). A notice of its own
+        // in the status block is still issue #53.
+        const seen = lastRecording.current;
+        setFailed({
+          recording_id: payload.recording_id,
+          error: payload.error,
+          output: seen?.recording_id === payload.recording_id ? seen.output : null,
+          seenAt: new Date(),
+        });
+      }
     }).catch((error: unknown) => {
       // Subscribing needs `core:event:allow-listen` in
       // `src-tauri/capabilities/default.json`; without it Tauri rejects this
@@ -165,7 +240,7 @@ export function useRecorderLink(): RecorderLinkView {
       // recorder has to say so rather than show an answer from a minute ago
       // (AGENTS.md section 27).
       if (current) {
-        setState({
+        observe({
           link: 'unavailable',
           reason: `This window cannot follow the recorder: ${String(error)}`,
         });
@@ -188,7 +263,7 @@ export function useRecorderLink(): RecorderLinkView {
     };
   }, []);
 
-  return { link: state, interrupted };
+  return { link: state, observedAt, interrupted, failed };
 }
 
 /** The two or three words shown as the recorder's state, and one sentence. */

@@ -44,18 +44,31 @@ block in the sidebar shows what the link reports and nothing else — one wordin
 for each of the link's four states, and one for "this is not the Clipped window",
 which is what `npm run dev:web` and the tests see.
 
-**The controls that drive the recorder are in the notification area, not in the
-window** — see [The tray](#the-tray). No screen has one: five of the seven are
-not built, Games deliberately draws none because nothing it would drive can be
-reached from here, and the Editor draws none of the editing controls for the
-same reason — the operations exist in `crates/edit` and this window cannot reach
-them. A button with nothing behind it is exactly what AGENTS.md section 27
-forbids. A "Try again" control for a link that has given up is
+**Almost every control is in the notification area, not in the window** — see
+[The tray](#the-tray). No screen drives the recorder: one of the seven is not
+built, and none of the six that are draws anything that would, because nothing
+they would drive can be reached from here. The Editor draws none of the editing
+controls for the same reason — the operations exist in `crates/edit` and this
+window cannot reach them. A button with nothing behind it is exactly what
+AGENTS.md section 27 forbids, which is also why Diagnostics has no Export Support
+Bundle button ([diagnostics.md](diagnostics.md)). A "Try again" control for a link
+that has given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221).
 
-The one exception is the Editor's three zoom controls, which change how the
-timeline is drawn and nothing else — this window's own state, and therefore
-something it can actually perform.
+The controls a screen does draw change nothing outside the window: the Settings
+screen's rail, which moves between that screen's own sections — see
+[The Settings screen](#the-settings-screen); the Diagnostics screen's Copy
+report, which does what it says with a browser API and no recorder involved — see
+[The Diagnostics screen](#the-diagnostics-screen); and the Editor's three zoom
+controls, which change how the timeline is drawn and nothing else — this window's
+own state, and therefore something it can actually perform.
+
+There is one **link** in the chrome that is not navigation, and a link is a
+destination rather than an action: when a recorder dies mid-recording, the notice
+that names the file it left also leads to that recording's own playback screen —
+see [The playback screen](#the-playback-screen). That screen does not play it,
+and does not offer to; it says what state the recording is in and what stands
+between this window and playing it, which is more than a sidebar has room for.
 
 ## What the shell is
 
@@ -86,13 +99,102 @@ separately.
 
 Both navigation lists and every route are derived from one array, `SCREENS` in
 `@clipped/shared`, so a navigation item cannot point at a route that does not
-exist. **Two of the seven screens have been written**: Games — see
-[The Games screen](#the-games-screen) — and Editor, see
-[The Editor screen](#the-editor-screen). The other five each lead to a panel
-saying so and naming the issue that builds it — #60 for Home and Library, #51
-for Settings, #94 for Trash, #101 for Diagnostics. Building one replaces its
-placeholder route with the real screen, in `elementFor` in `Shell.tsx`, which is
-the one place that knows a screen from a placeholder.
+exist. **Six of the seven screens have been written** —
+[Home and Library](#home-and-library), [Games](#the-games-screen),
+[Editor](#the-editor-screen), [Settings](#the-settings-screen) and
+[Diagnostics](#the-diagnostics-screen), which has a document of its own in
+[diagnostics.md](diagnostics.md). The last, Trash, leads to a panel saying so and
+naming the issue that builds it — #94. Building it replaces its placeholder route
+with the real screen, in `elementFor` in `Shell.tsx`, which is the one place that
+knows a screen from a placeholder.
+
+There is an **eighth route** that is not in `SCREENS` and deliberately not in the
+sidebar: `/clip/:recordingId`, the playback screen, which is opened *for* a
+recording rather than navigated to — see
+[The playback screen](#the-playback-screen). A sidebar item called Playback would
+be an item with no recording behind it. `titleFor` in `Shell.tsx` names it in the
+window title all the same, so the taskbar, Alt+Tab and a screen reader say where
+you are on that screen as they do on the seven.
+
+## Home and Library
+
+SPEC.md section 17, and issue #60. The deck draws Home as tiles of recent
+sessions, recently clipped and favourites, and Library as a Sessions / Clips /
+Highlights tab strip over a grid of thumbnails, with a filter row and a search
+field above it.
+
+**None of that is drawn, because none of it can be read.** The same shape of
+answer the Games screen gives, and for a sibling reason.
+
+### What the window can and cannot see of the library
+
+`clipped-library` builds the index — games, sessions, recordings, clips,
+favourites, `game_summaries` and `missing_since` — by reconciling the session
+sidecars against the disk ([library.md](library.md)). It does that **inside the
+recorder's process**, and there are three separate reasons none of it reaches
+this window:
+
+| The way in | Why it is shut |
+| --- | --- |
+| A protocol command | There is none. `crates/ipc`'s `Command` is `ping`, `get_status`, `start_recording`, `stop_recording`, `add_bookmark` and `shutdown`, plus three refused ones. None mentions a session, a clip or a count |
+| Reading `library.db` from the window | `capabilities/default.json` grants three `core:` permissions and no file-system access, and Tauri denies what is not listed |
+| Linking `clipped-library` into the Tauri host | `tests/integration/tests/workspace_layering.rs` permits it exactly one member of the workspace, `clipped-ipc` — which is what keeps the recording engine out of the window's process ([ADR 0002](adr/0002-separate-recorder-process.md)) |
+
+[Issue #301](https://github.com/wildware-uk/clipped/issues/301) is that gap,
+raised by #60. It is deliberately not
+[#245](https://github.com/wildware-uk/clipped/issues/245), which is the game
+*catalogue*, nor [#241](https://github.com/wildware-uk/clipped/issues/241),
+which is the *live* session; this is the record of what has already been
+recorded. `docs/library.md` also records that **nothing calls the index at all**
+yet, which is the other half of the same work.
+
+So neither screen draws a session list, a clip grid, a count or a search field.
+An empty Sessions tab is indistinguishable from a machine that has recorded
+nothing; "0 clips" is a figure nobody measured; a search box that cannot search
+is the control AGENTS.md section 27 forbids. What each screen draws instead is
+what it owes, one row per part, naming the issue — the table both share with
+Games, in `WaitingOn.tsx`.
+
+### The one real thing on Home
+
+**What is being recorded right now, and into which file.** That comes from the
+recorder link, changes when the link does, and is the whole of what Home claims.
+`describeRecordingNow` in `recordingNow.ts` has one rendering for each of the
+link's four states and one for "this is not the Clipped window".
+
+Two rules shape those renderings, and both are properties `HomeScreen.test.tsx`
+asserts across every state rather than at the one place they could go wrong:
+
+- **A heading carries its own scope.** It is either "Not known…", which claims
+  nothing; "This recorder…", which names what the claim is about; or
+  "Recording `<target>`", which asserts a recording that demonstrably exists.
+  The wording this rules out is "Nothing is being recorded" — a statement about
+  the machine, when `clipped-recorder watch` serves no protocol and could be
+  recording a game this link cannot see. The same trap the Games screen's
+  detection state describes.
+- **No duration.** `ActiveRecording::elapsed_ms` is on the wire and is not
+  drawn. The recorder publishes `status_changed` when a recording starts and
+  when it ends and at no point between (`apps/recorder/src/serve.rs`), so the
+  elapsed time this window holds is the one from the moment it started and never
+  moves. A duration frozen at 0:00 beside an hour-long recording is worse than
+  no duration, and counting up from it locally would be a figure nobody
+  measured.
+
+The file itself is printed in full, in `.clipped-path`, because it is the only
+thing on the screen anybody can act on and a path with an ellipsis in it cannot
+be typed into Explorer (AGENTS.md sections 28 and 45).
+
+### No tab strip and no chips
+
+[Issue #215](https://github.com/wildware-uk/clipped/issues/215) asks for the
+deck's tab strip and its selectable chips **at the point a screen needs them**,
+so that a component with no consumer is not designed against a guess. **The
+Library screen does not need them yet**: it has nothing to switch between and
+nothing to filter, so a strip over three panels that all say the same thing
+would be exactly the speculative component that issue exists to prevent. They
+belong with the first screen that has three populated lists, which is this one
+once #301 lands. `LibraryScreen.test.tsx` asserts that no `tablist` and no `tab`
+is drawn, so adding one is a decision rather than a drift.
 
 ## The Games screen
 
@@ -307,6 +409,273 @@ End lands on the end of the clip, where the screen says nothing plays: every
 range in the model is half-open, so the last position of a clip is the
 nanosecond before its end and the end itself belongs to nothing. Saying that is
 better than silently moving the playhead somewhere the user did not ask for.
+## The Settings screen
+
+SPEC.md sections 10, 12, 15, 27 and 34, and
+[issue #51](https://github.com/wildware-uk/clipped/issues/51). The deck draws a
+rail of sections and panes of controls: device pickers, a recording directory,
+quality presets, a container choice, hotkey bindings and a row of switches.
+
+**The rail is here and the controls are not, because this window can neither
+read nor write a setting.** That is a fact about what is built rather than about
+what was finished, and it has four parts:
+
+- the settings are `clipped_session::config` — three layers, validation, and
+  each value reported with the layer it came from and whether this scope
+  overrode it ([configuration.md](configuration.md)). It is exactly the shape a
+  settings screen needs, and nothing here can ask it anything;
+- the desktop application may link one crate of the repository's workspace,
+  `clipped-ipc`, and `tests/integration/tests/workspace_layering.rs` enforces
+  it. `clipped-session` sits above capture, audio, encoding and muxing, so
+  naming it here would put the recording engine in the window's process — the
+  separation [ADR 0002](adr/0002-separate-recorder-process.md) exists to make;
+- the control protocol has no command that reads configuration, and the one
+  that would write it, `apply_settings`, is refused as not implemented by every
+  build ([ipc.md](ipc.md));
+- reading `settings.json` from this process instead would be a second
+  implementation of its versioning, migration and validation, against the file
+  the user's own settings live in (AGENTS.md section 55).
+
+[Issue #252](https://github.com/wildware-uk/clipped/issues/252) is the fix, by
+either of its two routes, and it says it blocks this screen.
+
+### What each pane carries instead
+
+Three columns: the setting, **how it is set today**, and what has to land before
+this window can hold the control. The middle column is the one that makes this a
+screen rather than an apology — almost every setting *can* be changed today, and
+the screen says how:
+
+| Section | What can be changed today |
+| --- | --- |
+| Recording | `clipped-recorder watch --framerate 60 --codec auto …`, per run; #61 is what makes the settings file reach a recording |
+| Audio | The same options, with the recorder's own warning that a recording has no audio track yet (#180) |
+| Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
+| Hotkeys | Nothing: the hotkey service is written and no process installs it (#232) |
+| Notifications | **The one thing this window's own behaviour follows**: the three switches in `notifications.json`, named with their keys and their file |
+| Startup | `clipped-recorder start-at-login enable`, which no protocol command can reach — [#308](https://github.com/wildware-uk/clipped/issues/308) |
+
+Two settings SPEC.md asks for have nowhere to be stored rather than nothing to
+read them, and that is worth the distinction the screen draws: the recording
+directory and the container are #307, and listing this machine's audio devices
+at all is #308. Both were raised while this screen was built, because a row that
+said "not yet" with no issue behind it is a promise nobody has made.
+
+### What is checked, and against what
+
+Everything above is a claim about code in another process, and a screen full of
+those goes quietly wrong: a renamed settings key, a subcommand that moved, an
+`apply_settings` that got implemented, and the screen still says what it said in
+August. `apps/desktop/src/settingsConformance.test.ts` reads the definitions out
+of the sources that hold them:
+
+| The screen says | Read from |
+| --- | --- |
+| These are the settings, spelled this way | `SettingKey::name` in `crates/session/src/config/value.rs`, both directions — a setting the API gains and one the screen invented both fail |
+| These are the notification switches | `NotificationCategory::key` in `apps/desktop/src-tauri/src/notification_policy.rs` |
+| The settings file is at this path | `APPLICATION_DIRECTORY` in `clipped-logging` and `FILE_NAME` in `config::document` |
+| The notification file is at this path | The bundle identifier in `tauri.conf.json` and `SETTINGS_FILE` in `notifications.rs` |
+| `apply_settings` is refused | `UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` |
+| Nothing reads settings back | The command names `Command::from_request` parses |
+| Run this command | The subcommands `apps/recorder/src/cli.rs` declares, and their options |
+
+`SettingKey`'s own documentation asks for the first of those: it exists so that
+"the settings screen can list what there is to render without this module having
+to publish a second list that goes stale". This is what stops the copy of that
+list on this side going stale instead.
+
+### The rail
+
+`SectionRail` in `packages/ui`, drawn in the shell's own `.clipped-nav__link`
+because a rail entry and a sidebar item are the same thing to look at. What
+differs is beneath: the sidebar's items are anchors with addresses, and these are
+`role="tab"` buttons, because a section of a screen has no address of its own —
+every route comes from `SCREENS`, one per screen, and both the window title and
+the marked sidebar item are derived from an exact path match. Giving a section a
+URL would mean nested routes and a title that understands a sub-path, and is
+worth doing when something needs to link to one.
+
+So the keyboard contract is the WAI-ARIA tab list's, and it is written out
+rather than left to Tab: **one stop in the tab order**, the arrow keys moving
+between sections, Home and End reaching the ends, and selection following focus.
+Six sections each taking a tab stop would put five stops between the sidebar and
+the pane, every time. The pane itself takes a tab stop because it holds text
+rather than controls, which is what WAI-ARIA asks for and what
+`jsx-a11y/no-noninteractive-tabindex` allows in its own default options —
+`jsx-a11y`'s strict preset restates the rule with no options, which is why that
+one line carries a suppression and a reason (AGENTS.md section 42).
+## The Diagnostics screen
+
+SPEC.md section 36, and issue #101. It has a document of its own,
+[diagnostics.md](diagnostics.md), because most of what it is about is not the
+interface: what the recorder records, what reaches this window, and exactly what
+a support report may and may not contain.
+
+The shape is the Games screen's, for the same reason — a live panel saying what
+this window can establish, and a table of what the rest is waiting for — with a
+third part the Games screen has no equivalent of: the support report, composed
+here, shown in full, and copied to the clipboard.
+
+Two things it adds to this document. Its `Copy report` is the **one control in a
+screen that acts** rather than navigating: a browser clipboard call, needing no
+Tauri permission and reaching no recorder, which reports both of its failure
+modes rather than appearing to work. And it is the reason
+`.clipped-screen__report` exists in `styles.css` — a monospaced block on the card
+ground, wrapping rather than scrolling and with no height limit, because
+[privacy.md](privacy.md) asks that nothing about what leaves the machine is
+hidden and a scroll box showing eight of thirty lines hides twenty-two of them.
+
+It draws **no Export Support Bundle button**, which SPEC.md section 36 asks for
+and the deck draws. The log files that would make a bundle worth sending are
+unreachable from this window, and diagnostics.md sets out why a button that wrote
+a report with no logs in it would be an export in name only
+([issue #303](https://github.com/wildware-uk/clipped/issues/303)).
+
+## The playback screen
+
+SPEC.md section 42 and [issue #52](https://github.com/wildware-uk/clipped/issues/52).
+The route is `/clip/:recordingId`; the screen is `ClipPlaybackScreen.tsx` and
+everything it decides is in `clipPlayback.ts`, which is pure and therefore the
+part with tests.
+
+The ticket asks for playback with transport controls, keyboard shortcuts,
+frame-accurate seeking and an audio-track selector. **None of it is drawn,
+because this window cannot play a Clipped recording at all.** That is not a
+scheduling remark; it is four independent facts, and the design that follows from
+them is below.
+
+### Why a `<video>` cannot be pointed at a recording
+
+Each of these is enough on its own, so fixing any single one changes nothing.
+They are on the screen itself, with the evidence beside each, in the same
+contract the unbuilt screens keep.
+
+| What stops it | Where it can be checked |
+| --- | --- |
+| **This window cannot load a file from the disk.** | `src-tauri/tauri.conf.json` does not enable the asset protocol; `capabilities/default.json` grants three `core:` permissions and none reaches the file system; the content-security policy declares no `media-src`, so it falls back to `default-src 'self'` — the bundle Vite built, and nothing else. |
+| **A recording is Matroska, and WebView2 does not demux it.** | [ADR 0001](adr/0001-mkv-archival-container.md) writes recordings into MKV so a killed recorder still leaves a playable file. WebView2 is Chromium, whose Matroska support is WebM: a strict subset restricted to Opus or Vorbis audio and VP8, VP9 or AV1 video. |
+| **The audio is uncompressed PCM, and nothing in Clipped encodes audio.** | [muxing.md](muxing.md): every track is 16-bit PCM because no crate in the workspace encodes audio ([#28](https://github.com/wildware-uk/clipped/issues/28)). No browser decodes PCM in MP4. |
+| **A media element cannot choose an audio track.** | `HTMLMediaElement.audioTracks` is not implemented in Chromium, so a multi-track file gives whichever track the demuxer lands on and no way off it. |
+
+`apps/desktop/src/playbackReach.test.ts` reads the first of those out of the
+three files rather than asserting it in prose: the day somebody enables the asset
+protocol, grants a file-system permission or widens the policy, that test fails
+and brings them here. A claim in a comment is true on the day it is written; a
+claim a test resolves is true whenever it passes.
+
+The fourth row is the one that decides the shape of the answer. **No arrangement
+that hands a whole multi-track file to a media element can satisfy #52's first
+acceptance criterion**, however the container question is settled, because the
+element has no way to switch tracks. Track selection has to happen on the way
+*out* of the recorder.
+
+### The decision, and what it costs
+
+**The recorder serves the media; the window plays a stream, one track at a time.**
+[Issue #304](https://github.com/wildware-uk/clipped/issues/304) builds it.
+
+Concretely: a protocol command opens a recording for playback and reports its
+duration, its dimensions and its track list; the recorder remuxes the source into
+fragmented MP4, copying the video without re-encoding it and encoding the chosen
+audio track to AAC; and it answers byte ranges, so a seek is a range request
+rather than a re-read. The Tauri host registers a URI scheme that relays those
+ranges and the screen points a `<video>` at it. The compatibility mix is the
+default, which is what the container already flags ([muxing.md](muxing.md)), and
+choosing another track is a new URL at the current time.
+
+The recorder rather than the window, because
+`tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
+permits `src-tauri` exactly one crate of the workspace, `clipped-ipc`. The window
+may not link `clipped-muxer`, so it cannot remux or encode anything in its own
+process, and it should not: that is the boundary
+[ADR 0002](adr/0002-separate-recorder-process.md) exists to keep.
+
+What it costs, stated rather than glossed:
+
+- **A live remux and an audio encode for every recording watched**, and again for
+  every track switched to. Video is copied, so the cost is the audio encode and
+  the container work, not a transcode — but it is not free, and it happens beside
+  a game.
+- **An audio encoder Clipped does not have.** Measured on this machine: the
+  pinned LGPL FFmpeg build carries FFmpeg's native `aac` encoder
+  (`third-party/ffmpeg/current/bin/ffmpeg -encoders`), so this is wiring rather
+  than a new dependency or a fresh licence question — but it is still a subsystem
+  that does not exist.
+- **Seek accuracy is the video's keyframe interval** unless the served stream
+  carries an index. "Frame-accurate seeking where practical" is the ticket's own
+  wording, and this is where the practical limit sits.
+- **Privilege.** The window gains a way to receive bytes it could not before.
+  #304's last criterion is that whatever it gains is the smallest thing that
+  works, and that `playbackReach.test.ts` is rewritten to describe the new
+  boundary rather than deleted.
+
+The alternatives, and why not:
+
+| Instead | Why not |
+| --- | --- |
+| Point a `<video>` at the MKV through Tauri's asset protocol | Rows two, three and four above. It is the cheapest thing to write and it plays nothing. |
+| Remux the whole file to MP4 first ([#92](https://github.com/wildware-uk/clipped/issues/92)) and play that | #92 copies streams without re-encoding, so the video arrives and **the sound does not** — PCM has nowhere to go in an MP4 a browser will decode. It also writes a second full-size copy of every recording somebody watches, and makes playback wait for a pass over the whole file. Even with the audio encoded it still cannot answer #52's track selector: one file, one track a media element can reach. |
+| Convert on the fly to WebM instead | The video would have to be re-encoded, because WebM cannot carry H.264 or HEVC. That is the one thing worth avoiding: a transcode of gameplay footage beside a running game. |
+| A native video surface behind the webview | No transport, no keyboard handling and no layout that the rest of the interface shares, and Tauri offers nothing for it. It is the answer if the stream above proves too expensive, and it is a much larger change. |
+
+### What it does show
+
+The one thing that is real: **what the recorder link says about this recording.**
+The window follows a single recorder, so it learns of exactly two recordings —
+the one being written now, and the one a recorder died in the middle of, whose
+file [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md) says naming is the
+whole of recovery. `resolveClip` has one answer for each, and one for everything
+else.
+
+That third answer is the careful one. It reads **"Not known to this window"** and
+explains that the library index is where a recording would be looked up and that
+nothing here can read it ([#305](https://github.com/wildware-uk/clipped/issues/305)).
+It does **not** say the recording is missing. This window has not been to the
+disk and cannot; `missing_since` in the library index is the only thing that has
+looked ([#56](https://github.com/wildware-uk/clipped/issues/56)), and reporting a
+file as gone because *this* window could not find it is exactly the invented
+state AGENTS.md section 27 is about. `clipPlayback.test.ts` asserts the wording
+carries none of "missing", "gone" or "deleted", so the distinction cannot be lost
+to an edit that reads better.
+
+Where a recording *is* known, the screen shows the four fields the protocol
+carries and no more: the file in full, the capture target, and how long the
+recorder had been recording when it last said so — labelled as a lower bound
+rather than a duration, because nothing has opened the file, and a recording a
+killed recorder left may have no Matroska trailer at all
+([#283](https://github.com/wildware-uk/clipped/issues/283)). **There is no
+duration, no thumbnail and no waveform**, because there is nothing to get them
+from.
+
+### Why it is reachable from the sidebar, and nowhere else
+
+A screen nothing links to is a screen nobody finds. The one recording this window
+can name is the one a recorder died writing, and the sidebar notice that names
+the file it left now carries a link to that recording's screen.
+
+That link is a destination and not a control: it does not claim the recording
+will play, and the screen it leads to says so in its first paragraph. It is the
+same bargain the tray's Open Library keeps — "a thing that happens, rather than a
+control that does nothing". Everything else waits on the library index (#305);
+Home and Library (#60) are what will open this screen properly.
+
+### What is not built
+
+Every row of the screen's second table, each naming the work that supplies it:
+playing anything at all and choosing a track (#304); opening a recording somebody
+picked, and saying a file has gone (#305); a poster frame, which is the thing
+[#57](https://github.com/wildware-uk/clipped/issues/57) has been waiting for —
+thumbnails are generated, cached and tested, and *nothing has ever drawn one*, so
+on a real machine none is produced; a waveform
+([#66](https://github.com/wildware-uk/clipped/issues/66)); and bookmarks and
+events on a timeline ([#64](https://github.com/wildware-uk/clipped/issues/64) and
+[#65](https://github.com/wildware-uk/clipped/issues/65)).
+
+The alternative to that table was a transport bar, a scrubber and a track
+selector drawn over a black rectangle. That is AGENTS.md section 27 broken twice
+in one screen — controls that do nothing, above a picture Clipped never made —
+and the scrubber is the worst of the three, because a scrubber implies a duration
+and nothing in this window has measured one.
 
 ## The tray
 
@@ -977,26 +1346,59 @@ accordion, no toast and no tooltip, because no screen in the deck has one
 (AGENTS.md section 1). Two patterns the deck does use are not here either — the
 Library's underlined tab strip and the export dialog's selectable preset chips —
 and [issue #215](https://github.com/wildware-uk/clipped/issues/215) covers them
-with the screen that first needs them. The Games screen (#107) is the first
-screen written and needed neither, so neither was built: they belong to the
-per-game detail view behind the game list, and there is no list yet to open one
-from.
+with the screen that first needs them. Five screens are now written and none
+needed either — the Settings rail draws `role="tab"` buttons, but that is the
+rail pattern below rather than the deck's underlined strip: the tab strip belongs
+to the per-game detail view behind the game list, which #245 has to land first,
+and to the Library's Sessions / Clips / Highlights row, which has nothing to
+switch between until #301 does — see
+[No tab strip and no chips](#no-tab-strip-and-no-chips).
 
-Beside the set above, the shell has three classes of its own that a screen
-draws with. They are not from the reference pages, which have no screen in them:
+Beside the set above, the shell has classes of its own that a screen draws with.
+They are not from the reference pages, which have no screen in them:
 
 | Class | What it is |
 | --- | --- |
 | `.clipped-screen__title`, `.clipped-screen__heading` | A screen's own two levels of heading |
 | `.clipped-screen__lead` | Running prose at the measure |
-| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state and by the Editor's "No clip is open", which are the same thing to look at |
+| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state, by Home's recording state, by Library's reason for being empty, by the Editor's "No clip is open", by the Settings screen's one statement and by the Diagnostics screen's capture health — all of them the same thing to look at |
+| `.clipped-screen__split` + `__pane` | A screen divided into a rail of sections and the pane one of them opens. `--rail-width` is its one metric |
+| `.clipped-rail` | The rail itself, which draws its entries in `.clipped-nav__link` rather than in a class of its own — the same reasoning as the panel above |
+| `.clipped-code` | Text somebody types or finds in a file: a settings key, a path, a command |
+| `.clipped-path` | A file path, printed in full: monospaced, and broken anywhere, because a Windows path has no spaces to break at. It sets no size, so it takes whatever block it sits in, and no colour, so it is the window's own ink |
+| `.clipped-screen__report` | A block of machine-written text a person is meant to read before sending it on: the Diagnostics screen's support report. Monospaced, on the card ground, wrapping rather than scrolling and with no height limit |
 | `.clipped-editor__*`, `.clipped-timeline__*` | The Editor's timeline — see below |
 
-**Two screens consume the component layer so far**: Games, with
-`.clipped-table` and `.clipped-muted`, and the Editor, which adds the same table
-and the secondary button. The classes exist ahead of that so that #60, #51, #94
-and #101 do not each invent their own styling, which is the reason issue #79
+**Every screen written so far consumes the component layer** — Home, Library,
+Games, Editor, Settings, Playback and Diagnostics, between them `.clipped-table`,
+`.clipped-panel`, `.clipped-muted`, the rail, the screen classes above, the
+secondary button on the Editor, and `.clipped-btn--primary` on Diagnostics, the
+first button in the application outside the skip link. The classes exist ahead of
+that so that #94 does not invent its own styling, which is the reason issue #79
 followed the shell.
+
+`.clipped-nav__link` now serves two mechanisms: the sidebar's anchors and the
+rail's `role="tab"` buttons. The declarations a button needs and an anchor does
+not — a width, a border, a ground, a typeface, a text alignment — are in the one
+rule rather than in a second class, because two classes drawing the same thing
+drift, and a screen's rail that stopped matching the sidebar would look like a
+mistake. The rule that marks the open one covers both `aria-current="page"` and
+`aria-selected="true"` for the same reason, and `contrast.test.ts` measures it on
+both grounds it is drawn on.
+
+`.clipped-screen__report` is Diagnostics' own, for the block of machine-written
+text a user is asked to read before sending it on. It is not a component-layer
+class: nothing in the deck has one, and it belongs to the screen that needs it
+rather than to the system.
+
+One element default was added with the playback screen and belongs with the
+classes above: **`code` takes `--font-mono`**. That token was declared with the
+other two typefaces in issue #79 and had no consumer until a screen had to put a
+recording's full path in front of somebody — the one thing on that screen anybody
+can act on, and a string that has to be read character by character. It is a step
+down the type scale, because a monospace face at the body size reads larger than
+the body around it, and it wraps anywhere, because a Windows path has no space in
+it to break at and would otherwise push a table wider than the window.
 
 ### The Editor's timeline is screen classes, not components
 
@@ -1089,11 +1491,12 @@ retrofitted:
 
 - **Keyboard.** Navigation items are real anchors in a real list, so Tab reaches
   them and Enter activates them. The first stop in the tab order is a "Skip to
-  content" button. Nothing in the chrome is reachable by mouse alone. The
-  Editor's timeline is the one place where that rule needed real design rather
-  than markup, and [its own table](#the-keyboard) says what every key does:
-  Page Up and Page Down land exactly on a cut, which is the thing a pointer
-  cannot do at all.
+  content" button. Nothing in the chrome is reachable by mouse alone. A screen's
+  own rail is one tab stop and the arrow keys move within it, which is the
+  WAI-ARIA tab list's contract — see [The rail](#the-rail). The Editor's timeline
+  is the one place where that rule needed real design rather than markup, and
+  [its own table](#the-keyboard) says what every key does: Page Up and Page Down
+  land exactly on a cut, which is the thing a pointer cannot do at all.
 - **Focus.** `:focus-visible` draws a `--rule-weight` accent outline, and
   `:focus { outline: none }` is the only place a ring is ever suppressed —
   `stylesheet.test.ts` fails if a second one appears. Two components have to
@@ -1139,6 +1542,7 @@ retrofitted:
   | ----------------------------------- | ------- |
   | A segment's recording name          | 15.21:1 |
   | Body text on the window ground      | 14.86:1 |
+  | A section in a screen's rail        | 14.86:1 |
   | A button's label, unfilled          | 14.86:1 |
   | Body text on a card                 | 13.70:1 |
   | A field's own text                  | 13.70:1 |
@@ -1150,6 +1554,7 @@ retrofitted:
   | The accent tag                      | 9.80:1  |
   | The neutral tag                     | 9.26:1  |
   | The skip link                       | 6.41:1  |
+  | The open section of a rail          | 6.41:1  |
   | The primary button                  | 6.41:1  |
   | The selected segment                | 6.41:1  |
   | A link on the window ground         | 6.41:1  |
@@ -1158,6 +1563,7 @@ retrofitted:
   | A card's kicker                     | 5.91:1  |
   | The open navigation item            | 5.83:1  |
   | Secondary text on the window ground | 5.81:1  |
+  | A settings key, path or command     | 5.81:1  |
   | A field's label                     | 5.81:1  |
   | A table's header                    | 5.81:1  |
   | A fact's term at the playhead       | 5.81:1  |
@@ -1222,9 +1628,14 @@ retrofitted:
   screen reader's window announcement all say where you are.
 
 `eslint-plugin-jsx-a11y` runs in its `strict` configuration as part of
-`npm run lint`, and `apps/desktop/src/Shell.test.tsx` and `GamesScreen.test.tsx`
-drive the window with Tab and Enter rather than asserting that the markup looks
-right.
+`npm run lint`, and `apps/desktop/src/Shell.test.tsx`, `GamesScreen.test.tsx`,
+`HomeScreen.test.tsx` and `LibraryScreen.test.tsx` drive the window with Tab and
+Enter rather than asserting that the markup looks right. Home is the screen the
+application opens on, so its case opens the window on Library — by putting the
+route in the fragment before mounting, as reopening the application on the last
+screen would — and then tabs back to Home, because the shell deliberately does
+not move focus on the *first* screen and there would otherwise be nothing to
+observe.
 
 ## Testing
 
@@ -1237,13 +1648,25 @@ read the stylesheets as text and Vitest replaces a CSS import with an empty
 module.
 
 The tests assert the things about this shell that would rot quietly: that no
-part of it shows data it does not have — including that the only control in the
-whole window is the skip link — that the chrome is operable from the keyboard
-alone, that every pairing of words and ground clears 4.5:1, and that the
-component layer still consumes the design system rather than a value somebody
-typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
+part of it shows data it does not have — including that the only controls in the
+whole window are the skip link, the Settings rail and Diagnostics' Copy report,
+none of which touches a recorder, and that Games offers none at all and
+Diagnostics offers no button that would not work — that the chrome is operable
+from the keyboard alone, that every pairing of words and ground clears 4.5:1, and
+that the component layer still consumes the design system rather than a value
+somebody typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
 colours" is a promise a reviewer has to re-check on every diff, and a test that
 reads the stylesheet is one that cannot be forgotten.
+
+`playbackReach.test.ts` is the same idea aimed at a different file. The playback
+screen's central claim is that this window has no way to load a file from the
+disk, and that is a fact about `tauri.conf.json` and `capabilities/default.json`
+rather than about any code — so it reads both, asserts the asset protocol is off,
+that the three granted permissions are exactly the three, that the policy has no
+`media-src`, and that no scheme which could carry a local file appears in it at
+all. It runs in the node environment, like the two stylesheet files, for the same
+reason: the subject is configuration as text. Enabling any of those makes it fail
+rather than leaving a paragraph on screen that has quietly stopped being true.
 
 Both files hold to one rule that is easy to lose: **a check must resolve what it
 claims to measure out of the stylesheet, not restate it.** A contrast case that
@@ -1271,6 +1694,23 @@ beside itself. The other cases are about absence: no button, no link, no field,
 no checkbox and no radio anywhere in `<main>`, and a table whose column headers
 are what is missing rather than Game / Recording / Last played.
 
+`HomeScreen.test.tsx` and `LibraryScreen.test.tsx` are built the same way, and
+add one check the other screens do not need: **no figure that nobody measured**.
+`test/counts.ts` matches a number against the nouns SPEC.md sections 17, 29 and
+30 count — sessions, recordings, clips, favourites, highlights, games, bytes —
+and both screens are held to drawing none of them, zero included, because
+nothing in this build has counted anything.
+
+That check is run over each **text node** rather than over the screen's
+`textContent`, and the reason is worth knowing before writing another one like
+it: `textContent` concatenates adjacent table cells with nothing between them.
+A row ending "Issue #301" beside one beginning "Clips" reads as `301Clips`,
+which fired the pattern on a screen that draws no figure at all; and a real
+"0 sessions" followed by the next heading reads as `sessionsWhat`, whose missing
+word boundary made the pattern *miss* the very thing it exists for. Both
+happened while the check was being written, and the second only came to light
+because the mutation that should have failed it did not.
+
 The Editor's three files are tested at the level each is about, and the split is
 deliberate:
 
@@ -1292,6 +1732,39 @@ deliberate:
   would fail. It also asserts the absences: no timeline at all when no clip is
   open, "No waveform" in every lane, no picture, and that the only controls on
   the screen are the three zoom buttons.
+
+`SettingsScreen.test.tsx` is about three things, and the middle one is the
+awkward one. That the screen offers nothing that would change a setting is
+asserted as an absence — no button, link, field, combobox, checkbox, radio,
+switch, slider, spinbutton or menu item anywhere on it, with the rail's own tabs
+counted first so the case cannot pass on an empty screen. That the rail is
+operable from the keyboard alone is driven with Tab, the arrow keys, Home and
+End. And that every setting names both how it is set today and the work that
+would bring it here is checked from a list written out in the test file, not
+mapped from the screen's own tables: a case that walked the rendered rows and
+checked their shape is satisfied by rows somebody invented, which is exactly the
+defect a review found in the Games screen's first version of the same case.
+
+`settingsConformance.test.ts` is the other half, and the table in
+[What is checked, and against what](#what-is-checked-and-against-what) is what it
+reads. It runs in the node environment because its subject is Rust sources as
+text, and every case throws when the item it names is no longer in the file —
+the same rule `contrast.test.ts` and `stylesheet.test.ts` hold to, for the same
+reason: a check that has stopped finding its subject has to fail rather than
+pass on nothing.
+
+`ClipPlaybackScreen.test.tsx` is built the same way and asks the same two
+questions. The first is that the screen follows the recorder: one address is
+opened and the link is then moved underneath it three times — no recorder, then a
+recorder writing that very recording, then idle — and the panel has to say
+something different each time, which a screen with the wording baked in could not
+do. The second is absence, and it is stated as elements rather than as sentences:
+no `video`, `audio`, `source` or `track`, no `img` or `canvas`, and no button,
+slider or combobox anywhere in `<main>`. The scrubber is the one that matters —
+`queryAllByRole('slider')` is what stops one being added over a duration nobody
+measured. `clipPlayback.test.ts` covers the decisions underneath: which of the
+two recordings the window may name wins when both carry the same identifier, and
+that no wording anywhere says a recording is missing.
 
 `useWindowTitle.test.ts` stands up a `__TAURI_INTERNALS__` so the branch that
 only runs inside the window is reached — jsdom is a browser, so without it the

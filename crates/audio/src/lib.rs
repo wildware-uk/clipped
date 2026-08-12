@@ -6,23 +6,27 @@
 //!
 //! # What exists
 //!
-//! Two independent captures, on Windows, built on one engine:
+//! Three independent captures, on Windows, built on one engine:
 //!
 //! - [`windows::SystemAudioCapture`] records the endpoint Windows is playing
 //!   through, using WASAPI loopback;
 //! - [`windows::MicrophoneCapture`] records an input device, chosen with
 //!   [`windows::MicrophoneSelection`] from the devices
-//!   [`windows::microphones`] lists.
+//!   [`windows::microphones`] lists;
+//! - [`windows::ProcessLoopbackCapture`] records everything one game's process
+//!   tree plays and nothing else, which is what separates the game from the
+//!   rest of the machine
+//!   ([ADR 0003](../../../docs/adr/0003-process-specific-audio-capture.md)).
 //!
-//! Both produce timestamped `f32` buffers that form a continuous timeline
-//! whatever the device does, and either can run without the other. That is the
-//! foundation the rest of the audio work is built on — two streams, not a track
-//! model — and [`docs/audio-routing.md`](../../../docs/audio-routing.md)
-//! describes their behaviour in full.
+//! All three produce timestamped `f32` buffers that form a continuous timeline
+//! whatever the device or the game does, and any of them can run without the
+//! others. That is the foundation the rest of the audio work is built on —
+//! three streams, not a track model — and
+//! [`docs/audio-routing.md`](../../../docs/audio-routing.md) describes their
+//! behaviour in full.
 //!
-//! Nothing else is built. Process-scoped capture, which is what actually
-//! separates the game from everything else, is milestone M2 and
-//! [ADR 0003](../../../docs/adr/0003-process-specific-audio-capture.md). The
+//! The rest of the track model is not built. Capturing everything *except* a
+//! game is [issue #27](https://github.com/wildware-uk/clipped/issues/27), the
 //! compatibility mix is
 //! [issue #29](https://github.com/wildware-uk/clipped/issues/29), microphone
 //! processing and the optional raw microphone track are
@@ -30,7 +34,7 @@
 //! [issue #32](https://github.com/wildware-uk/clipped/issues/32), and
 //! resampling between capture clocks is
 //! [issue #30](https://github.com/wildware-uk/clipped/issues/30). Nothing
-//! consumes what this crate produces yet, so no recording contains a microphone
+//! consumes what this crate produces yet, so no recording contains a game
 //! track: writing several audio tracks into one file is
 //! [issue #28](https://github.com/wildware-uk/clipped/issues/28).
 //!
@@ -73,8 +77,9 @@
 //! being unplugged, or not existing at all does not end a capture; the track
 //! becomes silence of the right length and the capture moves to whatever
 //! Windows is playing through now, or waits for the microphone the user chose
-//! to come back (AGENTS.md sections 16 and 17). The only thing that stops a
-//! capture is the caller.
+//! to come back (AGENTS.md sections 16 and 17). The same holds for a game that
+//! exits, or that exits the process it was launched as. The only thing that
+//! stops a capture is the caller.
 //!
 //! A fourth rule applies to the microphone alone: **its samples never leave
 //! this process except to the caller.** Nothing here writes them anywhere, and

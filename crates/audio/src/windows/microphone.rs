@@ -84,7 +84,7 @@ use crate::windows::endpoint::{
     active_endpoints, create_enumerator, default_endpoint, platform_error, DeviceSelection,
     EndpointIdentity, EndpointSource, SourceKind,
 };
-use crate::windows::endpoint_capture::{CaptureStats, EndpointCapture};
+use crate::windows::endpoint_capture::{CaptureSource, CaptureStats, EndpointCapture};
 
 /// One microphone Windows currently has.
 ///
@@ -256,7 +256,8 @@ impl MicrophoneCapture {
     /// Windows refuses something outright.
     pub fn open(selection: &MicrophoneSelection) -> Result<Self, AudioError> {
         let source = EndpointSource::microphone(selection.as_device_selection());
-        let endpoint = EndpointCapture::open(source)?.ok_or_else(|| selection.unavailable())?;
+        let endpoint = EndpointCapture::open(CaptureSource::Endpoint(source))?
+            .ok_or_else(|| selection.unavailable())?;
 
         // Said once, at `warn`, because it is the answer to "why is my
         // microphone track silent" and the user can act on it. It is not

@@ -76,6 +76,24 @@ a {
   text-underline-offset: var(--underline-offset);
 }
 
+/*
+ * A file path, a command or an identifier: a string the user did not write in
+ * prose and has to be able to read character by character. `--font-mono` was
+ * declared with the other two typefaces and had no consumer until the playback
+ * screen had to put a recording's full path on screen (issue #52), which is the
+ * one thing on that screen anybody can act on.
+ *
+ * A step down the scale because a monospace face at the body size reads larger
+ * than the body around it, and `overflow-wrap` because a Windows path has no
+ * space in it to break at and would otherwise push a table wider than the
+ * window.
+ */
+code {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
 :focus {
   outline: none;
 }
@@ -100,6 +118,28 @@ a {
 
 .clipped-muted {
   color: var(--color-text-muted);
+}
+
+/*
+ * A file path, printed in full.
+ *
+ * Monospaced, because a path is read character by character - somebody has to
+ * tell an l from a 1 before typing it into Explorer - and `--font-mono` is in
+ * the token set for exactly this. It is deliberately the class's only type
+ * declaration: it sets no size, so it takes whatever the block it sits in is
+ * set at and cannot fight that block's own rule depending on which of the two
+ * happens to be written later in this file.
+ *
+ * `overflow-wrap: anywhere` for the same reason the sidebar's interrupted-
+ * recording notice carries it: a Windows path has no spaces to break at, and a
+ * path that overflows is a path nobody can read.
+ *
+ * It sets no colour, so it is the window's own ink on the window's own ground -
+ * the pairing `contrast.test.ts` already measures at 14.86:1.
+ */
+.clipped-path {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }
 
 /* — shell — */
@@ -230,15 +270,34 @@ a {
   padding: 0;
 }
 
+/*
+ * One class for two mechanisms. The sidebar's items are anchors with addresses;
+ * a screen's own section rail (`SectionRail`) draws `role="tab"` buttons,
+ * because a section of a screen has no address of its own. They are the same
+ * thing to look at, so they are the same class rather than two that drift - the
+ * reasoning `.clipped-panel` already records.
+ *
+ * The declarations a button needs and an anchor does not are the reset ones:
+ * a button brings its own border, ground, typeface and centred text, and does
+ * not fill the box it is in.
+ */
 .clipped-nav__link {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   padding: var(--space-2) var(--space-4);
+  border: 0;
   border-left: var(--marker-weight) solid transparent;
+  background: none;
   color: var(--color-text);
+  /* Named rather than inherited: a button does not take the document's face,
+     and `inherit` would leave this rule saying nothing about what it draws. */
+  font-family: var(--font-body);
   font-size: var(--text-md);
+  text-align: left;
   text-decoration: none;
+  cursor: pointer;
 }
 
 .clipped-nav__link:hover {
@@ -254,9 +313,12 @@ a {
 /*
  * The current screen is marked three ways - the rule down its left edge, the
  * heavier weight, and `aria-current` - because colour alone is not a state
- * indicator (AGENTS.md section 46).
+ * indicator (AGENTS.md section 46). The open section of a screen's rail is
+ * marked the same three ways, with `aria-selected` as the third: a tab reports
+ * itself selected rather than current.
  */
-.clipped-nav__link[aria-current='page'] {
+.clipped-nav__link[aria-current='page'],
+.clipped-nav__link[aria-selected='true'] {
   border-left-color: var(--color-accent);
   color: var(--color-accent-text);
   font-family: var(--font-heading);
@@ -268,6 +330,21 @@ a {
 .clipped-nav--utility .clipped-nav__link {
   font-size: var(--text-sm);
   padding-block: calc(var(--space-1) * 1.5);
+}
+
+/* — a screen's section rail — */
+
+/*
+ * The rail is the sidebar's list drawn again inside a screen, so it takes the
+ * same rule down its right edge that separates the sidebar from the screen. It
+ * is a `--rule-weight` divider rather than a marker: it separates two things
+ * rather than singling one out.
+ */
+.clipped-rail {
+  display: flex;
+  flex-direction: column;
+  border-right: var(--rule-weight) solid var(--color-divider);
+  padding-right: var(--space-2);
 }
 
 /* — recorder status — */
@@ -341,6 +418,37 @@ a {
 .clipped-screen__lead {
   max-width: var(--measure);
   font-size: var(--text-md);
+}
+
+/*
+ * A screen divided into a rail of sections and the pane one of them opens
+ * (`SectionRail`). `minmax(0, 1fr)` rather than `1fr`: a grid column's minimum
+ * is its content, so a wide table in the pane would push the rail off the
+ * screen instead of scrolling.
+ */
+.clipped-screen__split {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+  margin-top: var(--space-6);
+}
+
+/* The pane. `min-width` for the same reason as the column that holds it: what
+   is in it is a table, and a table's own minimum is its widest row. */
+.clipped-screen__pane {
+  min-width: 0;
+}
+
+/*
+ * Text the user types or finds in a file: a settings key, a path, a command.
+ * Quieter than the prose around it and set in the mono face, so that the exact
+ * characters are readable and cannot be confused with the sentence they sit in.
+ */
+.clipped-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
 }
 
 /*
@@ -591,4 +699,31 @@ a {
   margin-left: calc(var(--rule-weight) / -2);
   background: var(--color-accent);
   pointer-events: none;
+}
+
+/*
+ * A block of machine-written text a person is meant to read before sending it
+ * on: the Diagnostics screen's support report (issue #101).
+ *
+ * Monospaced because the report lines its labels up in columns, and `--font-mono`
+ * is the token the design system already carries for exactly that. It wraps
+ * rather than scrolling sideways, and it has no height limit: `docs/privacy.md`
+ * asks that nothing about what leaves the machine is hidden, and a scroll box
+ * showing eight of thirty lines hides twenty-two of them.
+ *
+ * `--color-surface` is the ground the component layer already fills a card and a
+ * dialog with, so this reads as one of them rather than as a fourth kind of
+ * container; `contrast.test.ts` measures the ink on it.
+ */
+.clipped-screen__report {
+  max-width: var(--measure);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

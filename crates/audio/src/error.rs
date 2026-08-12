@@ -61,6 +61,36 @@ pub enum AudioError {
         /// used: the format tag, the bit depth and the subformat GUID.
         described: String,
     },
+    /// This machine cannot capture the audio of one process tree on its own.
+    ///
+    /// Windows exposes process-scoped loopback from build 20348, and no
+    /// shipping Windows 10 release reaches that number
+    /// ([ADR 0003](../../../docs/adr/0003-process-specific-audio-capture.md)).
+    /// Below the floor — and on a machine where the activation fails for any
+    /// other reason — there is a **supported fallback rather than a dead end**:
+    /// record one system-audio track with
+    /// [`SystemAudioCapture`](crate::windows::SystemAudioCapture) and state
+    /// plainly that per-source separation is unavailable. What must not happen
+    /// is a track labelled "Game" that is really everything the machine played
+    /// (AGENTS.md section 27).
+    ///
+    /// Its own variant rather than [`Platform`](Self::Platform) precisely
+    /// because a caller has to be able to tell this one apart and take that
+    /// path.
+    ProcessLoopbackUnavailable {
+        /// What Windows said, for the diagnostics. The message a user sees is
+        /// this error's own.
+        reason: String,
+    },
+    /// The process a capture was to be scoped to cannot be followed.
+    ///
+    /// Either it has already exited, or it runs at a higher integrity level
+    /// than Clipped — a game started as an administrator, say — and Windows
+    /// will not open it. There is then no process tree to scope a capture to.
+    ProcessUnavailable {
+        /// The process that could not be opened.
+        process_id: u32,
+    },
     /// A read was attempted on a capture that has been closed.
     NotOpen,
     /// A Windows API failed in a way this crate could not classify.
@@ -79,6 +109,14 @@ impl AudioError {
     pub fn unsupported_format(described: impl Into<String>) -> Self {
         Self::UnsupportedFormat {
             described: described.into(),
+        }
+    }
+
+    /// Reports that this machine will not capture one process tree's audio.
+    #[must_use]
+    pub fn process_loopback_unavailable(reason: impl Into<String>) -> Self {
+        Self::ProcessLoopbackUnavailable {
+            reason: reason.into(),
         }
     }
 }
@@ -104,6 +142,17 @@ impl fmt::Display for AudioError {
                 "the audio device presents samples in a format Clipped cannot convert \
                  ({described})"
             ),
+            Self::ProcessLoopbackUnavailable { reason } => write!(
+                f,
+                "this machine cannot record a game's audio separately from everything else, \
+                 which needs Windows build 20348 or later ({reason}). Clipped can still record \
+                 one system audio track containing everything the machine plays"
+            ),
+            Self::ProcessUnavailable { process_id } => write!(
+                f,
+                "the game (process {process_id}) is no longer running, or is running with \
+                 privileges Clipped does not have, so its audio cannot be recorded on its own"
+            ),
             Self::NotOpen => f.write_str("this audio capture has been closed"),
             Self::Platform { operation, source } => {
                 write!(f, "audio capture failed while {operation}: {source}")
@@ -120,6 +169,8 @@ impl Error for AudioError {
             | Self::NoMicrophone
             | Self::MicrophoneUnavailable { .. }
             | Self::UnsupportedFormat { .. }
+            | Self::ProcessLoopbackUnavailable { .. }
+            | Self::ProcessUnavailable { .. }
             | Self::NotOpen => None,
         }
     }
