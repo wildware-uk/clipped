@@ -127,7 +127,7 @@ without being placed in a layer.
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
 | 2 | `clipped-muxer` | layers 0–1 |
-| 3 | `clipped-replay` | layers 0–2 |
+| 3 | `clipped-replay`, `clipped-export` | layers 0–2 |
 | 4 | `clipped-session` | layers 0–3 |
 | 5 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–4 |
 | 6 | `clipped-video-pattern` (test application) | layers 0–5 |
@@ -147,6 +147,19 @@ Matroska implementation, and rather than leaving every caller to write the same
 loop (AGENTS.md section 55). The dependency points one way only: the muxer still
 knows nothing about a buffer, and a recording is written by exactly the code a
 clip is.
+
+`clipped-export` sits beside it rather than above it, and for the same reason
+it is above the muxer at all. An export writes a file, `MkvWriter` is what
+writes files here, and a cut-only edit is written from the coded packets the
+recording already holds — so `clipped_export::export` drives the same writer a
+recording and a replay clip are written by
+([docs/exporting.md](docs/exporting.md)). It has nothing to do with
+`clipped-replay` and does not depend on it. It does name `rusty_ffmpeg`
+directly, to *read* the recordings an edit refers to: `clipped-muxer` writes
+containers and remuxes whole files, and its container reader is private to it,
+so there is no lower-layer route to reading a recording's packets. That is the
+case ADR 0004's amendment ([issue #155](https://github.com/wildware-uk/clipped/issues/155))
+permits and that `clipped-waveform` already relies on.
 
 `clipped-ipc` sits at layer 0 for a reason worth stating: it is the protocol
 the desktop application drives the recorder through
