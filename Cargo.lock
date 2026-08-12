@@ -327,6 +327,12 @@ dependencies = [
 [[package]]
 name = "clipped-plugins"
 version = "0.1.0"
+dependencies = [
+ "clipped-events",
+ "serde",
+ "serde_json",
+ "tracing",
+]
 
 [[package]]
 name = "clipped-recorder"
