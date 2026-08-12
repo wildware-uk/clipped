@@ -295,10 +295,16 @@ impl MatchTracker {
     ///
     /// Counter-Strike keeps posting while the end-of-match scoreboard is up, so
     /// the interesting moment is the phase changing to something that is not
-    /// `gameover` — warm-up, or straight into a live round. A payload whose map
-    /// carries no phase at all says nothing either way and is declined, in
-    /// keeping with everything else here: a mark this plugin cannot justify is
-    /// worse than a missing one.
+    /// `gameover` — warm-up, or straight into a live round.
+    ///
+    /// A payload whose map carries no phase at all is not a transition and
+    /// reports nothing here. It is also not evidence that the phase changed, so
+    /// `adopt` leaves the baseline phase exactly as it was rather than clearing
+    /// it: the payload is passed over, not acted on. Clearing it would decline
+    /// this payload *and* the next one, because the `gameover` that the next
+    /// payload's warm-up has to be a transition from would be gone — one
+    /// phase-less payload in the wrong place would swallow a `match_started`
+    /// with nothing in the log to say so.
     fn left_game_over(&self, map: Option<&MapState>) -> bool {
         if self.baseline.map_phase.as_ref() != Some(&MapPhase::GameOver) {
             return false;
@@ -471,10 +477,25 @@ impl MatchTracker {
         }
 
         if let Some(map) = payload.map.as_ref() {
-            self.baseline.map_name.clone_from(&map.name);
-            self.baseline.map_phase.clone_from(&map.phase);
+            // Field by field, and only when the field is there. A map block is
+            // not a complete map: Game State Integration sends what the
+            // configuration subscribed to, and a component this build does not
+            // recognise parses to `None` as well. Replacing the baseline with
+            // an absence would make the *next* payload the first sight of a
+            // value that never went away — which for `phase` destroys the
+            // `gameover` the match's beginning is derived from, so a single
+            // phase-less payload between the scoreboard and the next warm-up
+            // costs a `match_started` permanently. "Says nothing" and "says
+            // nothing is there" are different payloads.
+            if map.name.is_some() {
+                self.baseline.map_name.clone_from(&map.name);
+            }
+            if map.phase.is_some() {
+                self.baseline.map_phase.clone_from(&map.phase);
+            }
         } else {
-            // Back to the main menu. The next map is a new match.
+            // Back to the main menu, which is the whole map block being absent
+            // rather than a field of it. The next map is a new match.
             self.baseline.map_name = None;
             self.baseline.map_phase = None;
         }
@@ -995,6 +1016,92 @@ mod tests {
         // it is one kill rather than the whole of the last match again.
         let first_kill = tracker.observe(&phase(41, "live", 1), at(4));
         assert_eq!(first_kill.kinds(), vec![&EventKind::Kill]);
+    }
+
+    #[test]
+    fn a_map_block_without_a_phase_does_not_erase_the_game_over_the_next_match_starts_from() {
+        // The sequence the guard above depends on, with one payload inserted
+        // into it that carries a map block and no `phase`: a configuration that
+        // does not subscribe to the whole of `map`, a component this build does
+        // not recognise, or a truncated post.
+        //
+        // Declining to report anything for *that* payload is right. Taking it
+        // as evidence that the phase went away is not, and it is the more
+        // expensive mistake by far: the `gameover` the next payload's warm-up
+        // has to be a transition from is gone, so the second match gets an
+        // ending and no beginning — which is exactly the defect
+        // `a_second_match_on_the_same_map_is_reported_starting` exists to stop,
+        // arriving by a different door and leaving no note behind.
+        let phase = |stamp: i64, phase: &str| {
+            payload(serde_json::json!({
+                "provider": {"steamid": LOCAL, "timestamp": stamp},
+                "map": {"name": "de_dust2", "mode": "competitive", "phase": phase, "round": 20,
+                        "team_ct": {"score": 13}, "team_t": {"score": 7}},
+                "player": {"steamid": LOCAL, "team": "CT",
+                           "match_stats": {"kills": 8, "deaths": 6, "assists": 3}}
+            }))
+        };
+        let no_phase = payload(serde_json::json!({
+            "provider": {"steamid": LOCAL, "timestamp": 35},
+            "map": {"name": "de_dust2", "mode": "competitive", "round": 20,
+                    "team_ct": {"score": 13}, "team_t": {"score": 7}},
+            "player": {"steamid": LOCAL, "team": "CT",
+                       "match_stats": {"kills": 8, "deaths": 6, "assists": 3}}
+        }));
+
+        let mut tracker = MatchTracker::new();
+        tracker.observe(&live(10, 8, 6, 3), at(0));
+
+        let ended = tracker.observe(&phase(30, "gameover"), at(1));
+        assert_eq!(ended.kinds(), vec![&EventKind::MatchEnded, &EventKind::Win]);
+
+        let passed_over = tracker.observe(&no_phase, at(2));
+        assert!(
+            passed_over.events.is_empty(),
+            "a payload that says nothing about the phase is not a transition: {:?}",
+            passed_over.kinds()
+        );
+
+        let started = tracker.observe(&phase(40, "warmup"), at(3));
+        assert_eq!(
+            started.kinds(),
+            vec![&EventKind::MatchStarted],
+            "one phase-less payload between the scoreboard and the next warm-up swallowed the \
+             beginning of the match: the baseline phase was cleared rather than kept"
+        );
+    }
+
+    #[test]
+    fn a_map_block_without_a_name_does_not_restart_the_match_it_is_silent_about() {
+        // The same rule, on the field beside it, where the cost is a spurious
+        // event rather than a missing one: clearing `map_name` makes the next
+        // payload the first sight of a map that never changed, and
+        // `derive_match` reports a match starting in the middle of one.
+        let named = |stamp: i64| {
+            payload(serde_json::json!({
+                "provider": {"steamid": LOCAL, "timestamp": stamp},
+                "map": {"name": "de_dust2", "phase": "live", "round": 5},
+                "player": {"steamid": LOCAL, "team": "CT",
+                           "match_stats": {"kills": 3, "deaths": 2, "assists": 1}}
+            }))
+        };
+        let nameless = payload(serde_json::json!({
+            "provider": {"steamid": LOCAL, "timestamp": 21},
+            "map": {"phase": "live", "round": 5},
+            "player": {"steamid": LOCAL, "team": "CT",
+                       "match_stats": {"kills": 3, "deaths": 2, "assists": 1}}
+        }));
+
+        let mut tracker = MatchTracker::new();
+        tracker.observe(&named(20), at(0));
+        assert!(tracker.observe(&nameless, at(1)).events.is_empty());
+
+        let same_map = tracker.observe(&named(22), at(2));
+        assert!(
+            same_map.events.is_empty(),
+            "the map never changed, and a match was reported starting inside one: {:?}",
+            same_map.kinds()
+        );
     }
 
     #[test]

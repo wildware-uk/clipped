@@ -249,11 +249,11 @@ What the plugin receives is a snapshot of your Counter-Strike match — the map,
 the round, the score and your own kill, death and assist counts — and it stays
 on the machine. What it becomes is worth being exact about, because it is less
 than the finished feature: the plugin turns those snapshots into events on its
-own standard output, and **nothing reads them yet**. Nothing in the recorder
-starts the plugin during a recording
-([issue #338](https://github.com/wildware-uk/clipped/issues/338)) and nothing
-writes a plugin's events onto a recording's timeline
-([issue #71](https://github.com/wildware-uk/clipped/issues/71)); when that is
+own standard output, and **nothing reads them yet**. A session can place an
+event on a recording's timeline
+([issue #71](https://github.com/wildware-uk/clipped/issues/71)), but nothing in
+the recorder starts a plugin during a recording or feeds it what a plugin prints
+([issue #338](https://github.com/wildware-uk/clipped/issues/338)); when that is
 built, the destination is the local database, and this paragraph should say so
 in the present tense at that point and not before. Either way nothing about it
 is transmitted anywhere. The listener requires the

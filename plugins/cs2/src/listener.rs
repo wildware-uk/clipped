@@ -112,6 +112,12 @@ pub struct GsiListener {
     /// anything that ships; shorter only in the test that would otherwise have
     /// to wait it out.
     allowance: Duration,
+    /// What one read of a connection is allowed, which is always
+    /// [`READ_TIMEOUT`]. It is a field rather than a constant read inside
+    /// [`handle`] so that the value the plugin ships with is something a test
+    /// can assert, and so that the two bounds a connection gets arrive at
+    /// `handle` the same way.
+    read_timeout: Duration,
 }
 
 impl GsiListener {
@@ -130,6 +136,7 @@ impl GsiListener {
         TcpListener::bind(address).map(|socket| Self {
             socket,
             allowance: CONNECTION_DEADLINE,
+            read_timeout: READ_TIMEOUT,
         })
     }
 
@@ -177,7 +184,7 @@ impl GsiListener {
                 // stopping for; the next one may be the game.
                 continue;
             };
-            match handle(stream, token, self.allowance) {
+            match handle(stream, token, self.allowance, self.read_timeout) {
                 Ok(payload) => {
                     if payloads.send(payload).is_err() {
                         // Nobody is reading any more: the session has ended.
@@ -192,12 +199,14 @@ impl GsiListener {
 
 /// Reads one request and answers it.
 ///
-/// `allowance` is the whole of the time this connection may take; see the
-/// module documentation for why a per-read timeout is not that.
+/// `allowance` is the whole of the time this connection may take and
+/// `read_timeout` is the most one read of it may wait; see the module
+/// documentation for why the second is not the first.
 fn handle(
     mut stream: TcpStream,
     token: &str,
     allowance: Duration,
+    read_timeout: Duration,
 ) -> Result<ReceivedPayload, Refusal> {
     // Both directions are bounded before a byte is read, and a socket that will
     // not take a timeout is one this endpoint declines to read from: the
@@ -205,10 +214,10 @@ fn handle(
     // already blocked, so without a timeout underneath it there is no bound at
     // all.
     stream
-        .set_read_timeout(Some(READ_TIMEOUT))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|_| Refusal::Unreadable)?;
     stream
-        .set_write_timeout(Some(READ_TIMEOUT))
+        .set_write_timeout(Some(read_timeout))
         .map_err(|_| Refusal::Unreadable)?;
 
     let reading = stream.try_clone().map_err(|_| Refusal::Unreadable)?;
@@ -666,6 +675,79 @@ mod tests {
                 }
             ],
             "exactly one payload should have got through, and both refusals named"
+        );
+    }
+
+    /// A socket that will not take a read timeout is declined, not read.
+    ///
+    /// The allowance in [`Deadline`] is checked *between* reads and cannot
+    /// interrupt one already blocked, so a socket with no timeout underneath it
+    /// has no bound at all — a single silent client would hold the endpoint,
+    /// and with it the game's payloads, for as long as it liked. Declining such
+    /// a socket is therefore behaviour rather than tidiness, which means it
+    /// needs a test that bites and not a sentence claiming it does.
+    ///
+    /// `Duration::ZERO` is how this gets a **real** `TcpStream` to refuse a
+    /// bound: `set_read_timeout` rejects it, so the endpoint takes the same
+    /// path a socket failing for any other reason would take. The request is a
+    /// perfectly good authenticated post either way, so the only thing that can
+    /// account for the difference between the two halves below is the bound
+    /// that could not be set.
+    #[test]
+    fn a_socket_that_will_not_take_a_read_timeout_is_declined_rather_than_read_unbounded() {
+        let handled = |read_timeout: Duration| {
+            let socket =
+                TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+                    .expect("an ephemeral loopback port");
+            let port = socket.local_addr().expect("the port it got").port();
+
+            let posting = thread::spawn(move || {
+                let mut stream =
+                    TcpStream::connect(("127.0.0.1", port)).expect("loopback connects");
+                let _ = stream.write_all(post(PAYLOAD).as_bytes());
+                let mut answer = String::new();
+                let _ = stream.read_to_string(&mut answer);
+                answer
+            });
+
+            let (stream, _) = socket.accept().expect("the connection it just made");
+            let outcome = handle(stream, TOKEN, CONNECTION_DEADLINE, read_timeout);
+            let answer = posting.join().expect("the posting thread");
+            (outcome, answer)
+        };
+
+        let (declined, answer) = handled(Duration::ZERO);
+        assert_eq!(
+            declined.expect_err("a socket that cannot be bounded is not read from"),
+            Refusal::Unreadable,
+            "a connection whose read timeout the operating system refused was read anyway"
+        );
+        assert!(
+            answer.is_empty(),
+            "nothing is answered to a connection that was never read: {answer:?}"
+        );
+
+        // The identical request over a socket that does take the bound. This is
+        // the half that makes the half above mean something: what differs
+        // between them is one `Duration`.
+        let (accepted, answer) = handled(READ_TIMEOUT);
+        assert_eq!(
+            accepted
+                .expect("the same post, over a socket that took the bound")
+                .body,
+            PAYLOAD.as_bytes()
+        );
+        assert!(answer.starts_with("HTTP/1.1 200"));
+    }
+
+    /// The read timeout the plugin actually uses is the constant, not a test's.
+    #[test]
+    fn a_bound_listener_reads_with_the_timeout_this_module_documents() {
+        let listener = GsiListener::bind(0).expect("an ephemeral loopback port");
+        assert_eq!(
+            (listener.read_timeout, listener.allowance),
+            (READ_TIMEOUT, CONNECTION_DEADLINE),
+            "a bound that only exists in a test is not a bound"
         );
     }
 
