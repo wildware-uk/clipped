@@ -16,6 +16,11 @@
 //!   [`BackendDeclaration`].
 //! - Choosing a backend and reporting the choice: [`select`], [`Selection`],
 //!   over the backends this build has: [`registered_backends`].
+//! - Keeping a recording going when the chosen backend fails part way through,
+//!   and reporting that it changed: [`CaptureFallback`], [`CaptureStatus`],
+//!   [`MethodChange`].
+//! - Noticing a capture that has silently gone black: [`BlackFrameWatch`],
+//!   [`FrameSampler`], [`windows::D3d11FrameSampler`].
 //! - The vocabulary frames arrive in: [`CapturedFrame`], [`FrameFormat`],
 //!   [`CaptureTimestamp`].
 //! - The clock a whole recording is timed against, and how far its tracks have
@@ -136,7 +141,9 @@
 //! ```
 
 mod backend;
+mod blackness;
 mod error;
+mod fallback;
 mod frame;
 mod method;
 mod registry;
@@ -151,7 +158,12 @@ pub use backend::{
     Acquisition, Availability, BackendCapabilities, BackendDeclaration, CaptureBackend,
     CaptureBackendFactory, CaptureConfig, Unavailable,
 };
+pub use blackness::{BlackFrameWatch, BlackRun, FrameSample, FrameSampler};
 pub use error::CaptureError;
+pub use fallback::{
+    response_to, Attempt, CaptureFallback, CaptureStatus, FailureResponse, FallbackError,
+    FallbackTrigger, MethodChange, Recovery, StartedCapture,
+};
 pub use frame::{CapturedFrame, FrameFormat, FrameSize, FrameTexture, PixelFormat, TextureKind};
 pub use method::{CaptureMethod, CaptureMethodSetting};
 pub use registry::{registered_backend, registered_backends, registered_declarations};
