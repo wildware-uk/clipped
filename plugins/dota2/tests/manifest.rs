@@ -31,6 +31,32 @@ fn the_manifest_is_one_this_build_of_the_host_can_read() {
 }
 
 #[test]
+fn the_user_is_told_it_writes_into_their_game_before_they_enable_it() {
+    // This plugin does two things to the machine, and contract 1 has a typed
+    // declaration for only one of them: `network` covers the loopback socket,
+    // and nothing covers a file written into the user's Dota 2 installation.
+    // Until there is a field for it
+    // ([#343](https://github.com/wildware-uk/clipped/issues/343)), the
+    // description carries it — that is the other thing the plugin manager
+    // shows before the user enables anything, and a permission the user is
+    // never told about is a permission nobody granted (`docs/privacy.md`).
+    //
+    // The assertion is on the *manifest*, not on the source string, so a
+    // description edited down to one tidy sentence fails here rather than
+    // quietly removing the only disclosure there is.
+    let description = manifest().description().to_lowercase();
+    assert!(
+        description.contains("writes one configuration file"),
+        "the file this plugin writes into a user's game has to be in what they are shown: \
+         {description}"
+    );
+    assert!(
+        description.contains("dota 2 installation"),
+        "and it has to say where: {description}"
+    );
+}
+
+#[test]
 fn the_manifest_names_the_executable_this_package_actually_builds() {
     // The failure this catches is a rename: `Cargo.toml` produces
     // `clipped-dota2-plugin.exe`, the manifest names a file, and a plugin whose

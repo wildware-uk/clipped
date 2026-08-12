@@ -47,7 +47,13 @@ is a bug in the constructed one.
 | `10-post-game.json` | The scoreboard |
 | `11-next-match.json` | A different `matchid`, with counters that start again |
 | `spectating.json` | A game being watched rather than played: `player` keyed by team and slot |
+| `spectating-post-game.json` | The same watched game at its scoreboard — the same `matchid`, and `map.game_state` moved on |
 | `unrecognisable.json` | A payload with nothing this plugin can read in it |
 
 `04` to `10` are one match, in order, and
 `tests/payload_sequence.rs` replays them as one.
+
+The two `spectating` payloads are a pair for the same reason: `map` describes a
+real match whoever is watching it, so the state boundary between them is what
+proves the plugin reports nothing during a spectated game rather than merely
+reporting none of its *kills*.

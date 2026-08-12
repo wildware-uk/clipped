@@ -164,14 +164,31 @@ impl Integration {
     /// The token is the only part that is not the same on every machine, which
     /// is what makes [`Installation::apply`]'s "is this already what we would
     /// write?" comparison a comparison of the whole file.
+    ///
+    /// # What the header may say
+    ///
+    /// It names no game, because this module does not know which one it is
+    /// writing for (`super`), and it does not tell the reader to delete the
+    /// file. Deleting it works exactly until the next time Clipped attaches to
+    /// this game, which writes it again — so "delete this file to stop the game
+    /// reporting" would be an instruction that undoes itself, which AGENTS.md
+    /// section 27 is about. The thing that actually stops it is disabling the
+    /// plugin, and that is what it says.
     #[must_use]
     pub fn render(&self, token: &AuthToken) -> String {
         let mut file = String::new();
-        file.push_str("// Written by Clipped's Dota 2 highlight plugin.\n");
+        file.push_str(
+            "// Written by Clipped, so that this game can report what happens in it to\n",
+        );
+        file.push_str("// Clipped's highlight plugin for it.\n");
         file.push_str("// It names a port on this machine that Clipped listens on while it is\n");
         file.push_str("// recording, and a token the game includes so that Clipped can tell the\n");
-        file.push_str("// game's payloads from anything else that finds the port. Delete this\n");
-        file.push_str("// file to stop the game reporting to Clipped.\n");
+        file.push_str("// game's payloads from anything else that finds the port.\n");
+        file.push_str("// Deleting this file stops the game reporting only until the next time\n");
+        file.push_str(
+            "// Clipped records this game, which writes it again. To stop it for good,\n",
+        );
+        file.push_str("// turn the plugin off in Clipped.\n");
         file.push_str(&format!("\"{}\"\n{{\n", self.title));
         file.push_str(&format!("    \"uri\"       \"{}\"\n", self.uri));
         file.push_str(&format!(
@@ -475,6 +492,64 @@ mod tests {
             fs::read_to_string(installation.path()).expect("the file is there"),
             changed
         );
+    }
+
+    #[test]
+    fn the_header_does_not_tell_the_user_to_do_something_that_undoes_itself() {
+        // The file said "Delete this file to stop the game reporting to
+        // Clipped", and the next attach wrote it straight back. An instruction
+        // that does not survive the software saying it is worse than no
+        // instruction (AGENTS.md section 27), so this test is both halves: the
+        // file does come back, and the header does not claim otherwise.
+        let directory = scratch_directory("deleted");
+        let installation = Installation::new(&directory, "gamestate_integration_clipped.cfg")
+            .expect("a plain file name");
+        let contents = integration().render(&token());
+
+        installation.apply(&contents).expect("it is written");
+        fs::remove_file(installation.path()).expect("and the user deletes it");
+        assert_eq!(
+            installation.apply(&contents).expect("the next attach"),
+            Installed::Written {
+                path: installation.path()
+            },
+            "the next attach writes it again, which is what the header has to be honest about"
+        );
+
+        let header: String = contents
+            .lines()
+            .take_while(|line| line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !header.to_lowercase().contains("delete this file to stop"),
+            "the header promises something the line above disproves: {header}"
+        );
+        assert!(
+            header.contains("only until the next time"),
+            "it has to say what deleting it actually buys: {header}"
+        );
+        assert!(
+            header.contains("turn the plugin off in Clipped"),
+            "and what does stop it: {header}"
+        );
+    }
+
+    #[test]
+    fn the_rendered_file_names_no_particular_game() {
+        // `super`'s claim is that nothing in `crate::gsi` knows which game it
+        // is serving, which is what makes it a module that can be moved to a
+        // crate two plugin binaries link rather than copied. A header with
+        // "Dota 2" written into it is that claim being untrue in the one place
+        // a user reads.
+        let rendered = integration().render(&token());
+        for game in ["Dota", "dota", "Counter-Strike", "cs2"] {
+            assert!(
+                !rendered.contains(game),
+                "`{game}` should not appear in a game-agnostic configuration writer's output: \
+                 {rendered}"
+            );
+        }
     }
 
     #[test]

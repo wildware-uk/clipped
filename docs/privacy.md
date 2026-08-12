@@ -272,6 +272,18 @@ otherwise would.
 - **What is sent: nothing.** The plugin only *receives*. It writes one
   configuration file into the game's own directory so that the game knows where
   to post, and it opens no outbound connection of any kind.
+- **What it writes, and where the user is told.** That configuration file is
+  the one thing this plugin does to a machine that the manifest has no *typed*
+  declaration for: contract 1's declarations cover the network and nothing
+  else. Until there is a field for it
+  ([issue #343](https://github.com/wildware-uk/clipped/issues/343)) the
+  plugin's manifest `description` carries it in plain terms, because that is
+  the other thing the plugin manager shows before the user enables anything,
+  and a permission the user is never told about is a permission nobody granted.
+  The file is named for Clipped, nothing else in that directory is read or
+  touched, and it is not removed when the plugin detaches — the game reads the
+  directory at start-up, so deleting it on the way out would break the next
+  launch.
 - **What is received:** the components the plugin subscribes to — the provider,
   the map, the player's own counters and their hero — from the game on this
   machine. Every payload has to carry a token the plugin generated and wrote

@@ -5,7 +5,7 @@
 //! happens. What each difference is worth — a standard kind, this plugin's own
 //! namespace, or nothing at all — is the table in [`super`].
 //!
-//! # The three rules that keep the subtraction honest
+//! # The five rules that keep the subtraction honest
 //!
 //! 1. **The first payload of a match reports nothing.** Attaching to a game
 //!    that is already running is normal — a user enables the plugin mid-match,
@@ -22,6 +22,22 @@
 //!    changed what the number means. Both are answered by taking the new value
 //!    as the truth and reporting nothing, which is what
 //!    [`u64::saturating_sub`] does here.
+//! 4. **A spectated payload reports nothing at all, including the match's own
+//!    state.** While the player is watching somebody else's game, `map` is
+//!    still a perfectly ordinary description of a match in progress — it starts
+//!    and it ends and it names a winner — and only `player` gives away that
+//!    none of it is about the person at this computer. Reporting `match_started`
+//!    off that `map` would put a match on the user's timeline that they were
+//!    not in, and it is the reason the gate is on the whole subtraction rather
+//!    than on the counters that obviously need it. It also cuts the baseline:
+//!    a snapshot of somebody else's game is not something the player's game can
+//!    be a difference from.
+//! 5. **A match starts once and ends once.** Dota's state can leave
+//!    `GAME_IN_PROGRESS` and come back — a reconnect, or a state this plugin
+//!    files under [`GameState::Other`] — and a second `match_started` carrying
+//!    the same `match_id` is not a second match, it is the same one said twice.
+//!    [`Announced`] remembers which of the two has been said, and forgets when
+//!    rule 2 says the match has changed.
 //!
 //! Timing is not this module's business. It produces *what happened*, and
 //! `crate::gsi::Window` — which knows the interval the payloads arrived in —
@@ -95,10 +111,37 @@ pub struct Observed {
     pub notice: Option<Notice>,
 }
 
+/// Which of the two once-per-match events have already been reported.
+///
+/// Rule 5. Kept beside the baseline rather than derived from the snapshots,
+/// because "has this match already started?" is a question about the whole run
+/// of payloads and [`difference`] only ever sees two of them.
+#[derive(Debug, Clone, Copy, Default)]
+struct Announced {
+    started: bool,
+    ended: bool,
+}
+
+impl Announced {
+    /// Whether `kind` is one this match has not had reported yet.
+    ///
+    /// Anything that is not once-per-match — a kill, a death, a killing spree —
+    /// passes through untouched.
+    fn first_time(&mut self, kind: &EventKind) -> bool {
+        let said = match kind {
+            EventKind::MatchStarted => &mut self.started,
+            EventKind::MatchEnded => &mut self.ended,
+            _ => return true,
+        };
+        !core::mem::replace(said, true)
+    }
+}
+
 /// Reads a stream of Dota 2 states and reports what changed between them.
 #[derive(Debug, Default)]
 pub struct Watcher {
     previous: Option<Snapshot>,
+    announced: Announced,
     told_about_spectating: bool,
 }
 
@@ -120,12 +163,32 @@ impl Watcher {
             None
         };
 
-        let reports = self
+        // Rule 2. Losing the baseline is also losing what has been announced:
+        // the next match has not started yet however many times the last one
+        // did.
+        let previous = self
             .previous
             .take()
-            .filter(|previous| previous.match_id == next.match_id)
-            .map(|previous| difference(&previous, &next))
-            .unwrap_or_default();
+            .filter(|previous| previous.match_id == next.match_id);
+        if previous.is_none() {
+            self.announced = Announced::default();
+        }
+
+        // Rule 4, and it is deliberately the whole subtraction rather than the
+        // counters: `map` describes a real match whoever is watching it, so a
+        // spectated payload would otherwise report that match starting and
+        // ending on the timeline of somebody who was not in it.
+        let mut reports = match previous {
+            Some(previous) if !previous.spectating && !next.spectating => {
+                difference(&previous, &next)
+            }
+            _ => Vec::new(),
+        };
+
+        // Rule 5.
+        let mut announced = self.announced;
+        reports.retain(|report| announced.first_time(&report.kind));
+        self.announced = announced;
 
         self.previous = Some(next);
         Observed { reports, notice }
@@ -396,24 +459,97 @@ mod tests {
 
     #[test]
     fn a_new_match_starts_again_rather_than_reporting_the_difference() {
-        // Rule 2. The second match's counters are lower than the first's, and
-        // its first kill is its first, not its ninth.
+        // Rule 2. The counters deliberately go *up* across the boundary: a
+        // second match whose first payload happens to have lower numbers than
+        // the first match's last one is caught by rule 3 whether or not the
+        // match identifier is compared, so it proves nothing about this rule.
+        // The case only this rule answers is the ordinary one — Clipped is
+        // still attached, the user has queued again, and the first payload of
+        // the new game arrives after the horn with a few kills already in it.
         let mut watcher = Watcher::new();
-        watcher.observe(&in_progress((8, 3, 11, 0)));
+        watcher.observe(&in_progress((0, 0, 0, 0)));
 
         let second = state(
             "8421997999",
             "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
-            (0, 0, 0, 0),
+            (3, 2, 5, 0),
         );
+        let opening = watcher.observe(&second);
         assert!(
-            watcher.observe(&second).reports.is_empty(),
-            "a different match identifier is a different game"
+            opening.reports.is_empty(),
+            "a different match identifier is a different game, and its opening score is not ten \
+             things that just happened: {:?}",
+            kinds(&opening)
         );
 
         let mut third = second.clone();
-        third["player"]["kills"] = json!(1);
-        assert_eq!(kinds(&watcher.observe(&third)), vec!["kill"]);
+        third["player"]["kills"] = json!(4);
+        assert_eq!(
+            kinds(&watcher.observe(&third)),
+            vec!["kill"],
+            "and the new match's baseline is the new match's, so its next kill is one kill"
+        );
+    }
+
+    #[test]
+    fn a_match_that_is_rejoined_does_not_start_a_second_time() {
+        // Rule 5. Leaving `GAME_IN_PROGRESS` and coming back is a reconnect, a
+        // pause the client reports as a state of its own, or a state a Dota
+        // update has added. None of them is a second match, and a second
+        // `match_started` carrying the same `match_id` is what everything
+        // downstream would have to un-pick to know that.
+        let mut watcher = Watcher::new();
+        watcher.observe(&state(
+            "1",
+            "DOTA_GAMERULES_STATE_STRATEGY_TIME",
+            (0, 0, 0, 0),
+        ));
+        assert_eq!(
+            kinds(&watcher.observe(&state(
+                "1",
+                "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                (0, 0, 0, 0)
+            ))),
+            vec!["match_started"]
+        );
+
+        assert!(watcher
+            .observe(&state("1", "DOTA_GAMERULES_STATE_DISCONNECT", (0, 0, 0, 0)))
+            .reports
+            .is_empty());
+        assert!(
+            watcher
+                .observe(&state(
+                    "1",
+                    "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                    (0, 0, 0, 0)
+                ))
+                .reports
+                .is_empty(),
+            "coming back to a match is not starting one"
+        );
+
+        // The same for the end of it, and then a genuinely different match
+        // starts again — what has been announced is forgotten with the
+        // baseline.
+        assert_eq!(
+            kinds(&watcher.observe(&state("1", "DOTA_GAMERULES_STATE_POST_GAME", (0, 0, 0, 0)))),
+            vec!["match_ended"]
+        );
+        watcher.observe(&state(
+            "2",
+            "DOTA_GAMERULES_STATE_STRATEGY_TIME",
+            (0, 0, 0, 0),
+        ));
+        assert_eq!(
+            kinds(&watcher.observe(&state(
+                "2",
+                "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                (0, 0, 0, 0)
+            ))),
+            vec!["match_started"],
+            "a different match starts on its own account"
+        );
     }
 
     #[test]
@@ -530,22 +666,97 @@ mod tests {
         assert!(CustomName::new(KILL_STREAK_NAME).is_ok());
     }
 
+    /// A payload from a game being watched: `player` keyed by team and slot,
+    /// and a `map` that is an ordinary description of a real match.
+    fn watching(game_state: &str) -> Value {
+        json!({
+            "map": {"matchid": "1", "game_state": game_state, "win_team": "none",
+                    "clock_time": 600},
+            "player": {
+                "team2": {"player0": {"kills": 4, "deaths": 1, "team_name": "radiant"}},
+                "team3": {"player5": {"kills": 2, "deaths": 3, "team_name": "dire"}}
+            },
+            "hero": {"team2": {"player0": {"name": "npc_dota_hero_lina"}}}
+        })
+    }
+
     #[test]
-    fn a_spectated_game_reports_nothing_and_says_why_once() {
-        let watching = json!({
-            "map": {"matchid": "1", "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"},
-            "player": {"team2": {"player0": {"kills": 4, "team_name": "radiant"}}}
-        });
+    fn a_spectated_game_reports_nothing_even_when_that_game_starts_and_ends() {
+        // Rule 4, and the case the gate exists for. `map.game_state` is the
+        // *game's* state and it moves through exactly the transitions a played
+        // match does, so a plugin that only kept somebody else's kills off the
+        // timeline would still put somebody else's match on it — and the user
+        // has been told in as many words that nothing is reported while they
+        // are watching.
+        assert!(
+            Notice::Spectating
+                .message()
+                .contains("nothing is reported while you are watching somebody else's game"),
+            "this test is the evidence for that sentence: {}",
+            Notice::Spectating.message()
+        );
 
         let mut watcher = Watcher::new();
-        let first = watcher.observe(&watching);
-        assert!(first.reports.is_empty());
-        assert_eq!(first.notice, Some(Notice::Spectating));
 
-        let second = watcher.observe(&watching);
+        let drafting = watcher.observe(&watching("DOTA_GAMERULES_STATE_HERO_SELECTION"));
+        assert!(drafting.reports.is_empty());
+        assert_eq!(drafting.notice, Some(Notice::Spectating));
+
+        let started = watcher.observe(&watching("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"));
+        assert!(
+            started.reports.is_empty(),
+            "the match somebody else is playing did not start on this user's timeline: {:?}",
+            kinds(&started)
+        );
         assert_eq!(
-            second.notice, None,
+            started.notice, None,
             "a fact about the session is said once, not once per payload"
+        );
+
+        let ended = watcher.observe(&watching("DOTA_GAMERULES_STATE_POST_GAME"));
+        assert!(
+            ended.reports.is_empty(),
+            "nor did it end on it: {:?}",
+            kinds(&ended)
+        );
+    }
+
+    #[test]
+    fn a_player_who_starts_watching_their_own_match_stops_being_reported_on() {
+        // Rule 4 in the direction a real client produces: leaving a game you
+        // were playing puts you in the spectator's payload shape with the
+        // *same* `matchid`, so the match-identifier rule does not catch it. The
+        // match then ends, and it is no longer this user's match to end.
+        let mut watcher = Watcher::new();
+        watcher.observe(&state(
+            "1",
+            "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+            (4, 1, 2, 0),
+        ));
+
+        let observed = watcher.observe(&watching("DOTA_GAMERULES_STATE_POST_GAME"));
+        assert!(
+            observed.reports.is_empty(),
+            "a payload that has stopped being about this player reports nothing about them: {:?}",
+            kinds(&observed)
+        );
+        assert_eq!(observed.notice, Some(Notice::Spectating));
+    }
+
+    #[test]
+    fn a_spectated_payload_is_not_a_baseline_for_the_players_own_game() {
+        // The other half of rule 4. A snapshot of somebody else's game says
+        // nothing about the player's, so it cannot be the thing the player's
+        // next payload is a difference from — even when the two carry the same
+        // `match_id`, which is what a user watching a friend's game in the same
+        // lobby they then play in would produce.
+        let mut watcher = Watcher::new();
+        watcher.observe(&watching("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"));
+
+        let own = state("1", "DOTA_GAMERULES_STATE_POST_GAME", (7, 2, 4, 0));
+        assert!(
+            watcher.observe(&own).reports.is_empty(),
+            "a spectated payload is not something the player's own game can be a difference from"
         );
     }
 }

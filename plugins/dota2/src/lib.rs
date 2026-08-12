@@ -32,11 +32,14 @@
 //! link and the recorder does not. It cannot go into `clipped-plugins`: that is
 //! the *host* side, linked into the recorder, and putting a listening socket
 //! and a configuration-file writer in it would put both inside the process that
-//! is recording (ADR 0002). It is not a crate yet because there is exactly one
-//! caller, and an abstraction with one implementation is the thing AGENTS.md
-//! section 1 warns about — the second caller is what makes the extraction a
-//! move rather than a guess. #70 is asked to do it in
-//! [its own issue](https://github.com/wildware-uk/clipped/issues/70).
+//! is recording (ADR 0002).
+//!
+//! **Why it is not that crate on this branch.** #70's implementation is open at
+//! the same time as this one, so the second caller now exists and the
+//! extraction is owed — but extracting a module out from under two open
+//! branches conflicts with whichever merges second, and doing it once against
+//! both callers is the only way to see what they really share. The proposal is
+//! on [#69](https://github.com/wildware-uk/clipped/issues/69).
 //!
 //! What could **not** be shared, and what #70 will have to write for itself:
 //! the shape of the state blob and every rule about what a change in it means.

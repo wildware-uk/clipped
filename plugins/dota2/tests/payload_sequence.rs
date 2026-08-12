@@ -39,8 +39,14 @@ const MATCH: [&str; 11] = [
     "11-next-match.json",
 ];
 
-/// The payloads that are not part of that sequence.
-const OTHERS: [&str; 2] = ["spectating.json", "unrecognisable.json"];
+/// A game being watched rather than played, from the middle of it to the
+/// scoreboard. Two payloads because the interesting thing about a spectated
+/// game is that its `map` block moves through the same states a played match
+/// does.
+const SPECTATED: [&str; 2] = ["spectating.json", "spectating-post-game.json"];
+
+/// The payloads that are not part of either sequence.
+const OTHERS: [&str; 1] = ["unrecognisable.json"];
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
@@ -157,16 +163,51 @@ fn every_event_this_plugin_can_produce_is_one_the_host_accepts() {
 
 #[test]
 fn a_spectated_game_reports_nothing_and_says_so_once() {
+    // The two payloads cross `GAME_IN_PROGRESS` to `POST_GAME`, which is the
+    // transition a *played* match ends on. That is the whole point of the pair:
+    // while spectating, `map` is an ordinary description of a real match and
+    // only `player` gives away that none of it is about the person at this
+    // computer, so a plugin that gated the counters alone would still put
+    // somebody else's match on this user's timeline.
     let mut watcher = Watcher::new();
-    let watching = payload("spectating.json");
 
-    let first = watcher.observe(&watching);
+    let first = watcher.observe(&payload(SPECTATED[0]));
     assert!(
         first.reports.is_empty(),
-        "somebody else's kills are not the player's"
+        "somebody else's kills are not the player's: {:?}",
+        kinds(&first)
     );
     assert_eq!(first.notice, Some(Notice::Spectating));
-    assert!(watcher.observe(&watching).notice.is_none());
+
+    let ended = watcher.observe(&payload(SPECTATED[1]));
+    assert!(
+        ended.reports.is_empty(),
+        "somebody else's match did not end on this user's timeline: {:?}",
+        kinds(&ended)
+    );
+    assert!(
+        ended.notice.is_none(),
+        "a fact about the session is said once, not once per payload"
+    );
+
+    // And the same pair read the other way round, because a user can start
+    // watching at the scoreboard as easily as before the horn.
+    let mut watcher = Watcher::new();
+    watcher.observe(&payload(SPECTATED[1]));
+    let back = watcher.observe(&payload(SPECTATED[0]));
+    assert!(
+        back.reports.is_empty(),
+        "nor did it start on it: {:?}",
+        kinds(&back)
+    );
+}
+
+fn kinds(observed: &clipped_dota2_plugin::dota::Observed) -> Vec<&str> {
+    observed
+        .reports
+        .iter()
+        .map(|report| report.kind.as_str())
+        .collect()
 }
 
 #[test]
@@ -202,6 +243,7 @@ fn every_committed_payload_is_used_by_a_test() {
 
     let mut used: Vec<String> = MATCH
         .iter()
+        .chain(SPECTATED.iter())
         .chain(OTHERS.iter())
         .map(|name| (*name).to_owned())
         .collect();

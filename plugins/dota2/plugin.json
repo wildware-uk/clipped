@@ -3,7 +3,7 @@
   "id": "dota-2",
   "name": "Dota 2",
   "version": "0.1.0",
-  "description": "Reports kills, deaths, assists and match results from Dota 2's Game State Integration.",
+  "description": "Reports kills, deaths, assists and match results from Dota 2's Game State Integration. Writes one configuration file into your Dota 2 installation, which is how the game is told to report; it is left there when Clipped stops.",
   "executable": "clipped-dota2-plugin.exe",
   "supports": { "executables": ["dota2.exe"] },
   "network": [

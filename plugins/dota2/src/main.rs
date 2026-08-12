@@ -112,7 +112,7 @@ fn main() {
     let opened = Instant::now();
     configure(&mut output, &token);
 
-    let payloads = listener.serve();
+    let payloads = listener.serve("dota 2 plugin");
     let mut cadence = Cadence::opened_at(opened);
     let mut watcher = Watcher::new();
 
@@ -141,6 +141,14 @@ fn main() {
                 let window = cadence.observe(payload.received());
                 let observed = watcher.observe(payload.state());
                 if let Some(notice) = observed.notice {
+                    // On the `problem` channel because contract 1 has no other
+                    // one, and because it is a problem in the sense that
+                    // variant means: a recording that will have no marks on it,
+                    // with something the user can do about it. An
+                    // informational channel — for a plugin that has something
+                    // to say and nothing to complain about — would be a
+                    // contract change, and is
+                    // [#344](https://github.com/wildware-uk/clipped/issues/344).
                     problem(&mut output, notice.message());
                 }
                 for report in observed.reports {
@@ -219,13 +227,16 @@ fn configure(output: &mut impl Write, token: &clipped_dota2_plugin::gsi::AuthTok
     };
 
     match installation.apply(&integration.render(token)) {
-        // The one message the user has to act on. Valve's client reads this
-        // directory when *it* starts, so a file written now is a file this
-        // session of Dota will never read (`gsi::config`).
+        // Valve's client reads this directory when *it* starts, so a file
+        // written now is a file this session of Dota will never read
+        // (`gsi::config`). Phrased as what is wrong rather than as what
+        // succeeded, because the user's copy of it is a line on a `problem`
+        // channel and "Clipped has set Dota 2 up" is not a thing to act on —
+        // restarting Dota is (AGENTS.md section 28).
         Ok(Installed::Written { .. }) => problem(
             output,
-            "Clipped has set Dota 2 up to report its events. Restart Dota 2 for it to take \
-             effect — this recording will not have any.",
+            "Dota 2 has to be restarted before Clipped can report its events, so this recording \
+             will not have any.",
         ),
         Ok(Installed::AlreadyCurrent { .. }) => {}
         Err(error) => problem(output, &format!("{error}")),

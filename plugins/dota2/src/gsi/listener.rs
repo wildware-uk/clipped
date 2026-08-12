@@ -30,6 +30,11 @@
 //!   and the time a connection may take. A local process that opens a
 //!   connection and says nothing costs one thread for [`READ_TIMEOUT`] and
 //!   nothing else.
+//! - **It bounds what it writes, too.** A plugin's standard error is inherited
+//!   by the host (`clipped_plugins::process`), so a line printed per refused
+//!   request would hand the same local process a way to fill the *host's* log
+//!   through a socket it can reach. [`Complaints`] is what makes that one line
+//!   per run of the plugin rather than one per request.
 //!
 //! The token is removed from the payload before it is delivered, so it cannot
 //! reach an event payload, a log line or a bug report.
@@ -52,6 +57,12 @@ use super::secret::AuthToken;
 /// connection and prints rubbish is bounded rather than interesting.
 const MAX_HEAD_LINE_BYTES: u64 = 8 * 1024;
 /// See [`MAX_HEAD_LINE_BYTES`].
+///
+/// Every line of the head counts towards it, including the request line and the
+/// blank line that ends the head — so a request may carry
+/// `MAX_HEAD_LINES - 2` headers. Counting the request line is what makes the
+/// number here the number of lines this reader will actually read, rather than
+/// one less than it.
 const MAX_HEAD_LINES: usize = 64;
 
 /// The most a state payload may carry.
@@ -167,14 +178,21 @@ impl GameStateListener {
     /// connection per payload and waits for the reply, so concurrency would buy
     /// nothing; serving sequentially with a read timeout is what bounds the
     /// cost of a local process that connects and then says nothing.
+    ///
+    /// `reported_as` is what a line of diagnostics on standard error is
+    /// attributed to — `"dota 2 plugin"`. It is passed in rather than known
+    /// here because nothing in this module knows which game it is serving, and
+    /// that is the property that lets the module move to a crate two plugin
+    /// binaries link (`super`).
     #[must_use]
-    pub fn serve(self) -> Receiver<Payload> {
+    pub fn serve(self, reported_as: &'static str) -> Receiver<Payload> {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_DEPTH);
-        thread::spawn(move || self.accept_until_closed(&sender));
+        thread::spawn(move || self.accept_until_closed(&sender, reported_as));
         receiver
     }
 
-    fn accept_until_closed(self, sender: &SyncSender<Payload>) {
+    fn accept_until_closed(self, sender: &SyncSender<Payload>, reported_as: &str) {
+        let mut complaints = Complaints::default();
         for connection in self.listener.incoming() {
             let stream = match connection {
                 Ok(stream) => stream,
@@ -183,34 +201,42 @@ impl GameStateListener {
                 // accept. A socket that has genuinely failed fails again
                 // immediately, and `incoming` ends.
                 Err(error) => {
-                    eprintln!("dota 2 plugin: a connection could not be accepted: {error}");
+                    complain(
+                        reported_as,
+                        complaints
+                            .unacceptable(&format!("a connection could not be accepted: {error}")),
+                    );
                     continue;
                 }
             };
             match self.serve_one(stream) {
-                Ok(Some(payload)) => {
+                Ok(Ok(payload)) => {
                     if sender.send(payload).is_err() {
                         // Nobody is draining any more, which means the plugin
                         // is finishing.
                         return;
                     }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    eprintln!("dota 2 plugin: a connection ended early: {error}");
-                }
+                Ok(Err(refusal)) => complain(
+                    reported_as,
+                    complaints.refused(&format!("a payload was refused: {refusal}")),
+                ),
+                Err(error) => complain(
+                    reported_as,
+                    complaints.unreadable(&format!("a connection ended early: {error}")),
+                ),
             }
         }
     }
 
     /// Reads one connection, answers it, and reports the payload it carried.
     ///
-    /// `Ok(None)` is a request that was answered and carried nothing this
-    /// plugin wants — a refused token, a request that was not a POST. The
+    /// `Ok(Err(refusal))` is a request that was answered and carried nothing
+    /// this plugin wants — a refused token, a request that was not a POST. The
     /// distinction between that and `Err` is deliberate: an `Err` is a
     /// connection that could not be *spoken to*, which says nothing about what
     /// it was trying to say.
-    fn serve_one(&self, stream: TcpStream) -> io::Result<Option<Payload>> {
+    fn serve_one(&self, stream: TcpStream) -> io::Result<Result<Payload, Refusal>> {
         stream.set_read_timeout(Some(READ_TIMEOUT))?;
         stream.set_write_timeout(Some(READ_TIMEOUT))?;
         let mut reader = BufReader::new(stream);
@@ -232,21 +258,71 @@ impl GameStateListener {
         // the peer may already have gone.
         let _ = stream.shutdown(std::net::Shutdown::Both);
 
-        match outcome {
-            Ok(state) => Ok(Some(Payload { state, received })),
-            Err(refusal) => {
-                eprintln!("dota 2 plugin: a payload was refused: {refusal}");
-                Ok(None)
-            }
+        Ok(outcome.map(|state| Payload { state, received }))
+    }
+}
+
+/// Whether something that went wrong on this socket is still worth a line.
+///
+/// The first of each kind is: "something on this machine is posting to this
+/// port and being refused" is exactly the sentence somebody debugging a
+/// misconfigured game wants, and it costs one line. The thousandth is the same
+/// sentence for the thousandth time, and a plugin's standard error is inherited
+/// by the host — so printing it per request would let any local process fill
+/// the host's log by connecting to a port it can reach.
+///
+/// Kept as three flags rather than one so that a genuine refusal is not
+/// silenced by an unrelated accept failure having happened first.
+#[derive(Debug, Default)]
+pub struct Complaints {
+    refused: bool,
+    unreadable: bool,
+    unacceptable: bool,
+}
+
+impl Complaints {
+    /// `line` if no payload has been refused yet, and nothing afterwards.
+    pub fn refused(&mut self, line: &str) -> Option<String> {
+        Self::once(&mut self.refused, line)
+    }
+
+    /// `line` if no connection has failed mid-request yet.
+    pub fn unreadable(&mut self, line: &str) -> Option<String> {
+        Self::once(&mut self.unreadable, line)
+    }
+
+    /// `line` if no connection has failed to be accepted yet.
+    pub fn unacceptable(&mut self, line: &str) -> Option<String> {
+        Self::once(&mut self.unacceptable, line)
+    }
+
+    fn once(said: &mut bool, line: &str) -> Option<String> {
+        if core::mem::replace(said, true) {
+            return None;
         }
+        Some(format!("{line}{ONLY_ONCE}"))
+    }
+}
+
+/// What the one line says about the lines that will not follow it.
+///
+/// Said in the line itself so that somebody reading a log knows the silence
+/// after it is a policy rather than the problem having gone away.
+const ONLY_ONCE: &str = " (further occurrences of this on this socket are not reported)";
+
+/// Prints one of [`Complaints`]' lines, if there is one to print.
+fn complain(reported_as: &str, line: Option<String>) {
+    if let Some(line) = line {
+        eprintln!("{reported_as}: {line}");
     }
 }
 
 /// Why a request was not accepted.
 ///
-/// Every one of these is answered on the socket and counted nowhere: a plugin
-/// that logged one line per refused request would hand any local process a way
-/// to fill a log file.
+/// Every one of these is answered on the socket and counted nowhere. At most
+/// one of them is ever printed, and [`Complaints`] is why: a plugin that logged
+/// one line per refused request would hand any local process a way to fill the
+/// host's log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// The request line was not `POST <target> HTTP/1.1`.
@@ -338,7 +414,8 @@ pub fn read_body(reader: &mut impl BufRead) -> Result<Vec<u8>, Refusal> {
     }
 
     let mut length = None;
-    for _ in 0..MAX_HEAD_LINES {
+    // From one, because the request line above was the first of them.
+    for _ in 1..MAX_HEAD_LINES {
         let line = read_head_line(reader)?;
         if line.is_empty() {
             let length = length.ok_or(Refusal::NoContentLength)?;
@@ -551,13 +628,71 @@ mod tests {
         let mut unterminated = Cursor::new(vec![b'x'; 16 * 1024]);
         assert_eq!(read_body(&mut unterminated), Err(Refusal::HeadTooLong));
 
-        let head = "POST / HTTP/1.1\r\n".to_owned()
-            + &"x: y\r\n".repeat(65)
-            + "content-length: 2\r\n\r\n{}";
+        // The bound is the number of lines this reader will read, and the
+        // request line is one of them. Asserted at the boundary rather than
+        // well past it, because a head of sixty-five lines is refused by a
+        // reader that stops at sixty-four and by one that stops at sixty-five,
+        // and only one of those matches what the constant says.
+        //
+        //   request line + `filler` fillers + content-length + blank line
+        let head = |filler: usize| {
+            Cursor::new(
+                ("POST / HTTP/1.1\r\n".to_owned()
+                    + &"x: y\r\n".repeat(filler)
+                    + "content-length: 0\r\n\r\n")
+                    .into_bytes(),
+            )
+        };
         assert_eq!(
-            read_body(&mut Cursor::new(head.into_bytes())),
-            Err(Refusal::HeadTooLong)
+            read_body(&mut head(61)),
+            Ok(Vec::new()),
+            "sixty-four lines of head is the most, and this is exactly that"
         );
+        assert_eq!(
+            read_body(&mut head(62)),
+            Err(Refusal::HeadTooLong),
+            "sixty-five is one too many"
+        );
+    }
+
+    #[test]
+    fn a_local_process_cannot_fill_the_hosts_log_by_being_refused() {
+        // `Refusal`'s own documentation is what this holds to: a refusal is
+        // answered on the socket and counted nowhere. A plugin's standard error
+        // is inherited by the host (`clipped_plugins::process`), so one line
+        // per refused request would be a log file any process on this machine
+        // could fill through a port it is allowed to reach.
+        let mut complaints = Complaints::default();
+        let lines: Vec<String> = (0..10_000)
+            .filter_map(|_| complaints.refused("a payload was refused: it was not a POST"))
+            .collect();
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "ten thousand refusals are worth one line, and this was worth {}",
+            lines.len()
+        );
+        assert!(
+            lines[0].contains("it was not a POST"),
+            "the one line still says what happened: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("not reported"),
+            "and says that the silence after it is a policy: {}",
+            lines[0]
+        );
+
+        // One flag per kind, so a connection that could not be accepted does
+        // not use up the line a refused payload would have had.
+        let mut complaints = Complaints::default();
+        assert!(complaints.unacceptable("could not accept").is_some());
+        assert!(complaints.refused("refused").is_some());
+        assert!(complaints.unreadable("ended early").is_some());
+        assert!(complaints.unacceptable("could not accept").is_none());
+        assert!(complaints.refused("refused").is_none());
+        assert!(complaints.unreadable("ended early").is_none());
     }
 
     #[test]
@@ -582,7 +717,7 @@ mod tests {
         let listener = GameStateListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), token())
             .expect("loopback binds");
         let address = listener.address().expect("an address");
-        let payloads = listener.serve();
+        let payloads = listener.serve("game state listener test");
 
         post(
             address,

@@ -16,18 +16,27 @@
 //!
 //! # Why it is here rather than in a crate of its own
 //!
-//! Because it is not the only copy, and the extraction is deliberately somebody
-//! else's change. `plugins/cs2`
-//! ([#70](https://github.com/wildware-uk/clipped/issues/70)) implements the
-//! same plumbing independently — a KeyValues writer, a loopback listener with
-//! request bounds, a shared secret checked on every payload — and lifting a
-//! module out from under two branches that were both open would have conflicted
-//! with whichever merged second. Where it belongs is argued on
-//! [#69](https://github.com/wildware-uk/clipped/issues/69) with a
-//! recommendation: `crates/gsi`, linked by the plugin binaries and not by the
-//! recorder. This module is written to make that a move rather than a
-//! rewrite: no type in here names Dota, reads a Dota field or imports
-//! [`crate::dota`], and its tests do not either.
+//! Because it is not the only copy. The Counter-Strike 2 integration
+//! ([#70](https://github.com/wildware-uk/clipped/issues/70)) is on `main` and
+//! implements the same plumbing independently — a KeyValues writer, a loopback
+//! listener with request bounds, a shared secret checked on every payload —
+//! which makes two, and two is when AGENTS.md section 55 says this belongs in a
+//! crate both plugin binaries link (`crates/gsi`) rather than being copied.
+//!
+//! **It is deliberately not extracted here.** Moving a module out from under
+//! two branches that were both open would have conflicted with whichever of
+//! them merged second, and the extraction is worth doing once, against both
+//! callers, by somebody who can see what they actually have in common. It is
+//! proposed with a recommendation on
+//! [#69](https://github.com/wildware-uk/clipped/issues/69), which owns the
+//! plugin contract, and the deferral is recorded there rather than left as a
+//! comment nobody is looking for.
+//!
+//! Everything here is written to make that extraction a *move*: no type in here
+//! names Dota, reads a Dota field or imports [`crate::dota`], its tests do not
+//! either, and the two places a game's name could have leaked in — the
+//! diagnostics on standard error and the header of the rendered configuration
+//! file — take it from the caller or do without it.
 //!
 //! It could not live in `clipped-plugins`. That crate is the *host* side and is
 //! linked into the recorder, and a listening socket and a writer of files
@@ -49,5 +58,5 @@ pub mod secret;
 
 pub use cadence::{Cadence, Window};
 pub use config::{ConfigError, Installation, Installed, Integration, Timings};
-pub use listener::{GameStateListener, Payload, Refusal};
+pub use listener::{Complaints, GameStateListener, Payload, Refusal};
 pub use secret::{remembered_token, AuthToken, TokenError};
