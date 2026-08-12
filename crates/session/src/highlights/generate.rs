@@ -55,11 +55,27 @@
 //! Hence the answer to "what happens when the buffer has already evicted it":
 //! **nothing is generated, and the reason says so.** A moment no file of the
 //! session covers is reported as [`NotGenerated::NotRecorded`], carrying which
-//! of the five cases it was — and for a session running the buffer alone, that
+//! of the four cases it was — and for a session running the buffer alone, that
 //! is `NothingRecorded`. Whether the buffer still holds the moment is a
 //! question about memory that has already been overwritten by the time anything
 //! could ask it, and offering a clip of a file that does not contain the kill it
 //! claims would be a marker the user cannot check (AGENTS.md section 27).
+//!
+//! # A moment that outlives the file it started in
+//!
+//! A merged moment can begin inside one recording and continue past the end of
+//! it — into the gap before the session's next file, or into that next file.
+//! The clip is clamped to the recording the moment *started* in rather than
+//! split across two, because a clip drawing on several recordings is [issue
+//! #88](https://github.com/wildware-uk/clipped/issues/88).
+//!
+//! **What is clamped away is not claimed.** The clip is titled and tagged from
+//! the events its own range contains and from nothing else, so a twenty-second
+//! clip that ends before the death that followed the kill is not called
+//! "Kill, death"; and each event left outside is reported as
+//! [`NotGenerated::OutsideTheClip`] rather than counted as clipped. A title
+//! promising an event the footage does not contain, or a silence about one that
+//! got no clip, are the same fault in two directions (AGENTS.md section 27).
 //!
 //! # When it runs
 //!
@@ -105,7 +121,7 @@ use core::fmt;
 use core::time::Duration;
 
 use clipped_edit::{RecordingId, SourceSpan};
-use clipped_events::{EventKind, GameEvent};
+use clipped_events::{EventKind, GameEvent, RecordedSpan};
 use clipped_library::events::{NotRecorded, Placement, SessionRecordings};
 use clipped_library::virtual_clip::{window_around, ClipOrigin, HighlightCause, VirtualClip};
 
@@ -176,7 +192,7 @@ impl<'a> HighlightGeneration<'a> {
 
         for highlight in &highlights {
             let cause = HighlightCause::of(highlight.primary());
-            let (recording, window) = match self.cut(highlight, &taken) {
+            let cut = match self.cut(highlight, &taken) {
                 Ok(cut) => cut,
                 Err(reason) => {
                     generated.withheld.push(WithheldHighlight { cause, reason });
@@ -185,37 +201,44 @@ impl<'a> HighlightGeneration<'a> {
             };
 
             let mut clip = VirtualClip::of_range(
-                title_of(highlight.causes(), window.start().as_nanos()),
-                recording.clone(),
-                window,
+                title_of(&cut.inside, &cut.recorded),
+                cut.recording.clone(),
+                cut.window,
                 ClipOrigin::Highlight(cause),
             );
-            for event in highlight.causes() {
+            for event in &cut.inside {
                 // Blank tags and repeats are `VirtualClip::with_tag`'s business,
                 // so a highlight of three kills is tagged `kill` once.
                 clip = clip.with_tag(event.kind().as_str());
             }
 
+            // What the clip does not contain, it does not claim: an event the
+            // range was clamped away from is reported here rather than counted
+            // as clipped, so that "which of my kills got a clip" has the same
+            // answer as the clips themselves do.
+            for event in &cut.outside {
+                generated.withheld.push(WithheldHighlight {
+                    cause: HighlightCause::of(event),
+                    reason: NotGenerated::OutsideTheClip,
+                });
+            }
+
             // Claimed before the next highlight is considered, so that one run
             // is held to the same two rules as two runs are.
-            taken.claim(highlight, &recording, window);
+            taken.claim(&cut.inside, &cut.recording, cut.window);
             generated.clips.push(clip);
         }
 
         generated
     }
 
-    /// Which file this highlight is cut from and which part of it, or why it is
-    /// not cut at all.
+    /// Which file this highlight is cut from, which part of it, and which of
+    /// its events that part contains — or why it is not cut at all.
     ///
     /// Every refusal is decided here and the clip is built from the answer, so
     /// that construction has no branches in it and no reason can be reached by
     /// one path and not the other.
-    fn cut(
-        &self,
-        highlight: &Highlight<'_>,
-        taken: &Taken,
-    ) -> Result<(RecordingId, SourceSpan), NotGenerated> {
+    fn cut<'e>(&self, highlight: &Highlight<'e>, taken: &Taken) -> Result<Cut<'e>, NotGenerated> {
         if taken.has_clipped_any_of(highlight) {
             return Err(NotGenerated::AlreadyGenerated);
         }
@@ -224,8 +247,7 @@ impl<'a> HighlightGeneration<'a> {
         // the earliest event in it. A merged window can reach past the end of
         // that file, into the gap before the session's next recording; it is
         // clamped to the file rather than split, because a clip drawing on two
-        // recordings is [issue #88](https://github.com/wildware-uk/clipped/issues/88)
-        // and the events outside it are still recorded as its causes.
+        // recordings is [issue #88](https://github.com/wildware-uk/clipped/issues/88).
         let at = highlight.primary().timing().at();
         let recording = match self.recordings.place(at) {
             Placement::In { recording, .. } => recording,
@@ -257,8 +279,46 @@ impl<'a> HighlightGeneration<'a> {
         if taken.overlaps(&recording, window) {
             return Err(NotGenerated::OverlapsAnExistingClip);
         }
-        Ok((recording, window))
+
+        // Which of the moment's events the clip actually contains. The window
+        // is the moment intersected with the file, and every cause happens
+        // inside the moment, so "inside the file" is the whole of the question
+        // — and the earliest event is inside it by construction, since it is
+        // the one the file was chosen for.
+        let (inside, outside) = highlight
+            .causes()
+            .iter()
+            .copied()
+            .partition(|event| recorded.contains(event.timing().at()));
+
+        Ok(Cut {
+            recording,
+            window,
+            recorded,
+            inside,
+            outside,
+        })
     }
+}
+
+/// A clip about to be made: the file, the part of it, and which of the moment's
+/// events that part holds.
+///
+/// The two lists are the whole of what the clip may say about itself. Titling
+/// and tagging read [`inside`](Self::inside) and never the moment's full list,
+/// so a clip cannot name an event its own seconds do not contain.
+struct Cut<'a> {
+    /// The file the clip plays.
+    recording: RecordingId,
+    /// The part of that file it plays.
+    window: SourceSpan,
+    /// What the file covers, which is what turns an event's time into a
+    /// position in it.
+    recorded: RecordedSpan,
+    /// The events inside the clip, earliest first. Never empty.
+    inside: Vec<&'a GameEvent>,
+    /// The events of the same moment that the clip was clamped away from.
+    outside: Vec<&'a GameEvent>,
 }
 
 /// What generation produced, and what it did not.
@@ -287,7 +347,8 @@ impl GeneratedHighlights {
         self.clips
     }
 
-    /// The highlights that produced no clip, and why each did not.
+    /// What produced no clip, and why: every moment the rules chose that has
+    /// none, and every event a clip was clamped away from.
     #[must_use]
     pub fn withheld(&self) -> &[WithheldHighlight] {
         &self.withheld
@@ -313,7 +374,9 @@ impl GeneratedHighlights {
     }
 }
 
-/// A moment the rules chose that did not become a clip.
+/// Something the rules chose that did not become a clip: a whole moment, or —
+/// for [`NotGenerated::OutsideTheClip`] — one event of a moment whose clip
+/// stopped before it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithheldHighlight {
     cause: HighlightCause,
@@ -321,7 +384,8 @@ pub struct WithheldHighlight {
 }
 
 impl WithheldHighlight {
-    /// The event the clip would have been named after.
+    /// The event the clip would have been named after, or the one that is in no
+    /// clip.
     #[must_use]
     pub const fn cause(&self) -> &HighlightCause {
         &self.cause
@@ -360,6 +424,16 @@ pub enum NotGenerated {
     /// clamped to the recording collapses to a point, and a clip of no length
     /// plays nothing.
     NothingToCut,
+    /// The event is part of a moment that *was* clipped, and outside the clip.
+    ///
+    /// A moment that begins in one recording and continues past the end of it
+    /// is clamped to the file it began in ([issue
+    /// #88](https://github.com/wildware-uk/clipped/issues/88)), so the events
+    /// after that point are in no clip. They are reported one by one rather
+    /// than folded into the clip that dropped them, because a clip claiming an
+    /// event its footage does not contain is exactly the marker a user cannot
+    /// check (AGENTS.md section 27).
+    OutsideTheClip,
 }
 
 impl fmt::Display for NotGenerated {
@@ -375,6 +449,8 @@ impl fmt::Display for NotGenerated {
             Self::NothingToCut => {
                 formatter.write_str("the recording ends at the moment, so there is nothing to cut")
             }
+            Self::OutsideTheClip => formatter
+                .write_str("the recording ends before it, so the clip of that moment stops first"),
         }
     }
 }
@@ -432,9 +508,13 @@ impl Taken {
         })
     }
 
-    /// Records that `highlight` has become a clip of `window` of `recording`.
-    fn claim(&mut self, highlight: &Highlight<'_>, recording: &RecordingId, window: SourceSpan) {
-        for event in highlight.causes() {
+    /// Records that `covered` have become a clip of `window` of `recording`.
+    ///
+    /// Only the events the clip contains. An event a clip was clamped away
+    /// from has not been clipped, so claiming it here would suppress the clip
+    /// it is owed once the file that holds it has been finished.
+    fn claim(&mut self, covered: &[&GameEvent], recording: &RecordingId, window: SourceSpan) {
+        for event in covered {
             self.causes.push(HighlightCause::of(event));
         }
         self.ranges.push((recording.clone(), window));
@@ -444,23 +524,34 @@ impl Taken {
 /// What a clip of these events is called.
 ///
 /// Made of what the events actually say and nothing else: which kinds happened,
-/// how many of each, and where in the file the clip starts. "Kill ×3, assist at
-/// 20:05" is a title somebody scanning a list can tell from the other nineteen,
-/// which is the whole job — a clip named "Highlight" thirty times over is a
-/// library nobody searches (AGENTS.md section 28).
+/// how many of each, and **when the first of them happened**, as a position in
+/// the file. "Kill ×3, assist at 20:05" is a title somebody scanning a list can
+/// tell from the other nineteen, which is the whole job — a clip named
+/// "Highlight" thirty times over is a library nobody searches (AGENTS.md
+/// section 28).
+///
+/// The timecode is the moment of the event the title names first, and not where
+/// the clip starts. A clip keeps fifteen seconds before a kill (SPEC.md section
+/// 7), so timing the title from its own first frame would call a kill at 10:00
+/// "Kill at 9:45" — a time nothing happened at, and the wrong one to read back
+/// to somebody watching the clip or comparing it with a demo.
 ///
 /// The kinds are in the order the events happened, which the merge has already
-/// sorted them into, so the first one named is the moment the clip opens on.
-/// Nothing is inferred beyond counting: three kills close together is "Kill ×3"
-/// and not "Triple kill", because this module does not know that game's word
-/// for it and inventing one would be putting a claim in a user's library that
-/// nothing checked (AGENTS.md section 27).
-fn title_of(causes: &[&GameEvent], start_nanos: u64) -> String {
+/// sorted them into. Nothing is inferred beyond counting: three kills close
+/// together is "Kill ×3" and not "Triple kill", because this module does not
+/// know that game's word for it and inventing one would be putting a claim in a
+/// user's library that nothing checked (AGENTS.md section 27).
+///
+/// `causes` are the events the clip *contains*, so a moment clamped to the end
+/// of its file is not named after what happened afterwards.
+fn title_of(causes: &[&GameEvent], recorded: &RecordedSpan) -> String {
     let mut counted: Vec<(String, usize)> = Vec::new();
+    let mut named_first: Option<&GameEvent> = None;
     for event in causes {
         let Some(label) = label_of(event.kind()) else {
             continue;
         };
+        named_first.get_or_insert(*event);
         match counted.iter_mut().find(|(named, _)| named == &label) {
             Some((_, count)) => *count += 1,
             None => counted.push((label, 1)),
@@ -487,13 +578,18 @@ fn title_of(causes: &[&GameEvent], start_nanos: u64) -> String {
         .collect();
 
     // An event whose kind is blank is possible only for one read back from
-    // storage, and a clip still deserves a name.
+    // storage, and a clip still deserves a name — timed from the earliest
+    // event in it, since there is no named one to time it from.
     let named = if named.is_empty() {
         "Highlight".to_owned()
     } else {
         named.join(", ")
     };
-    shortened(format!("{named} at {}", timecode(start_nanos)))
+    let at = named_first
+        .or_else(|| causes.first().copied())
+        .and_then(|event| recorded.position_of(event.timing().at()))
+        .unwrap_or(Duration::ZERO);
+    shortened(format!("{named} at {}", timecode(at)))
 }
 
 /// How an event kind reads in a title, or [`None`] when it says nothing.
@@ -518,9 +614,9 @@ fn sentence_case(text: &str) -> String {
     }
 }
 
-/// Where in the file a clip starts, as a person reads a position.
-fn timecode(nanos: u64) -> String {
-    let seconds = nanos / 1_000_000_000;
+/// A position in a file, as a person reads one.
+fn timecode(position: Duration) -> String {
+    let seconds = position.as_secs();
     let (hours, minutes, seconds) = (seconds / 3_600, (seconds % 3_600) / 60, seconds % 60);
     if hours > 0 {
         format!("{hours}:{minutes:02}:{seconds:02}")

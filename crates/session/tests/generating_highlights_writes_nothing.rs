@@ -14,6 +14,15 @@
 //! the same run again over the clips it produced, which is the path a re-run
 //! takes.
 //!
+//! **The time is printed and not asserted on.** A wall-clock budget in a debug
+//! build on a shared runner measures the machine rather than the code, so a
+//! ceiling low enough to catch anything would fail on a busy afternoon
+//! (AGENTS.md section 25). What the test asserts instead is what the number is
+//! evidence *for*, in forms that do not depend on the clock: the run produces
+//! clips from events alone, the re-run produces none, and every clip is
+//! metadata whose size does not follow the footage. The two tests after it are
+//! the rest of that argument.
+//!
 //! The second is the filesystem's own answer. A timing test would still pass if
 //! generation wrote a small file per clip, so a directory holding a stand-in
 //! recording is compared byte for byte before and after a session's worth of
@@ -23,7 +32,8 @@
 //! file at all, so writing media is not merely something it does not do; it is
 //! something it has no means to do. The check is on that module's own source,
 //! so it fails on the *appearance* of file access rather than waiting for a code
-//! path a test happens to call.
+//! path a test happens to call — and the scanner that does it is itself tested
+//! against a spelling that would slip past a naive search.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -52,14 +62,14 @@ const RECORDING: Duration = Duration::from_secs(RECORDING_SECONDS.unsigned_abs()
 const BURST_SPACING: i64 = 60;
 const BURST_SIZE: i64 = 4;
 
-/// The ceiling the measurement asserts, per clip.
+/// What one clip's metadata may cost, in bytes of the document it is.
 ///
-/// Deliberately loose — this runs in a debug build on a machine that may be
-/// busy, and it is not a benchmark. It is orders of magnitude above what
-/// generation costs, which is what makes it a check that only fails when
-/// something has started doing real work per clip: opening a file, decoding a
-/// frame, copying footage.
-const CEILING_PER_CLIP: Duration = Duration::from_millis(1);
+/// The assertion the timing used to make, in a unit that does not depend on the
+/// machine: a clip is a description of a range, so its size follows the number
+/// of *fields* it has and not the length of the footage. Anything that started
+/// copying frames, decoding, or caching a picture per clip would leave this
+/// behind.
+const CEILING_BYTES_PER_CLIP: usize = 1_024;
 
 fn at(seconds: i64) -> EventTime {
     EventTime::from_media_nanos(seconds * 1_000_000_000)
@@ -99,7 +109,7 @@ fn shipped_rules() -> ResolvedHighlightRules {
 }
 
 #[test]
-fn generating_a_busy_sessions_highlights_costs_microseconds_and_no_bytes() {
+fn generating_a_busy_sessions_highlights_produces_metadata_and_nothing_else() {
     let events = events();
     let recordings = session("2026-08-12T20-14-03-cs2");
     let rules = shipped_rules();
@@ -141,10 +151,20 @@ fn generating_a_busy_sessions_highlights_costs_microseconds_and_no_bytes() {
         second.clips().is_empty(),
         "a second run generated clips again"
     );
+
+    // What the timings above are evidence for, asserted without a clock: a
+    // clip is a description rather than a copy, so a session's worth of them is
+    // kilobytes of text over footage that is gigabytes of video.
+    let bytes: usize = generated
+        .clips()
+        .iter()
+        .map(|clip| clip.edit().write().expect("the document saves").len())
+        .sum();
+    println!("{clips} clips are {bytes} bytes of metadata over three hours of video");
     assert!(
-        per_clip < CEILING_PER_CLIP && per_clip_again < CEILING_PER_CLIP,
-        "generation took {per_clip:?} per clip and {per_clip_again:?} on the re-run, over the \
-         {CEILING_PER_CLIP:?} that something doing real work per clip would approach"
+        bytes < clips * CEILING_BYTES_PER_CLIP,
+        "{bytes} bytes for {clips} clips is over {CEILING_BYTES_PER_CLIP} bytes each, which is \
+         more than a range of a recording needs to be described in"
     );
 }
 
@@ -229,7 +249,7 @@ fn generating_highlights_adds_no_file_and_leaves_the_recording_alone() {
         generated.clips().len()
     );
     assert!(
-        document_bytes < generated.clips().len() * 1_024,
+        document_bytes < generated.clips().len() * CEILING_BYTES_PER_CLIP,
         "a generated clip should be under a kilobyte of metadata, not media: {document_bytes} \
          bytes for {}",
         generated.clips().len()
@@ -243,6 +263,11 @@ fn generating_highlights_adds_no_file_and_leaves_the_recording_alone() {
 /// to fail on the *appearance* of file access or of a wait, before anybody has
 /// to reason about whether that particular one is safe on a thread a recording
 /// might be sharing (AGENTS.md section 20).
+///
+/// Written without spaces, because [`forbidden_in`] compares against source
+/// with its whitespace removed: `std :: fs` and `std::fs` are the same path to
+/// the compiler, and a check that only caught the second would be a check the
+/// formatter could switch off.
 const FORBIDDEN: &[&str] = &[
     "std::fs",
     "fs::",
@@ -256,6 +281,64 @@ const FORBIDDEN: &[&str] = &[
     "RwLock",
 ];
 
+/// Every line of `source` that names one of [`FORBIDDEN`], as
+/// `line number: what was found`.
+///
+/// Comment lines are skipped — a module that explains why it opens no file has
+/// to be able to say the words — and everything else is compared with its
+/// whitespace removed, so that the spelling rather than the layout decides.
+fn forbidden_in(source: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        let code: String = code
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        for forbidden in FORBIDDEN {
+            if code.contains(forbidden) {
+                findings.push(format!("{}: {forbidden}", index + 1));
+            }
+        }
+    }
+    findings
+}
+
+#[test]
+fn the_check_for_file_access_reads_the_spelling_rather_than_the_layout() {
+    // The scanner's own regression test. It is a text search, so the way it
+    // fails quietly is by being written around — and every one of these is the
+    // same code to the compiler as the plain form the list names.
+    let written_around = "\
+        let file = std :: fs :: File :: open(path);\n\
+        let held = std::sync::Mutex ::new(());\n\
+        std::thread\n\
+            ::sleep(delay);\n";
+
+    let findings = forbidden_in(written_around);
+
+    assert_eq!(
+        findings,
+        vec![
+            "1: std::fs".to_owned(),
+            "1: fs::".to_owned(),
+            "1: File::".to_owned(),
+            "2: Mutex".to_owned(),
+            "3: std::thread".to_owned(),
+            "4: sleep".to_owned(),
+        ],
+        "a spaced-out spelling has to be found, or the check below is one \
+         `cargo fmt` away from passing on anything"
+    );
+    assert!(
+        forbidden_in("//! `std::fs` is what this module deliberately does not use\n").is_empty(),
+        "a module has to be able to explain itself in its own comments"
+    );
+}
+
 #[test]
 fn generation_has_no_way_to_open_a_file_or_to_wait_for_anything() {
     let module = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -264,18 +347,10 @@ fn generation_has_no_way_to_open_a_file_or_to_wait_for_anything() {
         .join("generate.rs");
     let text = fs::read_to_string(&module).expect("the module's source can be read");
 
-    let mut findings = Vec::new();
-    for (number, line) in text.lines().enumerate() {
-        let code = line.trim_start();
-        if code.starts_with("//") {
-            continue;
-        }
-        for forbidden in FORBIDDEN {
-            if code.contains(forbidden) {
-                findings.push(format!("{}:{}: {forbidden}", module.display(), number + 1));
-            }
-        }
-    }
+    let findings: Vec<String> = forbidden_in(&text)
+        .iter()
+        .map(|finding| format!("{}:{finding}", module.display()))
+        .collect();
 
     assert!(
         findings.is_empty(),

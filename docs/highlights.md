@@ -293,7 +293,7 @@ Highlights Only ([#77]) is the ticket whose whole purpose is that the buffer is
 all there is.
 
 So a moment no finished file of the session covers produces no clip, and the
-reason says which of the five cases it was. **And that is also the answer to
+reason says which of the four cases it was. **And that is also the answer to
 "what if the buffer has already evicted it":** nothing is generated. By the time
 anything could ask, the memory has been overwritten; there is no file to point
 at, and pointing at one that does not contain the kill it claims would be a
@@ -301,10 +301,18 @@ marker the user cannot check (AGENTS.md section 27). A session running the
 buffer alone reports `NothingRecorded` for every moment it heard.
 
 A merged window can reach past the end of the file it is cut from — into the gap
-before the session's next recording. It is clamped to that file rather than
-split across two, because a clip drawing on several recordings is [#88]; the
-events outside it are still recorded as its causes. The file chosen is the one
-holding the moment the clip is *named* after, which is the earliest event in it.
+before the session's next recording, or into the next recording itself. It is
+clamped to that file rather than split across two, because a clip drawing on
+several recordings is [#88]. The file chosen is the one holding the moment the
+clip is *named* after, which is the earliest event in it.
+
+**What the clip was clamped away from, it does not claim.** The title and the
+tags are made from the events inside the clip's own range and from nothing else,
+so a clip that ends before the death that followed the kill is `Kill at 1:45`
+and tagged `kill` — not `Kill, death`, which would promise footage it does not
+contain. Each event left outside is reported as `OutsideTheClip`, and is *not*
+recorded as having been clipped: when the recording that does hold it has been
+finished, that moment is still owed a clip.
 
 ### When it runs, and why nothing can stall the recording
 
@@ -323,17 +331,25 @@ asserts that against the module's source rather than against this paragraph.
 ### Titles and tags
 
 A title is made of what the events say and nothing more: which kinds happened,
-how many of each, and where in the file the clip starts.
+how many of each, and **when the first of them happened**, as a position in the
+file.
 
 ```text
 Kill ×3 at 20:05
-Kill ×2, assist at 0:45
-Objective taken, flag captured at 0:45
+Kill ×2, assist at 1:00
+Objective taken, flag captured at 1:00
 ```
 
-The kinds are in the order things happened, so the first one named is the moment
-the clip opens on. A plugin's own name is namespaced — `acme-cs2.flag_captured`
-— and the namespace is how the vocabulary stays collision-free rather than
+The timecode is the moment of the event the title names first, not the first
+frame of the clip. A clip keeps fifteen seconds before a kill, so timing the
+title from where it opens would call a kill at 10:00 `Kill at 9:45` — a time
+nothing happened at, and the wrong number to read back to somebody comparing the
+clip with a scoreboard or a demo. It is measured from the *file*, so a kill
+twenty minutes into a session that was saved from the replay buffer is ten
+seconds into the clip that holds it.
+
+The kinds are in the order things happened. A plugin's own name is namespaced —
+`acme-cs2.flag_captured` — and the namespace is how the vocabulary stays collision-free rather than
 something to show somebody, so a title uses the part after it and an underscore
 reads as a space. Nothing is inferred beyond counting: three kills close
 together is `Kill ×3` and not `Triple kill`, because Clipped does not know that
@@ -341,7 +357,7 @@ game's word for it and inventing one would put a claim in the user's library
 that nothing checked. A title is capped at 96 characters, because an event kind
 read back from storage is whatever text was stored.
 
-The **tags** are the wire spelling of every distinct kind in the clip —
+The **tags** are the wire spelling of every distinct kind the clip contains —
 `kill`, `acme-cs2.flag_captured` — because a tag is what a search filters on
 rather than what a person reads, and a clip of three kills is tagged `kill`
 once.
@@ -371,10 +387,21 @@ clip, and the library filters on `ClipOrigin` for exactly this kind of question.
 ### What is not generated is reported
 
 Every moment the rules chose either becomes a clip or appears in `withheld()`
-with the event it would have been named after and the reason there is no clip.
-A caller can therefore say "four of these five kills are on this file and the
-fifth happened before the recording started" rather than quietly producing four
-(AGENTS.md sections 15 and 27). Events the *rules* did not select never reach
+with the event it would have been named after and the reason there is no clip;
+so does every event a clip was clamped away from. A caller can therefore say
+"four of these five kills are on this file and the fifth happened before the
+recording started" rather than quietly producing four (AGENTS.md sections 15 and
+27). The reasons are:
+
+| Reason | What happened |
+| --- | --- |
+| `NotRecorded(…)` | No finished file of the session covers the moment — one of `NothingRecorded`, `BeforeTheFirstRecording`, `BetweenRecordings`, `AfterTheLastRecording` |
+| `AlreadyGenerated` | One of the moment's events is already the reason a generated clip exists |
+| `OverlapsAnExistingClip` | The range covers seconds a generated clip of the same recording covers |
+| `NothingToCut` | The part of the moment inside the file has no length |
+| `OutsideTheClip` | This event is part of a moment that *was* clipped, and the clip stopped at the end of the file before reaching it |
+
+Events the *rules* did not select never reach
 generation at all — `ResolvedHighlightRules::decision_for` is what says why for
 one of those, and it says it in four different ways.
 
@@ -394,6 +421,14 @@ minute apart, which the merge turns into 180 clips:
 
 The re-run is the more interesting figure, because it is the path that checks
 every moment against every clip the library holds.
+
+The test **prints** those times and does not assert on them. A wall-clock budget
+in a debug build on a shared runner measures the machine rather than the code,
+and a ceiling low enough to catch a regression would fail on a busy afternoon
+(AGENTS.md section 25). What it asserts instead is what the times are evidence
+for, in forms that do not depend on a clock: nothing appears on disk, every clip
+is under a kilobyte of metadata whatever the footage is, and `generate.rs` has
+no means of opening a file or waiting on anything.
 
 ### Where the conversion lives
 

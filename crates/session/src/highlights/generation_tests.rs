@@ -138,7 +138,11 @@ fn a_kill_becomes_a_clip_of_the_recording_it_happened_in() {
     // range of the file rather than of the session.
     assert_eq!(cut_of(clip), ("rec-1".to_owned(), 585, 610));
     assert_eq!(clip.duration(), Some(SECOND * 25));
-    assert_eq!(clip.title(), "Kill at 9:45");
+    assert_eq!(
+        clip.title(),
+        "Kill at 10:00",
+        "the title times the kill, not the fifteen seconds of lead the clip opens with"
+    );
     assert_eq!(clip.tags(), ["kill"]);
 
     // It is a clip, and it is traceable to the event that caused it.
@@ -169,7 +173,7 @@ fn a_firefight_is_one_clip_named_after_everything_in_it() {
     assert_eq!(generated.clips().len(), 1);
     let clip = &generated.clips()[0];
     assert_eq!(cut_of(clip), ("rec-1".to_owned(), 45, 76));
-    assert_eq!(clip.title(), "Kill ×3 at 0:45");
+    assert_eq!(clip.title(), "Kill ×3 at 1:00");
     assert_eq!(
         clip.tags(),
         ["kill"],
@@ -215,7 +219,11 @@ fn a_clip_of_a_saved_replay_starts_where_the_file_does() {
 
     assert_eq!(generated.clips().len(), 1);
     assert_eq!(cut_of(&generated.clips()[0]), ("replay".to_owned(), 0, 20));
-    assert_eq!(generated.clips()[0].title(), "Kill at 0:00");
+    assert_eq!(
+        generated.clips()[0].title(),
+        "Kill at 0:10",
+        "ten seconds into the file, rather than 20:10 into the session it was saved from"
+    );
 }
 
 #[test]
@@ -229,6 +237,75 @@ fn a_window_that_reaches_past_the_end_of_the_file_stops_there() {
         cut_of(&generated.clips()[0]),
         ("rec-1".to_owned(), 280, 300)
     );
+}
+
+#[test]
+fn a_clip_is_named_and_tagged_only_for_what_its_own_seconds_contain() {
+    // A firefight that ran past the end of the file. The window is clamped to
+    // the recording it started in rather than split across two ([#88]), so the
+    // death is not in the clip — and a clip titled "Kill, death" and tagged
+    // `death` would be claiming footage it does not contain (AGENTS.md section
+    // 27). The event is reported instead of being quietly folded in.
+    let recordings = one_recording(120);
+    let events = [kill(105), event(EventKind::Death, 125)];
+
+    let generated = HighlightGeneration::new(&defaults(), &recordings).generate(&events);
+
+    assert_eq!(generated.clips().len(), 1);
+    let clip = &generated.clips()[0];
+    assert_eq!(cut_of(clip), ("rec-1".to_owned(), 90, 120));
+    assert_eq!(clip.title(), "Kill at 1:45");
+    assert_eq!(
+        clip.tags(),
+        ["kill"],
+        "the death is outside the clip, so it is not one of its tags"
+    );
+
+    assert_eq!(reasons(&generated), vec![&NotGenerated::OutsideTheClip]);
+    assert_eq!(
+        generated.withheld()[0].cause().at(),
+        at(125),
+        "the event with no clip is named, so a caller can say which one it was"
+    );
+    assert!(!generated.withheld()[0].reason().to_string().is_empty());
+}
+
+#[test]
+fn an_event_no_clip_contained_is_clipped_when_its_own_recording_ends() {
+    // What follows from withholding it rather than claiming it: the death got no
+    // clip, so it is still owed one, and the run after the recording that holds
+    // it has been finished offers it rather than an `AlreadyGenerated`.
+    //
+    // What is generated across runs is decided by the causes an existing clip
+    // *carries*, and a clip carries the one it is named after — so the same
+    // thing happens whether or not generation also marked the death as clipped
+    // inside the earlier run. This test is the behaviour, not a proof of that
+    // bookkeeping; nothing observable distinguishes it today.
+    let first = SessionRecordings::of([segment("rec-1", 0, 120)]);
+    let events = [kill(105), event(EventKind::Death, 125)];
+
+    let during = HighlightGeneration::new(&defaults(), &first).generate(&events);
+    assert_eq!(cut_of(&during.clips()[0]), ("rec-1".to_owned(), 90, 120));
+
+    // The user switches kills off, so the death is a moment of its own rather
+    // than part of the kill's — which is the case the cause check can answer.
+    let deaths_only = rules_with(|global| {
+        global
+            .set_rule(
+                EventKind::Kill,
+                Some(HighlightRule::unset().with_enabled(Some(false))),
+            )
+            .expect("a kind can be switched off");
+    });
+    let both = SessionRecordings::of([segment("rec-1", 0, 120), segment("rec-2", 121, 300)]);
+    let after = HighlightGeneration::new(&deaths_only, &both)
+        .with_existing_clips(during.clips())
+        .generate(&events);
+
+    assert_eq!(after.clips().len(), 1, "{:?}", reasons(&after));
+    assert_eq!(cut_of(&after.clips()[0]), ("rec-2".to_owned(), 0, 9));
+    assert_eq!(after.clips()[0].title(), "Death at 0:04");
+    assert!(after.withheld().is_empty());
 }
 
 #[test]
@@ -478,7 +555,7 @@ fn a_title_names_the_kinds_in_the_order_they_happened() {
 
     let generated = HighlightGeneration::new(&defaults(), &recordings).generate(&events);
 
-    assert_eq!(titles(&generated), ["Kill ×2, assist at 0:45"]);
+    assert_eq!(titles(&generated), ["Kill ×2, assist at 1:00"]);
     assert_eq!(
         generated.clips()[0].tags(),
         ["kill", "assist"],
@@ -491,7 +568,7 @@ fn a_title_past_an_hour_reads_as_hours_minutes_and_seconds() {
     let recordings = one_recording(2 * 60 * 60);
     let generated = HighlightGeneration::new(&defaults(), &recordings).generate([&kill(3_700)]);
 
-    assert_eq!(titles(&generated), ["Kill at 1:01:25"]);
+    assert_eq!(titles(&generated), ["Kill at 1:01:40"]);
 }
 
 #[test]
@@ -515,7 +592,7 @@ fn a_kind_this_build_has_no_word_for_still_titles_and_tags_a_clip() {
 
     assert_eq!(
         titles(&generated),
-        ["Objective taken, flag captured at 0:45"]
+        ["Objective taken, flag captured at 1:00"]
     );
     assert_eq!(
         generated.clips()[0].tags(),

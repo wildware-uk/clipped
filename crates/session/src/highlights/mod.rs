@@ -82,7 +82,8 @@
 //! evicted (`docs/replay-buffer.md`), and that is a capture mode — Highlights
 //! Only ([#77](https://github.com/wildware-uk/clipped/issues/77)) — rather than
 //! generation. A moment no finished file covers produces no clip and says which
-//! of the five cases it was.
+//! of the four cases it was, and a moment that runs past the end of the file it
+//! started in is titled and tagged for the part inside the clip alone.
 //!
 //! # What this module does not do
 //!
