@@ -144,49 +144,38 @@ pub(crate) struct ContainerTimestamps {
     pub(crate) fixes: TimestampFixes,
 }
 
-/// One track's position in the file being written.
+/// One track's decode position in the file being written, counted in the
+/// container's own units.
 ///
-/// Each track keeps its own last decode timestamp, because monotonicity is a
-/// per-track requirement: audio and video interleave freely and their
-/// timestamps cross constantly.
-#[derive(Debug)]
-pub(crate) struct TrackTimeline {
-    time_base: TimeBase,
+/// Each track keeps its own, because monotonicity is a per-track requirement:
+/// audio and video interleave freely and their timestamps cross constantly.
+///
+/// This is the correction policy on its own, with no conversion attached to it,
+/// because two callers need it from different starting points. A recording
+/// arrives in nanoseconds on the capture clock and is converted by
+/// [`TrackTimeline`]; a remux arrives already counted in the *source* file's
+/// units and is rescaled into the destination's by FFmpeg
+/// ([`crate::remux`]). Both then have the same question to answer — does this
+/// packet's decode timestamp advance? — and it is answered once, here.
+#[derive(Debug, Default)]
+pub(crate) struct DecodeOrder {
     last_decode: Option<i64>,
 }
 
-impl TrackTimeline {
-    /// A timeline counting in `time_base`, with nothing written yet.
-    pub(crate) const fn new(time_base: TimeBase) -> Self {
-        Self {
-            time_base,
-            last_decode: None,
-        }
-    }
-
-    /// Places a packet on the timeline.
+impl DecodeOrder {
+    /// Places a packet whose timestamps are already in the container's units.
     ///
-    /// Both timestamps are nanoseconds *relative to the start of the file*, so
-    /// a negative one means the packet is older than the first packet written
-    /// — which happens when tracks start at slightly different moments and the
-    /// later-starting one is written first. It is clamped to the start of the
-    /// file rather than dropped, and counted.
-    pub(crate) fn stamp(
+    /// Nothing is clamped to zero here: a negative timestamp is meaningful in a
+    /// remux — Opus carries its pre-skip as one, and an edit list is how MP4
+    /// represents it — and it is [`TrackTimeline`], where zero is the start of a
+    /// recording being written, that clamps.
+    pub(crate) fn place(
         &mut self,
-        presentation_nanos: i64,
-        decode_nanos: i64,
-        duration_nanos: Option<u64>,
+        mut presentation: i64,
+        mut decode: i64,
+        duration: i64,
     ) -> ContainerTimestamps {
         let mut fixes = TimestampFixes::default();
-
-        let mut presentation = self.time_base.rescale_nanos(presentation_nanos);
-        let mut decode = self.time_base.rescale_nanos(decode_nanos);
-
-        if decode < 0 || presentation < 0 {
-            fixes.before_start = true;
-            decode = decode.max(0);
-            presentation = presentation.max(0);
-        }
 
         if let Some(previous) = self.last_decode {
             if decode <= previous {
@@ -210,11 +199,58 @@ impl TrackTimeline {
         ContainerTimestamps {
             presentation,
             decode,
-            duration: duration_nanos
-                .and_then(|nanos| i64::try_from(nanos).ok())
-                .map_or(0, |nanos| self.time_base.rescale_nanos(nanos)),
+            duration,
             fixes,
         }
+    }
+}
+
+/// One track's position in the file being written, converting from the
+/// recording's clock as it goes.
+#[derive(Debug)]
+pub(crate) struct TrackTimeline {
+    time_base: TimeBase,
+    order: DecodeOrder,
+}
+
+impl TrackTimeline {
+    /// A timeline counting in `time_base`, with nothing written yet.
+    pub(crate) const fn new(time_base: TimeBase) -> Self {
+        Self {
+            time_base,
+            order: DecodeOrder { last_decode: None },
+        }
+    }
+
+    /// Places a packet on the timeline.
+    ///
+    /// Both timestamps are nanoseconds *relative to the start of the file*, so
+    /// a negative one means the packet is older than the first packet written
+    /// — which happens when tracks start at slightly different moments and the
+    /// later-starting one is written first. It is clamped to the start of the
+    /// file rather than dropped, and counted.
+    pub(crate) fn stamp(
+        &mut self,
+        presentation_nanos: i64,
+        decode_nanos: i64,
+        duration_nanos: Option<u64>,
+    ) -> ContainerTimestamps {
+        let mut presentation = self.time_base.rescale_nanos(presentation_nanos);
+        let mut decode = self.time_base.rescale_nanos(decode_nanos);
+
+        let before_start = decode < 0 || presentation < 0;
+        if before_start {
+            decode = decode.max(0);
+            presentation = presentation.max(0);
+        }
+
+        let duration = duration_nanos
+            .and_then(|nanos| i64::try_from(nanos).ok())
+            .map_or(0, |nanos| self.time_base.rescale_nanos(nanos));
+
+        let mut stamps = self.order.place(presentation, decode, duration);
+        stamps.fixes.before_start = before_start;
+        stamps
     }
 }
 
@@ -393,6 +429,73 @@ mod tests {
             assert!(!video.stamp(video_nanos, video_nanos, None).fixes.any());
             assert!(!audio.stamp(audio_nanos, audio_nanos, None).fixes.any());
         }
+    }
+
+    #[test]
+    fn a_remuxed_packet_older_than_the_file_keeps_its_negative_timestamp() {
+        // The difference between the two entry points, and it matters. A
+        // recording being written starts at its first packet, so a timestamp
+        // before that is a fault to clamp. A file being copied has a start of
+        // its own: Opus carries its pre-skip as a negative timestamp, and MP4
+        // stores that in an edit list. Clamping it would move the sound forward
+        // by the pre-skip and put the copy out of sync with the source.
+        let mut order = DecodeOrder::default();
+
+        let first = order.place(-336, -336, 960);
+        assert!(!first.fixes.any());
+        assert_eq!(first.decode, -336);
+        assert_eq!(first.presentation, -336);
+
+        let next = order.place(624, 624, 960);
+        assert!(!next.fixes.any());
+        assert_eq!(next.decode, 624);
+    }
+
+    #[test]
+    fn a_remuxed_stream_that_reorders_is_copied_as_it_is() {
+        // A B-frame sequence arriving from a source file, in the source's own
+        // units. Nothing here is a fault and nothing may be corrected: MP4
+        // stores the gap between the two timestamps as a composition offset.
+        let mut order = DecodeOrder::default();
+
+        let key = order.place(0, -3_000, 3_000);
+        let predicted = order.place(9_000, 0, 3_000);
+        let bidirectional = order.place(3_000, 3_000, 3_000);
+
+        assert!(!key.fixes.any());
+        assert!(!predicted.fixes.any());
+        assert!(!bidirectional.fixes.any());
+        assert_eq!(
+            [key.decode, predicted.decode, bidirectional.decode],
+            [-3_000, 0, 3_000]
+        );
+        assert_eq!(
+            [
+                key.presentation,
+                predicted.presentation,
+                bidirectional.presentation
+            ],
+            [0, 9_000, 3_000]
+        );
+    }
+
+    #[test]
+    fn a_remuxed_packet_whose_decode_order_broke_is_nudged_rather_than_dropped() {
+        // A source whose decode timestamps do not increase is a file FFmpeg's
+        // muxer refuses outright, so a remux that passed it through would fail
+        // part-way and leave a truncated MP4. One tick forward keeps the copy
+        // going, and the count is what says how much of it was corrected.
+        let mut order = DecodeOrder::default();
+
+        order.place(0, 0, 3_000);
+        let backwards = order.place(1_500, 1_500, 3_000);
+        assert!(!backwards.fixes.any());
+
+        let repeated = order.place(1_500, 1_500, 3_000);
+        assert!(repeated.fixes.not_monotonic);
+        assert!(repeated.fixes.presented_before_decoded);
+        assert_eq!(repeated.decode, 1_501);
+        assert_eq!(repeated.presentation, 1_501);
     }
 
     #[test]
