@@ -76,6 +76,24 @@ a {
   text-underline-offset: var(--underline-offset);
 }
 
+/*
+ * A file path, a command or an identifier: a string the user did not write in
+ * prose and has to be able to read character by character. `--font-mono` was
+ * declared with the other two typefaces and had no consumer until the playback
+ * screen had to put a recording's full path on screen (issue #52), which is the
+ * one thing on that screen anybody can act on.
+ *
+ * A step down the scale because a monospace face at the body size reads larger
+ * than the body around it, and `overflow-wrap` because a Windows path has no
+ * space in it to break at and would otherwise push a table wider than the
+ * window.
+ */
+code {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
 :focus {
   outline: none;
 }

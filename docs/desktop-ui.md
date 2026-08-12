@@ -54,6 +54,19 @@ is [issue #221](https://github.com/wildware-uk/clipped/issues/221).
 There is exactly one control in a screen, and it changes nothing outside the
 window: the Settings screen's rail, which moves between that screen's own
 sections — see [The Settings screen](#the-settings-screen).
+[The tray](#the-tray). No screen has a control of any kind: five of the seven are
+not built, and neither Games nor Playback draws one, because nothing either
+would drive can be reached from here. A button with nothing behind it is exactly
+what AGENTS.md section 27 forbids. A "Try again" control for a link that has
+given up is
+[issue #221](https://github.com/wildware-uk/clipped/issues/221).
+
+There is one **link** in the chrome that is not navigation, and a link is a
+destination rather than an action: when a recorder dies mid-recording, the notice
+that names the file it left also leads to that recording's own playback screen —
+see [The playback screen](#the-playback-screen). That screen does not play it,
+and does not offer to; it says what state the recording is in and what stands
+between this window and playing it, which is more than a sidebar has room for.
 
 ## What the shell is
 
@@ -90,6 +103,14 @@ so and naming the issue that builds it — #60 for Home and Library, #83 for
 Editor, #94 for Trash, #101 for Diagnostics. Building one
 replaces its placeholder route with the real screen, in `elementFor` in
 `Shell.tsx`, which is the one place that knows a screen from a placeholder.
+
+There is an **eighth route** that is not in `SCREENS` and deliberately not in the
+sidebar: `/clip/:recordingId`, the playback screen, which is opened *for* a
+recording rather than navigated to — see
+[The playback screen](#the-playback-screen). A sidebar item called Playback would
+be an item with no recording behind it. `titleFor` in `Shell.tsx` names it in the
+window title all the same, so the taskbar, Alt+Tab and a screen reader say where
+you are on that screen as they do on the seven.
 
 ## The Games screen
 
@@ -267,6 +288,151 @@ rather than controls, which is what WAI-ARIA asks for and what
 `jsx-a11y/no-noninteractive-tabindex` allows in its own default options —
 `jsx-a11y`'s strict preset restates the rule with no options, which is why that
 one line carries a suppression and a reason (AGENTS.md section 42).
+## The playback screen
+
+SPEC.md section 42 and [issue #52](https://github.com/wildware-uk/clipped/issues/52).
+The route is `/clip/:recordingId`; the screen is `ClipPlaybackScreen.tsx` and
+everything it decides is in `clipPlayback.ts`, which is pure and therefore the
+part with tests.
+
+The ticket asks for playback with transport controls, keyboard shortcuts,
+frame-accurate seeking and an audio-track selector. **None of it is drawn,
+because this window cannot play a Clipped recording at all.** That is not a
+scheduling remark; it is four independent facts, and the design that follows from
+them is below.
+
+### Why a `<video>` cannot be pointed at a recording
+
+Each of these is enough on its own, so fixing any single one changes nothing.
+They are on the screen itself, with the evidence beside each, in the same
+contract the unbuilt screens keep.
+
+| What stops it | Where it can be checked |
+| --- | --- |
+| **This window cannot load a file from the disk.** | `src-tauri/tauri.conf.json` does not enable the asset protocol; `capabilities/default.json` grants three `core:` permissions and none reaches the file system; the content-security policy declares no `media-src`, so it falls back to `default-src 'self'` — the bundle Vite built, and nothing else. |
+| **A recording is Matroska, and WebView2 does not demux it.** | [ADR 0001](adr/0001-mkv-archival-container.md) writes recordings into MKV so a killed recorder still leaves a playable file. WebView2 is Chromium, whose Matroska support is WebM: a strict subset restricted to Opus or Vorbis audio and VP8, VP9 or AV1 video. |
+| **The audio is uncompressed PCM, and nothing in Clipped encodes audio.** | [muxing.md](muxing.md): every track is 16-bit PCM because no crate in the workspace encodes audio ([#28](https://github.com/wildware-uk/clipped/issues/28)). No browser decodes PCM in MP4. |
+| **A media element cannot choose an audio track.** | `HTMLMediaElement.audioTracks` is not implemented in Chromium, so a multi-track file gives whichever track the demuxer lands on and no way off it. |
+
+`apps/desktop/src/playbackReach.test.ts` reads the first of those out of the
+three files rather than asserting it in prose: the day somebody enables the asset
+protocol, grants a file-system permission or widens the policy, that test fails
+and brings them here. A claim in a comment is true on the day it is written; a
+claim a test resolves is true whenever it passes.
+
+The fourth row is the one that decides the shape of the answer. **No arrangement
+that hands a whole multi-track file to a media element can satisfy #52's first
+acceptance criterion**, however the container question is settled, because the
+element has no way to switch tracks. Track selection has to happen on the way
+*out* of the recorder.
+
+### The decision, and what it costs
+
+**The recorder serves the media; the window plays a stream, one track at a time.**
+[Issue #304](https://github.com/wildware-uk/clipped/issues/304) builds it.
+
+Concretely: a protocol command opens a recording for playback and reports its
+duration, its dimensions and its track list; the recorder remuxes the source into
+fragmented MP4, copying the video without re-encoding it and encoding the chosen
+audio track to AAC; and it answers byte ranges, so a seek is a range request
+rather than a re-read. The Tauri host registers a URI scheme that relays those
+ranges and the screen points a `<video>` at it. The compatibility mix is the
+default, which is what the container already flags ([muxing.md](muxing.md)), and
+choosing another track is a new URL at the current time.
+
+The recorder rather than the window, because
+`tests/integration/tests/workspace_layering.rs::the_desktop_application_links_nothing_of_this_workspace_but_the_protocol`
+permits `src-tauri` exactly one crate of the workspace, `clipped-ipc`. The window
+may not link `clipped-muxer`, so it cannot remux or encode anything in its own
+process, and it should not: that is the boundary
+[ADR 0002](adr/0002-separate-recorder-process.md) exists to keep.
+
+What it costs, stated rather than glossed:
+
+- **A live remux and an audio encode for every recording watched**, and again for
+  every track switched to. Video is copied, so the cost is the audio encode and
+  the container work, not a transcode — but it is not free, and it happens beside
+  a game.
+- **An audio encoder Clipped does not have.** Measured on this machine: the
+  pinned LGPL FFmpeg build carries FFmpeg's native `aac` encoder
+  (`third-party/ffmpeg/current/bin/ffmpeg -encoders`), so this is wiring rather
+  than a new dependency or a fresh licence question — but it is still a subsystem
+  that does not exist.
+- **Seek accuracy is the video's keyframe interval** unless the served stream
+  carries an index. "Frame-accurate seeking where practical" is the ticket's own
+  wording, and this is where the practical limit sits.
+- **Privilege.** The window gains a way to receive bytes it could not before.
+  #304's last criterion is that whatever it gains is the smallest thing that
+  works, and that `playbackReach.test.ts` is rewritten to describe the new
+  boundary rather than deleted.
+
+The alternatives, and why not:
+
+| Instead | Why not |
+| --- | --- |
+| Point a `<video>` at the MKV through Tauri's asset protocol | Rows two, three and four above. It is the cheapest thing to write and it plays nothing. |
+| Remux the whole file to MP4 first ([#92](https://github.com/wildware-uk/clipped/issues/92)) and play that | #92 copies streams without re-encoding, so the video arrives and **the sound does not** — PCM has nowhere to go in an MP4 a browser will decode. It also writes a second full-size copy of every recording somebody watches, and makes playback wait for a pass over the whole file. Even with the audio encoded it still cannot answer #52's track selector: one file, one track a media element can reach. |
+| Convert on the fly to WebM instead | The video would have to be re-encoded, because WebM cannot carry H.264 or HEVC. That is the one thing worth avoiding: a transcode of gameplay footage beside a running game. |
+| A native video surface behind the webview | No transport, no keyboard handling and no layout that the rest of the interface shares, and Tauri offers nothing for it. It is the answer if the stream above proves too expensive, and it is a much larger change. |
+
+### What it does show
+
+The one thing that is real: **what the recorder link says about this recording.**
+The window follows a single recorder, so it learns of exactly two recordings —
+the one being written now, and the one a recorder died in the middle of, whose
+file [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md) says naming is the
+whole of recovery. `resolveClip` has one answer for each, and one for everything
+else.
+
+That third answer is the careful one. It reads **"Not known to this window"** and
+explains that the library index is where a recording would be looked up and that
+nothing here can read it ([#305](https://github.com/wildware-uk/clipped/issues/305)).
+It does **not** say the recording is missing. This window has not been to the
+disk and cannot; `missing_since` in the library index is the only thing that has
+looked ([#56](https://github.com/wildware-uk/clipped/issues/56)), and reporting a
+file as gone because *this* window could not find it is exactly the invented
+state AGENTS.md section 27 is about. `clipPlayback.test.ts` asserts the wording
+carries none of "missing", "gone" or "deleted", so the distinction cannot be lost
+to an edit that reads better.
+
+Where a recording *is* known, the screen shows the four fields the protocol
+carries and no more: the file in full, the capture target, and how long the
+recorder had been recording when it last said so — labelled as a lower bound
+rather than a duration, because nothing has opened the file, and a recording a
+killed recorder left may have no Matroska trailer at all
+([#283](https://github.com/wildware-uk/clipped/issues/283)). **There is no
+duration, no thumbnail and no waveform**, because there is nothing to get them
+from.
+
+### Why it is reachable from the sidebar, and nowhere else
+
+A screen nothing links to is a screen nobody finds. The one recording this window
+can name is the one a recorder died writing, and the sidebar notice that names
+the file it left now carries a link to that recording's screen.
+
+That link is a destination and not a control: it does not claim the recording
+will play, and the screen it leads to says so in its first paragraph. It is the
+same bargain the tray's Open Library keeps — "a thing that happens, rather than a
+control that does nothing". Everything else waits on the library index (#305);
+Home and Library (#60) are what will open this screen properly.
+
+### What is not built
+
+Every row of the screen's second table, each naming the work that supplies it:
+playing anything at all and choosing a track (#304); opening a recording somebody
+picked, and saying a file has gone (#305); a poster frame, which is the thing
+[#57](https://github.com/wildware-uk/clipped/issues/57) has been waiting for —
+thumbnails are generated, cached and tested, and *nothing has ever drawn one*, so
+on a real machine none is produced; a waveform
+([#66](https://github.com/wildware-uk/clipped/issues/66)); and bookmarks and
+events on a timeline ([#64](https://github.com/wildware-uk/clipped/issues/64) and
+[#65](https://github.com/wildware-uk/clipped/issues/65)).
+
+The alternative to that table was a transport bar, a scrubber and a track
+selector drawn over a black rectangle. That is AGENTS.md section 27 broken twice
+in one screen — controls that do nothing, above a picture Clipped never made —
+and the scrubber is the worst of the three, because a scrubber implies a duration
+and nothing in this window has measured one.
 
 ## The tray
 
@@ -967,6 +1133,19 @@ drift, and a screen's rail that stopped matching the sidebar would look like a
 mistake. The rule that marks the open one covers both `aria-current="page"` and
 `aria-selected="true"` for the same reason, and `contrast.test.ts` measures it on
 both grounds it is drawn on.
+**Games and Playback are the only consumers of the component layer so far** —
+`.clipped-table`, `.clipped-panel` and `.clipped-muted` between them. The classes
+exist ahead of that so that #60, #83, #51, #94 and #101 do not each invent their
+own styling, which is the reason issue #79 followed the shell.
+
+One element default was added with the playback screen and belongs with the
+classes above: **`code` takes `--font-mono`**. That token was declared with the
+other two typefaces in issue #79 and had no consumer until a screen had to put a
+recording's full path in front of somebody — the one thing on that screen anybody
+can act on, and a string that has to be read character by character. It is a step
+down the type scale, because a monospace face at the body size reads larger than
+the body around it, and it wraps anywhere, because a Windows path has no space in
+it to break at and would otherwise push a table wider than the window.
 
 ### Where it departs from the system, and why
 
@@ -1187,6 +1366,16 @@ consumes the design system rather than a value somebody typed. The last of those
 colours" is a promise a reviewer has to re-check on every diff, and a test that
 reads the stylesheet is one that cannot be forgotten.
 
+`playbackReach.test.ts` is the same idea aimed at a different file. The playback
+screen's central claim is that this window has no way to load a file from the
+disk, and that is a fact about `tauri.conf.json` and `capabilities/default.json`
+rather than about any code — so it reads both, asserts the asset protocol is off,
+that the three granted permissions are exactly the three, that the policy has no
+`media-src`, and that no scheme which could carry a local file appears in it at
+all. It runs in the node environment, like the two stylesheet files, for the same
+reason: the subject is configuration as text. Enabling any of those makes it fail
+rather than leaving a paragraph on screen that has quietly stopped being true.
+
 Both files hold to one rule that is easy to lose: **a check must resolve what it
 claims to measure out of the stylesheet, not restate it.** A contrast case that
 names two tokens measures two constants; a focus check that looks for a selector
@@ -1232,6 +1421,18 @@ text, and every case throws when the item it names is no longer in the file —
 the same rule `contrast.test.ts` and `stylesheet.test.ts` hold to, for the same
 reason: a check that has stopped finding its subject has to fail rather than
 pass on nothing.
+`ClipPlaybackScreen.test.tsx` is built the same way and asks the same two
+questions. The first is that the screen follows the recorder: one address is
+opened and the link is then moved underneath it three times — no recorder, then a
+recorder writing that very recording, then idle — and the panel has to say
+something different each time, which a screen with the wording baked in could not
+do. The second is absence, and it is stated as elements rather than as sentences:
+no `video`, `audio`, `source` or `track`, no `img` or `canvas`, and no button,
+slider or combobox anywhere in `<main>`. The scrubber is the one that matters —
+`queryAllByRole('slider')` is what stops one being added over a duration nobody
+measured. `clipPlayback.test.ts` covers the decisions underneath: which of the
+two recordings the window may name wins when both carry the same identifier, and
+that no wording anywhere says a recording is missing.
 
 `useWindowTitle.test.ts` stands up a `__TAURI_INTERNALS__` so the branch that
 only runs inside the window is reached — jsdom is a browser, so without it the
