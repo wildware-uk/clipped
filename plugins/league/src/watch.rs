@@ -14,10 +14,11 @@
 //! polled feed is that a poll which arrives late misses whatever happened in
 //! between. It cannot happen here, and the reason is the shape of the API
 //! rather than anything clever: the event list is **cumulative and indexed**.
-//! Every poll returns the whole match, so the only state needed is the
-//! identifier after the last one reported ([`LeagueWatch`]'s cursor). A poll
-//! that took ten seconds returns ten seconds of events; a plugin that was
-//! restarted mid-match returns the match.
+//! Every poll returns the whole match, so the state needed is the identifier
+//! after the last one reported ([`LeagueWatch`]'s cursor), and the match clock
+//! that says when the cursor belongs to a different match. A poll that took ten
+//! seconds returns ten seconds of events; a plugin that was restarted mid-match
+//! returns the match.
 //!
 //! What a slow poll costs is therefore **latency and nothing else** — how long
 //! after a kill the recording hears about it — because the *position* of an
@@ -99,6 +100,15 @@ pub const REPORTED_TIME_RESOLUTION: Duration = Duration::from_millis(100);
 /// section 45).
 const UNREACHABLE_NOTICE: Duration = Duration::from_secs(60);
 
+/// How far the match clock may appear to go backwards without it meaning a
+/// different match.
+///
+/// Inside a match it does not go backwards at all, so this is not a tolerance
+/// for the game: it is a tolerance for two readings produced at two moments and
+/// rounded. A second is far below the gap between one match's clock and the
+/// next match's, which starts at zero.
+const CLOCK_JITTER: f64 = 1.0;
+
 /// How many unreadable answers in a row are worth telling the user about.
 ///
 /// One is a hiccup. Five in a row, from an endpoint that answered, is the
@@ -137,6 +147,8 @@ pub struct LeagueWatch {
     identity: Option<PlayerIdentity>,
     /// The identifier the next unreported event will have.
     next_event_id: u64,
+    /// The match clock in the last payload read, in seconds.
+    last_game_time: f64,
     /// When the current run of unreachable polls began.
     unreachable_since: Option<Duration>,
     /// Whether the current run has already been reported.
@@ -275,18 +287,30 @@ impl LeagueWatch {
     /// followed by another sees two matches through one attachment. Without
     /// this, the second match's events would all sit below the cursor and
     /// none of them would ever be reported.
+    ///
+    /// Two signals rather than one, because the obvious one is not enough. The
+    /// event list going backwards is what a new match usually looks like — but
+    /// only while the new match has fewer events than the old one had, which is
+    /// a race the plugin does not control: a first poll that lands a few
+    /// minutes into the second match would see identifiers past the cursor and
+    /// quietly skip everything below them. **The match clock cannot go
+    /// backwards inside a match**, so a clock that has is a different match
+    /// whatever the identifiers say.
     fn rewind_if_this_is_another_match(&mut self, snapshot: &GameSnapshot) {
+        let clock_went_backwards = snapshot.game_time() + CLOCK_JITTER < self.last_game_time;
+        self.last_game_time = snapshot.game_time();
         if self.next_event_id == 0 {
             return;
         }
+
         let highest = snapshot.events().iter().map(LiveEvent::id).max();
-        let went_backwards = match highest {
+        let list_went_backwards = match highest {
             Some(highest) => highest.saturating_add(1) < self.next_event_id,
             // A match that has produced no events at all yet, when this watch
             // has already reported some, is a match that started again.
             None => true,
         };
-        if went_backwards {
+        if list_went_backwards || clock_went_backwards {
             self.next_event_id = 0;
             self.said_it_does_not_know_the_player = false;
         }
@@ -463,13 +487,33 @@ mod tests {
         let first = snapshot(500.0, &format!("{START},{KILL},{DEATH}"));
         assert_eq!(watch.observe(answered(&first), Duration::ZERO).len(), 3);
 
-        // A new match: the identifiers begin at zero again, which is the only
-        // sign of it there is.
+        // A new match: the identifiers begin at zero again.
         let second = snapshot(6.0, START);
         assert_eq!(
             kinds(&watch.observe(answered(&second), Duration::from_secs(400))),
             vec!["match_started"],
             "the second match's events are below the first match's cursor"
+        );
+    }
+
+    #[test]
+    fn a_second_match_already_under_way_is_noticed_by_its_clock() {
+        // The identifiers are not enough on their own, and this is the case
+        // that shows it: a first poll of the second match that lands after it
+        // has produced more events than the first match did. Every identifier
+        // is above the cursor, so nothing looks backwards — except the match
+        // clock, which cannot go backwards inside a match.
+        let mut watch = LeagueWatch::new();
+        let first = snapshot(500.0, &format!("{START},{KILL}"));
+        assert_eq!(watch.observe(answered(&first), Duration::ZERO).len(), 2);
+
+        let later = r#"{"EventID":7,"EventName":"ChampionKill","EventTime":211.0,
+                        "KillerName":"Rosalind#EU1","VictimName":"Kestrel#EUW","Assisters":[]}"#;
+        let second = snapshot(240.0, &format!("{START},{KILL},{later}"));
+        assert_eq!(
+            kinds(&watch.observe(answered(&second), Duration::from_secs(600))),
+            vec!["match_started", "kill", "kill"],
+            "a match whose clock has gone back is another match, whatever its identifiers say"
         );
     }
 

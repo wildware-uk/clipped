@@ -884,11 +884,21 @@ whole of what is interesting here.
 
 **A poll that misses a window loses nothing.** League's event list is
 *cumulative and indexed*: every poll returns the whole match, each entry with an
-`EventID` that never moves. So the only state the plugin keeps is the identifier
+`EventID` that never moves. So the state the plugin keeps is the identifier
 after the last one it reported. A poll that took ten seconds returns ten seconds
 of events; a plugin restarted mid-match returns the match. This is the property
 that makes polling acceptable at all, and `plugins/league`'s tests drive three
 payloads of one match through one watch to hold it.
+
+The cursor needs one more thing beside it, and it is the part that is easy to
+get wrong: **a second match through the same attachment starts the identifiers
+again**, so the cursor has to be rewound. The list going backwards is the
+obvious signal and it is not sufficient — it only fires while the new match has
+fewer events than the old one had, and a first poll that lands a few minutes
+into the second match would see identifiers past the cursor and quietly skip
+everything below them. The match clock cannot go backwards inside a match, so a
+clock that has is a different match whatever the identifiers say. Both are
+checked, and there is a test for the case only the second one catches.
 
 **The poll interval is a cost, and it is a small one.** A second, on a machine
 that is also running League (AGENTS.md section 18). What it buys and what it
