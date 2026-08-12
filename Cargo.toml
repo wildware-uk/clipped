@@ -106,6 +106,7 @@ clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
 clipped-replay = { path = "crates/replay", version = "0.1.0" }
 clipped-session = { path = "crates/session", version = "0.1.0" }
 clipped-storage = { path = "crates/storage", version = "0.1.0" }
+clipped-waveform = { path = "crates/waveform", version = "0.1.0" }
 clipped-windows = { path = "crates/windows", version = "0.1.0" }
 
 # The media validation harness (tests/media, docs/testing.md). It is listed

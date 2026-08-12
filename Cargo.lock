@@ -387,6 +387,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-waveform"
+version = "0.1.0"
+dependencies = [
+ "clipped-ffmpeg-runtime",
+ "clipped-logging",
+ "clipped-media-validation",
+ "rusty_ffmpeg",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "clipped-windows"
 version = "0.1.0"
 dependencies = [
