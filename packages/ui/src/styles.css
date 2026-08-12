@@ -372,3 +372,30 @@ a {
 .clipped-panel__body:last-child {
   margin-bottom: 0;
 }
+
+/*
+ * A block of machine-written text a person is meant to read before sending it
+ * on: the Diagnostics screen's support report (issue #101).
+ *
+ * Monospaced because the report lines its labels up in columns, and `--font-mono`
+ * is the token the design system already carries for exactly that. It wraps
+ * rather than scrolling sideways, and it has no height limit: `docs/privacy.md`
+ * asks that nothing about what leaves the machine is hidden, and a scroll box
+ * showing eight of thirty lines hides twenty-two of them.
+ *
+ * `--color-surface` is the ground the component layer already fills a card and a
+ * dialog with, so this reads as one of them rather than as a fourth kind of
+ * container; `contrast.test.ts` measures the ink on it.
+ */
+.clipped-screen__report {
+  max-width: var(--measure);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

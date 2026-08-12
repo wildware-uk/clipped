@@ -44,12 +44,14 @@ block in the sidebar shows what the link reports and nothing else — one wordin
 for each of the link's four states, and one for "this is not the Clipped window",
 which is what `npm run dev:web` and the tests see.
 
-**The controls are in the notification area, not in the window** — see
-[The tray](#the-tray). No screen has a control of any kind: six of the seven are
-not built, and the seventh, Games, deliberately draws none because nothing it
-would drive can be reached from here. A button with nothing behind it is exactly
-what AGENTS.md section 27 forbids. A "Try again" control for a link that has
-given up is
+**Almost every control is in the notification area, not in the window** — see
+[The tray](#the-tray). Five of the seven screens are not built; Games
+deliberately draws no control because nothing it would drive can be reached from
+here, and Diagnostics draws exactly one, Copy report, which does what it says
+with a browser API and no recorder involved. A button with nothing behind it is
+exactly what AGENTS.md section 27 forbids, which is also why Diagnostics has no
+Export Support Bundle button ([diagnostics.md](diagnostics.md)). A "Try again"
+control for a link that has given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221).
 
 ## What the shell is
@@ -81,12 +83,13 @@ separately.
 
 Both navigation lists and every route are derived from one array, `SCREENS` in
 `@clipped/shared`, so a navigation item cannot point at a route that does not
-exist. **One of the seven screens has been written**, and it is Games — see
-[The Games screen](#the-games-screen). The other six each lead to a panel saying
-so and naming the issue that builds it — #60 for Home and Library, #83 for
-Editor, #51 for Settings, #94 for Trash, #101 for Diagnostics. Building one
-replaces its placeholder route with the real screen, in `elementFor` in
-`Shell.tsx`, which is the one place that knows a screen from a placeholder.
+exist. **Two of the seven screens have been written**: Games — see
+[The Games screen](#the-games-screen) — and Diagnostics, which has a document of
+its own in [diagnostics.md](diagnostics.md). The other five each lead to a panel
+saying so and naming the issue that builds it — #60 for Home and Library, #83 for
+Editor, #51 for Settings, #94 for Trash. Building one replaces its placeholder
+route with the real screen, in `elementFor` in `Shell.tsx`, which is the one
+place that knows a screen from a placeholder.
 
 ## The Games screen
 
@@ -168,6 +171,33 @@ Which is also why this screen built nothing for
 and the selectable chips are for the per-game detail view the deck draws behind
 this list, and there is no list to open one from. #215 asks for them at the point
 a screen needs them, and this one does not.
+
+## The Diagnostics screen
+
+SPEC.md section 36, and issue #101. It has a document of its own,
+[diagnostics.md](diagnostics.md), because most of what it is about is not the
+interface: what the recorder records, what reaches this window, and exactly what
+a support report may and may not contain.
+
+The shape is the Games screen's, for the same reason — a live panel saying what
+this window can establish, and a table of what the rest is waiting for — with a
+third part the Games screen has no equivalent of: the support report, composed
+here, shown in full, and copied to the clipboard.
+
+Two things it adds to this document. It is the **first screen with a control**,
+and the control is `Copy report`: a browser clipboard call, needing no Tauri
+permission and reaching no recorder, which reports both of its failure modes
+rather than appearing to work. And it is the reason `.clipped-screen__report`
+exists in `styles.css` — a monospaced block on the card ground, wrapping rather
+than scrolling and with no height limit, because [privacy.md](privacy.md) asks
+that nothing about what leaves the machine is hidden and a scroll box showing
+eight of thirty lines hides twenty-two of them.
+
+It draws **no Export Support Bundle button**, which SPEC.md section 36 asks for
+and the deck draws. The log files that would make a bundle worth sending are
+unreachable from this window, and diagnostics.md sets out why a button that wrote
+a report with no logs in it would be an export in name only
+([issue #303](https://github.com/wildware-uk/clipped/issues/303)).
 
 ## The tray
 
@@ -843,19 +873,27 @@ screen written and needed neither, so neither was built: they belong to the
 per-game detail view behind the game list, and there is no list yet to open one
 from.
 
-Beside the set above, the shell has three classes of its own that a screen
+Beside the set above, the shell has four classes of its own that a screen
 draws with. They are not from the reference pages, which have no screen in them:
 
 | Class | What it is |
 | --- | --- |
 | `.clipped-screen__title`, `.clipped-screen__heading` | A screen's own two levels of heading |
 | `.clipped-screen__lead` | Running prose at the measure |
-| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet" and by the Games screen's detection state, which are the same thing to look at |
+| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state and by the Diagnostics screen's capture health, which are the same thing to look at |
+| `.clipped-screen__report` | A block of machine-written text a person is meant to read before sending it on: the Diagnostics screen's support report. Monospaced, on the card ground, wrapping rather than scrolling and with no height limit |
 
-**The Games screen is the only consumer of the component layer so far** — its
-`.clipped-table` and `.clipped-muted`. The classes exist ahead of that so that
-#60, #83, #51, #94 and #101 do not each invent their own styling, which is the
-reason issue #79 followed the shell.
+**Two screens consume the component layer so far.** Games draws
+`.clipped-table` and `.clipped-muted`; Diagnostics draws those and
+`.clipped-btn--primary`, the first button in the application outside the skip
+link. The classes exist ahead of that so that #60, #83, #51 and #94 do not each
+invent their own styling, which is the reason issue #79 followed the shell.
+
+Diagnostics also added the shell's fourth screen class,
+`.clipped-screen__report`, for the block of machine-written text a user is asked
+to read before sending it on. It is not a component-layer class: nothing in the
+deck has one, and it belongs to the screen that needs it rather than to the
+system.
 
 ### Where it departs from the system, and why
 
@@ -1063,11 +1101,12 @@ read the stylesheets as text and Vitest replaces a CSS import with an empty
 module.
 
 The tests assert the things about this shell that would rot quietly: that no
-part of it shows data it does not have — including that the only control in the
-whole window is the skip link — that the chrome is operable from the keyboard
-alone, that every pairing of words and ground clears 4.5:1, and that the
-component layer still consumes the design system rather than a value somebody
-typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
+part of it shows data it does not have — including that the chrome's only
+control is the skip link, that Games offers none at all, and that Diagnostics
+offers exactly the one that works and no button that would not — that the chrome
+is operable from the keyboard alone, that every pairing of words and ground
+clears 4.5:1, and that the component layer still consumes the design system
+rather than a value somebody typed. The last of those is why `stylesheet.test.ts` exists: "no hard-coded
 colours" is a promise a reviewer has to re-check on every diff, and a test that
 reads the stylesheet is one that cannot be forgotten.
 

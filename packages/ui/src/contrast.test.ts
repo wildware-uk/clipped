@@ -317,6 +317,17 @@ describe('the shell', () => {
       SIDEBAR,
     ],
     ['a link on the window ground', ['styles', 'a', 'color'], WINDOW],
+    /*
+     * The Diagnostics screen's support report. It is the one block in the
+     * interface a user is asked to *read before sending*, so words that are hard
+     * to read there are words that go unread — and it fills its own ground rather
+     * than inheriting the window's, so it needs its own case.
+     */
+    [
+      'the support report',
+      ['styles', '\\.clipped-screen__report', 'color'],
+      ['styles', '\\.clipped-screen__report', 'background'],
+    ],
     [
       'the open navigation item',
       ['styles', "\\.clipped-nav__link\\[aria-current='page'\\]", 'color'],

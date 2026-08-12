@@ -3,13 +3,14 @@ import { AppShell, RecorderStatus, ScreenNav, ScreenNotBuilt } from '@clipped/ui
 import { useCallback, type ReactNode } from 'react';
 import { Route, Routes, useLocation, useNavigate } from 'react-router';
 
+import { DiagnosticsScreen } from './DiagnosticsScreen';
 import { GamesScreen } from './GamesScreen';
 import { UnknownScreen } from './UnknownScreen';
 import {
   describeInterruption,
   describeRecorderLink,
   useRecorderLink,
-  type RecorderLinkState,
+  type RecorderLinkView,
 } from './useRecorderLink';
 import { joinNotices, useTray } from './useTray';
 import { useWindowTitle } from './useWindowTitle';
@@ -24,12 +25,20 @@ const screenFor = (pathname: string): Screen | undefined =>
  *
  * Every route still comes from `SCREENS`, so the sidebar and the router cannot
  * disagree about what the application contains; this is only the question of
- * which element sits behind one. Six of the seven are still the placeholder
- * that names the issue building them. Games is written (issue #107), and the
- * change that builds another screen adds it here.
+ * which element sits behind one. Five of the seven are still the placeholder
+ * that names the issue building them. Games is written (issue #107) and
+ * Diagnostics is (issue #101), and the change that builds another screen adds it
+ * here.
  */
-function elementFor(screen: Screen, link: RecorderLinkState | null): ReactNode {
-  return screen.id === 'games' ? <GamesScreen link={link} /> : <ScreenNotBuilt screen={screen} />;
+function elementFor(screen: Screen, view: RecorderLinkView, notice: string | undefined): ReactNode {
+  switch (screen.id) {
+    case 'games':
+      return <GamesScreen link={view.link} />;
+    case 'diagnostics':
+      return <DiagnosticsScreen view={view} notice={notice} />;
+    default:
+      return <ScreenNotBuilt screen={screen} />;
+  }
 }
 
 /**
@@ -42,8 +51,8 @@ export function Shell(): ReactNode {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const screen = screenFor(pathname);
-  const { link, interrupted } = useRecorderLink();
-  const recorder = describeRecorderLink(link);
+  const view = useRecorderLink();
+  const recorder = describeRecorderLink(view.link);
 
   // The window title is what a person reads in the taskbar, in Alt+Tab and in
   // the window switcher, so it says which screen is open rather than only which
@@ -119,13 +128,13 @@ export function Shell(): ReactNode {
         <RecorderStatus
           state={recorder.state}
           detail={recorder.detail}
-          notice={joinNotices(trayNotice, describeInterruption(interrupted))}
+          notice={joinNotices(trayNotice, describeInterruption(view.interrupted))}
         />
       }
     >
       <Routes>
         {SCREENS.map((entry) => (
-          <Route key={entry.id} path={entry.path} element={elementFor(entry, link)} />
+          <Route key={entry.id} path={entry.path} element={elementFor(entry, view, trayNotice)} />
         ))}
         <Route path="*" element={<UnknownScreen />} />
       </Routes>
