@@ -231,6 +231,14 @@ is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design):
 - **The proxy question, since it decides whether "loopback" is true:** the
   request is made with `WINHTTP_ACCESS_TYPE_NO_PROXY`, so a system proxy
   configured on the machine cannot route it off the machine.
+- **The redirect question, which decides the same thing:** the request is made
+  with `WINHTTP_OPTION_REDIRECT_POLICY_NEVER`, so whatever is listening on port
+  2999 cannot answer "go and ask this other server instead" and have the plugin
+  do it. WinHTTP follows redirects by default; without this, and given that the
+  certificate on this request is deliberately not validated
+  ([docs/plugin-api.md](plugin-api.md)), any process that got to port 2999 first
+  could have made this loopback row untrue. A test asserts the second listener
+  is never reached.
 
 One thing is anticipated but **not implemented**, and has no code behind it
 today. It is listed so that the shape of a future row is clear, not to imply it

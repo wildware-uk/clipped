@@ -23,9 +23,15 @@
 //! also running a game is not somewhere to spin up a TLS server for a test
 //! (AGENTS.md section 25). Everything above the socket is a pure function of a
 //! payload and a clock reading, so `tests/` drives the real derivation with the
-//! real payloads and nothing has to be mocked; what is left untested is the
-//! socket itself, which `docs/plugin-api.md` says plainly rather than implying
-//! otherwise.
+//! real payloads and nothing has to be mocked.
+//!
+//! The socket is not entirely untested either: `live_api`'s own tests stand
+//! plain listeners on ephemeral loopback ports and hold the two properties that
+//! do not need TLS to be true — that a redirect is not followed, and that a
+//! listener dripping bytes cannot hold the poll loop. What remains untested is
+//! the **successful HTTPS request**, which has never run: no match has been
+//! played through this plugin. `docs/plugin-api.md` says so plainly rather than
+//! implying otherwise (AGENTS.md section 54).
 //!
 //! # Threading
 //!
