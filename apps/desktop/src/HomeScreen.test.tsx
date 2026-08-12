@@ -269,7 +269,9 @@ describe('the Home screen', () => {
    * been measured. Run over each text node rather than over the screen's
    * `textContent`, for the reason `test/counts.ts` sets out.
    */
-  it('draws no count, because nothing here has counted anything', async () => {
+  it('draws no count while the library has not been read', async () => {
+    // The runtime here answers neither library command, so nothing has been
+    // counted. A figure on this screen would then be one nobody measured.
     stubRecorderLinkRuntime(RECORDING);
     renderApp();
 
@@ -283,6 +285,92 @@ describe('the Home screen', () => {
   });
 
   /*
+   * The other half of that property, and the point of issue #301: once the
+   * library *has* been read, the figures on the screen are the index's own.
+   * Both cases matter — the first would pass on a screen that can never show
+   * anything, and the second on one that invents.
+   */
+  it('lists the most recent sittings once the library has been read', async () => {
+    stubRecorderLinkRuntime(RECORDING, null, {
+      sessions: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              session_id: 'cs2-20260811-201400',
+              game_name: 'Counter-Strike 2',
+              started_at: '2026-08-11T20:14:00+01:00',
+              favourite: false,
+              recordings: [
+                {
+                  recording_id: 12,
+                  session_index: 1,
+                  path: 'D:\\clips\\gone.mkv',
+                  started_at: '2026-08-11T20:14:00+01:00',
+                  duration_seconds: 6540,
+                  size_bytes: 1024,
+                  missing_since: '2026-08-12T09:00:00+01:00',
+                  favourite: false,
+                  tags: [],
+                },
+              ],
+              clips: [],
+            },
+          ],
+        }),
+    });
+    renderApp();
+
+    const table = await screen.findByRole('table', { name: 'Recent sessions' });
+    expect(table).toHaveTextContent('Counter-Strike 2');
+    expect(table).toHaveTextContent('1 recording, 1 file missing');
+  });
+
+  it('draws the per-game figures the index computes, and what is missing from them', async () => {
+    stubRecorderLinkRuntime(RECORDING, null, {
+      games: () =>
+        Promise.resolve([
+          {
+            game_id: 'cs2',
+            name: 'Counter-Strike 2',
+            sessions: 214,
+            recordings: 265,
+            clips: 31,
+            favourites: 12,
+            bytes: 0,
+            missing: 3,
+          },
+        ]),
+    });
+    renderApp();
+
+    const table = await screen.findByRole('table', { name: 'Games' });
+    const cells = within(within(table).getAllByRole('row')[1] as HTMLElement)
+      .getAllByRole('cell')
+      .map((cell) => cell.textContent);
+
+    expect(cells[0]).toBe('Counter-Strike 2');
+    expect(cells[1]).toBe('214');
+    // A missing file contributes nothing to the size and is counted beside it,
+    // in words rather than by colour alone (docs/library.md).
+    expect(cells[3]).toBe('0 bytes');
+    expect(cells[4]).toBe('3 missing');
+  });
+
+  it('says a library it could not read could not be read, rather than showing it as empty', async () => {
+    stubRecorderLinkRuntime(RECORDING, null, {
+      sessions: () =>
+        Promise.reject({
+          code: 'library_unavailable',
+          message: 'the recording library could not be opened: the drive is not connected',
+        }),
+    });
+    renderApp();
+
+    expect(await screen.findByText(/the drive is not connected/)).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Recent sessions' })).not.toBeInTheDocument();
+  });
+
+  /*
    * What SPEC.md section 17 asks of Home, and the issue that supplies each —
    * written out here rather than mapped from the screen's own array.
    *
@@ -293,19 +381,21 @@ describe('the Home screen', () => {
    * to the work that lands it".
    */
   const MUST_BE_NAMED: readonly (readonly [string, RegExp, readonly number[]])[] = [
-    ['recent sessions', /recent sessions/i, [56, 301]],
-    ['recently clipped', /recently clipped/i, [74, 301]],
-    ['favourites', /^favourites/i, [58, 301]],
-    ['games, with counts and storage', /games, with the sessions/i, [301, 107]],
+    ['recently clipped', /recently clipped/i, [74, 91]],
+    ['favourites', /^favourites/i, [58]],
   ];
 
-  it('names each list it owes, and the issue that lands it', async () => {
+  it('names each list it still owes, and the issue that lands it', async () => {
+    // Recent sessions and the per-game figures have left this list, because
+    // both are on the screen now (issue #301). Shrinking it without honouring
+    // that fails here, and the two cases below are what honour it.
     stubRecorderLinkRuntime({ link: 'connecting' });
     renderApp();
 
-    const rows = within(await screen.findByRole('table'))
-      .getAllByRole('row')
-      .slice(1);
+    // Neither library command is answered here, so the only table on the screen
+    // is the one that says what it still owes.
+    const waiting = await screen.findByRole('table');
+    const rows = within(waiting).getAllByRole('row').slice(1);
     expect(rows).toHaveLength(MUST_BE_NAMED.length);
 
     for (const [subject, shows, issues] of MUST_BE_NAMED) {

@@ -94,6 +94,7 @@ use clipped_session::{
 
 use crate::cli::{RecordArgs, ServeArgs};
 use crate::config::{ConfigError, RecordingConfig};
+use crate::library::LibraryReader;
 use crate::record::{resolve_window, settings_for};
 
 /// What this build tells every client it can do.
@@ -107,6 +108,10 @@ fn features_of_this_build() -> Vec<String> {
         features::STATUS_EVENTS.to_owned(),
         features::BOOKMARKS.to_owned(),
         features::SCREENSHOTS.to_owned(),
+        // The window checks for this before it draws a library screen at all,
+        // so that a recorder built before issue #301 is told apart from a
+        // library with nothing in it.
+        features::LIBRARY.to_owned(),
     ]
 }
 
@@ -237,14 +242,28 @@ fn identity() -> PeerIdentity {
 #[derive(Debug)]
 pub struct RecorderService {
     recordings: Arc<RecordingState>,
+    /// The recording library, which this process reads on the window's behalf
+    /// because the window cannot (`crate::library`, issue #301).
+    library: LibraryReader,
 }
 
 impl RecorderService {
-    /// A service with nothing recording.
+    /// A service with nothing recording, reading the library at Clipped's usual
+    /// place.
     #[must_use]
     pub fn new(events: EventPublisher) -> Self {
+        Self::with_library(events, LibraryReader::for_this_user())
+    }
+
+    /// The same, reading a library named by the caller.
+    ///
+    /// For tests, which must not read or create the library of whoever is
+    /// running them (AGENTS.md section 25).
+    #[must_use]
+    pub fn with_library(events: EventPublisher, library: LibraryReader) -> Self {
         Self {
             recordings: Arc::new(RecordingState::new(events)),
+            library,
         }
     }
 
@@ -283,6 +302,16 @@ impl CommandHandler for RecorderService {
             }),
             Command::TakeScreenshot(request) => Ok(Reply::ScreenshotTaken {
                 screenshot: self.recordings.screenshot(&request, SystemTime::now())?,
+            }),
+            // Answered from the index rather than from anything this process is
+            // doing, and deliberately on the connection thread: a library read
+            // is a bounded query over local data and shares nothing with a
+            // recording (`crate::library`).
+            Command::LibrarySessions(request) => Ok(Reply::LibrarySessions {
+                page: self.library.sessions(&request)?,
+            }),
+            Command::LibraryGames => Ok(Reply::LibraryGames {
+                games: self.library.games()?,
             }),
             // Refused by `clipped-ipc` before dispatch, so that no handler can
             // answer a command whose subsystem does not exist (AGENTS.md
@@ -1351,6 +1380,103 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A service over a library holding one sitting whose file has gone.
+    ///
+    /// The library is built here rather than reconciled, because what is under
+    /// test is the path from a command to a reply, not indexing.
+    fn service_over_a_library(name: &str) -> RecorderService {
+        let path = scratch(name).join("library.db");
+        {
+            let database = clipped_storage::Database::open(&path).expect("a database opens");
+            let connection = database.connection();
+            connection
+                .execute(
+                    "INSERT INTO games (game_id, name, first_seen_at) \
+                     VALUES ('cs2', 'Counter-Strike 2', '2026-08-11T20:14:00+01:00')",
+                    [],
+                )
+                .expect("a game inserts");
+            connection
+                .execute(
+                    "INSERT INTO sessions (session_id, game_id, started_at) \
+                     VALUES ('cs2-20260811-201400', 'cs2', '2026-08-11T20:14:00+01:00')",
+                    [],
+                )
+                .expect("a session inserts");
+            connection
+                .execute(
+                    "INSERT INTO recordings \
+                        (session_id, session_index, path, started_at, size_bytes, missing_since) \
+                     VALUES ('cs2-20260811-201400', 1, 'D:\\clips\\gone.mkv', \
+                             '2026-08-11T20:14:00+01:00', 1024, '2026-08-12T09:00:00+01:00')",
+                    [],
+                )
+                .expect("a recording inserts");
+        }
+
+        RecorderService::with_library(EventPublisher::new(), LibraryReader::at(Some(path)))
+    }
+
+    #[test]
+    fn the_library_commands_are_answered_from_the_index_through_the_real_dispatch() {
+        // Deliberately through `CommandHandler::call` rather than through
+        // `LibraryReader` beside it: what issue #301 is about is a command
+        // reaching the index at all, and a reader that works while nothing
+        // routes a command to it is the gap this ticket exists to close. A
+        // command wired to the wrong handler, or refused before dispatch, fails
+        // here and nowhere else.
+        let service = service_over_a_library("library");
+
+        let Reply::LibrarySessions { page } = service
+            .call(Command::LibrarySessions(
+                clipped_ipc::LibrarySessions::default(),
+            ))
+            .expect("the library reads")
+        else {
+            panic!("`library_sessions` was answered with something else");
+        };
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(
+            page.sessions[0].recordings[0].missing_since.as_deref(),
+            Some("2026-08-12T09:00:00+01:00"),
+            "a recording whose file has gone has to reach the window saying so"
+        );
+
+        let Reply::LibraryGames { games } =
+            service.call(Command::LibraryGames).expect("the games read")
+        else {
+            panic!("`library_games` was answered with something else");
+        };
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].missing, 1);
+    }
+
+    #[test]
+    fn a_library_that_cannot_be_read_is_refused_through_the_dispatch_rather_than_drawn_as_empty() {
+        let directory = scratch("library-unreadable");
+        let path = directory.join("library.db");
+        std::fs::write(&path, b"not a database").expect("the file is written");
+        let service =
+            RecorderService::with_library(EventPublisher::new(), LibraryReader::at(Some(path)));
+
+        let refusal = service
+            .call(Command::LibrarySessions(
+                clipped_ipc::LibrarySessions::default(),
+            ))
+            .expect_err("an unreadable library is not an empty one");
+
+        assert_eq!(refusal.code, ErrorCode::LibraryUnavailable);
+    }
+
+    #[test]
+    fn a_recorder_that_can_read_the_library_says_so_in_its_handshake() {
+        // The same rule bookmarks and screenshots follow: the window asks here
+        // before it draws a library screen, so a build that can read the index
+        // and does not advertise it is one whose Library screen stays empty for
+        // no reason anybody can see.
+        assert!(features_of_this_build().contains(&clipped_ipc::features::LIBRARY.to_owned()));
     }
 
     #[test]

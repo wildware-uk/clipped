@@ -39,6 +39,8 @@
         "stop_recording",
         "add_bookmark",
         "take_screenshot",
+        "library_sessions",
+        "library_games",
         "shutdown",
         "save_replay",
         "apply_settings"
@@ -74,6 +76,7 @@
         "recording_failed",
         "too_many_connections",
         "shutting_down",
+        "library_unavailable",
         "internal"
       ],
       "tolerates_unrecognised": true
@@ -106,7 +109,8 @@
         "status_events",
         "bookmarks",
         "screenshots",
-        "shutdown"
+        "shutdown",
+        "library"
       ],
       "tolerates_unrecognised": true
     },
@@ -132,6 +136,8 @@
         "recording_stopped",
         "bookmark_added",
         "screenshot_taken",
+        "library_sessions",
+        "library_games",
         "shutting_down"
       ],
       "tolerates_unrecognised": false
@@ -224,6 +230,88 @@
         "streams"
       ]
     },
+    "library_clip": {
+      "required": [
+        "clip_id",
+        "created_at",
+        "favourite",
+        "path",
+        "tags"
+      ],
+      "optional": [
+        "duration_seconds",
+        "missing_since",
+        "size_bytes",
+        "title"
+      ]
+    },
+    "library_game": {
+      "required": [
+        "bytes",
+        "clips",
+        "favourites",
+        "missing",
+        "recordings",
+        "sessions"
+      ],
+      "optional": [
+        "first_seen_at",
+        "game_id",
+        "last_played_at",
+        "name"
+      ]
+    },
+    "library_recording": {
+      "required": [
+        "favourite",
+        "path",
+        "recording_id",
+        "session_index",
+        "started_at",
+        "tags"
+      ],
+      "optional": [
+        "duration_seconds",
+        "end_reason",
+        "ended_at",
+        "height",
+        "missing_since",
+        "outcome",
+        "size_bytes",
+        "width"
+      ]
+    },
+    "library_session": {
+      "required": [
+        "clips",
+        "favourite",
+        "recordings",
+        "session_id",
+        "started_at"
+      ],
+      "optional": [
+        "end_reason",
+        "ended_at",
+        "game_id",
+        "game_name"
+      ]
+    },
+    "library_session_page": {
+      "required": [
+        "sessions"
+      ],
+      "optional": [
+        "next_cursor"
+      ]
+    },
+    "library_sessions": {
+      "required": [],
+      "optional": [
+        "after",
+        "limit",
+        "query"
+      ]
+    },
     "outcome.error": {
       "required": [
         "error"
@@ -288,6 +376,20 @@
     "reply.bookmark_added": {
       "required": [
         "bookmark",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.library_games": {
+      "required": [
+        "games",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.library_sessions": {
+      "required": [
+        "page",
         "reply"
       ],
       "optional": []
@@ -452,6 +554,18 @@
       "available_in_this_build": true
     },
     {
+      "name": "library_sessions",
+      "params": "library_sessions",
+      "reply": "reply.library_sessions",
+      "available_in_this_build": true
+    },
+    {
+      "name": "library_games",
+      "params": null,
+      "reply": "reply.library_games",
+      "available_in_this_build": true
+    },
+    {
       "name": "shutdown",
       "params": "shutdown",
       "reply": "reply.shutting_down",
@@ -544,6 +658,33 @@
       "discriminant": "request.start_recording"
     },
     {
+      "name": "asking for a page of the library",
+      "direction": "client",
+      "frame": {
+        "command": "library_sessions",
+        "id": 9,
+        "params": {
+          "after": "2026-08-11T20:14:00+01:00|cs2-20260811-201400",
+          "limit": 25,
+          "query": "game:cs2 tag:clutch"
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.library_sessions"
+    },
+    {
+      "name": "asking what the library holds per game",
+      "direction": "client",
+      "frame": {
+        "command": "library_games",
+        "id": 10,
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.library_games"
+    },
+    {
       "name": "asking the recorder to exit",
       "direction": "client",
       "frame": {
@@ -580,7 +721,8 @@
           "status_events",
           "bookmarks",
           "screenshots",
-          "shutdown"
+          "shutdown",
+          "library"
         ],
         "protocol_version": 1,
         "recorder": {
@@ -741,6 +883,256 @@
       },
       "parses": true,
       "discriminant": "response.ok.recording_stopped.stopped"
+    },
+    {
+      "name": "a moment marked in the recording that is running",
+      "direction": "server",
+      "frame": {
+        "id": 5,
+        "outcome": {
+          "ok": {
+            "bookmark": {
+              "at_seconds": 115.0,
+              "bookmarks_file": "D:\\clips\\session.bookmarks.json",
+              "bookmarks_in_recording": 3,
+              "colour": "#ffcc00",
+              "duration_seconds": 12.5,
+              "label": "triple kill on mid",
+              "lead_seconds": 5.0,
+              "pressed_at_seconds": 120.0,
+              "recording_id": "r-1"
+            },
+            "reply": "bookmark_added"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.bookmark_added"
+    },
+    {
+      "name": "a screenshot written to disk",
+      "direction": "server",
+      "frame": {
+        "id": 6,
+        "outcome": {
+          "ok": {
+            "reply": "screenshot_taken",
+            "screenshot": {
+              "at_seconds": 115.0,
+              "bytes": 4812009,
+              "format": "png",
+              "height": 1440,
+              "path": "C:\\Users\\player\\Pictures\\Clipped\\clipped-cs2-20260811-143205.png",
+              "recording_id": "r-1",
+              "width": 2560
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.screenshot_taken"
+    },
+    {
+      "name": "a page of the library, with more after it",
+      "direction": "server",
+      "frame": {
+        "id": 9,
+        "outcome": {
+          "ok": {
+            "page": {
+              "next_cursor": "2026-08-11T20:14:00+01:00|cs2-20260811-201400",
+              "sessions": [
+                {
+                  "clips": [
+                    {
+                      "clip_id": 3,
+                      "created_at": "2026-08-11T21:02:00+01:00",
+                      "duration_seconds": 30.0,
+                      "favourite": true,
+                      "missing_since": "2026-08-12T09:00:00+01:00",
+                      "path": "D:\\clips\\ace-on-mirage.mkv",
+                      "size_bytes": 48120091,
+                      "tags": [
+                        "clutch"
+                      ],
+                      "title": "Ace on Mirage"
+                    }
+                  ],
+                  "end_reason": "game-exited",
+                  "ended_at": "2026-08-11T22:03:00+01:00",
+                  "favourite": true,
+                  "game_id": "cs2",
+                  "game_name": "Counter-Strike 2",
+                  "recordings": [
+                    {
+                      "duration_seconds": 6540.0,
+                      "end_reason": "target-lost",
+                      "ended_at": "2026-08-11T22:03:00+01:00",
+                      "favourite": false,
+                      "height": 1440,
+                      "missing_since": "2026-08-12T09:00:00+01:00",
+                      "outcome": "recorded",
+                      "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+                      "recording_id": 12,
+                      "session_index": 1,
+                      "size_bytes": 9812009112,
+                      "started_at": "2026-08-11T20:14:00+01:00",
+                      "tags": [
+                        "clutch"
+                      ],
+                      "width": 2560
+                    }
+                  ],
+                  "session_id": "cs2-20260811-201400",
+                  "started_at": "2026-08-11T20:14:00+01:00"
+                }
+              ]
+            },
+            "reply": "library_sessions"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_sessions.more"
+    },
+    {
+      "name": "a library with nothing in it, which is not a library that could not be read",
+      "direction": "server",
+      "frame": {
+        "id": 9,
+        "outcome": {
+          "ok": {
+            "page": {
+              "sessions": []
+            },
+            "reply": "library_sessions"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_sessions"
+    },
+    {
+      "name": "a recording whose file has gone",
+      "direction": "server",
+      "frame": {
+        "id": 9,
+        "outcome": {
+          "ok": {
+            "page": {
+              "sessions": [
+                {
+                  "clips": [],
+                  "end_reason": "game-exited",
+                  "ended_at": "2026-08-11T22:03:00+01:00",
+                  "favourite": true,
+                  "game_id": "cs2",
+                  "game_name": "Counter-Strike 2",
+                  "recordings": [
+                    {
+                      "duration_seconds": 6540.0,
+                      "end_reason": "target-lost",
+                      "ended_at": "2026-08-11T22:03:00+01:00",
+                      "favourite": false,
+                      "height": 1440,
+                      "missing_since": "2026-08-12T09:00:00+01:00",
+                      "outcome": "recorded",
+                      "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+                      "recording_id": 12,
+                      "session_index": 1,
+                      "size_bytes": 9812009112,
+                      "started_at": "2026-08-11T20:14:00+01:00",
+                      "tags": [
+                        "clutch"
+                      ],
+                      "width": 2560
+                    }
+                  ],
+                  "session_id": "cs2-20260811-201400",
+                  "started_at": "2026-08-11T20:14:00+01:00"
+                }
+              ]
+            },
+            "reply": "library_sessions"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_sessions"
+    },
+    {
+      "name": "what the library holds per game",
+      "direction": "server",
+      "frame": {
+        "id": 10,
+        "outcome": {
+          "ok": {
+            "games": [
+              {
+                "bytes": 411204889112,
+                "clips": 31,
+                "favourites": 12,
+                "first_seen_at": "2026-01-04T19:30:00+00:00",
+                "game_id": "cs2",
+                "last_played_at": "2026-08-11T20:14:00+01:00",
+                "missing": 3,
+                "name": "Counter-Strike 2",
+                "recordings": 265,
+                "sessions": 214
+              },
+              {
+                "bytes": 1204889,
+                "clips": 0,
+                "favourites": 0,
+                "missing": 0,
+                "recordings": 2,
+                "sessions": 2
+              }
+            ],
+            "reply": "library_games"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_games"
+    },
+    {
+      "name": "a library that could not be read",
+      "direction": "server",
+      "frame": {
+        "id": 9,
+        "outcome": {
+          "error": {
+            "code": "library_unavailable",
+            "message": "the recording library could not be opened: the database is from a newer build of Clipped"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.library_unavailable"
+    },
+    {
+      "name": "a search that does not parse",
+      "direction": "server",
+      "frame": {
+        "id": 9,
+        "outcome": {
+          "error": {
+            "code": "invalid_parameters",
+            "message": "`library_sessions` was not given a usable query: expected a term after `OR` at position 8"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.invalid_parameters"
     },
     {
       "name": "a shutdown accepted, with nothing being recorded",

@@ -126,42 +126,69 @@ sessions, recently clipped and favourites, and Library as a Sessions / Clips /
 Highlights tab strip over a grid of thumbnails, with a filter row and a search
 field above it.
 
-**None of that is drawn, because none of it can be read.** The same shape of
-answer the Games screen gives, and for a sibling reason.
+**The sessions and the per-game figures are drawn. The clips, the highlights,
+the favourites and the thumbnails are not**, and the reason has changed: it is
+no longer that nothing can be read.
 
-### What the window can and cannot see of the library
+### How the window sees the library
 
 `clipped-library` builds the index — games, sessions, recordings, clips,
 favourites, `game_summaries` and `missing_since` — by reconciling the session
-sidecars against the disk ([library.md](library.md)). It does that **inside the
-recorder's process**, and there are three separate reasons none of it reaches
-this window:
+sidecars against the disk ([library.md](library.md)), **inside the recorder's
+process**. Two of the three ways into it are still shut, and always will be:
 
-| The way in | Why it is shut |
+| The way in | Where it stands |
 | --- | --- |
-| A protocol command | There is none. `crates/ipc`'s `Command` is `ping`, `get_status`, `start_recording`, `stop_recording`, `add_bookmark` and `shutdown`, plus three refused ones. None mentions a session, a clip or a count |
-| Reading `library.db` from the window | `capabilities/default.json` grants three `core:` permissions and no file-system access, and Tauri denies what is not listed |
-| Linking `clipped-library` into the Tauri host | `tests/integration/tests/workspace_layering.rs` permits it exactly one member of the workspace, `clipped-ipc` — which is what keeps the recording engine out of the window's process ([ADR 0002](adr/0002-separate-recorder-process.md)) |
+| Reading `library.db` from the window | Shut. `capabilities/default.json` grants three `core:` permissions and no file-system access, and Tauri denies what is not listed |
+| Linking `clipped-library` into the Tauri host | Shut. `tests/integration/tests/workspace_layering.rs` permits it exactly one member of the workspace, `clipped-ipc` — which is what keeps the recording engine out of the window's process ([ADR 0002](adr/0002-separate-recorder-process.md)) |
+| A protocol command | **Open.** [Issue #301](https://github.com/wildware-uk/clipped/issues/301) added `library_sessions` and `library_games`; the recorder reads the index and answers, and `library.ts` asks through a Tauri command in front of each ([ipc.md](ipc.md)) |
 
-[Issue #301](https://github.com/wildware-uk/clipped/issues/301) is that gap,
-raised by #60. It is deliberately not
-[#245](https://github.com/wildware-uk/clipped/issues/245), which is the game
-*catalogue*, nor [#241](https://github.com/wildware-uk/clipped/issues/241),
-which is the *live* session; this is the record of what has already been
-recorded. `docs/library.md` also records that **nothing calls the index at all**
-yet, which is the other half of the same work.
+So the round trip is window → Tauri command → control protocol → recorder →
+`library.db`, and the window links nothing but the protocol. Which is the same
+shape of answer the Games screen gives, and deliberately not
+[#245](https://github.com/wildware-uk/clipped/issues/245) — the game
+*catalogue* — nor [#241](https://github.com/wildware-uk/clipped/issues/241), the
+*live* session; this is the record of what has already been recorded.
 
-So neither screen draws a session list, a clip grid, a count or a search field.
-An empty Sessions tab is indistinguishable from a machine that has recorded
-nothing; "0 clips" is a figure nobody measured; a search box that cannot search
-is the control AGENTS.md section 27 forbids. What each screen draws instead is
-what it owes, one row per part, naming the issue — the table both share with
-Games, in `WaitingOn.tsx`.
+### Three answers, never two
 
-### The one real thing on Home
+Every library read ends in one of three states, and both screens draw all three
+differently: **read** — holding what the index says, which may legitimately be
+nothing; **unread** — holding why; and **reading**, while the round trip is in
+flight.
 
-**What is being recorded right now, and into which file.** That comes from the
-recorder link, changes when the link does, and is the whole of what Home claims.
+Collapsing the first two is the failure this is shaped to prevent. "You have not
+recorded anything" over a database that is locked, corrupt, from a newer build
+or on a drive that is not plugged in is the fabricated state AGENTS.md section
+27 forbids, and it is indistinguishable from the truth unless the protocol keeps
+them apart — which it does: an empty library is a successful `library_sessions`
+carrying no sessions, and an unreadable one is a `library_unavailable` refusal
+that says why. `LibraryRead<T>` in `library.ts` therefore has no "empty" case at
+all; empty is a successful read of an empty page.
+
+The window tells apart three more things the recorder cannot: a question that
+never reached a recorder (`recorder_unreachable`), a build with none configured
+(`no_recorder_configured`), and a recorder older than this window, which refuses
+the command with `unknown_command` and is told to restart. Those codes are
+outside the protocol's own vocabulary on purpose, so that "the recorder said no"
+and "there was no recorder" cannot be confused.
+
+**One thing the index knows is still not on a real machine's screen**: nothing
+calls `reconcile`, so the database is empty until something does
+([#385](https://github.com/wildware-uk/clipped/issues/385)). The window reports
+that honestly — it says the library was read and holds nothing — which is true
+of the database and, until #385, false of the disk.
+
+What each screen still owes is a row in `WaitingOn.tsx`, the table both share
+with Games, naming the work that lands it: clips and highlights wait on
+something creating one (#91, #76), favourites on anything being favouritable
+(#58), and thumbnails and waveforms on a transport for bytes rather than rows.
+
+### What is being recorded right now
+
+**What is being recorded, and into which file.** That comes from the recorder
+link rather than from the library, changes when the link does, and is the one
+thing on Home that is not a read of the index.
 `describeRecordingNow` in `recordingNow.ts` has one rendering for each of the
 link's four states and one for "this is not the Clipped window".
 
@@ -192,12 +219,20 @@ be typed into Explorer (AGENTS.md sections 28 and 45).
 [Issue #215](https://github.com/wildware-uk/clipped/issues/215) asks for the
 deck's tab strip and its selectable chips **at the point a screen needs them**,
 so that a component with no consumer is not designed against a guess. **The
-Library screen does not need them yet**: it has nothing to switch between and
-nothing to filter, so a strip over three panels that all say the same thing
-would be exactly the speculative component that issue exists to prevent. They
-belong with the first screen that has three populated lists, which is this one
-once #301 lands. `LibraryScreen.test.tsx` asserts that no `tablist` and no `tab`
-is drawn, so adding one is a decision rather than a drift.
+Library screen still does not need them**: since #301 it has one populated list
+— sessions — and two empty ones, because nothing creates a clip or a highlight
+yet, so a strip over them would still be the speculative component that issue
+exists to prevent. It belongs with the first screen that has three lists worth
+switching between, which is this one once #91 and #76 land.
+`LibraryScreen.test.tsx` asserts that no `tablist` and no `tab` is drawn, so
+adding one is a decision rather than a drift.
+
+The search field is a different case and is drawn, because it now does
+something: the query goes to the recorder, which parses it with the language in
+[search.md](search.md) and answers with the sittings it selects. It runs on
+submission rather than on every keystroke — `game:` on the way to `game:cs2` is
+a parse error nobody asked about — and a query the recorder will not parse is
+reported with what was wrong with it rather than as an empty result set.
 
 ## The Games screen
 
@@ -219,7 +254,7 @@ its own Tauri host through two commands, `recorder_link_state` and
 | --- | --- | --- |
 | The list of games | `clipped-game-detection`'s catalogue: the compiled-in `games.toml` plus the user's overlay ([game-detection.md](game-detection.md)) | No protocol command lists it, and the window has no file-system permission to read it — `capabilities/default.json` grants three `core:` permissions and nothing else. [Issue #245](https://github.com/wildware-uk/clipped/issues/245) |
 | Add an executable, rename, exclude, disable capture | The same overlay, written | Same. [#45](https://github.com/wildware-uk/clipped/issues/45) owns the behaviour, #245 the way to reach it |
-| Sessions, clips, favourites, storage per game | The library index | [#55](https://github.com/wildware-uk/clipped/issues/55). The session sidecars `watch` writes ([sessions.md](sessions.md)) are the only record today, and nothing can read one from here |
+| Sessions, clips, favourites, storage per game | The library index | Reachable since [#301](https://github.com/wildware-uk/clipped/issues/301): `library_games` carries exactly these figures and Home draws them. Bringing them onto *this* screen, beside the catalogue entry each belongs to, needs the catalogue itself, which is #245 |
 | Which game is being recorded now | A `status` that can name a game | [#241](https://github.com/wildware-uk/clipped/issues/241): the protocol describes a recording by its capture target, `process 4242` |
 
 Drawing the deck's table with nothing in it was the tempting alternative and is
@@ -742,7 +777,11 @@ else.
 
 That third answer is the careful one. It reads **"Not known to this window"** and
 explains that the library index is where a recording would be looked up and that
-nothing here can read it ([#305](https://github.com/wildware-uk/clipped/issues/305)).
+this screen has not looked in it
+([#52](https://github.com/wildware-uk/clipped/issues/52)). Since #301 the index
+*can* be read — the Library screen does — but the identifier in the address bar
+is the recorder's `recording_id` for a live recording and the index keys
+recordings by its own integer, so reconciling the two is work of its own.
 It does **not** say the recording is missing. This window has not been to the
 disk and cannot; `missing_since` in the library index is the only thing that has
 looked ([#56](https://github.com/wildware-uk/clipped/issues/56)), and reporting a
@@ -769,14 +808,16 @@ the file it left now carries a link to that recording's screen.
 That link is a destination and not a control: it does not claim the recording
 will play, and the screen it leads to says so in its first paragraph. It is the
 same bargain the tray's Open Library keeps — "a thing that happens, rather than a
-control that does nothing". Everything else waits on the library index (#305);
-Home and Library (#60) are what will open this screen properly.
+control that does nothing". Everything else waits on this screen looking a
+recording up in the library index (#52); Home and Library (#60), which now list
+what the index holds, are what will open this screen properly.
 
 ### What is not built
 
 Every row of the screen's second table, each naming the work that supplies it:
 playing anything at all and choosing a track (#304); opening a recording somebody
-picked, and saying a file has gone (#305); a poster frame, which is the thing
+picked, and saying a file has gone (#52 — the read that carries both landed with
+#301, and this screen does not yet use it); a poster frame, which is the thing
 [#57](https://github.com/wildware-uk/clipped/issues/57) has been waiting for —
 thumbnails are generated, cached and tested, and *nothing has ever drawn one*, so
 on a real machine none is produced; a waveform
@@ -1826,9 +1867,15 @@ are what is missing rather than Game / Recording / Last played.
 `HomeScreen.test.tsx` and `LibraryScreen.test.tsx` are built the same way, and
 add one check the other screens do not need: **no figure that nobody measured**.
 `test/counts.ts` matches a number against the nouns SPEC.md sections 17, 29 and
-30 count — sessions, recordings, clips, favourites, highlights, games, bytes —
-and both screens are held to drawing none of them, zero included, because
-nothing in this build has counted anything.
+30 count — sessions, recordings, clips, favourites, highlights, games, bytes.
+
+Since #301 that check has a condition on it, and the condition is the whole
+point: Home is held to drawing **no** such figure *while the library has not
+been read* — the stub answers neither library command — and a second case reads
+a library and holds the figures on the screen to being the index's own. Both
+halves are needed. The first alone would pass on a screen that can never show
+anything; the second alone would pass on a screen that invents while a read is
+in flight or has failed.
 
 That check is run over each **text node** rather than over the screen's
 `textContent`, and the reason is worth knowing before writing another one like

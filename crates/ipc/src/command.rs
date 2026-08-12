@@ -40,6 +40,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, ProtocolError};
+use crate::library::{LibraryGame, LibrarySessionPage, LibrarySessions};
 use crate::message::Request;
 use crate::status::{BookmarkSummary, RecorderStatus, RecordingSummary, ScreenshotSummary};
 
@@ -58,6 +59,11 @@ pub enum Command {
     AddBookmark(AddBookmark),
     /// Save a still image of what is being captured.
     TakeScreenshot(TakeScreenshot),
+    /// Read a page of the recording library: the sittings and what they
+    /// produced.
+    LibrarySessions(LibrarySessions),
+    /// Read what the library holds per game (SPEC.md section 17).
+    LibraryGames,
     /// Stop serving, finish anything still being recorded, and exit.
     ///
     /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
@@ -85,6 +91,8 @@ impl Command {
             Self::StopRecording(_) => "stop_recording",
             Self::AddBookmark(_) => "add_bookmark",
             Self::TakeScreenshot(_) => "take_screenshot",
+            Self::LibrarySessions(_) => "library_sessions",
+            Self::LibraryGames => "library_games",
             Self::Shutdown(_) => "shutdown",
             Self::Unbuilt(command) => command.name(),
         }
@@ -106,6 +114,8 @@ impl Command {
             "stop_recording" => Ok(Self::StopRecording(parse_params(request)?)),
             "add_bookmark" => Ok(Self::AddBookmark(parse_params(request)?)),
             "take_screenshot" => Ok(Self::TakeScreenshot(parse_params(request)?)),
+            "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
+            "library_games" => Ok(Self::LibraryGames),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => match UnbuiltCommand::from_name(name) {
                 Some(command) => Ok(Self::Unbuilt(command)),
@@ -128,7 +138,8 @@ impl Command {
     /// these from user input.
     pub fn to_request(&self, id: u64) -> Result<Request, ProtocolError> {
         let params = match self {
-            Self::Ping | Self::GetStatus => Ok(serde_json::Value::Null),
+            Self::Ping | Self::GetStatus | Self::LibraryGames => Ok(serde_json::Value::Null),
+            Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
@@ -466,6 +477,22 @@ pub enum Reply {
         /// The file, and what is in it.
         screenshot: ScreenshotSummary,
     },
+    /// One page of the recording library.
+    LibrarySessions {
+        /// The sittings, newest first, and where the next page starts.
+        ///
+        /// An empty page is this reply, not a refusal: a library that could not
+        /// be read is
+        /// [`ErrorCode::LibraryUnavailable`](crate::ErrorCode::LibraryUnavailable)
+        /// and says why.
+        page: LibrarySessionPage,
+    },
+    /// What the library holds per game.
+    LibraryGames {
+        /// One row per game, and one for the sittings nothing was attributed
+        /// to.
+        games: Vec<LibraryGame>,
+    },
     /// The recorder has stopped listening and is winding up.
     ///
     /// Sent **before** the recorder exits, because a reply written after the
@@ -748,6 +775,76 @@ mod tests {
             shutdown,
             "the parameter has to survive the wire, or every shutdown becomes the refusing one"
         );
+    }
+
+    #[test]
+    fn a_library_listing_that_asks_for_nothing_gets_the_recorders_own_page() {
+        // What a window sends when it opens. Every field absent has to mean
+        // "you decide", including the limit: a page size defaulted here would
+        // be a second place deciding what one frame can carry.
+        for params in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"invented_later": true}),
+        ] {
+            assert_eq!(
+                Command::from_request(&request("library_sessions", params.clone()))
+                    .expect("it parses"),
+                Command::LibrarySessions(LibrarySessions::default()),
+                "a listing carrying {params} must ask for nothing in particular"
+            );
+        }
+    }
+
+    #[test]
+    fn every_library_listing_parameter_survives_the_request_it_is_carried_in() {
+        // Distinct values on purpose: a round trip whose fields could be
+        // confused with one another passes while the code swaps two of them —
+        // and a `query` that arrived as the cursor would silently search for
+        // nothing.
+        let listing = Command::LibrarySessions(LibrarySessions {
+            limit: Some(25),
+            after: Some("2026-08-11T20:14:00+01:00|cs2-20260811-201400".to_owned()),
+            query: Some("game:cs2 tag:clutch".to_owned()),
+        });
+
+        let request = listing.to_request(4).expect("it can be represented");
+        assert_eq!(request.command, "library_sessions");
+
+        let json = serde_json::to_string(&request).expect("it serialises");
+        let back: Request = serde_json::from_str(&json).expect("and deserialises");
+        let Command::LibrarySessions(parsed) = Command::from_request(&back).expect("it parses")
+        else {
+            panic!("a library_sessions request parsed as something else");
+        };
+
+        assert_eq!(parsed.limit, Some(25));
+        assert_eq!(
+            parsed.after.as_deref(),
+            Some("2026-08-11T20:14:00+01:00|cs2-20260811-201400")
+        );
+        assert_eq!(parsed.query.as_deref(), Some("game:cs2 tag:clutch"));
+    }
+
+    #[test]
+    fn reading_the_library_is_a_command_this_build_performs_rather_than_one_it_refuses() {
+        // The mistake this guards against is the one `add_bookmark` records
+        // above: a command left in `UNBUILT_COMMANDS` after its subsystem
+        // landed refuses every request with a plausible sentence about a
+        // milestone, and nobody questions it.
+        for name in ["library_sessions", "library_games"] {
+            assert_eq!(UnbuiltCommand::from_name(name), None);
+            assert!(
+                !UNBUILT_COMMANDS
+                    .iter()
+                    .any(|unbuilt| unbuilt.name() == name),
+                "{name} is still listed as unbuilt: {UNBUILT_COMMANDS:?}"
+            );
+            assert!(
+                Command::from_request(&request(name, serde_json::Value::Null)).is_ok(),
+                "{name} should parse"
+            );
+        }
     }
 
     #[test]

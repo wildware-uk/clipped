@@ -116,6 +116,7 @@ pub mod client;
 pub mod command;
 pub mod error;
 pub mod frame;
+pub mod library;
 pub mod message;
 pub mod schema;
 pub mod server;
@@ -130,6 +131,9 @@ pub use command::{
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
+pub use library::{
+    LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
+};
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,

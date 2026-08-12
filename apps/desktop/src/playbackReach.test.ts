@@ -85,8 +85,8 @@ describe('what the window may load', () => {
 
   it('names no scheme anywhere in the policy that could carry a local file', () => {
     // Stated as a property rather than as a list of directives, so that a
-    // scheme added to `img-src` for a thumbnail - which is issue #305's first
-    // consumer - is caught here too. A poster frame and a video stream reach
+    // scheme added to `img-src` for a thumbnail - which is the first thing
+    // that would need one - is caught here too. A poster frame and a video stream reach
     // the window the same way.
     const policy = security()['csp'] as string;
 

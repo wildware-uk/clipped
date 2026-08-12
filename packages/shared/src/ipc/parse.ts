@@ -41,11 +41,17 @@
 
 import type {
   ActiveRecording,
+  BookmarkSummary,
   ClientMessage,
   ErrorDetail,
   Hello,
   JsonObject,
   JsonValue,
+  LibraryClip,
+  LibraryGame,
+  LibraryRecording,
+  LibrarySession,
+  LibrarySessionPage,
   ProtocolError,
   RecorderEvent,
   RecorderRequest,
@@ -53,6 +59,7 @@ import type {
   RecorderStatus,
   RecordingSummary,
   Reply,
+  ScreenshotSummary,
   ServerMessage,
   Welcome,
 } from './protocol';
@@ -137,6 +144,38 @@ function optionalNumberField(source: JsonObject, name: string, what: string): nu
     return undefined;
   }
   return typeof value === 'number' ? value : unreadable(`${what}'s \`${name}\` is not a number`);
+}
+
+function booleanField(source: JsonObject, name: string, what: string): boolean {
+  const value = source[name];
+  return typeof value === 'boolean' ? value : unreadable(`${what} has no \`${name}\` boolean`);
+}
+
+function optionalStringField(source: JsonObject, name: string, what: string): string | undefined {
+  const value = source[name];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return typeof value === 'string' ? value : unreadable(`${what}'s \`${name}\` is not a string`);
+}
+
+/**
+ * A list of objects, each read by the same reader.
+ *
+ * A member that cannot be read fails the whole list rather than being dropped:
+ * a library page missing the one recording this build could not parse would be
+ * a page that looks complete and is not, which is worse than a refusal the user
+ * can report.
+ */
+function arrayField<T>(
+  value: JsonValue | undefined,
+  what: string,
+  read: (entry: JsonValue) => T,
+): readonly T[] {
+  if (!Array.isArray(value)) {
+    unreadable(`${what} has no array where one was expected`);
+  }
+  return value.map(read);
 }
 
 function stringArrayField(source: JsonObject, name: string, what: string): readonly string[] {
@@ -293,6 +332,17 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'recording_stopped':
       return { reply: 'recording_stopped', summary: readSummary(reply['summary']) };
+    case 'bookmark_added':
+      return { reply: 'bookmark_added', bookmark: readBookmark(reply['bookmark']) };
+    case 'screenshot_taken':
+      return { reply: 'screenshot_taken', screenshot: readScreenshot(reply['screenshot']) };
+    case 'library_sessions':
+      return { reply: 'library_sessions', page: readSessionPage(reply['page']) };
+    case 'library_games':
+      return {
+        reply: 'library_games',
+        games: arrayField(reply['games'], 'a games list', readLibraryGame),
+      };
     case 'shutting_down': {
       const finalising = reply['finalising'];
       return {
@@ -359,6 +409,145 @@ function readSummary(value: JsonValue | undefined): RecordingSummary {
     codec: stringField(summary, 'codec', what),
     width: numberField(summary, 'width', what),
     height: numberField(summary, 'height', what),
+  };
+}
+
+function readBookmark(value: JsonValue | undefined): BookmarkSummary {
+  const bookmark = object(value, 'a bookmark');
+  const what = 'a bookmark';
+  const label = optionalStringField(bookmark, 'label', what);
+  const colour = optionalStringField(bookmark, 'colour', what);
+  const duration = optionalNumberField(bookmark, 'duration_seconds', what);
+  return {
+    recording_id: stringField(bookmark, 'recording_id', what),
+    at_seconds: numberField(bookmark, 'at_seconds', what),
+    pressed_at_seconds: numberField(bookmark, 'pressed_at_seconds', what),
+    lead_seconds: numberField(bookmark, 'lead_seconds', what),
+    ...(label === undefined ? {} : { label }),
+    ...(colour === undefined ? {} : { colour }),
+    ...(duration === undefined ? {} : { duration_seconds: duration }),
+    bookmarks_file: stringField(bookmark, 'bookmarks_file', what),
+    bookmarks_in_recording: numberField(bookmark, 'bookmarks_in_recording', what),
+  };
+}
+
+function readScreenshot(value: JsonValue | undefined): ScreenshotSummary {
+  const screenshot = object(value, 'a screenshot');
+  const what = 'a screenshot';
+  const recording = optionalStringField(screenshot, 'recording_id', what);
+  const at = optionalNumberField(screenshot, 'at_seconds', what);
+  return {
+    path: stringField(screenshot, 'path', what),
+    format: stringField(screenshot, 'format', what),
+    width: numberField(screenshot, 'width', what),
+    height: numberField(screenshot, 'height', what),
+    bytes: numberField(screenshot, 'bytes', what),
+    ...(recording === undefined ? {} : { recording_id: recording }),
+    ...(at === undefined ? {} : { at_seconds: at }),
+  };
+}
+
+function readSessionPage(value: JsonValue | undefined): LibrarySessionPage {
+  const page = object(value, 'a library page');
+  const cursor = optionalStringField(page, 'next_cursor', 'a library page');
+  return {
+    sessions: arrayField(page['sessions'], 'a library page', readLibrarySession),
+    // Absent is the end of the library, which is an answer rather than a gap.
+    ...(cursor === undefined ? {} : { next_cursor: cursor }),
+  };
+}
+
+function readLibrarySession(value: JsonValue | undefined): LibrarySession {
+  const session = object(value, 'a session');
+  const what = 'a session';
+  const gameId = optionalStringField(session, 'game_id', what);
+  const gameName = optionalStringField(session, 'game_name', what);
+  const endedAt = optionalStringField(session, 'ended_at', what);
+  const endReason = optionalStringField(session, 'end_reason', what);
+  return {
+    session_id: stringField(session, 'session_id', what),
+    ...(gameId === undefined ? {} : { game_id: gameId }),
+    ...(gameName === undefined ? {} : { game_name: gameName }),
+    started_at: stringField(session, 'started_at', what),
+    ...(endedAt === undefined ? {} : { ended_at: endedAt }),
+    ...(endReason === undefined ? {} : { end_reason: endReason }),
+    favourite: booleanField(session, 'favourite', what),
+    recordings: arrayField(session['recordings'], what, readLibraryRecording),
+    clips: arrayField(session['clips'], what, readLibraryClip),
+  };
+}
+
+function readLibraryRecording(value: JsonValue | undefined): LibraryRecording {
+  const recording = object(value, 'a recording');
+  const what = 'a recording';
+  const endedAt = optionalStringField(recording, 'ended_at', what);
+  const outcome = optionalStringField(recording, 'outcome', what);
+  const endReason = optionalStringField(recording, 'end_reason', what);
+  const duration = optionalNumberField(recording, 'duration_seconds', what);
+  const width = optionalNumberField(recording, 'width', what);
+  const height = optionalNumberField(recording, 'height', what);
+  const size = optionalNumberField(recording, 'size_bytes', what);
+  const missing = optionalStringField(recording, 'missing_since', what);
+  return {
+    recording_id: numberField(recording, 'recording_id', what),
+    session_index: numberField(recording, 'session_index', what),
+    path: stringField(recording, 'path', what),
+    started_at: stringField(recording, 'started_at', what),
+    ...(endedAt === undefined ? {} : { ended_at: endedAt }),
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(endReason === undefined ? {} : { end_reason: endReason }),
+    ...(duration === undefined ? {} : { duration_seconds: duration }),
+    ...(width === undefined ? {} : { width }),
+    ...(height === undefined ? {} : { height }),
+    ...(size === undefined ? {} : { size_bytes: size }),
+    // The field the whole read exists for: absent means the file is there, and
+    // present means the screen has to say it has gone.
+    ...(missing === undefined ? {} : { missing_since: missing }),
+    favourite: booleanField(recording, 'favourite', what),
+    tags: stringArrayField(recording, 'tags', what),
+  };
+}
+
+function readLibraryClip(value: JsonValue | undefined): LibraryClip {
+  const clip = object(value, 'a clip');
+  const what = 'a clip';
+  const title = optionalStringField(clip, 'title', what);
+  const duration = optionalNumberField(clip, 'duration_seconds', what);
+  const size = optionalNumberField(clip, 'size_bytes', what);
+  const missing = optionalStringField(clip, 'missing_since', what);
+  return {
+    clip_id: numberField(clip, 'clip_id', what),
+    path: stringField(clip, 'path', what),
+    ...(title === undefined ? {} : { title }),
+    created_at: stringField(clip, 'created_at', what),
+    ...(duration === undefined ? {} : { duration_seconds: duration }),
+    ...(size === undefined ? {} : { size_bytes: size }),
+    ...(missing === undefined ? {} : { missing_since: missing }),
+    favourite: booleanField(clip, 'favourite', what),
+    tags: stringArrayField(clip, 'tags', what),
+  };
+}
+
+function readLibraryGame(value: JsonValue | undefined): LibraryGame {
+  const game = object(value, 'a game');
+  const what = 'a game';
+  const id = optionalStringField(game, 'game_id', what);
+  const name = optionalStringField(game, 'name', what);
+  const firstSeen = optionalStringField(game, 'first_seen_at', what);
+  const lastPlayed = optionalStringField(game, 'last_played_at', what);
+  return {
+    // Both absent is the row for sittings the catalogue would not attribute,
+    // and it is a row rather than a fault.
+    ...(id === undefined ? {} : { game_id: id }),
+    ...(name === undefined ? {} : { name }),
+    ...(firstSeen === undefined ? {} : { first_seen_at: firstSeen }),
+    ...(lastPlayed === undefined ? {} : { last_played_at: lastPlayed }),
+    sessions: numberField(game, 'sessions', what),
+    recordings: numberField(game, 'recordings', what),
+    clips: numberField(game, 'clips', what),
+    favourites: numberField(game, 'favourites', what),
+    bytes: numberField(game, 'bytes', what),
+    missing: numberField(game, 'missing', what),
   };
 }
 

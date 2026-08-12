@@ -68,6 +68,9 @@ use serde_json::{json, Value};
 use crate::command::{Command, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand};
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
+use crate::library::{
+    LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
+};
 use crate::message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
@@ -440,6 +443,30 @@ fn structures() -> BTreeMap<String, Structure> {
             "active_recording".to_owned(),
             structure_of(&exemplar_active_recording(), &[]),
         ),
+        (
+            "library_sessions".to_owned(),
+            structure_of(&exemplar_library_sessions(), &[]),
+        ),
+        (
+            "library_session_page".to_owned(),
+            structure_of(&exemplar_library_page(), &[]),
+        ),
+        (
+            "library_session".to_owned(),
+            structure_of(&exemplar_library_session(), &[]),
+        ),
+        (
+            "library_recording".to_owned(),
+            structure_of(&exemplar_library_recording(), &[]),
+        ),
+        (
+            "library_clip".to_owned(),
+            structure_of(&exemplar_library_clip(), &[]),
+        ),
+        (
+            "library_game".to_owned(),
+            structure_of(&exemplar_library_game(), &[]),
+        ),
     ]);
 
     for outcome in every_outcome() {
@@ -488,8 +515,12 @@ fn commands() -> Vec<CommandSchema> {
                 Command::StopRecording(_) => Some("stop_recording".to_owned()),
                 Command::AddBookmark(_) => Some("add_bookmark".to_owned()),
                 Command::TakeScreenshot(_) => Some("take_screenshot".to_owned()),
+                Command::LibrarySessions(_) => Some("library_sessions".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
-                Command::Ping | Command::GetStatus | Command::Unbuilt(_) => None,
+                Command::Ping
+                | Command::GetStatus
+                | Command::LibraryGames
+                | Command::Unbuilt(_) => None,
             },
             reply: match command {
                 Command::Ping => Some("reply.pong".to_owned()),
@@ -498,6 +529,8 @@ fn commands() -> Vec<CommandSchema> {
                 Command::StopRecording(_) => Some("reply.recording_stopped".to_owned()),
                 Command::AddBookmark(_) => Some("reply.bookmark_added".to_owned()),
                 Command::TakeScreenshot(_) => Some("reply.screenshot_taken".to_owned()),
+                Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
+                Command::LibraryGames => Some("reply.library_games".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
                 Command::Unbuilt(_) => None,
             },
@@ -558,6 +591,23 @@ fn samples() -> Vec<Sample> {
                 command: "start_recording".to_owned(),
                 params: serde_json::to_value(exemplar_start_recording())
                     .expect("the start options serialise"),
+            }),
+        ),
+        (
+            "asking for a page of the library",
+            ClientMessage::Request(Request {
+                id: 9,
+                command: "library_sessions".to_owned(),
+                params: serde_json::to_value(exemplar_library_sessions())
+                    .expect("the listing options serialise"),
+            }),
+        ),
+        (
+            "asking what the library holds per game",
+            ClientMessage::Request(Request {
+                id: 10,
+                command: "library_games".to_owned(),
+                params: Value::Null,
             }),
         ),
         (
@@ -660,6 +710,109 @@ fn samples() -> Vec<Sample> {
                         ..exemplar_summary()
                     },
                 }),
+            }),
+        ),
+        (
+            "a moment marked in the recording that is running",
+            ServerMessage::Response(Response {
+                id: 5,
+                outcome: Outcome::Ok(Reply::BookmarkAdded {
+                    bookmark: exemplar_bookmark(),
+                }),
+            }),
+        ),
+        (
+            "a screenshot written to disk",
+            ServerMessage::Response(Response {
+                id: 6,
+                outcome: Outcome::Ok(Reply::ScreenshotTaken {
+                    screenshot: exemplar_screenshot(),
+                }),
+            }),
+        ),
+        (
+            "a page of the library, with more after it",
+            ServerMessage::Response(Response {
+                id: 9,
+                outcome: Outcome::Ok(Reply::LibrarySessions {
+                    page: exemplar_library_page(),
+                }),
+            }),
+        ),
+        (
+            "a library with nothing in it, which is not a library that could not be read",
+            ServerMessage::Response(Response {
+                id: 9,
+                outcome: Outcome::Ok(Reply::LibrarySessions {
+                    page: LibrarySessionPage::default(),
+                }),
+            }),
+        ),
+        (
+            "a recording whose file has gone",
+            ServerMessage::Response(Response {
+                id: 9,
+                outcome: Outcome::Ok(Reply::LibrarySessions {
+                    page: LibrarySessionPage {
+                        sessions: vec![LibrarySession {
+                            recordings: vec![LibraryRecording {
+                                missing_since: Some("2026-08-12T09:00:00+01:00".to_owned()),
+                                ..exemplar_library_recording()
+                            }],
+                            clips: Vec::new(),
+                            ..exemplar_library_session()
+                        }],
+                        next_cursor: None,
+                    },
+                }),
+            }),
+        ),
+        (
+            "what the library holds per game",
+            ServerMessage::Response(Response {
+                id: 10,
+                outcome: Outcome::Ok(Reply::LibraryGames {
+                    games: vec![
+                        exemplar_library_game(),
+                        // The sittings the catalogue would not attribute. It has
+                        // no identifier and no name, and a mirror that required
+                        // either would fail to read it.
+                        LibraryGame {
+                            game_id: None,
+                            name: None,
+                            first_seen_at: None,
+                            last_played_at: None,
+                            sessions: 2,
+                            recordings: 2,
+                            clips: 0,
+                            favourites: 0,
+                            bytes: 1_204_889,
+                            missing: 0,
+                        },
+                    ],
+                }),
+            }),
+        ),
+        (
+            "a library that could not be read",
+            ServerMessage::Response(Response {
+                id: 9,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::LibraryUnavailable,
+                    "the recording library could not be opened: the database is from a newer \
+                     build of Clipped",
+                )),
+            }),
+        ),
+        (
+            "a search that does not parse",
+            ServerMessage::Response(Response {
+                id: 9,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::InvalidParameters,
+                    "`library_sessions` was not given a usable query: expected a term after `OR` \
+                     at position 8",
+                )),
             }),
         ),
         (
@@ -907,6 +1060,16 @@ fn reply_discriminant(reply: &Reply) -> String {
         }
         Reply::BookmarkAdded { .. } => "bookmark_added".to_owned(),
         Reply::ScreenshotTaken { .. } => "screenshot_taken".to_owned(),
+        // Whether the page ends the library is part of the path, for the reason
+        // `shutting_down`'s finalising is: a mirror that dropped the cursor
+        // would otherwise reach the same discriminant for a page that continues
+        // and a page that does not, and paging is the whole of what this reply
+        // is for.
+        Reply::LibrarySessions { page } => match &page.next_cursor {
+            None => "library_sessions".to_owned(),
+            Some(_) => "library_sessions.more".to_owned(),
+        },
+        Reply::LibraryGames { .. } => "library_games".to_owned(),
         // Whether a recording is being finished is the whole of what this reply
         // says, so it is part of the path: a mirror that dropped the field would
         // otherwise reach the same discriminant either way.
@@ -1168,6 +1331,94 @@ fn exemplar_screenshot() -> crate::status::ScreenshotSummary {
     }
 }
 
+/// Every `library_sessions` parameter at once.
+fn exemplar_library_sessions() -> LibrarySessions {
+    LibrarySessions {
+        limit: Some(25),
+        after: Some("2026-08-11T20:14:00+01:00|cs2-20260811-201400".to_owned()),
+        query: Some("game:cs2 tag:clutch".to_owned()),
+    }
+}
+
+/// A page of the library, with every optional field present so the schema sees
+/// them.
+fn exemplar_library_page() -> LibrarySessionPage {
+    LibrarySessionPage {
+        sessions: vec![exemplar_library_session()],
+        next_cursor: Some("2026-08-11T20:14:00+01:00|cs2-20260811-201400".to_owned()),
+    }
+}
+
+/// A sitting, with every optional field present so the schema sees them.
+fn exemplar_library_session() -> LibrarySession {
+    LibrarySession {
+        session_id: "cs2-20260811-201400".to_owned(),
+        game_id: Some("cs2".to_owned()),
+        game_name: Some("Counter-Strike 2".to_owned()),
+        started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+        ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+        end_reason: Some("game-exited".to_owned()),
+        favourite: true,
+        recordings: vec![exemplar_library_recording()],
+        clips: vec![exemplar_library_clip()],
+    }
+}
+
+/// A recording in the library, with every optional field present.
+///
+/// `missing_since` among them: the field the whole read exists for has to be in
+/// the schema, or a TypeScript mirror could leave it out and the check would
+/// still pass.
+fn exemplar_library_recording() -> LibraryRecording {
+    LibraryRecording {
+        recording_id: 12,
+        session_index: 1,
+        path: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+        ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+        outcome: Some("recorded".to_owned()),
+        end_reason: Some("target-lost".to_owned()),
+        duration_seconds: Some(6_540.0),
+        width: Some(2560),
+        height: Some(1440),
+        size_bytes: Some(9_812_009_112),
+        missing_since: Some("2026-08-12T09:00:00+01:00".to_owned()),
+        favourite: false,
+        tags: vec!["clutch".to_owned()],
+    }
+}
+
+/// A clip in the library, with every optional field present.
+fn exemplar_library_clip() -> LibraryClip {
+    LibraryClip {
+        clip_id: 3,
+        path: r"D:\clips\ace-on-mirage.mkv".to_owned(),
+        title: Some("Ace on Mirage".to_owned()),
+        created_at: "2026-08-11T21:02:00+01:00".to_owned(),
+        duration_seconds: Some(30.0),
+        size_bytes: Some(48_120_091),
+        missing_since: Some("2026-08-12T09:00:00+01:00".to_owned()),
+        favourite: true,
+        tags: vec!["clutch".to_owned()],
+    }
+}
+
+/// What the library holds for one game, with every optional field present.
+fn exemplar_library_game() -> LibraryGame {
+    LibraryGame {
+        game_id: Some("cs2".to_owned()),
+        name: Some("Counter-Strike 2".to_owned()),
+        first_seen_at: Some("2026-01-04T19:30:00+00:00".to_owned()),
+        last_played_at: Some("2026-08-11T20:14:00+01:00".to_owned()),
+        sessions: 214,
+        recordings: 265,
+        clips: 31,
+        favourites: 12,
+        bytes: 411_204_889_112,
+        missing: 3,
+    }
+}
+
 /// A bookmark, with every optional field present so the schema sees them.
 fn exemplar_bookmark() -> crate::status::BookmarkSummary {
     crate::status::BookmarkSummary {
@@ -1282,6 +1533,8 @@ fn every_built_command() -> Vec<Command> {
         Command::StopRecording(StopRecording::default()),
         Command::AddBookmark(exemplar_add_bookmark()),
         Command::TakeScreenshot(exemplar_take_screenshot()),
+        Command::LibrarySessions(exemplar_library_sessions()),
+        Command::LibraryGames,
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -1292,6 +1545,8 @@ fn every_built_command() -> Vec<Command> {
             | Command::StopRecording(_)
             | Command::AddBookmark(_)
             | Command::TakeScreenshot(_)
+            | Command::LibrarySessions(_)
+            | Command::LibraryGames
             | Command::Shutdown(_)
             | Command::Unbuilt(_) => {}
         }
@@ -1314,6 +1569,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::RecordingFailed,
         ErrorCode::TooManyConnections,
         ErrorCode::ShuttingDown,
+        ErrorCode::LibraryUnavailable,
         ErrorCode::Internal,
     ];
     for code in &codes {
@@ -1330,6 +1586,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::RecordingFailed
             | ErrorCode::TooManyConnections
             | ErrorCode::ShuttingDown
+            | ErrorCode::LibraryUnavailable
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
         }
@@ -1435,6 +1692,12 @@ fn every_reply() -> Vec<Reply> {
         Reply::ScreenshotTaken {
             screenshot: exemplar_screenshot(),
         },
+        Reply::LibrarySessions {
+            page: exemplar_library_page(),
+        },
+        Reply::LibraryGames {
+            games: vec![exemplar_library_game()],
+        },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
@@ -1448,6 +1711,8 @@ fn every_reply() -> Vec<Reply> {
             | Reply::RecordingStopped { .. }
             | Reply::BookmarkAdded { .. }
             | Reply::ScreenshotTaken { .. }
+            | Reply::LibrarySessions { .. }
+            | Reply::LibraryGames { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }
@@ -1506,6 +1771,14 @@ mod tests {
             "event.recording_failed",
             "recorder_status.idle",
             "recorder_status.recording",
+            "library_sessions",
+            "library_session_page",
+            "library_session",
+            "library_recording",
+            "library_clip",
+            "library_game",
+            "reply.library_sessions",
+            "reply.library_games",
             "error_detail.unsupported_protocol_version",
             "error_detail.not_implemented",
             "outcome.ok",
@@ -1722,6 +1995,38 @@ mod tests {
             Some("event.unrecognised"),
             "inside an event there is somewhere for it to go, and it is not `idle`"
         );
+    }
+
+    #[test]
+    fn every_reply_the_recorder_can_send_has_a_sample_carrying_it() {
+        // The hole this closes, and it was a real one. `bookmark_added` and
+        // `screenshot_taken` were in every list this schema publishes and in no
+        // sample, so no frame carrying either ever crossed the conformance
+        // check — and `packages/shared/src/ipc/parse.ts` could not read either
+        // of them. Both sides agreed about a reply neither could handle.
+        //
+        // A list is not enough on its own: the samples are what make the
+        // TypeScript actually parse a frame. So a reply added without one fails
+        // here, and the TypeScript half asserts the same thing from its side.
+        let schema = protocol_schema();
+        let discriminants: Vec<&str> = schema
+            .samples
+            .iter()
+            .filter_map(|sample| sample.discriminant.as_deref())
+            .collect();
+
+        for reply in every_reply() {
+            let tag = reply_tag(&reply);
+            let prefix = format!("response.ok.{tag}");
+            assert!(
+                discriminants
+                    .iter()
+                    .any(|discriminant| *discriminant == prefix
+                        || discriminant.starts_with(&format!("{prefix}."))),
+                "`{tag}` is a reply this recorder sends and no sample carries one, so nothing \
+                 checks that the other end can read it"
+            );
+        }
     }
 
     #[test]

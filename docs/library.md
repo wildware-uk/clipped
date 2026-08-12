@@ -5,12 +5,15 @@ This document covers the thing that fills that index and keeps it honest: what
 it reads, what it does when the database and the filesystem disagree, what it
 costs on a large library, and why it cannot get in the way of a recording.
 
-**Status: the mechanism is built and nothing calls it yet.** `clipped-library`'s
-`index` module reconciles a real database against real folders ([#56]), with 51
-tests, 22 of which run it against real files on a real disk. What does not exist
-is a caller: the recorder does not run it when a session ends and the desktop
-application does not run it at start-up, because both of those are outside this
-ticket's remit. Nothing here pretends otherwise.
+**Status: reading the index has a caller; filling it still does not.**
+`clipped-library`'s `index` module reconciles a real database against real
+folders ([#56]), with tests that run it against real files on a real disk. Since
+[#301] the recorder answers `library_sessions` and `library_games` from it, so
+the desktop window draws real rows ([ipc.md](ipc.md), [desktop-ui.md](desktop-ui.md)).
+What still does not exist is a caller for `reconcile`: the recorder does not run
+it when a session ends and nothing runs it at start-up, so on a real machine the
+index is empty until something does. That is the other half of the same work and
+it is [#385]. Nothing here pretends otherwise.
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
 [#46]: https://github.com/wildware-uk/clipped/issues/46
@@ -22,6 +25,8 @@ ticket's remit. Nothing here pretends otherwise.
 [#93]: https://github.com/wildware-uk/clipped/issues/93
 [#94]: https://github.com/wildware-uk/clipped/issues/94
 [#272]: https://github.com/wildware-uk/clipped/issues/272
+[#301]: https://github.com/wildware-uk/clipped/issues/301
+[#385]: https://github.com/wildware-uk/clipped/issues/385
 
 ## The shape of it
 
@@ -235,6 +240,90 @@ report lists what could not be used:
 The only failure that ends a run is the database refusing outright, and even
 then every batch already committed stays committed.
 
+## Reading it back
+
+`index::browse::list_sessions` is the other direction: one page of sittings,
+newest first, with the recordings and clips each produced. It is what the
+desktop window asks for over the control protocol, because the window may
+neither open `library.db` nor link this crate
+([ADR 0002](adr/0002-separate-recorder-process.md), [ipc.md](ipc.md)).
+
+**Everything is a page.** There is no function here that returns the whole
+library. A `SessionListing` takes a limit — defaulting to 50, clamped to 200 —
+and a cursor, and answers a `SessionPage` carrying `next` when a further session
+was actually found. The cursor is offered only when there is one, so a caller
+stops on `next: None` rather than on an empty page.
+
+That limit bounds how much is **read**, and deliberately not how large the answer
+is, because a count of sessions cannot bound that: a session holds any number of
+recordings and clips, so two hundred of them is 135 KB with one recording each
+and over 3 MB with thirty. Whatever carries a page across a process boundary has
+to bound its own payload in bytes, and `apps/recorder/src/library.rs` does —
+against `clipped_ipc::MAX_FRAME_BYTES`, cutting a page short and moving the
+cursor back to the last session it carried. This crate knows nothing about
+frames, which is why the bound is not here.
+
+**The cursor is a keyset, not an offset.** It names the last session on the page
+— `started_at|session_id` — and the next page is everything ordered after it.
+An offset would make the tenth page ten times the cost of the first, and would
+skip or repeat rows when a reconciliation inserted a session between two
+requests. The order is `started_at DESC, session_id DESC`: the second key is not
+decoration, because two sessions can share a start moment and an order that is
+not total cannot be paged through without losing or repeating one.
+
+**A missing file is listed, never omitted.** `missing_since` crosses the
+boundary because a screen has to *say* a file has gone rather than draw a broken
+tile (AGENTS.md section 27). Filtering those rows out here would leave the
+window unable to tell "you deleted this" from "this was never recorded". A row
+in the trash (`deleted_at`) is a different thing and is left out — it is deleted
+as far as the library is concerned, and the trash has a screen of its own
+([#94]).
+
+**A search runs the matcher rather than a compiler.** A query ([#59]) is applied
+by building the `search::Row` a session projects and asking `Query::matches`.
+Compiling the query into SQL would be a second implementation of what a match
+means, and the two disagreeing would be a bug nobody could see. What that costs
+is a walk of the sessions rather than an index lookup, which is the figure the
+table below exists to make honest.
+
+### What a page costs
+
+The same machine and the same command as the reconciliation figures above, on
+the same two libraries. A page is 25 sessions, which is what the Library screen
+asks for.
+
+| Read | 2,000 sessions | 10,000 sessions |
+| --- | --- | --- |
+| First page of 25 | **1.4 ms** | **4.8 ms** |
+| The 21st page of 25 | **1.1 ms** | **4.0 ms** |
+| A search matching one game in twenty | 23 ms | 188 ms |
+| A search matching nothing at all | 37 ms | 316 ms |
+| The games view, every game at once | 0.9 ms | 11 ms |
+
+The second row is the whole claim keyset paging makes, and it is the row to
+watch: **page twenty-one costs what page one costs.** An offset would show a
+curve there.
+
+The two search rows are the cost of running the matcher, and they bound it from
+both sides. A search that finds a full page stops as soon as it has one; a
+search that matches nothing walks every session in the library, which is the
+worst case and is 316 ms for ten thousand. That is a search box that answers
+between keystrokes-plus-a-beat rather than instantly, on a library larger than
+most people will have. The moment it stops being fast enough the answer is a
+query compiler checked against this matcher, not instead of it.
+
+The games view is not a page — it is every game at once, which is what SPEC.md
+section 17 draws, and it is counted by SQLite rather than by walking rows.
+
+These are the cost of the read itself, which is what this crate is answerable
+for. Carrying a page to the desktop application adds a serialisation of it, once
+to size the page against the frame budget and once to send it
+(`apps/recorder/src/library.rs`); that is not measured here, and it is a pass
+over a hundred-odd kilobytes rather than a query.
+
+Memory is bounded by the page rather than by the library: a search reads session
+rows a batch of 256 at a time and never holds more than one batch.
+
 ## The games view
 
 `game_summaries` is SPEC.md section 17's list: per game, the sessions,
@@ -269,15 +358,19 @@ the two together. Two tests stand in for it:
 cargo test -p clipped-library
 ```
 
-Fifty-one tests, all of which run anywhere: a library is a directory and a
-database, not a GPU. The integration tests build real folders under the
-platform's temporary directory, provoke every disagreement between the index and
-the disk described above, and check the outcome against a real SQLite database.
+Every one of them runs anywhere: a library is a directory and a database, not a
+GPU. The integration tests build real folders under the platform's temporary
+directory, provoke every disagreement between the index and the disk described
+above, and check the outcome against a real SQLite database. The paging and
+search tests in `index::browse` build a real library and page through it, so a
+cursor that skipped or repeated a session fails rather than being reasoned
+about.
 
 ## What this is not
 
-- **Search.** The query language is [#59]; this crate's `search` module is where
-  it lives.
+- **Search.** The query language is [#59] and this crate's `search` module is
+  where it lives. `index::browse` is a *caller* of it — it builds the row a
+  session projects and asks the matcher — and defines none of the language.
 - **Thumbnails and waveforms.** Thumbnails are [#57] and landed as
   `clipped_library::thumbnail` ([thumbnails.md](thumbnails.md)); waveforms are
   #66 and live in `clipped-waveform`. Nothing in *this* module — indexing —

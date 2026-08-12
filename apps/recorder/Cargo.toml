@@ -33,6 +33,15 @@ clipped-game-detection.workspace = true
 # and the handshake live there so that both ends of the connection use one
 # implementation of them; what lives here is the recorder behind it.
 clipped-ipc.workspace = true
+# The recording library the desktop application reads through this process
+# (issue #301, `src/library.rs`). The window may not link it — the workspace
+# layering test permits `apps/desktop/src-tauri` exactly one member of this
+# workspace, `clipped-ipc` — and it has no file-system permission for
+# `library.db` either, so the process that owns the database answers for it
+# (ADR 0002, docs/library.md). `clipped-session` already brings this crate in;
+# naming it here is what deny.toml's `wildcards = "deny"` asks of a dependency
+# this package uses directly.
+clipped-library.workspace = true
 clipped-logging.workspace = true
 # What is installed under the plugins directory, and why anything there was
 # refused. `watch` reads that list at start-up and names what it found;
@@ -42,6 +51,10 @@ clipped-logging.workspace = true
 # (tests/integration/tests/workspace_layering.rs).
 clipped-plugins.workspace = true
 clipped-session.workspace = true
+# The database file itself: opening it, and the migrations that bring it to this
+# build's schema. `clipped-library` says what the rows mean and this says where
+# they live, which is the split docs/storage.md draws.
+clipped-storage.workspace = true
 # Window and monitor enumeration for `list-windows`, and the target selection
 # the recorder resolves `--window`, `--process` and `--pid` through. Every
 # Windows API call this subcommand makes is behind this crate; none is made
@@ -68,6 +81,15 @@ time = { version = "0.3", default-features = false, features = [
     "local-offset",
     "macros",
 ] }
+# A library page is bounded by the bytes it will occupy rather than by a count of
+# sessions (`src/library.rs`), and the only honest way to know that figure is to
+# ask the serialiser the protocol actually uses. An estimate would be a second
+# opinion about the size of JSON, and being wrong about it closes the desktop
+# application's control connection rather than failing one request
+# (`crates/ipc/src/frame.rs`). `tests/ipc_protocol.rs` uses it too, to send
+# parameters `clipped_ipc::Command` cannot express. Taken from the workspace, so
+# there is one copy of it in the binary. Dual MIT/Apache-2.0.
+serde_json.workspace = true
 
 # Console control, for the one Win32 call the recorder itself makes:
 # `SetConsoleCtrlHandler(NULL, FALSE)`, which re-enables Ctrl+C for a process
@@ -107,11 +129,6 @@ windows-sys = { version = "0.61", features = [
 # plausible and the timestamps increase (AGENTS.md section 22, docs/testing.md).
 [dev-dependencies]
 clipped-media-validation.workspace = true
-# `tests/ipc_protocol.rs` sends parameters that `clipped_ipc::Command` cannot
-# express - an unknown command's, and a malformed one's - which is how the
-# rejection paths are exercised against a real recorder rather than a mock of
-# one. Taken from the workspace for the reason every other crate takes it there.
-serde_json.workspace = true
 
 [lints]
 workspace = true

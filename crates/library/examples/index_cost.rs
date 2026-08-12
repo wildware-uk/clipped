@@ -33,8 +33,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use clipped_library::index::{
-    game_summaries, reconcile, IndexControl, IndexPace, IndexReport, IndexSettings,
+    game_summaries, list_sessions, reconcile, IndexControl, IndexPace, IndexReport, IndexSettings,
+    SessionListing, SessionPage,
 };
+use clipped_library::search::Query;
 use clipped_storage::Database;
 
 fn main() {
@@ -101,7 +103,89 @@ fn main() {
         "again, at the background pace",
     );
 
+    // What the desktop application pays for a screenful. Issue #301 puts these
+    // reads behind a protocol command, and the contract has to say what a page
+    // costs on the library this example builds — measured here rather than
+    // asserted, for the same reason the reconciliation figures above are.
+    read(&database, "a first page of 25", |database| {
+        list_sessions(
+            database,
+            &SessionListing {
+                limit: 25,
+                ..SessionListing::default()
+            },
+        )
+    });
+
+    // Deep in the library rather than at its start, which is the whole claim
+    // keyset paging makes: page four hundred costs what page one costs. An
+    // offset would show a curve here.
+    let mut cursor = None;
+    for _ in 0..20 {
+        let page = list_sessions(
+            &database,
+            &SessionListing {
+                limit: 25,
+                after: cursor,
+                ..SessionListing::default()
+            },
+        )
+        .expect("a page");
+        cursor = page.next;
+    }
+    let deep = cursor;
+    read(&database, "the 21st page of 25", |database| {
+        list_sessions(
+            database,
+            &SessionListing {
+                limit: 25,
+                after: deep.clone(),
+                ..SessionListing::default()
+            },
+        )
+    });
+
+    // A search, which is a walk of the sessions rather than an index lookup:
+    // the matcher is the definition of what a query means, and running it is
+    // what keeps one definition (`index::browse`). This is the figure that says
+    // whether that stays defensible.
+    let query: Query = "game:\"game 7\"".parse().expect("a query parses");
+    read(
+        &database,
+        "a search matching one game in twenty",
+        |database| {
+            list_sessions(
+                database,
+                &SessionListing {
+                    limit: 25,
+                    query: Some(&query),
+                    ..SessionListing::default()
+                },
+            )
+        },
+    );
+    let nothing: Query = "game:never-played".parse().expect("a query parses");
+    read(&database, "a search matching nothing at all", |database| {
+        list_sessions(
+            database,
+            &SessionListing {
+                limit: 25,
+                query: Some(&nothing),
+                ..SessionListing::default()
+            },
+        )
+    });
+    // The games view is the other read the window makes, and it is not a page:
+    // it is every game at once, which is what SPEC.md section 17 draws.
+    let started = Instant::now();
     let summaries = game_summaries(&database).expect("the games view can be built");
+    println!(
+        "{:34} {:>9.2?}  {:>4} games",
+        "the games view",
+        started.elapsed(),
+        summaries.len(),
+    );
+
     println!(
         "\n{} games, {} sessions, {} recordings, {} bytes",
         summaries.len(),
@@ -112,6 +196,26 @@ fn main() {
     println!(
         "the library is left in {} — delete it when you are done",
         directory.display()
+    );
+}
+
+/// Times one read of the library, and says what it produced.
+fn read(
+    database: &Database,
+    label: &str,
+    once: impl Fn(&Database) -> Result<SessionPage, clipped_library::index::IndexError>,
+) {
+    let started = Instant::now();
+    let page = once(database).unwrap_or_else(|error| panic!("{label} failed: {error}"));
+    println!(
+        "{label:34} {:>9.2?}  {:>4} sessions, {:>5} recordings{}",
+        started.elapsed(),
+        page.sessions.len(),
+        page.sessions
+            .iter()
+            .map(|session| session.recordings.len())
+            .sum::<usize>(),
+        if page.next.is_some() { ", more" } else { "" },
     );
 }
 

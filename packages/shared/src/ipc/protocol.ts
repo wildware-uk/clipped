@@ -112,6 +112,7 @@ export const FEATURES = [
   'bookmarks',
   'screenshots',
   'shutdown',
+  'library',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -135,6 +136,8 @@ export const COMMANDS = [
   'stop_recording',
   'add_bookmark',
   'take_screenshot',
+  'library_sessions',
+  'library_games',
   'shutdown',
   'save_replay',
   'apply_settings',
@@ -166,6 +169,7 @@ export const ERROR_CODES = [
   'recording_failed',
   'too_many_connections',
   'shutting_down',
+  'library_unavailable',
   'internal',
 ] as const;
 
@@ -207,6 +211,8 @@ export const REPLIES = [
   'recording_stopped',
   'bookmark_added',
   'screenshot_taken',
+  'library_sessions',
+  'library_games',
   'shutting_down',
 ] as const;
 
@@ -395,6 +401,200 @@ export type TakeScreenshotParams = {
   readonly format?: string;
 };
 
+/**
+ * Which page of the recording library to read. A type alias for the reason
+ * {@link StartRecordingParams} is one.
+ *
+ * Every field is optional: a window opening on the newest sessions sends none of
+ * them.
+ */
+export type LibrarySessionsParams = {
+  /**
+   * How many sessions to answer with.
+   *
+   * The recorder clamps this to what one frame can carry, so asking for the
+   * whole library returns a page and a cursor rather than a refusal. Absent
+   * means the recorder's own page size.
+   */
+  readonly limit?: number;
+  /**
+   * Continue after the session this cursor names.
+   *
+   * It is {@link LibrarySessionPage.next_cursor} from the previous reply and is
+   * opaque: the only thing to do with one is send it back. A cursor the
+   * recorder cannot read starts at the newest session rather than refusing,
+   * because a window may have kept one across a restart.
+   */
+  readonly after?: string;
+  /**
+   * Only the sessions this search query selects, in the language of
+   * `docs/search.md`.
+   *
+   * A query that does not parse is refused with `invalid_parameters` carrying
+   * the position and what was expected there, so a search box can say what is
+   * wrong with what was typed rather than showing nothing and no reason.
+   */
+  readonly query?: string;
+};
+
+/** One media file a sitting produced. */
+export interface LibraryRecording {
+  /** The index's own identifier for it. */
+  readonly recording_id: number;
+  /** Its ordinal within the sitting, as the sidecar recorded it. */
+  readonly session_index: number;
+  /**
+   * The file.
+   *
+   * This window cannot open it. It is what "reveal in Explorer" and a support
+   * request name, and it is a path inside the user's own profile — so it is
+   * redacted before it reaches a log (`redactPath.ts`).
+   */
+  readonly path: string;
+  /** When it started, RFC 3339 with an offset. */
+  readonly started_at: string;
+  /** When it ended. Absent for one still running when the library was read. */
+  readonly ended_at?: string;
+  /** What became of it: `recorded`, `no-window` or `failed`. */
+  readonly outcome?: string;
+  /** Why it ended, and only meaningful for `recorded`. */
+  readonly end_reason?: string;
+  /** How long it runs for. Absent for a recording that produced no file. */
+  readonly duration_seconds?: number;
+  /** The encoded picture width. */
+  readonly width?: number;
+  /** The encoded picture height. */
+  readonly height?: number;
+  /**
+   * What the file occupied when it was last seen.
+   *
+   * Kept while {@link missing_since} is set, so a drive coming back needs no
+   * re-measurement — but it must not be added into a total meanwhile, because
+   * that space is not being used.
+   */
+  readonly size_bytes?: number;
+  /**
+   * When the library first found the file gone.
+   *
+   * Absent while the file is there. Present is a state the screen has to *say*
+   * rather than draw a broken tile around (AGENTS.md section 27).
+   */
+  readonly missing_since?: string;
+  /** Whether the user favourited it. */
+  readonly favourite: boolean;
+  /** The tags on it, alphabetically. */
+  readonly tags: readonly string[];
+}
+
+/** One clip cut from a sitting. */
+export interface LibraryClip {
+  /** The index's own identifier for it. */
+  readonly clip_id: number;
+  /** The file. */
+  readonly path: string;
+  /** What it is called, if anything. */
+  readonly title?: string;
+  /** When it was made, RFC 3339 with an offset. */
+  readonly created_at: string;
+  /** How long it runs for. */
+  readonly duration_seconds?: number;
+  /** What the file occupies, with the same caveat as a recording's. */
+  readonly size_bytes?: number;
+  /** When the library first found the file gone. */
+  readonly missing_since?: string;
+  /** Whether the user favourited it. */
+  readonly favourite: boolean;
+  /** The tags on it, alphabetically. */
+  readonly tags: readonly string[];
+}
+
+/** One sitting, and what it produced. */
+export interface LibrarySession {
+  /** The identifier the recorder generated, shared by the sidecar and the files. */
+  readonly session_id: string;
+  /**
+   * The catalogue's identifier for the game.
+   *
+   * Absent for a sitting the catalogue would not attribute: it reported a tie
+   * and the recording was filed under no game rather than under a guess.
+   */
+  readonly game_id?: string;
+  /**
+   * The game's name as the catalogue knew it when it was played.
+   *
+   * Absent for the same reason. What to call that group on screen is this
+   * interface's decision, which is why the protocol does not make one.
+   */
+  readonly game_name?: string;
+  /** When the sitting started, RFC 3339 with the offset it was recorded in. */
+  readonly started_at: string;
+  /** When it ended. Absent for a sitting that has not. */
+  readonly ended_at?: string;
+  /** Why it ended: `game-exited`, `system-resumed` or `recorder-stopping`. */
+  readonly end_reason?: string;
+  /** Whether the user favourited the sitting itself. */
+  readonly favourite: boolean;
+  /** The files it recorded, in the order they were recorded. */
+  readonly recordings: readonly LibraryRecording[];
+  /** The clips cut from it. */
+  readonly clips: readonly LibraryClip[];
+}
+
+/** One page of the recording library, newest session first. */
+export interface LibrarySessionPage {
+  /**
+   * The sessions on this page.
+   *
+   * Empty means the library holds no more sessions matching the request. That
+   * is a different thing from a library that could not be read, which arrives
+   * as a `library_unavailable` refusal saying why — and the two must never be
+   * drawn the same way.
+   */
+  readonly sessions: readonly LibrarySession[];
+  /**
+   * The cursor for the page after this one.
+   *
+   * Absent at the end of the library, and present only when a further session
+   * was actually found — so paging stops on this rather than on an empty page.
+   */
+  readonly next_cursor?: string;
+}
+
+/**
+ * What the library holds for one game (SPEC.md section 17).
+ *
+ * `game_id` and `name` are both absent on the row for sittings the catalogue
+ * would not attribute. There is at most one such row and it is last.
+ */
+export interface LibraryGame {
+  /** The catalogue's identifier. */
+  readonly game_id?: string;
+  /** The name as the catalogue knew it when the game was last played. */
+  readonly name?: string;
+  /** When the first sitting of this game was recorded. */
+  readonly first_seen_at?: string;
+  /** When the most recent one was. */
+  readonly last_played_at?: string;
+  /** Sittings recorded. */
+  readonly sessions: number;
+  /** Recordings that are not in the trash. */
+  readonly recordings: number;
+  /** Clips that are not in the trash. */
+  readonly clips: number;
+  /** Sessions, recordings and clips the user has favourited. */
+  readonly favourites: number;
+  /**
+   * What the files that are still there occupy.
+   *
+   * A missing file contributes nothing: the space it is not occupying is not
+   * being used, and a library reporting 83 GB of files nobody can find would be
+   * a lie.
+   */
+  readonly bytes: number;
+  /** Recordings and clips whose file could not be found when the library was read. */
+  readonly missing: number;
+}
+
 /** One command, and the identifier its reply will quote. */
 export interface RecorderRequest {
   /** Chosen by the client, and quoted back in the response. */
@@ -476,6 +676,22 @@ export interface ScreenshotTakenReply {
   readonly screenshot: ScreenshotSummary;
 }
 
+/** One page of the recording library. */
+export interface LibrarySessionsReply {
+  /** The tag. */
+  readonly reply: 'library_sessions';
+  /** The sittings, newest first, and where the next page starts. */
+  readonly page: LibrarySessionPage;
+}
+
+/** What the library holds per game. */
+export interface LibraryGamesReply {
+  /** The tag. */
+  readonly reply: 'library_games';
+  /** One row per game, and one for the sittings nothing was attributed to. */
+  readonly games: readonly LibraryGame[];
+}
+
 /**
  * The recorder has stopped listening and is winding up.
  *
@@ -508,6 +724,8 @@ export type Reply =
   | RecordingStoppedReply
   | BookmarkAddedReply
   | ScreenshotTakenReply
+  | LibrarySessionsReply
+  | LibraryGamesReply
   | ShuttingDownReply;
 
 /** Nothing is being recorded. */
