@@ -20,15 +20,22 @@ lives in `clipped-session`; this command line is a front end over it, and so is
 call rather than a second implementation
 ([ADR 0002](adr/0002-separate-recorder-process.md)).
 
-Two things a recording does **not** have yet, stated here rather than left to be
-discovered in a file:
+**A recording has sound in it.** `--system-audio` and `--microphone` each open
+an endpoint through `clipped-audio` and give it a named audio track of its own,
+placed on the recording's timeline by `docs/av-sync.md`'s model
+([#180](https://github.com/wildware-uk/clipped/issues/180)). Both default to
+`default`, so an invocation that says nothing about audio records the output
+device and the microphone; `none` on either turns that source off completely —
+no device is opened and no track is declared. What a recording does not have yet
+is *routing*: the game's own process tree
+([#26](https://github.com/wildware-uk/clipped/issues/26)), per-application
+tracks ([#27](https://github.com/wildware-uk/clipped/issues/27)) and the
+compatibility mix ([#29](https://github.com/wildware-uk/clipped/issues/29)) are
+M2, so today the system track is the whole output endpoint.
 
-- **No audio track.** `clipped-audio` captures system audio and a microphone and
-  is tested doing it ([audio-routing.md](audio-routing.md)), but nothing routes
-  it into a session yet ([#180](https://github.com/wildware-uk/clipped/issues/180)),
-  so a recording has one video stream and nothing else. `--microphone` and
-  `--system-audio` are accepted, and a run that asks for either logs a warning
-  saying it cannot be recorded.
+One thing a recording still does **not** have, stated here rather than left to
+be discovered in a file:
+
 - **No scaling.** `--resolution` may only name the size the capture is already
   producing. Frames go from the capture to the encoder without being copied,
   which is what keeps the cost off the game, and there is no scaler in that
@@ -43,9 +50,10 @@ file is finished at that point and says so; what a session should do instead is
 **`watch` records games automatically.** It is the mode the product exists for
 (SPEC.md section 2): a game launching starts a session recording and quitting it
 finalises one, with nothing to press
-([#46](https://github.com/wildware-uk/clipped/issues/46)). It has the same two
-gaps `record` has — no audio track and no scaling — because it makes the same
-recording through the same call. [sessions.md](sessions.md) is the subsystem
+([#46](https://github.com/wildware-uk/clipped/issues/46)). It records the same
+audio tracks and has the same gap `record` has — no scaling — because it makes
+the same recording through the same call. [sessions.md](sessions.md) is the
+subsystem
 document: what a session is, what happens on a crash, a fast restart, a second
 game or a suspend, and where a session is written down.
 
@@ -96,7 +104,7 @@ clipped-recorder record --window "Counter-Strike 2"
 | `--codec <CODEC>` | `auto` | `auto`, `h264`, `hevc`, `av1` |
 | `--encoder <ENCODER>` | `auto` | `auto`, `nvenc`, `amf`, `quicksync`, `software` |
 | `--microphone <DEVICE>` | `default` | `default`, `none`, or part of a device name |
-| `--system-audio <DEVICE>` | `default` | Same values; per-application tracks are M2 |
+| `--system-audio <DEVICE>` | `default` | `default` or `none`; naming a device is refused ([#316](https://github.com/wildware-uk/clipped/issues/316)) |
 
 Exactly one of `--window`, `--process` and `--pid` may be given. `--help` is the
 authority on all of this; the table above is here so the shape can be read
@@ -136,10 +144,45 @@ the next candidate when one refuses to open a session on the device the frames
 are captured on. An encoder named explicitly is never fallen back from: somebody
 who typed `--encoder nvenc` wants to know it was not used.
 
+### The audio tracks
+
+`--system-audio default` records the endpoint Windows is playing through, in
+loopback, and `--microphone default` records the default input device;
+`--microphone <NAME>` records the one microphone whose name contains that text,
+and refuses rather than guessing when nothing matches or several do. Each source
+gets a track of its own, named as an editor will show it, and the two are never
+mixed together (AGENTS.md section 21).
+
+The tracks are ordered by `clipped-muxer`'s track model rather than by the order
+the devices happened to open, so `track 2 is the microphone` keeps being true of
+every recording made the same way. The first of them carries Matroska's default
+flag, because some players take one audio track from a multi-track file and the
+one they take should be the one that sounds right (SPEC.md section 13).
+
+Audio is stored as uncompressed 16-bit PCM, which is what `clipped-muxer`
+records in and why (`docs/muxing.md`): nothing in Clipped encodes audio yet, the
+bitrate is small beside the video beside it, and an archival recording that has
+never been through a lossy encoder is the one an editor should be given.
+
+`--system-audio` will not take a device name. WASAPI loopback is opened against
+the endpoint Windows is *playing through*, and recording a different one is
+[#316](https://github.com/wildware-uk/clipped/issues/316); a name is refused
+with exit code 3 rather than the default endpoint being recorded quietly in its
+place.
+
+`--microphone` and `--system-audio` treat `default` and `none` as reserved
+words. Prefix with `name:` to select a device that is really called one of them:
+`--microphone name:none`.
+
+`--microphone none --system-audio none` makes a video-only recording: no device
+is opened, no track is declared, and nothing is said about audio.
+
 ### What a finished recording prints
 
 ```text
 Recorded 233 frames of 1280x720 AV1 in 7.76s to D:\clips\session.mkv (NVIDIA NVENC, Windows Graphics Capture, 29.9 fps sustained; 0 frames dropped). Stopped by request.
+  Other System Audio: 7.77s at 48000 Hz, 2 channels from Speakers (Realtek(R) Audio)
+  Microphone: 7.77s at 48000 Hz, 1 channel from Microphone (Yeti Stereo Microphone)
 ```
 
 On standard error, with the same figures in the log. "Frames dropped" is the one
@@ -148,9 +191,14 @@ because the thread writing the file had not caught up. Frames skipped to hold
 `--framerate` are counted separately and are not in it, because they are the
 recorder doing what it was asked.
 
-`--microphone` and `--system-audio` treat `default` and `none` as reserved
-words. Prefix with `name:` to select a device that is really called one of them:
-`--microphone name:none`.
+One line per audio track follows, and each says what it came to. A track whose
+device produced nothing says so — a microphone muted in Windows still delivers
+packets, of silence, so a recording of one looks perfectly healthy and contains
+nothing, and that is the commonest reason a track is silent. The log carries
+more: how much of the track was silence synthesised to cover periods the device
+said nothing for, and how far the track moved against the recording's reference
+clock over the session (`sync_drift_ppb`, `sync_state`), measured rather than
+assumed (`docs/av-sync.md`).
 
 ### Defaults that touch the disk
 
@@ -188,7 +236,7 @@ it costs somebody a session.
 | `--output-directory <PATH>` | the Clipped folder of your videos directory | Where recordings and session records go |
 | `--window-timeout <SECONDS>` | 120 | How long a game may take to put a window on screen |
 | `--resolution`, `--framerate`, `--codec`, `--encoder` | as `record` | Applied to every automatic recording |
-| `--microphone`, `--system-audio` | `default` | As `record`, and with the same warning: there is no audio track yet |
+| `--microphone`, `--system-audio` | `default` | As `record`: one named audio track per source, `none` to record without it |
 
 What it prints, on standard error:
 
@@ -407,8 +455,9 @@ real backend too, `QuickSyncEncoder`, written to the same interface — but ther
 is no Intel GPU on the machine it was written on, so nothing has ever seen it
 encode a frame, and the footer does not count it until it has
 ([#160](https://github.com/wildware-uk/clipped/issues/160)). A machine whose
-best encoder is Quick Sync encodes on the CPU today. Whichever is chosen, a
-recording made with it has a video track and no audio track.
+best encoder is Quick Sync encodes on the CPU today. Whichever is chosen, the
+audio tracks beside the picture are the same: they do not go through a video
+encoder at all.
 
 Which encoders count comes from `EncoderKind::is_implemented` rather than from
 a sentence in the report, because the sentence that used to be there went on

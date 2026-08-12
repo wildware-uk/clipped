@@ -98,6 +98,15 @@ pub enum FailureKind {
     GraphicsDeviceLost,
     /// No encoder could be opened, or the one in use became unavailable.
     EncoderUnavailable,
+    /// An audio source the recording was asked for could not be opened: no
+    /// output device, no microphone, the chosen microphone unplugged.
+    ///
+    /// Only ever before a recording starts. A device going away *during* one is
+    /// survived rather than reported — the track becomes silence of the right
+    /// length and the capture waits for it to come back
+    /// (`docs/audio-routing.md`) — because a recording in progress is worth more
+    /// than the audio it is missing.
+    AudioUnavailable,
     /// The thing being recorded went away, or never appeared.
     CaptureLost,
     /// The recording was never possible as asked for: a size this build cannot
@@ -117,6 +126,7 @@ impl FailureKind {
             Self::OutputRefused => "output-refused",
             Self::GraphicsDeviceLost => "graphics-device-lost",
             Self::EncoderUnavailable => "encoder-unavailable",
+            Self::AudioUnavailable => "audio-unavailable",
             Self::CaptureLost => "capture-lost",
             Self::NotPossible => "not-possible",
             Self::Unclassified => "unclassified",
@@ -266,6 +276,31 @@ impl RecordingFailure {
                 actions: vec!["Change the settings the message names".to_owned()],
                 footage: FootageKept::Nothing,
             },
+
+            SessionError::Audio { track, .. } => Self {
+                kind: FailureKind::AudioUnavailable,
+                headline: format!("The {track} track could not be recorded"),
+                detail: error.to_string(),
+                actions: vec![
+                    "Connect the device, or choose another one".to_owned(),
+                    "Turn that audio source off to record without it".to_owned(),
+                ],
+                footage: FootageKept::Nothing,
+            },
+
+            SessionError::AudioDeviceNotSelectable | SessionError::MicrophoneNotFound { .. } => {
+                Self {
+                    kind: FailureKind::AudioUnavailable,
+                    headline: "That audio device could not be recorded".to_owned(),
+                    detail: error.to_string(),
+                    actions: vec![
+                        "Run `clipped-recorder capabilities` to see the devices this machine has"
+                            .to_owned(),
+                        "Turn that audio source off to record without it".to_owned(),
+                    ],
+                    footage: FootageKept::Nothing,
+                }
+            }
 
             SessionError::Detection(_) => Self {
                 kind: FailureKind::EncoderUnavailable,
@@ -638,6 +673,15 @@ mod tests {
             SessionError::Mux(MuxError::OutputExists { path: output() }),
             SessionError::Mux(MuxError::ContainerUnsupported),
             SessionError::UnsupportedPlatform,
+            SessionError::Audio {
+                track: "Microphone",
+                source: clipped_audio::AudioError::NoMicrophone,
+            },
+            SessionError::AudioDeviceNotSelectable,
+            SessionError::MicrophoneNotFound {
+                matched: 0,
+                available: 3,
+            },
         ];
 
         for error in &errors {

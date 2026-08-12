@@ -81,6 +81,30 @@ pub enum SessionError {
     },
     /// Encoding failed part way through the recording.
     Encode(EncodeError),
+    /// An audio source the caller asked for could not be opened.
+    ///
+    /// Refused before the recording starts rather than skipped, because a
+    /// recording made without the microphone somebody asked for is one they
+    /// find out about afterwards, when it cannot be made again (AGENTS.md
+    /// section 54). Once a capture is open the same situations are survivable
+    /// and are not errors: the track becomes silence and the capture waits for
+    /// the device (`docs/audio-routing.md`).
+    Audio {
+        /// The track the source would have fed, as the container names it.
+        track: &'static str,
+        /// What the audio stack said.
+        source: clipped_audio::AudioError,
+    },
+    /// A particular output device was asked for and this build can only record
+    /// the one Windows is playing through.
+    AudioDeviceNotSelectable,
+    /// The microphone that was asked for named no device, or several.
+    MicrophoneNotFound {
+        /// How many of the machine's microphones matched the name.
+        matched: usize,
+        /// How many microphones the machine has.
+        available: usize,
+    },
     /// The container could not be written.
     Mux(MuxError),
     /// Capture produced no frame at all before the recording was stopped.
@@ -165,6 +189,39 @@ impl fmt::Display for SessionError {
                 "encoding stopped part way through the recording: {error}. \
                  The file was closed, so everything encoded before this point still plays"
             ),
+            Self::Audio { track, source } => write!(
+                formatter,
+                "the {track} track could not be recorded: {source}. Turn that source off to \
+                 record without it"
+            ),
+            Self::AudioDeviceNotSelectable => formatter.write_str(
+                "system audio is recorded from the output device Windows is playing through, \
+                 and this build cannot record a different one. Use `default` to record what \
+                 you hear, or `none` to record no system audio",
+            ),
+            Self::MicrophoneNotFound {
+                matched,
+                available: 0,
+            } => {
+                let _ = matched;
+                formatter.write_str(
+                    "no microphone matches that name, because this machine has none connected. \
+                     Connect one, or turn the microphone track off",
+                )
+            }
+            Self::MicrophoneNotFound {
+                matched: 0,
+                available,
+            } => write!(
+                formatter,
+                "no microphone matches that name; this machine has {available} connected. Run \
+                 `clipped-recorder capabilities` to see them"
+            ),
+            Self::MicrophoneNotFound { matched, .. } => write!(
+                formatter,
+                "{matched} microphones match that name, and recording one of them at random \
+                 would be recording the wrong one. Use more of the device's name"
+            ),
             Self::Mux(error) => write!(formatter, "the recording could not be written: {error}"),
             Self::NoFrames => formatter.write_str(
                 "capture never produced a frame, so there was nothing to record. A window \
@@ -187,8 +244,11 @@ impl Error for SessionError {
             Self::Detection(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Mux(error) => Some(error),
+            Self::Audio { source, .. } => Some(source),
             Self::OutputDirectory { source } => Some(source),
-            Self::UnsupportedPlatform
+            Self::AudioDeviceNotSelectable
+            | Self::MicrophoneNotFound { .. }
+            | Self::UnsupportedPlatform
             | Self::TargetHasNoPixels
             | Self::ZeroFramerate
             | Self::ScalingNotSupported { .. }

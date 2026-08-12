@@ -110,11 +110,18 @@ impl RunError {
             // mistake as a rejected argument: the command line is what has to
             // change, and the message already lists the candidates.
             Self::Record(record::RecordError::Resolution(_)) => EXIT_USAGE,
+            // And a `--microphone` that named no device, or several, is the
+            // same mistake again: the message says how many matched, and the
+            // command line is what has to change.
+            Self::Record(record::RecordError::Session(
+                clipped_session::SessionError::MicrophoneNotFound { .. },
+            )) => EXIT_USAGE,
             // What this build genuinely cannot produce, as opposed to what went
             // wrong while producing it.
             Self::Record(record::RecordError::Session(
                 clipped_session::SessionError::ScalingNotSupported { .. }
-                | clipped_session::SessionError::UnsupportedPixelFormat { .. },
+                | clipped_session::SessionError::UnsupportedPixelFormat { .. }
+                | clipped_session::SessionError::AudioDeviceNotSelectable,
             )) => EXIT_NOT_IMPLEMENTED,
             Self::Record(
                 record::RecordError::Shutdown(_)
@@ -287,6 +294,32 @@ mod tests {
             !error.is_usage_error(),
             "the help has nothing to add: no argument turns a scaler on"
         );
+    }
+
+    #[test]
+    fn an_output_device_this_build_cannot_name_shares_that_code() {
+        // `--system-audio name:Speakers` parses, and there is no way to honour
+        // it: WASAPI loopback opens the endpoint Windows is playing through
+        // (#316). It is the same class of answer as "there is no scaler" — the
+        // feature does not exist — rather than a mistyped argument, so a script
+        // can tell it from a failure.
+        let error = RunError::from(RecordError::Session(
+            clipped_session::SessionError::AudioDeviceNotSelectable,
+        ));
+        assert_eq!(error.exit_code(), EXIT_NOT_IMPLEMENTED);
+    }
+
+    #[test]
+    fn a_microphone_that_named_no_device_is_a_command_line_to_fix() {
+        // The same code a window selector that matched nothing gets, and for
+        // the same reason: what has to change is what was typed.
+        let error = RunError::from(RecordError::Session(
+            clipped_session::SessionError::MicrophoneNotFound {
+                matched: 0,
+                available: 3,
+            },
+        ));
+        assert_eq!(error.exit_code(), EXIT_USAGE);
     }
 
     #[test]

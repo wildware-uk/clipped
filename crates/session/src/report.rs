@@ -16,7 +16,7 @@ use core::fmt;
 use core::time::Duration;
 use std::path::{Path, PathBuf};
 
-use clipped_capture::CaptureMethod;
+use clipped_capture::{CaptureMethod, SyncState};
 use clipped_encoder::{Codec, EncoderKind};
 
 /// Why a recording ended.
@@ -86,6 +86,269 @@ impl EndReason {
     }
 }
 
+/// How far one audio track moved against the recording's reference clock.
+///
+/// Measured rather than assumed, per `docs/av-sync.md`: every buffer an endpoint
+/// delivers carries two accounts of the same moment — where the endpoint said it
+/// belongs, and where the track built from counting samples puts it — and
+/// `clipped_capture::DriftEstimator` turns the stream of pairs into these
+/// figures. It is a measurement of a *change*, so a constant offset that was
+/// already there when the capture started does not appear in it at any size;
+/// that one needs a subject whose sound and picture are known to be
+/// simultaneous, which is what `tests/capture/av_sync.rs` is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioSyncReport {
+    pub(crate) first_offset_nanos: i64,
+    pub(crate) latest_offset_nanos: i64,
+    pub(crate) peak_offset_nanos: i64,
+    pub(crate) observations: u64,
+    pub(crate) discontinuities: u64,
+    pub(crate) drift_parts_per_billion: Option<i64>,
+    pub(crate) state: SyncState,
+}
+
+impl AudioSyncReport {
+    /// The first offset observed, in nanoseconds. Positive is sound behind
+    /// picture.
+    ///
+    /// Worth reading beside [`latest`](Self::latest_offset_nanos): a track that
+    /// starts 30 ms out and stays there has an alignment problem, and one that
+    /// starts at zero and ends 30 ms out has a drift problem.
+    #[must_use]
+    pub const fn first_offset_nanos(&self) -> i64 {
+        self.first_offset_nanos
+    }
+
+    /// The last offset observed, in nanoseconds.
+    #[must_use]
+    pub const fn latest_offset_nanos(&self) -> i64 {
+        self.latest_offset_nanos
+    }
+
+    /// The largest offset seen in either direction, keeping its sign.
+    #[must_use]
+    pub const fn peak_offset_nanos(&self) -> i64 {
+        self.peak_offset_nanos
+    }
+
+    /// How many buffers were measured.
+    #[must_use]
+    pub const fn observations(&self) -> u64 {
+        self.observations
+    }
+
+    /// How many times the offset stepped rather than drifted — a timeline
+    /// correcting itself, or an endpoint change.
+    #[must_use]
+    pub const fn discontinuities(&self) -> u64 {
+        self.discontinuities
+    }
+
+    /// The fitted drift rate over the current correction-free segment, in parts
+    /// per billion, or [`None`] when there was not enough of one to fit a line
+    /// to.
+    ///
+    /// Parts per billion rather than per million because the rates worth
+    /// reporting are single-digit parts per million, and an integer keeps two
+    /// recordings comparable where a float would not.
+    #[must_use]
+    pub const fn drift_parts_per_billion(&self) -> Option<i64> {
+        self.drift_parts_per_billion
+    }
+
+    /// Whether the track ended inside `SyncTolerance::default()`, and if not,
+    /// which way.
+    #[must_use]
+    pub const fn state(&self) -> SyncState {
+        self.state
+    }
+}
+
+/// What one of a recording's audio tracks turned out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioTrackReport {
+    pub(crate) track_name: String,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
+    pub(crate) device: Option<String>,
+    pub(crate) buffers: u64,
+    pub(crate) frames: u64,
+    pub(crate) synthesised_silence_frames: u64,
+    pub(crate) frames_before_the_recording: u64,
+    pub(crate) buffers_dropped_writer_behind: u64,
+    pub(crate) format_changes: u64,
+    pub(crate) sync: Option<AudioSyncReport>,
+}
+
+impl AudioTrackReport {
+    /// A report for a track that has recorded nothing yet.
+    pub(crate) fn new(
+        track_name: String,
+        sample_rate: u32,
+        channels: u16,
+        device: Option<String>,
+    ) -> Self {
+        Self {
+            track_name,
+            sample_rate,
+            channels,
+            device,
+            buffers: 0,
+            frames: 0,
+            synthesised_silence_frames: 0,
+            frames_before_the_recording: 0,
+            buffers_dropped_writer_behind: 0,
+            format_changes: 0,
+            sync: None,
+        }
+    }
+
+    /// Records one buffer the capture handed over.
+    pub(crate) fn note_buffer(&mut self, frames: u64, origin: clipped_audio::SampleOrigin) {
+        self.buffers += 1;
+        self.frames += frames;
+        if origin == clipped_audio::SampleOrigin::SynthesisedSilence {
+            self.synthesised_silence_frames += frames;
+        }
+    }
+
+    /// Records frames dropped for describing a moment before the recording
+    /// started.
+    pub(crate) fn note_trimmed(&mut self, frames: u64) {
+        self.frames_before_the_recording += frames;
+    }
+
+    /// Records a buffer the writer had no room for.
+    pub(crate) fn note_dropped(&mut self) {
+        self.buffers_dropped_writer_behind += 1;
+    }
+
+    /// Records the endpoint being replaced by one of a different shape.
+    pub(crate) fn note_format_change(&mut self) {
+        self.format_changes += 1;
+    }
+
+    /// Attaches the synchronisation measurement, once the source has stopped.
+    pub(crate) fn with_sync(&mut self, sync: Option<AudioSyncReport>) {
+        self.sync = sync;
+    }
+
+    /// The name the track carries in the container, as an editor shows it.
+    #[must_use]
+    pub fn track_name(&self) -> &str {
+        &self.track_name
+    }
+
+    /// The sampling rate the track was declared at.
+    #[must_use]
+    pub const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// How many channels each frame has.
+    #[must_use]
+    pub const fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    /// The device Windows was capturing, if there was one.
+    #[must_use]
+    pub fn device(&self) -> Option<&str> {
+        self.device.as_deref()
+    }
+
+    /// How many buffers the capture handed over.
+    #[must_use]
+    pub const fn buffers(&self) -> u64 {
+        self.buffers
+    }
+
+    /// How many frames of audio the capture handed over, real and synthesised.
+    #[must_use]
+    pub const fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Of those, frames of silence `clipped-audio` synthesised because the
+    /// device produced nothing for that period.
+    ///
+    /// Not a fault: it is what keeps the track the same length as the recording
+    /// (`docs/audio-routing.md`). A track that is *all* synthesised silence is
+    /// a device that never produced anything.
+    #[must_use]
+    pub const fn synthesised_silence_frames(&self) -> u64 {
+        self.synthesised_silence_frames
+    }
+
+    /// Frames dropped for describing a moment before the first video frame.
+    ///
+    /// Expected, and small: the audio endpoint is opened while the capture
+    /// backend is still initialising, so the first buffer or two of every
+    /// recording precede its epoch (`docs/av-sync.md`).
+    #[must_use]
+    pub const fn frames_before_the_recording(&self) -> u64 {
+        self.frames_before_the_recording
+    }
+
+    /// Buffers lost because the thread writing the file had not caught up.
+    ///
+    /// **This one is a fault.** Anything above zero is a hole in the track.
+    /// Nothing after the hole slides — every later packet keeps the media time
+    /// its own hardware gave it — but the sound in it is gone.
+    #[must_use]
+    pub const fn buffers_dropped_writer_behind(&self) -> u64 {
+        self.buffers_dropped_writer_behind
+    }
+
+    /// How many times the device was replaced by one this build cannot follow
+    /// inside one file, after which the track is silence.
+    #[must_use]
+    pub const fn format_changes(&self) -> u64 {
+        self.format_changes
+    }
+
+    /// How far this track moved against the recording's reference clock.
+    #[must_use]
+    pub const fn sync(&self) -> Option<AudioSyncReport> {
+        self.sync
+    }
+}
+
+impl fmt::Display for AudioTrackReport {
+    /// The line the recorder prints for one audio track when a recording ends.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{name}: {seconds:.2}s at {rate} Hz, {channels} channel{plural}",
+            name = self.track_name,
+            seconds = if self.sample_rate == 0 {
+                0.0
+            } else {
+                self.frames as f64 / f64::from(self.sample_rate)
+            },
+            rate = self.sample_rate,
+            channels = self.channels,
+            plural = if self.channels == 1 { "" } else { "s" },
+        )?;
+        if let Some(device) = &self.device {
+            write!(formatter, " from {device}")?;
+        }
+        if self.frames == 0 {
+            formatter.write_str(" — nothing was recorded on this track")?;
+        } else if self.synthesised_silence_frames == self.frames {
+            formatter.write_str(" — the device produced nothing, so the track is silence")?;
+        }
+        if self.buffers_dropped_writer_behind > 0 {
+            write!(
+                formatter,
+                " — {} buffers were lost because the disk could not keep up",
+                self.buffers_dropped_writer_behind
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// What one recording contained, and what it cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingReport {
@@ -105,6 +368,7 @@ pub struct RecordingReport {
     pub(crate) timestamps_corrected: u64,
     pub(crate) duration: Duration,
     pub(crate) end_reason: EndReason,
+    pub(crate) audio_tracks: Vec<AudioTrackReport>,
 }
 
 impl RecordingReport {
@@ -221,6 +485,16 @@ impl RecordingReport {
         self.end_reason
     }
 
+    /// What each of the recording's audio tracks turned out to be, in the order
+    /// the container declares them.
+    ///
+    /// Empty for a recording made with both audio sources turned off, which is a
+    /// file with one video stream and nothing else.
+    #[must_use]
+    pub fn audio_tracks(&self) -> &[AudioTrackReport] {
+        &self.audio_tracks
+    }
+
     /// Frames a second actually achieved, over the length of the recording.
     ///
     /// [`None`] for a recording too short to divide by — a single frame has no
@@ -290,7 +564,100 @@ mod tests {
             timestamps_corrected: 0,
             duration: Duration::from_millis(6_000),
             end_reason: EndReason::Stopped,
+            audio_tracks: Vec::new(),
         }
+    }
+
+    fn audio_track(name: &str, frames: u64, channels: u16) -> AudioTrackReport {
+        AudioTrackReport {
+            track_name: name.to_owned(),
+            sample_rate: 48_000,
+            channels,
+            device: Some("Speakers (Realtek(R) Audio)".to_owned()),
+            buffers: frames / 480,
+            frames,
+            synthesised_silence_frames: 0,
+            frames_before_the_recording: 0,
+            buffers_dropped_writer_behind: 0,
+            format_changes: 0,
+            sync: None,
+        }
+    }
+
+    #[test]
+    fn an_audio_track_says_how_much_sound_it_holds_and_where_it_came_from() {
+        let line = audio_track("Other System Audio", 288_000, 2).to_string();
+        assert_eq!(
+            line,
+            "Other System Audio: 6.00s at 48000 Hz, 2 channels from Speakers (Realtek(R) Audio)"
+        );
+    }
+
+    #[test]
+    fn a_track_that_recorded_nothing_says_so_rather_than_reading_as_zero_seconds() {
+        // The commonest support question about multi-track audio — "why is my
+        // microphone track empty?" — starts with the recorder saying that it
+        // is (AGENTS.md section 45). A line reading "0.00s" and stopping there
+        // reads as a rounding error rather than as an answer.
+        let mut track = audio_track("Microphone", 0, 1);
+        track.buffers = 0;
+        let line = track.to_string();
+        assert!(
+            line.contains("1 channel from"),
+            "a mono track is not plural: {line}"
+        );
+        assert!(
+            line.contains("nothing was recorded on this track"),
+            "an empty track has to say so: {line}"
+        );
+    }
+
+    #[test]
+    fn a_track_that_only_ever_got_silence_is_distinguished_from_one_that_got_nothing() {
+        // Two different faults. A device that produced nothing at all was never
+        // opened or never delivered; a track that is entirely synthesised
+        // silence had a device the whole time and it played nothing — a muted
+        // microphone, or speakers nobody used.
+        let mut track = audio_track("Microphone", 96_000, 1);
+        track.synthesised_silence_frames = 96_000;
+        let line = track.to_string();
+        assert!(
+            line.contains("the device produced nothing, so the track is silence"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn buffers_lost_to_a_slow_disk_are_named_in_the_line_rather_than_only_counted() {
+        // The one figure on an audio track that means something went wrong.
+        let mut track = audio_track("Other System Audio", 288_000, 2);
+        track.buffers_dropped_writer_behind = 17;
+        let line = track.to_string();
+        assert!(line.contains("17 buffers were lost"), "{line}");
+    }
+
+    #[test]
+    fn a_recording_carries_its_audio_tracks_in_the_order_the_container_declares_them() {
+        // The report is what the recorder prints and what a library will store,
+        // and "track 2 is the microphone" has to keep being true of it.
+        let mut report = report();
+        report.audio_tracks = vec![
+            audio_track("Other System Audio", 288_000, 2),
+            audio_track("Microphone", 288_000, 1),
+        ];
+        let names: Vec<&str> = report
+            .audio_tracks()
+            .iter()
+            .map(AudioTrackReport::track_name)
+            .collect();
+        assert_eq!(names, ["Other System Audio", "Microphone"]);
+    }
+
+    #[test]
+    fn a_video_only_recording_reports_no_audio_tracks_at_all() {
+        // Not one empty track: a source that was turned off has no track in the
+        // file, and the report has to say the same thing the container does.
+        assert!(report().audio_tracks().is_empty());
     }
 
     #[test]

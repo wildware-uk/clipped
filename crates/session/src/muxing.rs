@@ -8,12 +8,28 @@
 //! not be inside. So the writer gets a thread, and packets — bytes, not
 //! textures — cross to it through a bounded queue.
 //!
+//! # Who writes into it
+//!
+//! Two kinds of producer, and neither may wait on the other. The capture loop
+//! sends encoded video packets; one thread per audio source
+//! (`crate::audio`) sends the interleaved samples its endpoint produced. They
+//! share one queue because they share one file — libavformat interleaves a
+//! recording's tracks inside a single context, so exactly one thread may write
+//! to it — and the samples are converted to the container's PCM on the writer
+//! thread rather than on a capture thread, through
+//! [`clipped_muxer::AudioTrackWriter`].
+//!
 //! # What happens when the queue fills
 //!
 //! Stated plainly, because the alternative is a recorder that silently drops
-//! half a recording. The queue holds [`QUEUE_CAPACITY`] packets. While more
-//! than [`HIGH_WATER`] of them are outstanding the capture loop stops
-//! *submitting frames* and counts each one it skipped
+//! half a recording. The queue holds [`QUEUE_CAPACITY`] items, and that
+//! capacity is **divided** between the two producers: [`VIDEO_CAPACITY`] for
+//! encoded packets and [`AUDIO_CAPACITY`] for captured buffers. Each producer is
+//! held to its own share, so neither can fill the queue underneath the other and
+//! turn its unblocked `send` into a blocking one.
+//!
+//! While more than [`HIGH_WATER`] video packets are outstanding the capture loop
+//! stops *submitting frames* and counts each one it skipped
 //! ([`crate::RecordingReport::frames_dropped_writer_behind`]).
 //!
 //! Frames are skipped before they are encoded and never after. An encoded
@@ -22,7 +38,16 @@
 //! recording that stops decoding. Dropping the *input* costs one frame and
 //! nothing else.
 //!
-//! The alternative — blocking the capture thread until the disk catches up — is
+//! Audio has no equivalent of "do not capture the next one": the endpoint
+//! produces what it produces and a buffer that is not taken is gone. So a buffer
+//! arriving when the audio share is full is **dropped and counted**
+//! ([`crate::AudioTrackReport::buffers_dropped_writer_behind`]) rather than
+//! waited on. What that costs is a hole in the track — every later packet still
+//! carries the media time its own hardware gave it, so nothing after the hole
+//! slides — and it is reported, because a recorder that silently loses audio is
+//! the failure this whole arrangement exists to make visible.
+//!
+//! The alternative — blocking a capture thread until the disk catches up — is
 //! worse in the way that matters: the capture backend keeps producing frames
 //! while it is blocked, the game shares the GPU with a stalled encoder, and the
 //! user sees the recorder as a stutter in the game.
@@ -38,6 +63,12 @@
 //! than one, in the low-latency configuration a recording opens them with.
 //! `crate::recording::report_submission_over_headroom` says so, once, if that
 //! ever stops being true, rather than leaving a stall with no explanation.
+//!
+//! The audio half rests on the same arithmetic and is checked the same way: an
+//! audio producer counts its own outstanding buffers and refuses to send past
+//! [`AUDIO_CAPACITY`], so `try_send` is never the thing that discovers the queue
+//! is full. The constant assertions at the foot of this file are what hold the
+//! two shares to the one capacity.
 //!
 //! # Watching the drive
 //!
@@ -58,27 +89,47 @@
 //! one container context — which is precisely what libavformat does not support
 //! (`crates/muxer/src/writer.rs`).
 
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use clipped_capture::MediaTime;
 use clipped_muxer::{
-    EncodedPacket, MkvWriter, MuxError, PacketTimestamp, RecordingSummary, TrackId,
+    AudioTrackWriter, EncodedPacket, MkvWriter, MuxError, PacketTimestamp, RecordingLayout,
+    RecordingSummary, TrackId,
 };
 
 use crate::disk::{self, SpaceVerdict};
 use crate::error::SessionError;
 
-/// How many encoded packets may be waiting to be written.
+/// How many encoded video packets may be waiting to be written.
 ///
 /// Two seconds of a 60 fps recording. Long enough to absorb the pauses a
 /// desktop filesystem takes — a flush behind a virus scanner, a drive spinning
 /// up — and short enough that the memory behind it is bounded at something
 /// small: at 33 Mbit/s, two seconds of packets is about eight megabytes.
-const QUEUE_CAPACITY: usize = 128;
+const VIDEO_CAPACITY: usize = 128;
+
+/// How many captured audio buffers may be waiting to be written.
+///
+/// Sized in the same currency as [`VIDEO_CAPACITY`] — about two seconds of
+/// production — but audio arrives an order of magnitude more often: Windows
+/// delivers loopback in 10 ms packets, and a recording has up to two sources, so
+/// two seconds is around four hundred buffers. Five hundred and twelve gives
+/// that some slack while staying small in memory: a 10 ms stereo buffer at
+/// 48 kHz is 3,840 bytes of `f32`, so the whole share is about two megabytes.
+///
+/// It is deliberately a separate number rather than more room in one pool. The
+/// point of the split is that a slow disk cannot make the audio threads consume
+/// the video's headroom, which would turn the capture loop's unblocking `send`
+/// into a blocking one.
+const AUDIO_CAPACITY: usize = 512;
+
+/// How many items of any kind may be waiting to be written.
+const QUEUE_CAPACITY: usize = VIDEO_CAPACITY + AUDIO_CAPACITY;
 
 /// How many packets of headroom are kept above the point at which the capture
 /// loop stops submitting frames.
@@ -100,7 +151,16 @@ const QUEUE_CAPACITY: usize = 128;
 pub(crate) const HEADROOM: usize = 8;
 
 /// The depth at which the capture loop stops submitting frames.
-pub(crate) const HIGH_WATER: usize = QUEUE_CAPACITY - HEADROOM;
+pub(crate) const HIGH_WATER: usize = VIDEO_CAPACITY - HEADROOM;
+
+/// One thing waiting to be written into the recording.
+#[derive(Debug)]
+enum Queued {
+    /// An encoded picture, for the video track.
+    Video(QueuedPacket),
+    /// A block of captured samples, for one audio track.
+    Audio(QueuedSamples),
+}
 
 /// One encoded packet, copied out of the encoder's own buffer so that it can
 /// cross to another thread.
@@ -116,6 +176,23 @@ struct QueuedPacket {
     presentation_nanos: i64,
     decode_nanos: i64,
     keyframe: bool,
+}
+
+/// One capture buffer, copied out of the capture's own buffer so that it can
+/// cross to the writer thread.
+///
+/// The same trade as [`QueuedPacket`], and for the same reason:
+/// `clipped_audio::CapturedAudio` borrows the capture mutably and is released by
+/// the next read. The samples cross as `f32` rather than as the container's PCM
+/// because converting and cutting them into packets is
+/// [`AudioTrackWriter`]'s job and it needs the writer to do it — which keeps
+/// that arithmetic in one place (AGENTS.md section 55) and keeps the conversion
+/// off a capture thread.
+#[derive(Debug)]
+struct QueuedSamples {
+    track: TrackId,
+    at_nanos: i64,
+    samples: Vec<f32>,
 }
 
 /// What the writer thread has found out about the drive it is writing to.
@@ -228,15 +305,91 @@ impl SpaceGuard {
     }
 }
 
+/// What one attempt to queue a buffer of audio did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AudioQueued {
+    /// It is on its way to the file.
+    Written,
+    /// The writer is far enough behind that the audio share of the queue is
+    /// full, so the buffer was dropped. Counted, never waited on.
+    DroppedWriterBehind,
+    /// The writer thread has stopped, so nothing more will reach the file. The
+    /// reason is on that thread and comes back from
+    /// [`MuxingThread::finish`].
+    WriterLost,
+}
+
+/// A handle an audio thread queues its samples through.
+///
+/// Cloned once per source and owned by that source's thread, so the threads
+/// need no borrow of the [`MuxingThread`] and can be joined after the capture
+/// loop has finished with it. It carries the audio share of the queue's depth
+/// with it, which is what makes [`write`](Self::write) able to promise it never
+/// blocks: it refuses at [`AUDIO_CAPACITY`] rather than discovering a full queue
+/// inside a send.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioQueue {
+    sender: SyncSender<Queued>,
+    depth: Arc<AtomicUsize>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl AudioQueue {
+    /// Queues `samples` for `track`, starting at `at`.
+    ///
+    /// Never blocks and never fails a recording: a caller that is told
+    /// [`AudioQueued::DroppedWriterBehind`] has lost that buffer and nothing
+    /// else, and one told [`AudioQueued::WriterLost`] should stop reading its
+    /// endpoint because the file is no longer being written.
+    pub(crate) fn write(&self, track: TrackId, at: MediaTime, samples: &[f32]) -> AudioQueued {
+        // Counted before the send for the same reason the video path counts
+        // before its own: a depth that lagged the queue would let a producer
+        // send into a queue that is already full, and a full `sync_channel` is
+        // where a capture thread waits on the filesystem (AGENTS.md section 20).
+        if self.depth.fetch_add(1, Ordering::Relaxed) >= AUDIO_CAPACITY {
+            self.depth.fetch_sub(1, Ordering::Relaxed);
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return AudioQueued::DroppedWriterBehind;
+        }
+
+        match self.sender.try_send(Queued::Audio(QueuedSamples {
+            track,
+            at_nanos: at.as_nanos(),
+            samples: samples.to_vec(),
+        })) {
+            Ok(()) => AudioQueued::Written,
+            Err(error) => {
+                self.depth.fetch_sub(1, Ordering::Relaxed);
+                match error {
+                    // Unreachable while the share above is honoured — the two
+                    // shares add up to the capacity — but a `try_send` that
+                    // reported a full queue is still a lost buffer rather than
+                    // a lost recording, so it is counted like one.
+                    TrySendError::Full(_) => {
+                        self.dropped.fetch_add(1, Ordering::Relaxed);
+                        AudioQueued::DroppedWriterBehind
+                    }
+                    TrySendError::Disconnected(_) => AudioQueued::WriterLost,
+                }
+            }
+        }
+    }
+}
+
 /// The writer thread, and the queue into it.
 #[derive(Debug)]
 pub(crate) struct MuxingThread {
     /// [`None`] once [`finish`](Self::finish) has taken it, which is what tells
-    /// the writer thread that no more packets are coming.
-    sender: Option<SyncSender<QueuedPacket>>,
-    /// How many packets have been sent and not yet written. Read by the capture
-    /// loop before every submission, so it is an atomic and not a lock.
+    /// the writer thread that no more packets are coming — once every
+    /// [`AudioQueue`] clone has been dropped too.
+    sender: Option<SyncSender<Queued>>,
+    /// How many video packets have been sent and not yet written. Read by the
+    /// capture loop before every submission, so it is an atomic and not a lock.
     depth: Arc<AtomicUsize>,
+    /// How many audio buffers have been sent and not yet written.
+    audio_depth: Arc<AtomicUsize>,
+    /// How many audio buffers were dropped because the writer was behind.
+    audio_dropped: Arc<AtomicU64>,
     /// What the writer thread last found out about the drive.
     space: Arc<SpaceWatch>,
     handle: Option<JoinHandle<Result<RecordingSummary, MuxError>>>,
@@ -245,26 +398,78 @@ pub(crate) struct MuxingThread {
 impl MuxingThread {
     /// Starts a thread that writes into `writer` until the queue closes,
     /// watching `guard`'s volume as it goes.
-    pub(crate) fn start(writer: MkvWriter, guard: SpaceGuard) -> Self {
+    ///
+    /// `layout` is the one `writer` was created from. It is taken again here
+    /// because the audio tracks it declares are what the writer thread needs an
+    /// [`AudioTrackWriter`] for, and building those from the same value the
+    /// container was described from is what stops a track's declared format
+    /// from drifting from the samples written to it.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Mux`] when an audio track the layout declares cannot be
+    /// written to — a codec this writer does not produce, or a track with no
+    /// sampling rate. Refused here, before a frame is captured, rather than
+    /// discovered by an audio thread part way through a recording.
+    pub(crate) fn start(
+        writer: MkvWriter,
+        guard: SpaceGuard,
+        layout: &RecordingLayout,
+    ) -> Result<Self, SessionError> {
+        let tracks = audio_track_writers(layout)?;
+
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let depth = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&depth);
+        let audio_depth = Arc::new(AtomicUsize::new(0));
+        let audio_counted = Arc::clone(&audio_depth);
         let space = Arc::new(SpaceWatch::default());
         let watched = Arc::clone(&space);
 
         let handle = thread::Builder::new()
             .name("clipped-muxer".to_owned())
-            .spawn(move || write_until_closed(writer, &receiver, &counted, &guard, &watched))
+            .spawn(move || {
+                write_until_closed(
+                    writer,
+                    tracks,
+                    &receiver,
+                    &Depths {
+                        video: &counted,
+                        audio: &audio_counted,
+                    },
+                    &guard,
+                    &watched,
+                )
+            })
             // A machine that cannot start a thread cannot record, and there is
             // nothing to fall back to. `spawn` failing here means the process
             // is out of handles or memory, which is not a state to carry on in.
             .expect("a recording needs a thread to write its file");
 
-        Self {
+        Ok(Self {
             sender: Some(sender),
             depth,
+            audio_depth,
+            audio_dropped: Arc::new(AtomicU64::new(0)),
             space,
             handle: Some(handle),
+        })
+    }
+
+    /// A handle for one audio source's thread to queue its samples through.
+    ///
+    /// # Panics
+    ///
+    /// When [`finish`](Self::finish) has already been called, which would be
+    /// asking to write into a recording that is being closed.
+    pub(crate) fn audio_queue(&self) -> AudioQueue {
+        AudioQueue {
+            sender: self
+                .sender
+                .clone()
+                .expect("audio queues are taken before the recording is finished"),
+            depth: Arc::clone(&self.audio_depth),
+            dropped: Arc::clone(&self.audio_dropped),
         }
     }
 
@@ -304,20 +509,31 @@ impl MuxingThread {
         // queue would let it submit into a queue that is already full.
         self.depth.fetch_add(1, Ordering::Relaxed);
         sender
-            .send(QueuedPacket {
+            .send(Queued::Video(QueuedPacket {
                 data: data.to_vec(),
                 presentation_nanos,
                 decode_nanos,
                 keyframe,
-            })
+            }))
             .map_err(|_| {
                 self.depth.fetch_sub(1, Ordering::Relaxed);
                 SessionError::WriterLost
             })
     }
 
+    /// How many audio buffers were dropped because the writer was behind.
+    pub(crate) fn audio_buffers_dropped(&self) -> u64 {
+        self.audio_dropped.load(Ordering::Relaxed)
+    }
+
     /// Closes the queue, waits for everything in it to be written, and
     /// finalises the file.
+    ///
+    /// **Every [`AudioQueue`] taken from this thread has to have been dropped
+    /// first**, because each one holds a clone of the sender and the writer's
+    /// loop ends when the last of them goes. `crate::audio::AudioThreads` joins
+    /// its threads — which is what drops their queues — before the capture loop
+    /// reaches this call.
     ///
     /// This is the finalisation the whole design is arranged around: it writes
     /// the trailer, which is where Matroska's segment length, duration and cue
@@ -374,6 +590,37 @@ impl Drop for MuxingThread {
     }
 }
 
+/// The two depth counters the writer thread decrements as it takes work off the
+/// queue.
+///
+/// One structure rather than two arguments because they always travel together
+/// and because which of them a queued item belongs to is the whole of the
+/// bookkeeping: decrementing the wrong one would let a producer past its share.
+struct Depths<'counters> {
+    video: &'counters AtomicUsize,
+    audio: &'counters AtomicUsize,
+}
+
+/// An [`AudioTrackWriter`] for every audio track the layout declared.
+///
+/// Built before the thread starts, from the same layout the container was
+/// described from, so a track this writer cannot produce packets for is refused
+/// while the caller still has somewhere to report it.
+fn audio_track_writers(layout: &RecordingLayout) -> Result<Vec<AudioTrackWriter>, SessionError> {
+    layout
+        .audio_tracks()
+        .iter()
+        .enumerate()
+        .map(|(index, declared)| {
+            let track = u16::try_from(index).map_err(|_| MuxError::InvalidTrack {
+                track: TrackId::Video,
+                reason: "a recording cannot have more than 65,536 audio tracks",
+            })?;
+            Ok(AudioTrackWriter::new(TrackId::Audio(track), declared)?)
+        })
+        .collect()
+}
+
 /// The writer thread's body: write until the queue closes or a write fails,
 /// then finalise whatever happened.
 ///
@@ -383,8 +630,9 @@ impl Drop for MuxingThread {
 /// filesystem at all.
 fn write_until_closed(
     mut writer: MkvWriter,
-    receiver: &Receiver<QueuedPacket>,
-    depth: &AtomicUsize,
+    mut tracks: Vec<AudioTrackWriter>,
+    receiver: &Receiver<Queued>,
+    depths: &Depths<'_>,
     guard: &SpaceGuard,
     space: &SpaceWatch,
 ) -> Result<RecordingSummary, MuxError> {
@@ -394,9 +642,7 @@ fn write_until_closed(
     // wait out an interval to find out (`crate::disk`).
     let mut next_probe = Instant::now();
 
-    while let Ok(packet) = receiver.recv() {
-        depth.fetch_sub(1, Ordering::Relaxed);
-
+    while let Ok(item) = receiver.recv() {
         if guard.is_armed() {
             let now = Instant::now();
             if now >= next_probe {
@@ -405,15 +651,25 @@ fn write_until_closed(
             }
         }
 
-        let muxed = EncodedPacket::new(
-            TrackId::Video,
-            PacketTimestamp::from_nanos(packet.presentation_nanos),
-            &packet.data,
-        )
-        .with_decode_timestamp(PacketTimestamp::from_nanos(packet.decode_nanos))
-        .with_keyframe(packet.keyframe);
+        let written = match item {
+            Queued::Video(packet) => {
+                depths.video.fetch_sub(1, Ordering::Relaxed);
+                let muxed = EncodedPacket::new(
+                    TrackId::Video,
+                    PacketTimestamp::from_nanos(packet.presentation_nanos),
+                    &packet.data,
+                )
+                .with_decode_timestamp(PacketTimestamp::from_nanos(packet.decode_nanos))
+                .with_keyframe(packet.keyframe);
+                writer.write_packet(&muxed)
+            }
+            Queued::Audio(audio) => {
+                depths.audio.fetch_sub(1, Ordering::Relaxed);
+                write_samples(&mut writer, &mut tracks, &audio)
+            }
+        };
 
-        if let Err(error) = writer.write_packet(&muxed) {
+        if let Err(error) = written {
             // Stop at the first failure rather than filling the log with one
             // line per frame for a disk that is not going to empty itself. The
             // trailer is still written below, so the recording up to here is a
@@ -434,29 +690,77 @@ fn write_until_closed(
     }
 }
 
-/// The invariants the two numbers above have to keep, checked while this crate
-/// is compiled rather than while a test runs.
+/// Sends one queued buffer of samples to the track it belongs to.
 ///
-/// A run-time test would be the wrong tool: both are constants an author
+/// A buffer addressed to a track the layout never declared is a wiring fault
+/// rather than an operating condition — track identifiers come from
+/// `RecordingLayout::audio_track_for` and cannot name a track that is not there
+/// — so it is reported once at `error` and the buffer is dropped. Failing the
+/// write instead would end a recording over a bug in the code that placed it
+/// (AGENTS.md section 17).
+fn write_samples(
+    writer: &mut MkvWriter,
+    tracks: &mut [AudioTrackWriter],
+    audio: &QueuedSamples,
+) -> Result<(), MuxError> {
+    let index = match audio.track {
+        TrackId::Video => None,
+        TrackId::Audio(index) => Some(usize::from(index)),
+    };
+    let Some(track) = index.and_then(|index| tracks.get_mut(index)) else {
+        static REPORTED: AtomicBool = AtomicBool::new(false);
+        if !REPORTED.swap(true, Ordering::Relaxed) {
+            tracing::error!(
+                track = %audio.track,
+                declared = tracks.len(),
+                "audio was queued for a track this recording does not have, and was dropped; \
+                 please report this"
+            );
+        }
+        return Ok(());
+    };
+
+    track.write_samples(
+        writer,
+        PacketTimestamp::from_nanos(audio.at_nanos),
+        &audio.samples,
+    )
+}
+
+/// The invariants the numbers above have to keep, checked while this crate is
+/// compiled rather than while a test runs.
+///
+/// A run-time test would be the wrong tool: all of them are constants an author
 /// changes, so the moment to refuse is the build. The headroom must leave the
-/// capture loop somewhere to put the packets of a submission made at the limit,
-/// and the queue must hold about two seconds of a 60 fps recording — long
+/// capture loop somewhere to put the packets of a submission made at the limit;
+/// the video share must hold about two seconds of a 60 fps recording — long
 /// enough to absorb a filesystem pause, short enough that the memory behind it
-/// stays small.
+/// stays small — and the two shares together must be the whole capacity, which
+/// is what makes neither producer able to block.
 const _: () = {
     assert!(
-        HIGH_WATER < QUEUE_CAPACITY,
+        HIGH_WATER < VIDEO_CAPACITY,
         "with no headroom, a submission made at the limit produces a packet with nowhere to \
          go, and the only remaining choices are blocking the capture thread or losing an \
          encoded packet"
     );
     assert!(
-        QUEUE_CAPACITY >= 120,
+        VIDEO_CAPACITY >= 120,
         "the queue holds less than two seconds of a 60 fps recording"
     );
     assert!(
-        QUEUE_CAPACITY <= 256,
-        "the queue holds more memory than a queue should"
+        VIDEO_CAPACITY <= 256,
+        "the queue holds more video memory than a queue should"
+    );
+    assert!(
+        QUEUE_CAPACITY == VIDEO_CAPACITY + AUDIO_CAPACITY,
+        "the two producers' shares have to add up to the capacity, or one of them can fill \
+         the queue underneath the other and turn its send into a wait on the filesystem"
+    );
+    assert!(
+        AUDIO_CAPACITY >= 400,
+        "the audio share holds less than two seconds of two sources at Windows' 10 ms \
+         loopback period"
     );
 };
 
@@ -507,6 +811,78 @@ mod tests {
             watch.publish(state);
             assert_eq!(watch.state(), state);
         }
+    }
+
+    /// A queue with no writer behind it, which is what a stalled disk looks
+    /// like from a producer.
+    ///
+    /// The receiver is returned rather than dropped: dropping it would
+    /// disconnect the channel, and every write would come back
+    /// [`AudioQueued::WriterLost`] instead of filling it.
+    fn stalled_queue() -> (AudioQueue, Receiver<Queued>) {
+        let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+        (
+            AudioQueue {
+                sender,
+                depth: Arc::new(AtomicUsize::new(0)),
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn an_audio_producer_stops_at_its_share_instead_of_waiting_for_the_writer() {
+        // The guarantee AGENTS.md section 20 asks for, against the case that
+        // tests it: a writer that has stopped taking anything off the queue.
+        // The producer must come back with a dropped buffer rather than sitting
+        // inside `send`, because a capture thread inside `send` is a capture
+        // thread waiting on the filesystem.
+        //
+        // Run on a thread of its own and waited for with a timeout, so that a
+        // producer which *does* block fails this test rather than hanging the
+        // suite with no explanation.
+        let (queue, receiver) = stalled_queue();
+        let (done, finished) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let samples = vec![0.0_f32; 480];
+            let mut written = 0_usize;
+            let mut dropped = 0_usize;
+            for _ in 0..QUEUE_CAPACITY * 2 {
+                match queue.write(TrackId::Audio(0), MediaTime::ZERO, &samples) {
+                    AudioQueued::Written => written += 1,
+                    AudioQueued::DroppedWriterBehind => dropped += 1,
+                    AudioQueued::WriterLost => break,
+                }
+            }
+            let _ = done.send((written, dropped));
+        });
+
+        let (written, dropped) = finished
+            .recv_timeout(core::time::Duration::from_secs(10))
+            .expect(
+                "queueing audio waited for a writer that had stopped, which is a capture thread \
+                 blocked on the filesystem",
+            );
+
+        assert_eq!(
+            written, AUDIO_CAPACITY,
+            "an audio producer must stop at its own share of the queue and not one item further"
+        );
+        assert_eq!(dropped, QUEUE_CAPACITY * 2 - AUDIO_CAPACITY);
+
+        // And the point of the share: the video's slots are still there. A
+        // producer allowed to fill the whole queue would leave the capture
+        // loop's `send` — which *is* the blocking one — with nowhere to put an
+        // encoded packet, and AGENTS.md section 20's guarantee would be gone
+        // without anything failing.
+        assert_eq!(
+            receiver.try_iter().count(),
+            AUDIO_CAPACITY,
+            "the queue should hold exactly the audio share, leaving the video's {} free",
+            VIDEO_CAPACITY
+        );
     }
 
     #[cfg(windows)]

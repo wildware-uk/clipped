@@ -207,6 +207,7 @@ fn recorded(output: &Path, end_reason: EndReason) -> RecordingOutcome {
         timestamps_corrected: 0,
         duration: Duration::from_secs(6),
         end_reason,
+        audio_tracks: Vec::new(),
     }))
 }
 

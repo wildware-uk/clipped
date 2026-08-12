@@ -149,6 +149,47 @@ pub enum CodecPreference {
     Fixed(Codec),
 }
 
+/// Where one of a recording's audio tracks comes from.
+///
+/// One of these per source — system audio and the microphone — rather than a
+/// single "record audio" flag, because the two are chosen independently and
+/// each produces a track of its own that must never be silently merged with the
+/// other (AGENTS.md section 21).
+///
+/// [`Off`](Self::Off) is not "record silence": no device is opened, and the
+/// recording's layout declares no track for that source at all. A track that is
+/// declared and empty means something different — the device was opened and
+/// produced nothing — and the two must stay distinguishable in the file
+/// (`docs/audio-routing.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AudioSourceSetting {
+    /// Do not record this source.
+    ///
+    /// The default, and deliberately so. A library call must not open somebody's
+    /// microphone because its caller forgot a field (AGENTS.md section 14);
+    /// `clipped-recorder` is the product surface that defaults both sources on,
+    /// and it says so explicitly.
+    #[default]
+    Off,
+    /// Whatever Windows currently makes the default device, following it if the
+    /// user changes it mid-recording.
+    SystemDefault,
+    /// A device whose name contains this text, and only that device.
+    ///
+    /// A capture on a chosen device waits for it rather than quietly recording
+    /// a different one, so unplugging a headset produces silence on that track
+    /// and not the audio of whatever Windows promoted (`docs/audio-routing.md`).
+    Named(String),
+}
+
+impl AudioSourceSetting {
+    /// Whether this source is recorded at all.
+    #[must_use]
+    pub const fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
+    }
+}
+
 /// Which encoder family to encode with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EncoderPreference {
@@ -172,7 +213,8 @@ pub struct RecordingSettings {
     codec: CodecPreference,
     encoder: EncoderPreference,
     capture_cursor: bool,
-    audio_requested: bool,
+    system_audio: AudioSourceSetting,
+    microphone: AudioSourceSetting,
     overwrite: bool,
     minimum_free_space: u64,
 }
@@ -190,7 +232,8 @@ impl RecordingSettings {
             codec: CodecPreference::Automatic,
             encoder: EncoderPreference::Automatic,
             capture_cursor: false,
-            audio_requested: false,
+            system_audio: AudioSourceSetting::Off,
+            microphone: AudioSourceSetting::Off,
             overwrite: false,
             minimum_free_space: crate::disk::DEFAULT_MINIMUM_FREE_SPACE,
         }
@@ -244,15 +287,25 @@ impl RecordingSettings {
         self
     }
 
-    /// Records that the caller asked for one or more audio tracks.
+    /// Sets where the system-audio track comes from.
     ///
-    /// The session cannot produce them yet, and this is how it knows to say so
-    /// once rather than writing a file that silently has no sound in it. It is
-    /// deliberately a bare flag and not a device selection: carrying a
-    /// selection the pipeline cannot honour would look like support for it.
+    /// [`AudioSourceSetting::Named`] is not honoured for this source in this
+    /// build and is refused when the recording starts: WASAPI loopback is
+    /// opened against the endpoint Windows is *playing through*, and
+    /// `clipped-audio` offers no way to name a different one
+    /// ([issue #316](https://github.com/wildware-uk/clipped/issues/316)).
+    /// Recording the default endpoint instead would be a setting that silently
+    /// does something else (AGENTS.md section 27).
     #[must_use]
-    pub const fn with_audio_requested(mut self, requested: bool) -> Self {
-        self.audio_requested = requested;
+    pub fn with_system_audio(mut self, source: AudioSourceSetting) -> Self {
+        self.system_audio = source;
+        self
+    }
+
+    /// Sets which microphone the microphone track comes from.
+    #[must_use]
+    pub fn with_microphone(mut self, source: AudioSourceSetting) -> Self {
+        self.microphone = source;
         self
     }
 
@@ -309,10 +362,22 @@ impl RecordingSettings {
         self.capture_cursor
     }
 
-    /// Whether the caller asked for audio that this build cannot record.
+    /// Where the system-audio track comes from.
     #[must_use]
-    pub const fn audio_requested(&self) -> bool {
-        self.audio_requested
+    pub const fn system_audio(&self) -> &AudioSourceSetting {
+        &self.system_audio
+    }
+
+    /// Where the microphone track comes from.
+    #[must_use]
+    pub const fn microphone(&self) -> &AudioSourceSetting {
+        &self.microphone
+    }
+
+    /// Whether this recording will open any audio device at all.
+    #[must_use]
+    pub const fn records_audio(&self) -> bool {
+        !self.system_audio.is_off() || !self.microphone.is_off()
     }
 
     /// Whether an existing recording at the output path may be replaced.
@@ -445,11 +510,56 @@ mod tests {
         assert_eq!(settings.codec(), CodecPreference::Automatic);
         assert_eq!(settings.encoder(), EncoderPreference::Automatic);
         assert!(!settings.capture_cursor());
-        assert!(!settings.audio_requested());
+        assert!(
+            !settings.records_audio(),
+            "a library caller that said nothing must not have its microphone opened"
+        );
+        assert_eq!(settings.system_audio(), &AudioSourceSetting::Off);
+        assert_eq!(settings.microphone(), &AudioSourceSetting::Off);
         assert_eq!(
             settings.minimum_free_space(),
             crate::disk::DEFAULT_MINIMUM_FREE_SPACE,
             "a caller that says nothing must still get the disk guard"
+        );
+    }
+
+    #[test]
+    fn each_audio_source_is_turned_on_and_off_independently_of_the_other() {
+        // The pair has to stay two answers rather than one. A recording with
+        // the microphone off and system audio on is the ordinary case, and a
+        // settings object that collapsed them into "audio: yes" would either
+        // open a microphone nobody asked for or leave the game silent.
+        let base = RecordingSettings::new(
+            CaptureTargetSettings::window(1, 1280, 720),
+            PathBuf::from("out.mkv"),
+        );
+
+        let system_only = base
+            .clone()
+            .with_system_audio(AudioSourceSetting::SystemDefault);
+        assert!(system_only.records_audio());
+        assert_eq!(
+            system_only.system_audio(),
+            &AudioSourceSetting::SystemDefault
+        );
+        assert!(system_only.microphone().is_off());
+
+        let microphone_only = base
+            .clone()
+            .with_microphone(AudioSourceSetting::Named("Yeti".to_owned()));
+        assert!(microphone_only.records_audio());
+        assert!(microphone_only.system_audio().is_off());
+        assert_eq!(
+            microphone_only.microphone(),
+            &AudioSourceSetting::Named("Yeti".to_owned())
+        );
+
+        assert!(
+            !base
+                .with_system_audio(AudioSourceSetting::Off)
+                .with_microphone(AudioSourceSetting::Off)
+                .records_audio(),
+            "both off is a video-only recording, and nothing should be opened for it"
         );
     }
 
