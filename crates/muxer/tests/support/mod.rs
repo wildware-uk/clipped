@@ -148,3 +148,100 @@ impl RunningRecorder {
 fn parse_media_seconds(line: &str) -> Option<f64> {
     line.trim().strip_prefix("media_seconds=")?.parse().ok()
 }
+
+/// Builds a fixture with the pinned build's own `ffmpeg`.
+///
+/// For sources `examples/synthetic_recording.rs` cannot produce. It writes H.264
+/// with `libopenh264`, which does not reorder and has no B-frames, so a test
+/// about composition offsets needs a stream from somewhere else — and a test
+/// about a codec MP4 refuses needs a codec nothing here encodes.
+///
+/// This is the same program `clipped-media-validation` inspects with, and it is
+/// used the same way: as a test tool. Nothing in the recorder shells out to
+/// FFmpeg (`docs/ffmpeg.md`).
+///
+/// # Panics
+///
+/// When `ffmpeg` fails, with its own diagnostics, because a fixture that was not
+/// built means the test after it is asserting on nothing.
+pub(crate) fn build_fixture_with_ffmpeg(ffmpeg: &Path, arguments: &[&str]) {
+    let output = Command::new(ffmpeg)
+        // `-nostdin` because `ffmpeg` otherwise reads the console, and a test
+        // harness's console is not something it should be reading.
+        .arg("-nostdin")
+        .args(arguments)
+        .output()
+        .expect("the pinned ffmpeg can be run");
+
+    assert!(
+        output.status.success(),
+        "the fixture could not be built with `ffmpeg {}`: {}",
+        arguments.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The payload of every packet of a file, as a hash, in the order they are
+/// stored.
+///
+/// This is what proves a remux did not re-encode: the coded bytes of the source
+/// and the coded bytes of the result are the same bytes, so the picture and the
+/// sound are bit for bit identical and no quality was traded for the change of
+/// container. Counting packets, or comparing durations, would pass just as
+/// happily on a file that had been through an encoder.
+///
+/// Hashes rather than the bytes themselves because a four-second recording is
+/// megabytes and a mismatch is answered by which packet, not by which byte.
+/// `clipped-media-validation` has no opinion about packet payloads, which is why
+/// this reads `ffprobe` here rather than there — it is one assertion in one
+/// crate, and adding a hash to the shared harness before a second caller wants
+/// one would be building for a user that does not exist.
+pub(crate) fn packet_payload_hashes(ffprobe: &Path, file: &Path) -> Vec<(i64, String)> {
+    let output = Command::new(ffprobe)
+        .args([
+            "-hide_banner",
+            "-v",
+            "error",
+            "-show_packets",
+            "-show_data_hash",
+            "MD5",
+            "-show_entries",
+            "packet=stream_index,data_hash",
+            "-of",
+            "compact=p=0:nk=0",
+        ])
+        .arg(file)
+        .output()
+        .expect("the pinned ffprobe can be run");
+
+    assert!(
+        output.status.success(),
+        "ffprobe could not read {}: {}",
+        file.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut hashes = Vec::new();
+    for line in text.lines() {
+        let mut stream = None;
+        let mut hash = None;
+        for field in line.trim().split('|') {
+            match field.split_once('=') {
+                Some(("stream_index", value)) => stream = value.parse().ok(),
+                Some(("data_hash", value)) => hash = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+        if let (Some(stream), Some(hash)) = (stream, hash) {
+            hashes.push((stream, hash));
+        }
+    }
+
+    assert!(
+        !hashes.is_empty(),
+        "no packet hashes came back for {}, so a comparison against them would prove nothing",
+        file.display()
+    );
+    hashes
+}

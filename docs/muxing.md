@@ -17,12 +17,15 @@ that implements it, and [ffmpeg.md](ffmpeg.md) how to build against it.
 - One video track and any number of named audio tracks, with language tags and
   a default-track flag.
 - H.264, HEVC and AV1 video; PCM, AAC and Opus audio.
+- `remux_to_mp4` — copies a finished recording into MP4 without decoding it, and
+  `Mp4Plan::inspect`, which says what that copy would cost before it is made.
 
-What does not exist: remuxing to MP4
-([issue #92](https://github.com/wildware-uk/clipped/issues/92)) and the replay
-buffer's segment writing. Nothing in the recorder is wired to the muxer yet —
-capture, encoding and the session that joins them are separate M1 issues — so
-the writer is exercised by its own tests rather than by `clipped-recorder`.
+Nothing in the recorder is wired to the muxer yet — capture, encoding and the
+session that joins them are separate M1 issues — so the writer is exercised by
+its own tests rather than by `clipped-recorder`. Nothing calls `remux_to_mp4`
+yet either: the setting that offers it (SPEC.md section 15, "Allow automatic
+remux") and the retention policy for the MKV it was made from belong to the
+session and library work, and are not in this crate.
 
 ## Writing a recording
 
@@ -135,6 +138,162 @@ not a number to tolerate.
 Above about 1000 frames per second two frames round onto the same millisecond
 and the second is forced forward by a tick. No capture path in Clipped produces
 frames that fast.
+
+## Remuxing to MP4
+
+MKV is the archival container, and ADR 0001 accepted the consequence: several
+upload targets, chat clients and editors reject it. So a shareable copy is
+produced by **remuxing** — copying the coded packets into an MP4 — rather than by
+re-encoding.
+
+```rust
+use clipped_muxer::{remux_to_mp4, Mp4Plan};
+
+// What would this cost? Answered without writing anything.
+let plan = Mp4Plan::inspect(Path::new("recording.mkv"))?;
+for loss in plan.losses() {
+    eprintln!("warning: {loss}");
+}
+
+let summary = remux_to_mp4(Path::new("recording.mkv"), Path::new("recording.mp4"))?;
+```
+
+or from a shell, which is what the numbers below were taken with:
+
+```text
+cargo run -p clipped-muxer --example remux_recording -- \
+    --source recording.mkv --destination recording.mp4
+cargo run -p clipped-muxer --example remux_recording -- --source recording.mkv --inspect
+```
+
+### No decoder and no encoder run
+
+The bytes that come out of the source are the bytes that go into the
+destination; only the boxes around them change. That is the whole claim, so it
+is the thing the tests check directly rather than inferring from a duration or a
+frame count: `crates/muxer/tests/mp4_remux.rs` hashes the payload of every packet
+of both files with `ffprobe -show_data_hash` and compares them stream by stream,
+in order.
+
+Measured on the development machine — a 30-second 1280×720 recording at 60 fps
+with three PCM audio tracks, 19.1 MB, produced by `examples/synthetic_recording`,
+with everything built in the **debug** profile:
+
+| | Wall time | Result |
+| --- | --- | --- |
+| `remux_recording` | 0.05 s (0.031 s inside `remux_to_mp4`) | 1800 frames, 30.000 s, 19,071,344 bytes |
+| `ffmpeg -c:v libopenh264 -b:v 8000k` | 1.85 s | 1800 frames, 30.000 s, 19,751,402 bytes |
+
+Thirty-six times faster on this machine, and the comparison is generous to the
+re-encode: it is the same picture size and rate, in the pinned build's *software*
+encoder, which is the only H.264 encoder an LGPL build has. The remux's output is
+4 KB larger than the source, which is the difference between Matroska's boxes and
+MP4's; the re-encode's is 700 KB larger and its pixels are not the source's.
+Repeat it with `scripts`-free commands: build the examples, run the two above,
+and compare with `ffprobe -count_frames`.
+
+### What MP4 cannot carry
+
+Matroska accepts nearly anything. MP4 stores only what has a registered mapping,
+so every stream is put to the **linked FFmpeg build's own MP4 muxer**
+(`avformat_query_codec`) rather than to a list written down in Clipped, which
+would go stale: FFmpeg 8 added uncompressed audio to MP4 as `ipcm`, and a list
+written a year ago would still be refusing it.
+
+| Stream | MP4 can carry it | What happens |
+| --- | --- | --- |
+| Picture or sound | yes | copied |
+| Picture or sound | no | **the remux is refused**, before the MP4 is created |
+| Subtitle, attachment, data | yes | copied |
+| Subtitle, attachment, data | no | left out, and named in the plan and the log |
+
+Refusing rather than dropping is the half that matters. An MP4 missing one of a
+recording's five audio tracks is indistinguishable from one that only ever had
+four, and the person who discovers it is the one who uploaded it. A missing
+attachment is not the recording, so that is a warning rather than a refusal.
+
+`Mp4Plan::inspect` answers all of this **without writing anything**, so a user
+interface can say what will be lost before somebody waits for the copy —
+`Mp4Plan::losses` is that list in words, and it includes the refusing tracks as
+well as the merely-dropped ones, because somebody deciding wants one list.
+
+Chapters are not carried. `Mp4Plan::chapters` counts them so that a caller can
+say so; nothing Clipped records has any.
+
+### What survives, and the two things that move
+
+Every carried track keeps its coded packets, its timestamps, its language, its
+default-track flag, its frame rate, and everything
+`avcodec_parameters_copy` copies — pixel format, profile and level, colour
+signalling, channel layout. Two things are stored differently on the other side,
+and both are worth knowing before somebody concludes the remux lost them:
+
+- **The track name.** Matroska keeps it in the track entry's `Name` element,
+  which `ffprobe` reports as the `title` tag. MP4 keeps it in a `udta`/`name` box
+  on the track, which `ffprobe` reports as the `name` tag. Same string, different
+  place; a tool that only looks for `title` will not find it.
+- **An unknown language.** Matroska omits the element; MP4's media header cannot,
+  and writes `und`. Same statement.
+
+One thing is *filled in* rather than copied. Matroska stores a channel **count**
+and no arrangement, so its demuxer reports an unspecified channel order for every
+uncompressed track — and MP4's `chnl` box has to name an arrangement. Left alone,
+FFmpeg's MP4 muxer rejects the track while writing the trailer, after the whole
+file has been written, with `unsupported channel layout 2 channels`. So a track
+whose order is unspecified is given the conventional layout for its channel count
+— the same one `MkvWriter` writes when it creates such a track, and the one every
+player assumes. A track that *did* state its arrangement is left alone, because
+overwriting a stated layout is how a surround mix gets its channels relabelled.
+
+### Timestamps, and where a naive remux drifts
+
+The source's timestamps are rescaled into the destination's units and otherwise
+left exactly as they are. In particular:
+
+| The source has | What is written | Why |
+| --- | --- | --- |
+| Tracks that do not start together | the same offset between them | Rebasing each track onto its own first packet is the classic remux bug: it pulls the later track forward and the copy plays out of sync with the recording. |
+| A first timestamp before zero | the same negative timestamp | MP4 represents it with an **edit list**, which is what FFmpeg's muxer writes. Opus carries its pre-skip this way; clamping it to zero would shift the sound. |
+| A decode timestamp before its own presentation timestamp | both, unchanged | A stream with B-frames leaves the encoder in decode order. MP4 stores the gap as a **composition offset**; flattening it reorders the picture. |
+| A decode timestamp that does not advance | one tick past its predecessor, counted | FFmpeg's muxer refuses the packet outright, which would end the copy part-way and leave a truncated MP4. Nothing Clipped records produces this — `MkvWriter` already enforces it — so a non-zero `RemuxSummary::timestamps_forced_monotonic` means the source's own decode order was broken. |
+
+The rescaling is `av_rescale_q_rnd` with FFmpeg's own rounding, so a remuxed
+timestamp is the one `ffmpeg -c copy` would have written. The correction policy
+in the last row is `crate::timeline`'s, shared with the recording writer, so
+there is one answer to "what do we do about a timestamp that does not advance"
+rather than two.
+
+`crates/muxer/tests/mp4_remux.rs` builds a source with two B-frames per group
+using the pinned build's MPEG-4 encoder — `libopenh264` does not reorder, so a
+recording written here cannot exercise this — and asserts that **both** timestamps
+of **every** packet come out within 2 ms of the source's, in the same order.
+
+### The recording is never touched
+
+`avformat_open_input` opens for reading and nothing here opens the source any
+other way, so a remux leaves the recording byte for byte as it found it — on the
+failing paths as well as the succeeding one (AGENTS.md section 56). The tests
+read the source before and after and compare the bytes, for a successful copy, a
+copy refused for an uncarryable track, and a copy refused because the destination
+was already taken.
+
+The destination gets the same protection the recording writer gives:
+`MuxError::OutputExists` rather than truncating whatever was there, and a partial
+MP4 removed again if the copy fails part-way, so that retrying the same name does
+not run into a stub left by the last attempt.
+
+### `faststart`
+
+The MP4 is written with `-movflags +faststart`: the index is moved to the front
+of the finished file, which costs one extra pass over the output and is the
+difference between a file that plays while it is still downloading and one that
+has to be fetched whole first. Sharing is the entire reason this container exists
+here, so the pass is worth paying for.
+
+That second pass re-opens the output by URL, which is why
+`OutputContext::open_output` sets `AVFormatContext::url` — without it the muxer
+fails at the trailer, after the whole file has been written, with
+`Unable to re-open output file for shifting data`.
 
 ## Interruption: what a killed recording costs
 
@@ -313,6 +472,7 @@ install.
 | `tests/mkv_writing.rs` | Track names, languages, default flags, channel counts and codec metadata land in the file; packets go to the track they were addressed to; out-of-order and unrebased timestamps come out monotonic and from zero; an existing file is never overwritten. |
 | `tests/synthetic_recording.rs` | A whole recording — real H.264 and two PCM tracks — opens, decodes frame by frame, has a plausible duration, carries the right codec metadata, and has tracks that start and end together. |
 | `tests/abrupt_termination.rs` | A killed recorder leaves a playable file, reaching to within the bound above. |
+| `tests/mp4_remux.rs` | An MP4 made from a recording holds the same tracks, the same names, languages and default flags, decodes the same pictures, keeps the offset between tracks that do not start together and the composition offsets of a stream that reorders — and holds the source's coded bytes, packet for packet. A track MP4 cannot carry is refused before anything is created, an existing MP4 is never overwritten, and the recording is unchanged afterwards on every path. |
 | `tests/ffmpeg_linkage.rs` | The FFmpeg actually loaded is the pinned, LGPL-only build and contains what the pipeline needs. |
 
 The packets come from `crates/muxer/examples/synthetic_recording.rs`, which
@@ -322,9 +482,23 @@ helper because two of those tests need it as a *process*: a Rust panic unwinds
 and runs destructors, and destructors are exactly what a killed recorder does not
 get.
 
+Two of its options exist only so that a test can fail. `--audio-offset-ms` starts
+the audio later than the video, because a remux that rebased each track onto its
+own first packet passes every other assertion. `--default-audio-track` marks a
+track other than the first as the one to play, because FFmpeg's MP4 muxer enables
+the first track of each kind whether or not it was told to — so a recording whose
+default track *is* the first one produces an identical MP4 with the flag copied
+and with the copy deleted.
+
+Sources that Clipped's own writer cannot produce — a stream with B-frames, a
+codec MP4 refuses — are built in the test with the pinned build's `ffmpeg`, the
+same program `clipped-media-validation` inspects with. Nothing in the recorder
+shells out to FFmpeg ([ffmpeg.md](ffmpeg.md)).
+
 ```text
 cargo test -p clipped-muxer
 cargo run -p clipped-muxer --example synthetic_recording -- --output demo.mkv --seconds 5
+cargo run -p clipped-muxer --example remux_recording -- --source demo.mkv --destination demo.mp4
 ```
 
 ## What has not been exercised
@@ -339,9 +513,20 @@ Stated rather than left to be discovered (AGENTS.md section 54):
   [issue #15](https://github.com/wildware-uk/clipped/issues/15) and is not on
   this branch. The Annex B handling is what a Windows hardware encoder produces
   and is exercised by the software encoder, which produces the same form.
-- **No B-frames.** Reordered presentation timestamps are handled and unit
-  tested, but `libopenh264` does not reorder, so no file with B-frames has been
-  written.
+- **No B-frames have been *recorded*.** Reordered presentation timestamps are
+  handled and unit tested, and `tests/mp4_remux.rs` remuxes a real reordered
+  stream end to end, but that stream is MPEG-4 built by `ffmpeg` for the test:
+  `libopenh264` does not reorder, so no *recording* with B-frames has been
+  written by `MkvWriter`.
+- **No MP4 has been played by anything but FFmpeg.** The remuxed files are
+  decoded frame by frame with the pinned build's `ffprobe` and nothing else. That
+  is the same limit `MkvWriter`'s interruption claim has, and for the same reason
+  — but it matters more here, because the whole point of the MP4 is that other
+  software accepts it. Whether a given upload target accepts these files is a
+  thing to check by uploading one, and it has not been checked.
+- **No remux has been driven by the application.** Nothing calls
+  `remux_to_mp4` yet; the setting, the retention policy for the MKV, and the
+  progress a long copy should report belong to the session and library work.
 - **Sessions are minutes, not hours.** AGENTS.md section 59 asks for long-run
   testing; the longest recording written so far is a few seconds.
 - **No colour signalling is written.** A 10-bit recording would not say what its

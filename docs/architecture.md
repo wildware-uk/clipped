@@ -128,7 +128,7 @@ surrounding responsibility.
 | Encoder Manager | `clipped-encoder` | M1 |
 | Event/Highlight Engine | `clipped-events` (vocabulary), `clipped-session` (rules) | M8–M10 |
 | Media Library | `clipped-library` | M6 |
-| Storage Manager | `clipped-storage` (persistence); policy undecided | M6, M12 |
+| Storage Manager | `clipped-storage` (persistence); `clipped-library::accounting` (measurement and limits) | M6, M12 |
 | Export Engine | not yet created; `clipped-edit` is the edit document it renders, `clipped-muxer` for remux | M11 |
 | Plugin Manager | `clipped-plugins` | M9 |
 | Game/Screen Capture | `clipped-capture` | M1 |
@@ -154,13 +154,18 @@ in which order, how loud each track is and what text goes over the picture
 ([editing.md](editing.md)) — and it holds no exporter, no editor and no edit
 operation. It sits at layer 0 beside `clipped-ipc` because both ends of the
 application read a document, and it performs no file or database access at all,
-so a clip cannot damage the recording it refers to. Storage policy — quotas, retention, favourite protection — is listed as
-undecided for the same reason: the mechanism (SQLite, on-disk layout) is clearly
-`clipped-storage`, but no crate's documented remit claims the policy, and
-`clipped-library` explicitly claims indexing, search, favourites and tags
-instead. Where it lives is an M12 decision that
-[issue #93](https://github.com/wildware-uk/clipped/issues/93) and
-[issue #111](https://github.com/wildware-uk/clipped/issues/111) will make.
+so a clip cannot damage the recording it refers to. The Storage Manager is split
+between two crates because the mechanism and the policy are different jobs. The
+mechanism — SQLite, migrations, on-disk layout — is `clipped-storage`. The
+policy that had no home was placed by
+[issue #93](https://github.com/wildware-uk/clipped/issues/93): storage
+*accounting* is `clipped-library::accounting`, because measuring what is on disk
+and attributing it to games and sessions is a view over the library, which is
+what `clipped-library` has claimed from the start
+([storage-management.md](storage-management.md)). It measures and judges limits
+and deletes nothing; acting on a breached limit is
+[issue #111](https://github.com/wildware-uk/clipped/issues/111), which is where
+the retention and favourite-protection rules will land.
 
 ### Dependency direction
 
@@ -383,6 +388,8 @@ contributor working in it needs.
 | [replay-buffer.md](replay-buffer.md) | The rolling segmented buffer, retention and clip construction | M3 |
 | [game-detection.md](game-detection.md) | The game catalogue and how a process is matched against it; watching for processes starting and stopping, why the source is a subscription rather than a poll, how a launcher and the game it starts become one launch, and what detection costs while nothing is happening | M4 |
 | [sessions.md](sessions.md) | What a session is; how a launch becomes a recording; what happens on a crash, a fast restart, a second game and a suspend; the one capture mode this build has; and where a session is written down before M6's database exists | M4 |
+| [search.md](search.md) | The local search language: its syntax, what each term means, every message a malformed query produces, the limits of its text matching, and how a database-backed executor consumes the parsed query | M6 |
+| [waveforms.md](waveforms.md) | Per-track audio peaks for the timeline and the clip editor: what is stored and at what resolutions, the sidecar cache and its invalidation and cleanup rules, and where generation runs so that it cannot compete with a recording | M8 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 | [ipc.md](ipc.md) | The recorder control protocol: transport, framing, the handshake, the compatibility policy, the commands and events, and the security a local endpoint does and does not promise | M5 |
 | [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
@@ -391,8 +398,8 @@ contributor working in it needs.
 All but [capture-pipeline.md](capture-pipeline.md),
 [encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md),
 [av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md), [ipc.md](ipc.md),
-[game-detection.md](game-detection.md), [sessions.md](sessions.md) and
-[editing.md](editing.md)
+[game-detection.md](game-detection.md), [sessions.md](sessions.md),
+[editing.md](editing.md), [search.md](search.md) and [waveforms.md](waveforms.md)
 are stubs today, stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
@@ -421,8 +428,17 @@ explicit about what is not built, which for sessions is three of the four captur
 modes and every per-game setting. `editing.md` is a specification rather than a
 description, as `ipc.md` is: the document model exists in `clipped-edit` and is
 the shape the ten remaining M11 tickets are held to, but no editor, no export
-engine and no edit operation is written, and the document says so. The rest
+engine and no edit operation is written, and the document says so. `search.md`
+is the same shape again: the query language, its parser and its matcher exist in
+`clipped-library`, so the syntax, every error message and the measured cost of
+matching are written down, and the document is explicit that nothing indexes a
+real library yet — that is M6's issues #55 and #56, and the document says what
+they have to consume. `waveforms.md` covers the peak generator, which is written, and is explicit that
+nothing draws its output and nothing hosts its background worker yet — the
+timeline and the clip editor are the consumers, and neither exists. The rest
 stay stubs on purpose: describing a capture pipeline that has not been written
+
+The rest stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 
 Supporting documents that are not subsystems:

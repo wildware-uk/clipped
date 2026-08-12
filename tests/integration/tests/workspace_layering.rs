@@ -68,6 +68,12 @@ const LAYERS: &[&[&str]] = &[
         "clipped-ffmpeg-runtime",
     ],
     // Subsystems built directly on a platform or persistence layer.
+    //
+    // `clipped-waveform` is here rather than beside `clipped-muxer` above,
+    // even though both link FFmpeg, because it consumes nothing this workspace
+    // produces: it reads a finished file from disk. Putting it at layer 1 is
+    // what lets `clipped-library` depend on it when the timeline needs peaks
+    // (issue #65) without the library having to sit above the muxer.
     &[
         "clipped-capture",
         "clipped-audio",
@@ -75,6 +81,7 @@ const LAYERS: &[&[&str]] = &[
         "clipped-library",
         "clipped-game-detection",
         "clipped-plugins",
+        "clipped-waveform",
     ],
     // Consumers of encoded output. `clipped-muxer` writes it to a container.
     &["clipped-muxer"],

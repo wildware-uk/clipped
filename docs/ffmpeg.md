@@ -6,7 +6,9 @@ remuxing, thumbnails and waveforms all go through `libavformat` and
 what is pinned, and what has to happen when the pin moves.
 
 Why it is set up this way — and in particular why the build must not be a GPL
-one — is [ADR 0004](adr/0004-ffmpeg-dependency-strategy.md).
+one — is [ADR 0004](adr/0004-ffmpeg-dependency-strategy.md). What a *release*
+has to do about FFmpeg's licence, which is a different question from how to
+build against it, is [licensing.md](licensing.md).
 
 ## Setting up a clean clone
 
@@ -175,8 +177,11 @@ The script is non-interactive and safe to run unconditionally, and it needs no
 wiring into the job's environment: the workflow checks the repository out, so it
 has `.cargo/config.toml` for the same reason a contributor does.
 `.github/workflows/ci.yml` caches `third-party/ffmpeg` keyed on the pinned asset
-name read out of the fetch script, so moving the pin misses the cache and a hit
-turns the step into a no-op that touches no network.
+name, so moving the pin misses the cache and a hit turns the step into a no-op
+that touches no network. It gets that name by running the fetch script with
+`-PrintPin`, which prints the pin as `key=value` lines and exits without
+touching anything — the pin answering a question about itself, rather than a
+second reader of it that a reformatted parameter block could break.
 
 The runner also needs `libclang.dll`. GitHub's `windows-latest` image ships LLVM,
 and the workflow's "Locate libclang for bindgen" step finds it and exports

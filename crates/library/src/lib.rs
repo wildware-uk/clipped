@@ -7,30 +7,38 @@
 //! # Responsibilities
 //!
 //! - Indexing games, sessions, recordings and clips.
-//! - [`virtual_clip`]: what a clip *is* before anything has been exported — a
-//!   range of a recording, and why it exists. `docs/highlights.md` argues it.
 //! - Search, favourites and tags.
 //! - Thumbnail and waveform bookkeeping.
+//! - Storage accounting and the limits configured against it:
+//!   [`accounting`].
 //!
 //! # Not responsible for
 //!
-//! Storage primitives (see `clipped-storage`) or generating media. Nor
-//! *deciding* which moments deserve a clip: the highlight rules are
-//! [issue #75](https://github.com/wildware-uk/clipped/issues/75) and generation
-//! is [#76](https://github.com/wildware-uk/clipped/issues/76). This crate owns
-//! the shape of what they produce.
+//! Storage primitives (see `clipped-storage`) or generating media. Nothing here
+//! deletes a file — measuring what is on disk and removing something from it are
+//! deliberately different modules in different tickets (AGENTS.md section 56).
 //!
 //! # Position in the architecture
 //!
-//! Sits above `clipped-storage` and below `clipped-session`. It also names the
-//! two layer 0 vocabularies a clip is made of — `clipped-edit` for the range
-//! and `clipped-events` for the reason — which is why the virtual clip model
-//! is here and not in either of them: those two crates are both at layer 0 and
-//! cannot name each other, and this is the lowest crate that can see both.
+//! Sits above `clipped-storage` and below `clipped-session`.
+//!
+//! # What exists today
+//!
+//! [`search`]: the query language a user types into the search box, its parser
+//! and a matcher for it (SPEC.md section 30, `docs/search.md`). It is a
+//! language and its meaning, and it deliberately touches no database — the
+//! index that will run it over a real library is
+//! [issue #56](https://github.com/wildware-uk/clipped/issues/56), and the
+//! database under that is
+//! [issue #55](https://github.com/wildware-uk/clipped/issues/55).
+//!
+//! [`accounting`]: what Clipped has put on disk and what a quota permits
+//! (SPEC.md section 27, `docs/storage-management.md`). It measures and reports;
+//! removing anything is
+//! [issue #111](https://github.com/wildware-uk/clipped/issues/111).
+//!
+//! Nothing else in this crate is built yet.
 
+pub mod accounting;
+pub mod search;
 pub mod virtual_clip;
-
-pub use virtual_clip::{
-    window_around, ClipOrigin, ClipState, HighlightCause, SourceAvailability, SourceDeletion,
-    VirtualClip,
-};
