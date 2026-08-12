@@ -133,7 +133,7 @@ function withoutTag<T>(payload: RecorderLinkEvent): T {
  * answer; guessing at a state would be the failure AGENTS.md section 27
  * describes.
  */
-function inTauriWindow(): boolean {
+export function inTauriWindow(): boolean {
   return '__TAURI_INTERNALS__' in window;
 }
 

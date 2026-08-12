@@ -24,6 +24,23 @@
 //!    `recorder_link_state` command and follows it through the
 //!    `recorder-link` event.
 //!
+//! # What the window can ask this process to do
+//!
+//! Eight `#[tauri::command]`s, and no other way in. Two are about this process —
+//! [`recorder_link_state`] and [`startup_notice`]; two read the recording
+//! library through the recorder — [`library_sessions`] and [`library_games`]
+//! (issue #301); and four are the record control — [`record_target`] says what
+//! would be recorded, [`recorder_status`] asks the recorder what it is doing,
+//! and [`start_recording`] and [`stop_recording`] do the two things the button
+//! does (issue #389).
+//!
+//! All but `record_target` are a round trip over the control protocol, and each
+//! returns either the recorder's own answer or a [`RecorderProblem`] carrying
+//! the recorder's own words. **The window keeps no recording state of its
+//! own**: it asks [`recorder_status`] and draws the answer, so a recorder that
+//! has died stops being reported as recording rather than going on being
+//! claimed (`docs/desktop-ui.md`, AGENTS.md section 27).
+//!
 //! # Closing, and quitting
 //!
 //! They are different things now, which is what SPEC.md section 33 asks for.
@@ -142,7 +159,11 @@ fn main() {
             recorder_link_state,
             startup_notice,
             library_sessions,
-            library_games
+            library_games,
+            record_target,
+            recorder_status,
+            start_recording,
+            stop_recording
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -243,30 +264,39 @@ fn recorder_link_state(link: tauri::State<'_, RecorderLink>) -> RecorderLinkStat
     link.state()
 }
 
-/// A library read that did not happen, in the form the window renders.
+/// A request to the recorder that did not produce the reply it asked for.
 ///
-/// The window cannot open `library.db` and may not link `clipped-library`, so
-/// every question about the library is a round trip to the recorder
+/// The window cannot open `library.db`, may not link `clipped-library` and
+/// cannot open a named pipe from a webview, so every question it has for the
+/// recorder is a round trip
 /// ([ADR 0002](../../../docs/adr/0002-separate-recorder-process.md),
-/// [issue #301](https://github.com/wildware-uk/clipped/issues/301)). Three
-/// different things can stop one, and the screen has to tell them apart:
+/// [issue #301](https://github.com/wildware-uk/clipped/issues/301),
+/// [issue #389](https://github.com/wildware-uk/clipped/issues/389)). Four
+/// different things can stop one, and the screen has to tell them apart because
+/// the useful action is different in each case (AGENTS.md section 45):
 ///
 /// - the recorder **refused**, and [`Self::code`] is its own protocol code —
 ///   `library_unavailable` for an index that could not be read,
-///   `invalid_parameters` for a search that does not parse, `unknown_command`
-///   for a recorder built before this command existed;
+///   `invalid_parameters` for a search that does not parse, `target_not_found`
+///   for a window that has since closed, `already_recording` for a second
+///   start, `unknown_command` for a recorder built before a command existed;
 /// - there is **no recorder to ask**, or it went away mid-question;
-/// - this build was started with no recorder configured at all.
+/// - this build was started with no recorder configured at all;
+/// - the recorder answered a different command's reply, which is a bug rather
+///   than a refusal.
 ///
-/// None of them is an empty library, and none of them may be drawn as one
-/// (AGENTS.md section 27).
-#[derive(Debug, Clone, serde::Serialize)]
-struct LibraryProblem {
-    /// The recorder's protocol code, or one of the two below for a question
+/// None of them is an empty library, and none of them is a recording that
+/// started; none may be drawn as one (AGENTS.md section 27).
+///
+/// **The sentence is the recorder's own** wherever there is one. The window
+/// invents no wording for a refusal it did not make.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct RecorderProblem {
+    /// The recorder's protocol code, or one of the three below for a question
     /// that never reached it.
     ///
-    /// Both are outside the protocol's own vocabulary deliberately: a code the
-    /// recorder could also send would leave the window unable to tell "the
+    /// Those are outside the protocol's own vocabulary deliberately: a code
+    /// the recorder could also send would leave the window unable to tell "the
     /// recorder said no" from "there was no recorder".
     code: String,
     /// One sentence for a person, which is the part that is always shown.
@@ -282,7 +312,7 @@ const NO_RECORDER_CONFIGURED: &str = "no_recorder_configured";
 /// The code a reply that answered a different question carries.
 const UNEXPECTED_REPLY: &str = "unexpected_reply";
 
-impl From<clipped_ipc::RecorderCallError> for LibraryProblem {
+impl From<clipped_ipc::RecorderCallError> for RecorderProblem {
     fn from(error: clipped_ipc::RecorderCallError) -> Self {
         match error {
             clipped_ipc::RecorderCallError::Refused(refusal) => Self {
@@ -299,7 +329,7 @@ impl From<clipped_ipc::RecorderCallError> for LibraryProblem {
             },
             clipped_ipc::RecorderCallError::NoRecorderConfigured => Self {
                 code: NO_RECORDER_CONFIGURED.to_owned(),
-                message: "this build has no recorder to ask, so the library cannot be read"
+                message: "this build has no recorder to ask, so nothing can be read or recorded"
                     .to_owned(),
             },
         }
@@ -311,8 +341,8 @@ impl From<clipped_ipc::RecorderCallError> for LibraryProblem {
 /// It cannot happen against a recorder that speaks this protocol version, and
 /// is reported rather than ignored: a window that quietly drew an empty library
 /// because it got a `pong` would be hiding a real fault (AGENTS.md section 15).
-fn wrong_reply(command: &str) -> LibraryProblem {
-    LibraryProblem {
+fn wrong_reply(command: &str) -> RecorderProblem {
+    RecorderProblem {
         code: UNEXPECTED_REPLY.to_owned(),
         message: format!("the recorder answered `{command}` with something else"),
     }
@@ -330,7 +360,7 @@ fn library_sessions(
     limit: Option<u32>,
     after: Option<String>,
     query: Option<String>,
-) -> Result<clipped_ipc::LibrarySessionPage, LibraryProblem> {
+) -> Result<clipped_ipc::LibrarySessionPage, RecorderProblem> {
     let reply = link.call(&clipped_ipc::Command::LibrarySessions(
         clipped_ipc::LibrarySessions {
             limit,
@@ -349,10 +379,153 @@ fn library_sessions(
 #[tauri::command(async)]
 fn library_games(
     link: tauri::State<'_, RecorderLink>,
-) -> Result<Vec<clipped_ipc::LibraryGame>, LibraryProblem> {
+) -> Result<Vec<clipped_ipc::LibraryGame>, RecorderProblem> {
     match link.call(&clipped_ipc::Command::LibraryGames)? {
         clipped_ipc::Reply::LibraryGames { games } => Ok(games),
         _ => Err(wrong_reply("library_games")),
+    }
+}
+
+/// What the record control would record, if it were pressed now.
+///
+/// The application the user was last in, which is the same answer the tray's
+/// Start Recording gives and comes from the same place ([`foreground`]). A
+/// window has a screen to name it on, so it does — a button reading "Record"
+/// with no subject records something the user did not choose.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct RecordTarget {
+    /// The process `start_recording` would be given.
+    process_id: u32,
+    /// The executable's file name, such as `cs2.exe`, for the button to name.
+    ///
+    /// The executable rather than the window title, for the reason
+    /// [`foreground::ForegroundWindow`] gives: a title is user content, and the
+    /// surest way to put somebody's document name on screen and into a
+    /// screenshot of a bug report (AGENTS.md section 13).
+    process_name: String,
+}
+
+/// What the record control would record, or [`None`] if nothing would.
+///
+/// [`None`] is a real state rather than a failure: a machine just signed into
+/// has had nothing in front of it, and a build whose foreground hook could not
+/// be installed never will. The window says so and disables the control, which
+/// is what the tray's menu item does with the same answer.
+///
+/// Not `async`: it reads a value this process already holds and opens no pipe.
+#[tauri::command]
+fn record_target() -> Option<RecordTarget> {
+    foreground::last_seen().map(|window| RecordTarget {
+        process_id: window.process_id,
+        process_name: window.process_name,
+    })
+}
+
+/// What the recorder is doing, asked of the recorder.
+///
+/// **This is where the window's recording state comes from**, and the reason it
+/// is a command of its own rather than a field the window keeps. The link's
+/// state carries a status too, but the recorder publishes `status_changed` when
+/// a recording starts and when it ends and at no point between
+/// (`apps/recorder/src/serve.rs`), so the `elapsed_ms` in it is the elapsed time
+/// at the moment the recording started and never moves. Counting up from it in
+/// the window would be a figure nobody measured, and — worse — a window that had
+/// decided it was recording would go on saying so after the recorder died
+/// (AGENTS.md section 27, issue #389).
+///
+/// So the window asks, repeatedly, and draws the answer. A recorder that has
+/// stopped, crashed or refused stops answering `recording`, and the window
+/// follows it down within one interval.
+#[tauri::command(async)]
+fn recorder_status(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<clipped_ipc::RecorderStatus, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetStatus)? {
+        clipped_ipc::Reply::Status { status } => Ok(status),
+        _ => Err(wrong_reply("get_status")),
+    }
+}
+
+/// A recording that started, in the form the window renders.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StartedRecording {
+    /// Identifies it to [`stop_recording`].
+    recording_id: String,
+    /// The file it is writing, which is the one thing worth saying about a
+    /// recording that has just begun and the one thing nothing else will say.
+    output: String,
+}
+
+/// Records the process the window named.
+///
+/// `process_id` rather than "whatever is in front now" deliberately, and it is
+/// the same reasoning `StopRecording::recording_id` carries: the control names
+/// what it will record, and the foreground can change between the label being
+/// drawn and the button being pressed. Sending the identifier the window had on
+/// screen means a press cannot record an application the user was never offered.
+///
+/// Nothing else is sent. Resolution, frame rate, codec, encoder and the audio
+/// devices are the recorder's own settings, and a window that sent its own
+/// values would be a second place those are decided (AGENTS.md section 30); the
+/// output path is likewise the recorder's timestamped default, which is what
+/// `clipped-recorder record` writes with no `--output`.
+///
+/// `async` for the reason [`recorder_status`] is, and more so: this one waits
+/// for a capture target to be resolved and an encoder session to be opened.
+#[tauri::command(async)]
+fn start_recording(
+    link: tauri::State<'_, RecorderLink>,
+    process_id: u32,
+) -> Result<StartedRecording, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::StartRecording(
+        clipped_ipc::StartRecording {
+            pid: Some(process_id),
+            ..clipped_ipc::StartRecording::default()
+        },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::RecordingStarted {
+            recording_id,
+            output,
+        } => Ok(StartedRecording {
+            recording_id,
+            output,
+        }),
+        _ => Err(wrong_reply("start_recording")),
+    }
+}
+
+/// Stops the recording the window had on screen, and waits for its file.
+///
+/// `recording_id` is what the window last saw [`recorder_status`] report, so
+/// that a recording which ended by itself in the meantime cannot have its
+/// successor stopped instead — the race `StopRecording::recording_id` exists
+/// for, and a real one when the recorded window closed at the same moment the
+/// user pressed the button.
+///
+/// [`None`] means "whatever is running", which is what the tray sends and what
+/// this command sends when the window has no particular recording on screen. It
+/// is passed through rather than substituted with something: a command that
+/// invented an identifier would stop a recording nobody asked about.
+///
+/// The reply is the finished recording, and it arrives **after the file has been
+/// finalised** — `stop_recording` does not answer until the muxer has closed the
+/// container (`docs/ipc.md`). A window that drew "stopped" before that would be
+/// pointing at a file that was not yet playable, which is the one claim this
+/// control must not make (AGENTS.md section 22).
+#[tauri::command(async)]
+fn stop_recording(
+    link: tauri::State<'_, RecorderLink>,
+    recording_id: Option<String>,
+) -> Result<clipped_ipc::RecordingSummary, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::StopRecording(
+        clipped_ipc::StopRecording { recording_id },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::RecordingStopped { summary } => Ok(summary),
+        _ => Err(wrong_reply("stop_recording")),
     }
 }
 
@@ -477,7 +650,7 @@ mod tests {
         // tell "the recorder said the index is unreadable" from "there was no
         // recorder" would show one sentence for both, and the useful action is
         // different in each case (AGENTS.md section 45).
-        let refused = LibraryProblem::from(clipped_ipc::RecorderCallError::Refused(
+        let refused = RecorderProblem::from(clipped_ipc::RecorderCallError::Refused(
             clipped_ipc::ProtocolError::new(
                 clipped_ipc::ErrorCode::LibraryUnavailable,
                 "the recording library could not be opened",
@@ -486,7 +659,7 @@ mod tests {
         assert_eq!(refused.code, "library_unavailable");
         assert_eq!(refused.message, "the recording library could not be opened");
 
-        let missing = LibraryProblem::from(clipped_ipc::RecorderCallError::NoRecorderConfigured);
+        let missing = RecorderProblem::from(clipped_ipc::RecorderCallError::NoRecorderConfigured);
         assert_eq!(missing.code, NO_RECORDER_CONFIGURED);
         assert_ne!(
             missing.code, "library_unavailable",
@@ -500,12 +673,12 @@ mod tests {
     struct AskedRecorder {
         /// Every command it was sent, in order.
         asked: std::sync::Mutex<Vec<clipped_ipc::Command>>,
-        /// What to answer both commands with instead of a reply.
+        /// What to answer every command with instead of a reply.
         refusal: Option<clipped_ipc::ProtocolError>,
     }
 
     impl AskedRecorder {
-        /// A recorder that refuses every library question.
+        /// A recorder that refuses everything it is asked.
         fn refusing(refusal: clipped_ipc::ProtocolError) -> Self {
             Self {
                 asked: std::sync::Mutex::new(Vec::new()),
@@ -543,19 +716,63 @@ mod tests {
                 clipped_ipc::Command::LibraryGames => Ok(clipped_ipc::Reply::LibraryGames {
                     games: vec![a_game()],
                 }),
+                clipped_ipc::Command::GetStatus => Ok(clipped_ipc::Reply::Status {
+                    status: a_running_recording(),
+                }),
+                clipped_ipc::Command::StartRecording(_) => {
+                    Ok(clipped_ipc::Reply::RecordingStarted {
+                        recording_id: "rec-1".to_owned(),
+                        output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
+                    })
+                }
+                clipped_ipc::Command::StopRecording(_) => {
+                    Ok(clipped_ipc::Reply::RecordingStopped {
+                        summary: a_summary(),
+                    })
+                }
                 other => Err(clipped_ipc::ProtocolError::new(
                     clipped_ipc::ErrorCode::UnknownCommand,
-                    format!("this test recorder answers the library commands only, not {other:?}"),
+                    format!(
+                        "this test recorder answers the library and recording commands only, not \
+                         {other:?}"
+                    ),
                 )),
             }
         }
 
         fn status(&self) -> clipped_ipc::RecorderStatus {
-            clipped_ipc::RecorderStatus::Idle
+            a_running_recording()
         }
 
         fn features(&self) -> Vec<String> {
             vec![clipped_ipc::features::LIBRARY.to_owned()]
+        }
+    }
+
+    /// The status [`AskedRecorder`] answers `get_status` with.
+    fn a_running_recording() -> clipped_ipc::RecorderStatus {
+        clipped_ipc::RecorderStatus::Recording(clipped_ipc::ActiveRecording {
+            recording_id: "rec-1".to_owned(),
+            output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
+            target: "process `cs2.exe`".to_owned(),
+            elapsed_ms: 754_000,
+        })
+    }
+
+    /// The summary [`AskedRecorder`] answers `stop_recording` with.
+    fn a_summary() -> clipped_ipc::RecordingSummary {
+        clipped_ipc::RecordingSummary {
+            output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
+            duration_ms: 754_000,
+            end_reason: clipped_ipc::EndReason::Stopped,
+            frames_encoded: 45_240,
+            frames_skipped_for_rate: 0,
+            frames_dropped_writer_behind: 0,
+            sustained_framerate: Some(59.98),
+            encoder: "nvenc".to_owned(),
+            codec: "av1".to_owned(),
+            width: 2_560,
+            height: 1_392,
         }
     }
 
@@ -665,6 +882,14 @@ mod tests {
     impl Drop for FakeRecorder {
         /// Over the protocol, the way the real recorder is stopped, so a test
         /// does not leave a pipe listening for the rest of the run.
+        ///
+        /// `finalise_recording: true`, and it has to be. This recorder answers
+        /// `status` with a recording in progress — which is what the record
+        /// control's cases are about — and the protocol refuses a bare
+        /// `shutdown` while something is being recorded, with `already_recording`
+        /// (`crates/ipc/src/server.rs`, issue #220). A refused shutdown leaves
+        /// the listener serving and the `join` below never returns: the first
+        /// version of this hung the whole test binary that way.
         fn drop(&mut self) {
             if let Ok(mut client) = clipped_ipc::Client::connect(
                 &self.endpoint,
@@ -672,9 +897,9 @@ mod tests {
                 "0.0.0",
                 std::time::Duration::from_secs(5),
             ) {
-                let _ = client.call(&clipped_ipc::Command::Shutdown(
-                    clipped_ipc::Shutdown::default(),
-                ));
+                let _ = client.call(&clipped_ipc::Command::Shutdown(clipped_ipc::Shutdown {
+                    finalise_recording: true,
+                }));
             }
             self.events.close();
             if let Some(serving) = self.serving.take() {
@@ -782,6 +1007,145 @@ mod tests {
         assert_eq!(problem.code, "library_unavailable");
         assert!(
             problem.message.contains("the drive is not connected"),
+            "the recorder's own sentence is the one worth showing: {}",
+            problem.message
+        );
+    }
+
+    #[test]
+    fn the_record_button_asks_the_recorder_to_record_the_process_it_was_given() {
+        // The middle hop of the round trip the record control is: window → Tauri
+        // command → control protocol → recorder. A `start_recording` that sent
+        // `take_screenshot`, or that dropped the process identifier and let the
+        // recorder pick its own target, would record the wrong application — or
+        // nothing — while the window said it had started, and every TypeScript
+        // test in the repository would still be green, because they stub
+        // `invoke` (issue #389).
+        let recorder = FakeRecorder::listening("record-start", AskedRecorder::default());
+        let window = recorder.window();
+
+        let started =
+            start_recording(window.state::<RecorderLink>(), 4_242).expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::StartRecording(
+                clipped_ipc::StartRecording {
+                    pid: Some(4_242),
+                    ..clipped_ipc::StartRecording::default()
+                }
+            )],
+            "the command the recorder received has to be `start_recording` for the process the \
+             window named, and nothing else"
+        );
+        assert_eq!(
+            started,
+            StartedRecording {
+                recording_id: "rec-1".to_owned(),
+                output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
+            },
+            "and its reply has to reach the caller whole — the file is what the window shows"
+        );
+    }
+
+    #[test]
+    fn the_stop_button_names_the_recording_the_window_had_on_screen() {
+        // `recording_id` is the whole safety property of a stop: a recording
+        // that ended by itself between the window drawing it and the button
+        // being pressed must not have its successor stopped instead
+        // (`StopRecording::recording_id`, `docs/ipc.md`). A command that dropped
+        // it would send "stop whatever is running", and the failure would only
+        // ever show up as somebody's next recording ending early.
+        let recorder = FakeRecorder::listening("record-stop", AskedRecorder::default());
+        let window = recorder.window();
+
+        let summary = stop_recording(window.state::<RecorderLink>(), Some("rec-1".to_owned()))
+            .expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::StopRecording(
+                clipped_ipc::StopRecording {
+                    recording_id: Some("rec-1".to_owned()),
+                }
+            )],
+            "the identifier the window was showing has to be the one the recorder is given"
+        );
+        assert_eq!(
+            summary,
+            a_summary(),
+            "and the finished recording has to reach the caller whole"
+        );
+    }
+
+    #[test]
+    fn a_stop_with_no_recording_named_stops_whatever_is_running() {
+        // What the window sends when it has no particular recording on screen,
+        // and what the tray sends always. `None` has to stay `None`: a command
+        // that substituted an identifier of its own would stop a recording
+        // nobody asked about.
+        let recorder = FakeRecorder::listening("record-stop-any", AskedRecorder::default());
+        let window = recorder.window();
+
+        stop_recording(window.state::<RecorderLink>(), None).expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::StopRecording(
+                clipped_ipc::StopRecording::default()
+            )]
+        );
+    }
+
+    #[test]
+    fn the_windows_recording_state_is_asked_of_the_recorder() {
+        // The acceptance criterion this command exists for. The window's
+        // "recording" and its elapsed time come from `get_status` and from
+        // nothing else — not from a flag set when the button was pressed, and
+        // not from a timer the window keeps. A `recorder_status` that sent
+        // `ping` and answered from the link's cached state would leave a window
+        // claiming to record after the recorder had died, which is the specific
+        // failure issue #389 names.
+        let recorder = FakeRecorder::listening("record-status", AskedRecorder::default());
+        let window = recorder.window();
+
+        let status =
+            recorder_status(window.state::<RecorderLink>()).expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::GetStatus],
+            "the state the window draws has to be one the recorder was asked for"
+        );
+        assert_eq!(
+            status,
+            a_running_recording(),
+            "and the recorder's own status has to reach the caller whole, elapsed time included"
+        );
+    }
+
+    #[test]
+    fn a_recording_that_cannot_start_says_why_in_the_recorders_own_words() {
+        // Issue #389's fourth acceptance criterion, over the real transport: a
+        // recording that cannot start says why, in the words the protocol
+        // returned (AGENTS.md section 45). A command that mapped every failure
+        // to one sentence of its own would leave the window unable to tell a
+        // window that has closed from an encoder that is busy.
+        let recorder = FakeRecorder::listening(
+            "record-refused",
+            AskedRecorder::refusing(clipped_ipc::ProtocolError::new(
+                clipped_ipc::ErrorCode::TargetNotFound,
+                "no visible window belongs to process 4242; it may have closed",
+            )),
+        );
+        let window = recorder.window();
+
+        let problem = start_recording(window.state::<RecorderLink>(), 4_242)
+            .expect_err("a target that has gone is a refusal");
+
+        assert_eq!(problem.code, "target_not_found");
+        assert!(
+            problem.message.contains("it may have closed"),
             "the recorder's own sentence is the one worth showing: {}",
             problem.message
         );
