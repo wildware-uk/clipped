@@ -46,19 +46,15 @@ serde_json.workspace = true
 # - `windows` is already pinned in the root manifest for the reason it gives,
 #   so this costs no new crate in the lockfile at all.
 #
-# The feature list is the honest inventory of what this crate names:
+# The feature list is the honest inventory of what this crate names — one
+# namespace, because one endpoint is all this plugin has:
 #
-# - Win32_Foundation            ERROR_INSUFFICIENT_BUFFER, and the error type
-#                               `windows_core` reads `GetLastError` into
 # - Win32_Networking_WinHttp    the session, the connection, the request, the
 #                               security flags and the read loop
 #
 # Dual MIT/Apache-2.0.
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_Networking_WinHttp",
-] }
+windows = { workspace = true, features = ["Win32_Networking_WinHttp"] }
 
 [lints]
 workspace = true
