@@ -87,8 +87,8 @@ function elementFor(screen: Screen, view: RecorderLinkView, notice: string | und
  * recovery produces, and it stays a tested pure function of the interruption —
  * and this adds the one destination that goes with it. A recorder that died
  * mid-recording is the only recording this window can name (`clipPlayback.ts`),
- * so it is the only way in the playback screen has until the library index can
- * be reached (issue #305).
+ * so it is the only way in the playback screen has until it looks a recording
+ * up in the library index, which is issue #52.
  *
  * The link does not claim the recording will play. It leads to the screen that
  * says what state the recording is in and what stands between this window and

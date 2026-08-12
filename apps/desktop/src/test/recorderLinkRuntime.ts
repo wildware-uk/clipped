@@ -22,6 +22,31 @@ export interface Invocation {
   readonly args: Record<string, unknown>;
 }
 
+/**
+ * What the two library commands answer with (issue #301).
+ *
+ * Functions rather than values, because the interesting cases are the ones that
+ * depend on the arguments: a second page has to answer to the cursor the first
+ * one ended with, and a search has to answer to the query.
+ *
+ * The default for both is a **rejection**, not an empty library. A stub that
+ * answered "nothing recorded" by default would let a screen test pass while the
+ * screen drew an empty library over a read that never happened, which is the
+ * exact confusion issue #301 is shaped to prevent (AGENTS.md section 27).
+ */
+export interface LibraryAnswers {
+  /** What `library_sessions` answers, given the request. */
+  readonly sessions?: (args: Record<string, unknown>) => Promise<unknown>;
+  /** What `library_games` answers. */
+  readonly games?: () => Promise<unknown>;
+}
+
+/** What an unstubbed library command rejects with. */
+const NO_LIBRARY_STUBBED = {
+  code: 'no_recorder_configured',
+  message: 'this test stubbed no library',
+};
+
 /** A stubbed runtime, and the things a test does with one. */
 export interface StubbedRuntime {
   /** Every command the interface sent, in order. */
@@ -60,6 +85,7 @@ export interface StubbedRuntime {
 export function stubRecorderLinkRuntime(
   answer: unknown,
   startupNotice: string | null | Promise<string | null> = null,
+  library: LibraryAnswers = {},
 ): StubbedRuntime {
   const invocations: Invocation[] = [];
   const handlers: ((event: unknown) => void)[] = [];
@@ -79,6 +105,12 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'startup_notice') {
         return Promise.resolve(startupNotice);
+      }
+      if (command === 'library_sessions') {
+        return library.sessions?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'library_games') {
+        return library.games?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'plugin:event|listen') {
         // The real wrapper registers its callback first and then sends this,

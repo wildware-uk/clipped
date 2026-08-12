@@ -33,8 +33,21 @@ clipped-game-detection.workspace = true
 # and the handshake live there so that both ends of the connection use one
 # implementation of them; what lives here is the recorder behind it.
 clipped-ipc.workspace = true
+# The recording library the desktop application reads through this process
+# (issue #301, `src/library.rs`). The window may not link it — the workspace
+# layering test permits `apps/desktop/src-tauri` exactly one member of this
+# workspace, `clipped-ipc` — and it has no file-system permission for
+# `library.db` either, so the process that owns the database answers for it
+# (ADR 0002, docs/library.md). `clipped-session` already brings this crate in;
+# naming it here is what deny.toml's `wildcards = "deny"` asks of a dependency
+# this package uses directly.
+clipped-library.workspace = true
 clipped-logging.workspace = true
 clipped-session.workspace = true
+# The database file itself: opening it, and the migrations that bring it to this
+# build's schema. `clipped-library` says what the rows mean and this says where
+# they live, which is the split docs/storage.md draws.
+clipped-storage.workspace = true
 # Window and monitor enumeration for `list-windows`, and the target selection
 # the recorder resolves `--window`, `--process` and `--pid` through. Every
 # Windows API call this subcommand makes is behind this crate; none is made

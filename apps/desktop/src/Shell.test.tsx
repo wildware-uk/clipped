@@ -117,7 +117,10 @@ describe('the application shell', () => {
    * is known by is a tablist rather than a region.
    */
   const ROUTED: readonly (readonly [string, string])[] = [
-    ['Library', 'Why this list is empty'],
+    // The Library screen draws its sessions region whatever the read produced,
+    // including the failure this test's unstubbed runtime provokes: it is the
+    // region that says which of the three it was (issue #301).
+    ['Library', 'Sessions'],
     ['Games', 'Game detection'],
     ['Editor', 'Open clip'],
     ['Diagnostics', 'Capture health'],

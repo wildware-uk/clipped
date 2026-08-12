@@ -72,9 +72,9 @@ describe('the clip playback screen', () => {
     );
     // The distinction the whole screen turns on. Nothing here has been to the
     // disk, so "the file has gone" is a claim it has no standing to make; the
-    // library index is what looks, and it cannot be reached (AGENTS.md section
-    // 27, issues #56 and #305).
-    expect(within(panel).getByText(/#305/)).toBeVisible();
+    // library index is what looks, and this screen has not looked in it
+    // (AGENTS.md section 27, issues #56 and #52).
+    expect(within(panel).getByText(/#52/)).toBeVisible();
     expect(panel.textContent).not.toMatch(/missing|deleted|no such recording/i);
   });
 
@@ -162,7 +162,8 @@ describe('the clip playback screen', () => {
   it('is reached from the notice that named the interrupted recording', async () => {
     // The only way in that exists. The window follows one recorder, so the
     // recording a recorder died writing is the only one it can name; the
-    // library index that would offer the rest is issue #305.
+    // library index that would offer the rest is read by the Library screen
+    // since #301, and looking one up from here is issue #52.
     const user = userEvent.setup();
     const runtime = stubRecorderLinkRuntime({ link: 'connecting' });
     renderApp();

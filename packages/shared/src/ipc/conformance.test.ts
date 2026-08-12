@@ -54,6 +54,14 @@ import type {
   KnownCommandName,
   KnownErrorDetailName,
   KnownEventName,
+  LibraryClip,
+  LibraryGame,
+  LibraryGamesReply,
+  LibraryRecording,
+  LibrarySession,
+  LibrarySessionPage,
+  LibrarySessionsParams,
+  LibrarySessionsReply,
   NotImplementedDetail,
   OkOutcome,
   PeerIdentity,
@@ -305,6 +313,65 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     recording_id: 'optional',
     at_seconds: 'optional',
   }),
+  library_sessions: fields<LibrarySessionsParams>({
+    limit: 'optional',
+    after: 'optional',
+    query: 'optional',
+  }),
+  library_session_page: fields<LibrarySessionPage>({
+    sessions: 'required',
+    next_cursor: 'optional',
+  }),
+  library_session: fields<LibrarySession>({
+    session_id: 'required',
+    game_id: 'optional',
+    game_name: 'optional',
+    started_at: 'required',
+    ended_at: 'optional',
+    end_reason: 'optional',
+    favourite: 'required',
+    recordings: 'required',
+    clips: 'required',
+  }),
+  library_recording: fields<LibraryRecording>({
+    recording_id: 'required',
+    session_index: 'required',
+    path: 'required',
+    started_at: 'required',
+    ended_at: 'optional',
+    outcome: 'optional',
+    end_reason: 'optional',
+    duration_seconds: 'optional',
+    width: 'optional',
+    height: 'optional',
+    size_bytes: 'optional',
+    missing_since: 'optional',
+    favourite: 'required',
+    tags: 'required',
+  }),
+  library_clip: fields<LibraryClip>({
+    clip_id: 'required',
+    path: 'required',
+    title: 'optional',
+    created_at: 'required',
+    duration_seconds: 'optional',
+    size_bytes: 'optional',
+    missing_since: 'optional',
+    favourite: 'required',
+    tags: 'required',
+  }),
+  library_game: fields<LibraryGame>({
+    game_id: 'optional',
+    name: 'optional',
+    first_seen_at: 'optional',
+    last_played_at: 'optional',
+    sessions: 'required',
+    recordings: 'required',
+    clips: 'required',
+    favourites: 'required',
+    bytes: 'required',
+    missing: 'required',
+  }),
   'outcome.ok': fields<OkOutcome>({ ok: 'required' }),
   'outcome.error': fields<ErrorOutcome>({ error: 'required' }),
   'reply.pong': fields<PongReply>({ reply: 'required' }),
@@ -325,6 +392,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.screenshot_taken': fields<ScreenshotTakenReply>({
     reply: 'required',
     screenshot: 'required',
+  }),
+  'reply.library_sessions': fields<LibrarySessionsReply>({
+    reply: 'required',
+    page: 'required',
+  }),
+  'reply.library_games': fields<LibraryGamesReply>({
+    reply: 'required',
+    games: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -402,6 +477,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'library_sessions',
+    params: 'library_sessions',
+    reply: 'reply.library_sessions',
+    available_in_this_build: true,
+  },
+  {
+    name: 'library_games',
+    params: null,
+    reply: 'reply.library_games',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
@@ -439,6 +526,14 @@ function replyDiscriminant(reply: Reply): string {
       return 'bookmark_added';
     case 'screenshot_taken':
       return 'screenshot_taken';
+    case 'library_sessions':
+      // Whether the page ends the library is part of the path, for the reason
+      // `shutting_down`'s is: a mirror that dropped the cursor would otherwise
+      // reach the same discriminant for a page that continues and one that does
+      // not, and paging is the whole of what this reply is for.
+      return reply.page.next_cursor === undefined ? 'library_sessions' : 'library_sessions.more';
+    case 'library_games':
+      return 'library_games';
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise
@@ -615,6 +710,39 @@ describe('every frame the recorder can send', () => {
             : serverDiscriminant(result.message as ServerMessage);
         expect(discriminant).toBe(sample.discriminant);
       }
+    });
+  }
+});
+
+describe('every reply the recorder can send', () => {
+  /**
+   * The hole this closes, and it was a real one.
+   *
+   * `bookmark_added` and `screenshot_taken` were in {@link REPLIES}, in the
+   * Rust schema and in {@link TYPESCRIPT_STRUCTURES}, and in no sample frame —
+   * so nothing ever ran one through {@link parseServerMessage}, and `parse.ts`
+   * could not read either of them. Both lists agreed perfectly about a reply
+   * neither side could handle.
+   *
+   * The lists alone cannot catch that: they compare names. Only a frame proves
+   * a reply can be read, so this insists there is one, and the suite above then
+   * parses it. `every_reply_the_recorder_can_send_has_a_sample_carrying_it` in
+   * `crates/ipc/src/schema.rs` is the same rule from the Rust side, which is
+   * what stops the sample being dropped there instead.
+   */
+  const carried = (reply: ReplyName): boolean =>
+    schema.samples.some(
+      (sample) =>
+        sample.discriminant === `response.ok.${reply}` ||
+        (sample.discriminant?.startsWith(`response.ok.${reply}.`) ?? false),
+    );
+
+  for (const reply of REPLIES) {
+    it(`is proved readable by a sample frame: ${reply}`, () => {
+      expect(
+        carried(reply),
+        `no sample frame carries a \`${reply}\`, so nothing checks this build can read one`,
+      ).toBe(true);
     });
   }
 });

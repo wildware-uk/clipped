@@ -47,8 +47,8 @@ export function isClipPath(pathname: string): boolean {
  * is the *only* description of a recording that reaches this window. There is
  * no duration, because nothing has measured one — a recording in progress has
  * an elapsed time and a recording a killed recorder left may have no Matroska
- * trailer at all — and there is no thumbnail, because #57's cache is on the
- * other side of a boundary this window cannot cross (#305).
+ * trailer at all — and there is no thumbnail, because #57's cache is a *file*
+ * beside the recording, and #301 gave this window rows rather than bytes.
  */
 export interface KnownRecording {
   /** The recorder's identifier for it. */
@@ -67,8 +67,14 @@ export interface KnownRecording {
  * Three cases, and the third is the ordinary one. The window follows a single
  * recorder and learns of exactly two recordings from it — the one being written
  * now, and the one a recorder died in the middle of — so any other identifier
- * is one it has no index to look up (#305). That is a different thing from "no
+ * is one *this screen* has not looked up. That is a different thing from "no
  * such recording", and it is said differently.
+ *
+ * Since #301 the library can be read, and this screen is not yet the thing that
+ * reads it: the identifier in the address bar is the recorder's `recording_id`
+ * for a live recording, and the index's own integer key is a different
+ * identifier entirely. Reconciling the two, and opening a recording somebody
+ * picked, is [issue #52](https://github.com/wildware-uk/clipped/issues/52).
  */
 export type ClipResolution =
   /** The recorder is writing this recording as the screen is read. */
@@ -135,9 +141,10 @@ export interface ClipDescription {
  * None of the three says a recording is missing, and that is deliberate: this
  * window cannot look at the disk, so "the file has gone" is a claim it has no
  * standing to make. `missing_since` in the library index is where that answer
- * lives (#56), and #305 is what would carry it here. Reporting a file as
- * missing because *this* window could not find it would be exactly the invented
- * state AGENTS.md section 27 is about.
+ * lives (#56), #301 put it on the wire, and #52 is what would look this
+ * particular recording up in it. Reporting a file as missing because *this*
+ * screen could not find it would be exactly the invented state AGENTS.md
+ * section 27 is about.
  */
 export function describeClip(resolution: ClipResolution): ClipDescription {
   switch (resolution.found) {
@@ -157,7 +164,7 @@ export function describeClip(resolution: ClipResolution): ClipDescription {
       return {
         state: 'Not known to this window',
         detail:
-          'This window follows one recorder and learns of the recording it is writing, and of one a recorder died in the middle of. Everything else is in the library index, which nothing here can read — issue #305. This is not a statement that the recording does not exist.',
+          'This window follows one recorder and learns of the recording it is writing, and of one a recorder died in the middle of. Everything else is in the library index, which the Library screen reads and this screen does not yet — issue #52. This is not a statement that the recording does not exist.',
       };
   }
 }
@@ -261,21 +268,21 @@ export const MISSING: readonly Missing[] = [
     shows:
       'Open a recording somebody picked, rather than one this window happened to be told about',
     needs:
-      'The library index: games, sessions and recordings in SQLite, reconciled against the disk (issues #55 and #56). No protocol command reads it and this window may not link the crate that does. Issue #305',
+      'The library index reaches the window since issue #301, and the Library screen lists it. What is left is looking one recording up by the identifier in the address bar. Issue #52',
   },
   {
     shows: 'Say that a recording’s file has gone, rather than drawing a player that does nothing',
     needs:
-      'missing_since from that same index, which is the only thing that has looked. Issue #305',
+      'missing_since is on the wire since issue #301 and the Library screen says it. This screen looks up no recording to say it about. Issue #52',
   },
   {
     shows: 'A poster frame before playback starts',
     needs:
-      'Thumbnails are generated, cached and tested (issue #57), and nothing has ever drawn one because nothing can reach the cache. Issue #305',
+      'Thumbnails are generated, cached and tested (issue #57) and nothing has ever drawn one: the cache is a file beside the recording, and this window has no file-system permission. Issue #301 carried rows, not bytes',
   },
   {
     shows: 'A waveform under the transport, and bookmarks and events on it',
     needs:
-      'Waveforms are issue #66 and reach here the same way (#305); bookmarks are written beside the recording already (issue #64) and issue #65 draws a timeline.',
+      'Waveforms are issue #66 and are files too, so they need the same transport a thumbnail does; bookmarks are written beside the recording already (issue #64) and issue #65 draws a timeline.',
   },
 ];

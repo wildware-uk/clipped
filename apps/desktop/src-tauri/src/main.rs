@@ -140,7 +140,9 @@ fn main() {
         .manage(link)
         .invoke_handler(tauri::generate_handler![
             recorder_link_state,
-            startup_notice
+            startup_notice,
+            library_sessions,
+            library_games
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -239,6 +241,119 @@ fn main() {
 #[tauri::command]
 fn recorder_link_state(link: tauri::State<'_, RecorderLink>) -> RecorderLinkState {
     link.state()
+}
+
+/// A library read that did not happen, in the form the window renders.
+///
+/// The window cannot open `library.db` and may not link `clipped-library`, so
+/// every question about the library is a round trip to the recorder
+/// ([ADR 0002](../../../docs/adr/0002-separate-recorder-process.md),
+/// [issue #301](https://github.com/wildware-uk/clipped/issues/301)). Three
+/// different things can stop one, and the screen has to tell them apart:
+///
+/// - the recorder **refused**, and [`Self::code`] is its own protocol code —
+///   `library_unavailable` for an index that could not be read,
+///   `invalid_parameters` for a search that does not parse, `unknown_command`
+///   for a recorder built before this command existed;
+/// - there is **no recorder to ask**, or it went away mid-question;
+/// - this build was started with no recorder configured at all.
+///
+/// None of them is an empty library, and none of them may be drawn as one
+/// (AGENTS.md section 27).
+#[derive(Debug, Clone, serde::Serialize)]
+struct LibraryProblem {
+    /// The recorder's protocol code, or one of the two below for a question
+    /// that never reached it.
+    ///
+    /// Both are outside the protocol's own vocabulary deliberately: a code the
+    /// recorder could also send would leave the window unable to tell "the
+    /// recorder said no" from "there was no recorder".
+    code: String,
+    /// One sentence for a person, which is the part that is always shown.
+    message: String,
+}
+
+/// The code a question that never reached a recorder carries.
+const RECORDER_UNREACHABLE: &str = "recorder_unreachable";
+
+/// The code a build with no recorder configured carries.
+const NO_RECORDER_CONFIGURED: &str = "no_recorder_configured";
+
+/// The code a reply that answered a different question carries.
+const UNEXPECTED_REPLY: &str = "unexpected_reply";
+
+impl From<clipped_ipc::RecorderCallError> for LibraryProblem {
+    fn from(error: clipped_ipc::RecorderCallError) -> Self {
+        match error {
+            clipped_ipc::RecorderCallError::Refused(refusal) => Self {
+                code: refusal.code.as_str().to_owned(),
+                message: refusal.message,
+            },
+            clipped_ipc::RecorderCallError::Unreachable(error) => Self {
+                code: RECORDER_UNREACHABLE.to_owned(),
+                message: format!("the recorder could not be reached: {error}"),
+            },
+            clipped_ipc::RecorderCallError::Unexpected(what) => Self {
+                code: UNEXPECTED_REPLY.to_owned(),
+                message: what,
+            },
+            clipped_ipc::RecorderCallError::NoRecorderConfigured => Self {
+                code: NO_RECORDER_CONFIGURED.to_owned(),
+                message: "this build has no recorder to ask, so the library cannot be read"
+                    .to_owned(),
+            },
+        }
+    }
+}
+
+/// A reply that was not the one the command asked for.
+///
+/// It cannot happen against a recorder that speaks this protocol version, and
+/// is reported rather than ignored: a window that quietly drew an empty library
+/// because it got a `pong` would be hiding a real fault (AGENTS.md section 15).
+fn wrong_reply(command: &str) -> LibraryProblem {
+    LibraryProblem {
+        code: UNEXPECTED_REPLY.to_owned(),
+        message: format!("the recorder answered `{command}` with something else"),
+    }
+}
+
+/// One page of the recording library.
+///
+/// `async` so that Tauri runs it on the async runtime rather than on the thread
+/// drawing the window: [`RecorderLink::call`] opens a pipe and waits for an
+/// answer, and a window that froze while a library page was fetched would be the
+/// exact failure ADR 0002's two processes exist to prevent.
+#[tauri::command(async)]
+fn library_sessions(
+    link: tauri::State<'_, RecorderLink>,
+    limit: Option<u32>,
+    after: Option<String>,
+    query: Option<String>,
+) -> Result<clipped_ipc::LibrarySessionPage, LibraryProblem> {
+    let reply = link.call(&clipped_ipc::Command::LibrarySessions(
+        clipped_ipc::LibrarySessions {
+            limit,
+            after,
+            query,
+        },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::LibrarySessions { page } => Ok(page),
+        _ => Err(wrong_reply("library_sessions")),
+    }
+}
+
+/// What the library holds per game (SPEC.md section 17).
+#[tauri::command(async)]
+fn library_games(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<Vec<clipped_ipc::LibraryGame>, LibraryProblem> {
+    match link.call(&clipped_ipc::Command::LibraryGames)? {
+        clipped_ipc::Reply::LibraryGames { games } => Ok(games),
+        _ => Err(wrong_reply("library_games")),
+    }
 }
 
 /// Something that went wrong before the window existed to be told about it.
@@ -354,6 +469,29 @@ mod tests {
         );
         assert!(said.contains("leaves the recorder running"), "{said}");
         assert!(said.contains("Task Manager"), "{said}");
+    }
+
+    #[test]
+    fn a_library_question_that_never_reached_a_recorder_is_not_a_refusal_it_made() {
+        // The distinction the Library screen turns on. A window that could not
+        // tell "the recorder said the index is unreadable" from "there was no
+        // recorder" would show one sentence for both, and the useful action is
+        // different in each case (AGENTS.md section 45).
+        let refused = LibraryProblem::from(clipped_ipc::RecorderCallError::Refused(
+            clipped_ipc::ProtocolError::new(
+                clipped_ipc::ErrorCode::LibraryUnavailable,
+                "the recording library could not be opened",
+            ),
+        ));
+        assert_eq!(refused.code, "library_unavailable");
+        assert_eq!(refused.message, "the recording library could not be opened");
+
+        let missing = LibraryProblem::from(clipped_ipc::RecorderCallError::NoRecorderConfigured);
+        assert_eq!(missing.code, NO_RECORDER_CONFIGURED);
+        assert_ne!(
+            missing.code, "library_unavailable",
+            "a question that never reached a recorder must not look like a refusal it made"
+        );
     }
 
     #[test]

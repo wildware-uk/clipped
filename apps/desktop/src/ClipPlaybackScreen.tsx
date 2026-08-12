@@ -34,9 +34,10 @@ import type { RecorderLinkView } from './useRecorderLink';
  * recording. The window follows one recorder, so it learns of exactly two
  * recordings — the one being written now, and the one a recorder died in the
  * middle of, whose file ADR 0006 says naming is the whole of recovery. Any
- * other identifier is one this window has no index to look up, which it says
- * rather than reporting the recording as missing: it has not looked, and cannot
- * (issue #305).
+ * other identifier is one this screen has not looked up, which it says rather
+ * than reporting the recording as missing: it has not looked. The library the
+ * lookup would go to reaches the window since issue #301; doing the lookup here
+ * is issue #52.
  */
 
 /** What the playback screen is given. */

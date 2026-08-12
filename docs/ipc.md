@@ -330,12 +330,19 @@ says what a build can express; a feature says what it can do, and the two are
 not the same — two recorders speaking protocol 1 can differ in what was compiled
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
-that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`, `shutdown`.
+that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
+`shutdown`, `library`.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
-belongs to `clipped-ipc` (`crates/ipc/src/server.rs`). The other three are the
+belongs to `clipped-ipc` (`crates/ipc/src/server.rs`). The others are the
 application's own.
+
+`library` is the one a window checks before it draws a library screen at all. A
+recorder built before [`library_sessions`](#library_sessions) existed refuses it
+with `unknown_command`, and without the check the window would have no way to
+tell that from a library with nothing in it — which is exactly the confusion
+those commands are shaped to avoid.
 
 ## Compatibility policy
 
@@ -458,6 +465,8 @@ when a command's parameters are all optional.
 | `stop_recording` | `recording_id` (optional) | `recording_stopped` | yes |
 | `add_bookmark` | all optional, below | `bookmark_added` | yes |
 | `take_screenshot` | all optional, below | `screenshot_taken` | yes |
+| `library_sessions` | all optional, below | `library_sessions` | yes |
+| `library_games` | none | `library_games` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 | `save_replay` | not yet defined | — | no — M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
@@ -563,6 +572,104 @@ lossless WebP needs a `libwebp` the FFmpeg build may not carry - or when nothing
 is being recorded and no target was named; with `target_not_found` when the
 window named does not exist or has stopped drawing; and with `internal`, naming
 the file, when the picture was taken and the disk refused it.
+
+### `library_sessions`
+
+Reads one page of the recording library: the sittings, newest first, with the
+recordings and clips each produced ([library.md](library.md), issue
+[#301](https://github.com/wildware-uk/clipped/issues/301)).
+
+It exists because the desktop window cannot read the index any other way. It has
+no file-system permission for `library.db` — `capabilities/default.json` grants
+three `core:` permissions and nothing else — and it may not link
+`clipped-library`, because `tests/integration/tests/workspace_layering.rs`
+permits `apps/desktop/src-tauri` exactly one member of the workspace, this one.
+That is [ADR 0002](adr/0002-separate-recorder-process.md): the process that owns
+the database answers for it.
+
+| Parameter | Meaning |
+| --- | --- |
+| `limit` | How many sittings. Absent means the recorder's own page size (50); anything larger than 200 is clamped rather than refused, so that a reply always fits one frame. |
+| `after` | Continue after the sitting this cursor names. It comes from `next_cursor` and is **opaque** — the only thing to do with one is send it back. |
+| `query` | A search query in the language of [search.md](search.md). Absent or blank means the whole library. |
+
+```json
+{"type":"response","id":9,"outcome":{"ok":{
+  "reply":"library_sessions",
+  "page":{"sessions":[
+    {"session_id":"cs2-20260811-201400","game_id":"cs2","game_name":"Counter-Strike 2",
+     "started_at":"2026-08-11T20:14:00+01:00","ended_at":"2026-08-11T22:03:00+01:00",
+     "end_reason":"game-exited","favourite":false,
+     "recordings":[{"recording_id":12,"session_index":1,
+                    "path":"D:\\clips\\cs2-20260811-201400-1.mkv",
+                    "started_at":"2026-08-11T20:14:00+01:00","outcome":"recorded",
+                    "duration_seconds":6540.0,"width":2560,"height":1440,
+                    "size_bytes":9812009112,"favourite":false,"tags":[]}],
+     "clips":[]}],
+   "next_cursor":"2026-08-11T20:14:00+01:00|cs2-20260811-201400"}}}}
+```
+
+**An empty library is this reply, not a refusal.** `{"sessions":[]}` means the
+library was read and holds nothing matching the request. A library that could
+not be read is `library_unavailable` and says why. The two must never be drawn
+the same way: "you have not recorded anything" over a database that is locked,
+corrupt, from a newer build or on a drive that is not plugged in is the
+fabricated state AGENTS.md section 27 forbids.
+
+**A recording whose file has gone is listed, carrying `missing_since`**, and is
+never omitted. That is the field the whole command exists for: a screen has to
+*say* the file has gone rather than draw a broken tile, and it can only do that
+if the fact crosses the boundary. `size_bytes` is kept beside it — the size the
+file had when it was last seen, so a drive coming back needs no re-measurement —
+but a screen must not add it into a total meanwhile, because that space is not
+being used.
+
+**`next_cursor` is present only when a further sitting was actually found**, so
+a caller stops on its absence rather than on an empty page. The cursor is a
+keyset rather than an offset, which is what makes page four hundred cost what
+page one costs; [library.md](library.md) measures a page of 25 at **4.8 ms on a
+10,000-session library, and the twenty-first page at 4.0 ms**. A search is a
+walk rather than an index lookup and costs more: 188 ms for one that fills a
+page, 316 ms for one that matches nothing at all and therefore reads every
+sitting.
+
+A cursor the recorder cannot read starts at the newest sitting rather than being
+refused, because it is a string a window may have kept across a restart, and
+refusing to draw a library over one would be the least useful possible answer.
+
+Refused with `invalid_parameters`, naming the command and the position, for a
+`query` the search language will not parse — a search box has to be able to say
+what is wrong with what was typed rather than show an empty result set — and
+with `library_unavailable` when the index could not be read.
+
+### `library_games`
+
+What the library holds per game: SPEC.md section 17's list. No parameters, and
+not a page — it is every game at once, which is what the screen draws.
+
+```json
+{"type":"response","id":10,"outcome":{"ok":{
+  "reply":"library_games",
+  "games":[{"game_id":"cs2","name":"Counter-Strike 2",
+            "first_seen_at":"2026-01-04T19:30:00+00:00",
+            "last_played_at":"2026-08-11T20:14:00+01:00",
+            "sessions":214,"recordings":265,"clips":31,"favourites":12,
+            "bytes":411204889112,"missing":3},
+           {"sessions":2,"recordings":2,"clips":0,"favourites":0,
+            "bytes":1204889,"missing":0}]}}}
+```
+
+The second row is the one with no `game_id` and no `name`: the sittings the
+catalogue would not attribute, because it reported a tie and the recording was
+filed under no game rather than under a guess ([sessions.md](sessions.md)).
+There is at most one such row and it is last. What to call that group on screen
+is the screen's decision, which is why the protocol does not make one.
+
+`bytes` counts only files that are still there. A missing file contributes
+nothing — the space it is not occupying is not being used — and is counted in
+`missing` instead. Anything in the trash contributes to neither.
+
+Refused with `library_unavailable` on the same terms as `library_sessions`.
 
 ### `stop_recording`
 
@@ -770,6 +877,7 @@ person reads, written to AGENTS.md section 28.
 | `recording_failed` | Capture, encoding or muxing refused. Whatever was written before the failure is still a finished file. |
 | `too_many_connections` | The recorder is serving as many connections as it will. |
 | `shutting_down` | The recorder has accepted a [`shutdown`](#shutdown) and will not start a recording. |
+| `library_unavailable` | The recording library could not be read, and the message says why. **Never an empty library**, which is a successful reply carrying no sessions. |
 | `internal` | The recorder is at fault and cannot say more usefully. |
 
 A code a client has never seen is kept verbatim and its message shown, and so is

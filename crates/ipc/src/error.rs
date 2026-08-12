@@ -143,6 +143,16 @@ pub enum ErrorCode {
     /// read and the reply would begin a recording the decision never covered
     /// (`crate::server::accept_shutdown`, AGENTS.md section 17).
     ShuttingDown,
+    /// `library_unavailable` — the recording library could not be read, and the
+    /// message says why.
+    ///
+    /// It exists so that "there is nothing in your library" and "your library
+    /// could not be opened" cannot be shown as the same thing. A read that
+    /// failed answered with an empty page would have a window drawing an empty
+    /// library over a database that is locked, corrupt, from a newer build or on
+    /// a drive that is not plugged in — the fabricated state AGENTS.md section
+    /// 27 forbids.
+    LibraryUnavailable,
     /// `internal` — the recorder is at fault and cannot say more usefully.
     Internal,
     /// A code this build has never heard of, kept verbatim.
@@ -170,6 +180,7 @@ impl ErrorCode {
             Self::RecordingFailed => "recording_failed",
             Self::TooManyConnections => "too_many_connections",
             Self::ShuttingDown => "shutting_down",
+            Self::LibraryUnavailable => "library_unavailable",
             Self::Internal => "internal",
             Self::Other(code) => code,
         }
@@ -197,6 +208,7 @@ impl From<String> for ErrorCode {
             "recording_failed" => Self::RecordingFailed,
             "too_many_connections" => Self::TooManyConnections,
             "shutting_down" => Self::ShuttingDown,
+            "library_unavailable" => Self::LibraryUnavailable,
             "internal" => Self::Internal,
             _ => Self::Other(code),
         }

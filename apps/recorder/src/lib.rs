@@ -44,6 +44,7 @@
 pub mod capabilities;
 pub mod cli;
 pub mod config;
+pub mod library;
 pub mod list_windows;
 pub mod options;
 pub mod record;

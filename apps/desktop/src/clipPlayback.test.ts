@@ -17,9 +17,9 @@ import type { InterruptedRecording, RecorderLinkView } from './useRecorderLink';
  *
  * The property under all of this is that the screen can only describe a
  * recording the recorder actually named. Two of the three resolutions come from
- * the link, the third is "this window has no index", and none of them is
+ * the link, the third is "this screen has looked nothing up", and none of them is
  * "missing" — because nothing here has looked at the disk (AGENTS.md section
- * 27, issue #305).
+ * 27, issue #52).
  */
 
 const INTERRUPTED: InterruptedRecording = {
@@ -71,12 +71,13 @@ describe('resolving a recording', () => {
     // The failure this guards against is the tempting one: an identifier the
     // window cannot resolve reported as a file that has gone. `missing_since`
     // in the library index is the only thing that has been to the disk (issue
-    // #56), and this window cannot read it (#305).
+    // #56); #301 put it on the wire, and #52 is what would look this
+    // particular recording up in it.
     const { state, detail } = describeClip(resolveClip('r-99', NOTHING));
 
     expect(state).not.toMatch(/missing|gone|deleted|no such/i);
     expect(detail).not.toMatch(/missing|gone|deleted|no such/i);
-    expect(detail).toMatch(/#305/);
+    expect(detail).toMatch(/#52/);
   });
 
   it('reads the recording the recorder is writing now', () => {

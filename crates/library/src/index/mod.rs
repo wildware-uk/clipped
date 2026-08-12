@@ -62,6 +62,7 @@
 //!
 //! [docs/library.md]: https://github.com/wildware-uk/clipped/blob/main/docs/library.md
 
+mod browse;
 mod error;
 mod ingest;
 /// Comparing and writing the moments the schema stores.
@@ -90,6 +91,10 @@ use clipped_storage::rusqlite::params;
 use clipped_storage::Database;
 use tracing::{debug, info, warn};
 
+pub use browse::{
+    list_sessions, IndexedClip, IndexedRecording, IndexedSession, SessionListing, SessionPage,
+    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+};
 pub use error::{IndexError, IndexProblem};
 pub use scan::UnavailableRoot;
 pub use summary::{game_summaries, GameSummary};

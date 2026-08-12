@@ -1,61 +1,52 @@
 import type { ReactNode } from 'react';
 
+import { describeProblem, formatBytes, useGames, useSessions } from './library';
 import { describeRecordingNow, WHERE_RECORDINGS_GO } from './recordingNow';
+import { SessionList } from './SessionList';
 import type { RecorderLinkState } from './useRecorderLink';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
+/** How many sittings Home lists. It is a recent-activity list, not the library. */
+const RECENT = 5;
+
 /**
- * The Home screen (issue #60).
+ * The Home screen (issues #60 and #301).
  *
- * # Why there are no recent sessions on it
+ * # What it draws
  *
  * SPEC.md section 17 draws Home as four lists — recent sessions, recently
- * clipped, favourites, games — and the application deck draws them as tiles.
- * **Every one of them is a read of the library index, and this window cannot
- * perform one.** `clipped-library` reconciles the session sidecars into
- * `library.db` inside the recorder's process (#56, `docs/library.md`); the
- * control protocol has no command that reads a row of it; and this window has no
- * file-system permission to open the database itself, because
- * `src-tauri/capabilities/default.json` grants three `core:` permissions and
- * nothing else. Linking the crate is not an option either — the workspace
- * layering test permits `apps/desktop/src-tauri` exactly one member of the
- * workspace, `clipped-ipc`. Issue #301 is the gap.
+ * clipped, favourites, games. Two of them are on the screen: the most recent
+ * sittings, and what the library holds per game. Both are read from the index
+ * through the recorder, because this window can neither open `library.db` nor
+ * link `clipped-library` (`docs/library.md`, ADR 0002, issue #301).
  *
- * Four tiles reading "0" would be indistinguishable from a machine that has
- * recorded nothing, and this build has not looked (AGENTS.md section 27). So the
- * screen shows the one thing it can establish — what is being recorded right
- * now, and into which file — and then names each list it owes against the work
- * that lands it.
+ * The other two are still waiting on the things that produce them rather than on
+ * a way to read them: nothing creates a clip yet (#91), and nothing can
+ * favourite anything (#58).
+ *
+ * A library that could not be read says so and says why. It is never drawn as an
+ * empty one: four tiles reading "0" over a database that could not be opened
+ * would be indistinguishable from a machine that has recorded nothing
+ * (AGENTS.md section 27).
  */
 
 /**
- * Everything SPEC.md section 17 asks of the Home screen, against what each one
+ * What SPEC.md section 17 still asks of the Home screen, against what each one
  * is waiting for.
  *
  * Written out here rather than derived from anything, because it is a promise to
- * the reader: these four are what this screen will become, and each is pinned to
- * the work that lands it.
+ * the reader. The rows for recent sessions and for the per-game figures are
+ * gone: both are on the screen now.
  */
 const WAITING: readonly Waiting[] = [
   {
-    shows: 'Recent sessions: each sitting, the game it was, when it ran and what it produced',
-    needs:
-      'The library index that records them (#56, built and uncalled), and a way for this window to read it. Issue #301',
-  },
-  {
     shows: 'Recently clipped, and the clips a session produced',
-    needs:
-      'The virtual clip model (#74) and clip creation (#91), then the same read. Issues #74 and #301',
+    needs: 'The virtual clip model (#74) and clip creation (#91). The read carries clips already',
   },
   {
     shows: 'Favourites, which are also what storage cleanup protects',
-    needs: 'Favouriting anything at all. Issue #58, then issue #301',
-  },
-  {
-    shows:
-      'Games, with the sessions, clips, favourites and bytes against each (SPEC.md section 17)',
     needs:
-      'The index already computes these as game_summaries; nothing carries them to this window. Issue #301. The Games screen itself is #107',
+      'Favouriting anything at all. Issue #58. The read already carries which things are favourited',
   },
 ];
 
@@ -74,6 +65,8 @@ export interface HomeScreenProps {
 /** The Home screen. */
 export function HomeScreen({ link }: HomeScreenProps): ReactNode {
   const now = describeRecordingNow(link);
+  const { read: sessions } = useSessions('', RECENT);
+  const games = useGames();
 
   return (
     <>
@@ -97,6 +90,71 @@ export function HomeScreen({ link }: HomeScreenProps): ReactNode {
           <p className="clipped-panel__body clipped-path">{now.output}</p>
         )}
         <p className="clipped-panel__body clipped-muted">{WHERE_RECORDINGS_GO}</p>
+      </section>
+
+      <section aria-label="Recent sessions">
+        <h2 className="clipped-screen__heading">Recent sessions</h2>
+        {sessions.state === 'reading' && (
+          <p className="clipped-screen__lead clipped-muted" aria-busy="true">
+            Reading your library…
+          </p>
+        )}
+        {sessions.state === 'unread' && (
+          <p className="clipped-screen__lead">{describeProblem(sessions.problem)}</p>
+        )}
+        {sessions.state === 'read' && sessions.value.length === 0 && (
+          <p className="clipped-screen__lead">
+            Your library was read and holds no sittings yet. One appears here after Clipped has
+            recorded a game.
+          </p>
+        )}
+        {sessions.state === 'read' && sessions.value.length > 0 && (
+          <SessionList sessions={sessions.value} label="Recent sessions" />
+        )}
+      </section>
+
+      <section aria-label="Games">
+        <h2 className="clipped-screen__heading">Games</h2>
+        {games.state === 'reading' && (
+          <p className="clipped-screen__lead clipped-muted" aria-busy="true">
+            Reading your library…
+          </p>
+        )}
+        {games.state === 'unread' && (
+          <p className="clipped-screen__lead">{describeProblem(games.problem)}</p>
+        )}
+        {games.state === 'read' && games.value.length === 0 && (
+          <p className="clipped-screen__lead">Your library was read and holds no games yet.</p>
+        )}
+        {games.state === 'read' && games.value.length > 0 && (
+          <table className="clipped-table" aria-label="Games">
+            <thead>
+              <tr>
+                <th scope="col">Game</th>
+                <th scope="col">Sessions</th>
+                <th scope="col">Recordings</th>
+                <th scope="col">Size</th>
+                <th scope="col">Files</th>
+              </tr>
+            </thead>
+            <tbody>
+              {games.value.map((game) => (
+                <tr key={game.game_id ?? 'unattributed'}>
+                  <td>{game.name ?? 'Not recognised'}</td>
+                  <td>{game.sessions}</td>
+                  <td>{game.recordings}</td>
+                  {/*
+                   * A missing file contributes nothing to the size — the space
+                   * it is not occupying is not being used — and is counted
+                   * beside it instead, in words (docs/library.md).
+                   */}
+                  <td>{formatBytes(game.bytes)}</td>
+                  <td>{game.missing === 0 ? 'All present' : `${String(game.missing)} missing`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <h2 className="clipped-screen__heading">What this screen will show</h2>

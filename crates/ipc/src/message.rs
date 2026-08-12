@@ -144,6 +144,18 @@ pub mod features {
         /// which is what a client checks for before offering an "Exit" that
         /// would do nothing.
         SHUTDOWN = "shutdown";
+        /// The recorder can read the recording library: `library_sessions` and
+        /// `library_games`.
+        ///
+        /// A UI asks for this before drawing a library screen at all, for the
+        /// reason the two above give: a recorder built before
+        /// [issue #301](https://github.com/wildware-uk/clipped/issues/301) has
+        /// no command that reads a row and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand).
+        /// Without the check the window would have no way to tell that from an
+        /// empty library, which is exactly the confusion the library commands
+        /// are shaped to avoid.
+        LIBRARY = "library";
     }
 }
 

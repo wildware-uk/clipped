@@ -1,86 +1,67 @@
-import type { ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
 
+import { describeProblem, useSessions } from './library';
+import { SessionList } from './SessionList';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
 /**
- * The Library screen (issue #60).
+ * The Library screen (issues #60 and #301).
  *
- * # Why it lists nothing
+ * # What it draws now
  *
- * The deck draws this screen as a Sessions / Clips / Highlights tab strip, a row
- * of filter chips, a search field and a grid of thumbnails. **Not one of those
- * can be honoured in this build**, and the reason is the same for all of them:
- * there is no path from this window to the library index.
+ * The sittings the index holds, newest first, a page at a time, and a search box
+ * over them. Both are real reads: the window asks the recorder, the recorder
+ * reads `library.db` and answers, and nothing on this screen is invented in the
+ * meantime (`docs/library.md`, `docs/ipc.md`).
  *
- * - `clipped-library` reconciles the session sidecars the recorder writes into
- *   `library.db` (#56, `docs/library.md`), inside the recorder's process. The
- *   control protocol in `docs/ipc.md` defines six commands and none of them
- *   reads a row.
- * - This window cannot open the database itself.
- *   `src-tauri/capabilities/default.json` grants `core:window:allow-set-title`,
- *   `core:event:allow-listen` and `core:event:allow-unlisten`, and Tauri denies
- *   everything not listed.
- * - It may not link the crate either:
- *   `tests/integration/tests/workspace_layering.rs` permits the Tauri host
- *   exactly one member of the workspace, `clipped-ipc`, which is what keeps the
- *   recording engine out of the window's process ([ADR 0002](../../../docs/adr/0002-separate-recorder-process.md)).
+ * Three states, never two. A library that could not be read says so and says
+ * why; an empty library says it is empty; and the two are different sentences,
+ * because "you have not recorded anything" over a database that could not be
+ * opened is the fabricated state AGENTS.md section 27 forbids.
  *
- * Issue #301 is that gap, raised by this ticket.
+ * # What it still does not draw, and why
  *
- * So the screen draws no empty grid, no zeroed count and no search field. An
- * empty Sessions tab is indistinguishable from a machine that has recorded
- * nothing, a "0 clips" is a figure nobody measured, and a search box that cannot
- * search is the control AGENTS.md section 27 forbids. What is here instead is
- * what the screen owes and the work that lands each part of it — the same
- * contract the Games screen (#107) keeps.
+ * Clips and highlights (nothing creates one yet), favourites (nothing can
+ * favourite anything yet), thumbnails and waveforms (they are files beside the
+ * recordings and this window has no permission to load one), playback and the
+ * trash. Each is a row in the table below, against the work that lands it —
+ * the same contract the Games screen keeps.
  *
- * # And why there is no tab strip
+ * # And why there is still no tab strip
  *
- * Issue #215 asks for the deck's tab strip and its selectable chips **at the
- * point a screen needs them**, precisely so that a component with no consumer is
- * not designed against a guess. This screen has nothing to switch between and
- * nothing to filter, so building either here would be the speculative component
- * that issue exists to avoid. They belong with the first screen that has three
- * populated lists, which is this one once #301 lands.
+ * Issue #215 asks for the deck's tab strip at the point a screen needs one.
+ * There is one populated list here and two empty ones, so a strip over them
+ * would be the component with no consumer that issue exists to avoid. It
+ * belongs with the first screen that has three lists worth switching between,
+ * which is this one once clips (#91) and highlights (#76) land.
  */
 
+/** How many sittings a page of the Library screen holds. */
+const PAGE = 25;
+
 /**
- * Everything SPEC.md sections 17, 29 and 30 ask of the Library screen, against
- * what each one is waiting for.
+ * What SPEC.md sections 17, 29 and 30 still ask of this screen, against what
+ * each one is waiting for.
  *
- * A promise to the reader rather than a derived list: these are the parts of the
- * screen, and each is pinned to the work that lands it.
+ * A promise to the reader rather than a derived list. The rows that named issue
+ * #301 for the session list, the search and a missing file are gone, because
+ * those three are on the screen now.
  */
 const WAITING: readonly Waiting[] = [
   {
-    shows:
-      'Sessions, each with the matches and other footage inside it, as SPEC.md section 17 draws',
-    needs:
-      'The index that records them (#56, built and uncalled), and a way for this window to read it. Issue #301',
-  },
-  {
     shows: 'Clips, and the highlights a session produced',
     needs:
-      'The virtual clip model (#74), clip creation (#91) and automatic highlights (#76), then the same read. Issue #301',
-  },
-  {
-    shows: 'Search by game, date, event, tag, favourite and duration (SPEC.md section 30)',
-    needs:
-      'The query language is built and runs inside the recorder (#59). This window needs a way to send a query and receive results. Issue #301',
+      'The virtual clip model (#74), clip creation (#91) and automatic highlights (#76). The read carries them already',
   },
   {
     shows: 'Favourites, and filtering the list down to them (SPEC.md section 29)',
-    needs: 'Favouriting anything at all. Issue #58, then issue #301',
+    needs:
+      'Favouriting anything at all. Issue #58. The read already carries which things are favourited',
   },
   {
     shows: 'A thumbnail against each recording, and a waveform under each track',
     needs:
-      'Thumbnails (#57) and waveforms (#66) are generated beside the files. This window can load neither, having no file-system permission. Issue #301',
-  },
-  {
-    shows: 'A recording whose file has gone, said as that rather than drawn as a broken tile',
-    needs:
-      'The index already records missing_since for a file it could not find (docs/library.md). It needs reading. Issue #301',
+      'Thumbnails (#57) and waveforms (#66) are generated beside the files. This window can load neither, having no file-system permission, and how the bytes should reach it is issue #301',
   },
   {
     shows: 'Playing a clip, from the list',
@@ -94,6 +75,17 @@ const WAITING: readonly Waiting[] = [
 
 /** The Library screen. */
 export function LibraryScreen(): ReactNode {
+  /**
+   * What has been typed, and what has been searched for.
+   *
+   * They are separate because the search runs when the form is submitted rather
+   * than on every keystroke: a query is parsed by the recorder, and `game:` on
+   * the way to `game:cs2` is a parse error nobody asked about.
+   */
+  const [typed, setTyped] = useState('');
+  const [query, setQuery] = useState('');
+  const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
+
   return (
     <>
       <h1 className="clipped-screen__title">Library</h1>
@@ -103,20 +95,81 @@ export function LibraryScreen(): ReactNode {
         output folder the recorder was given.
       </p>
 
-      <section className="clipped-panel" aria-label="Why this list is empty">
-        <h2 className="clipped-panel__heading">This window cannot read the library</h2>
-        <p className="clipped-panel__body">
-          The index of sessions, recordings and clips is built inside the recorder&apos;s process.
-          The control protocol has no command that reads it, and this window has no file-system
-          permission to open it directly, so nothing here has looked at your recordings. Issue #301
-          is the work that connects the two.
-        </p>
+      <form
+        className="clipped-panel"
+        role="search"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setQuery(typed.trim());
+        }}
+      >
+        <label className="clipped-field" htmlFor="library-search">
+          Search your library
+        </label>
+        <input
+          id="library-search"
+          type="search"
+          value={typed}
+          placeholder="game:cs2 tag:clutch"
+          onChange={(event) => {
+            setTyped(event.target.value);
+          }}
+        />
+        <button type="submit">Search</button>
         <p className="clipped-panel__body clipped-muted">
-          Nothing is lost in the meantime. The files are ordinary video files and play in anything;
-          the session record beside them is JSON, and is what the index is rebuilt from
-          (docs/library.md).
+          Words match anywhere; <code>game:</code>, <code>tag:</code>, <code>date:</code>,{' '}
+          <code>duration:</code> and <code>favourite</code> narrow it, and <code>-</code> in front
+          of a term excludes it.
         </p>
-      </section>
+      </form>
+
+      {read.state === 'reading' && (
+        <section className="clipped-panel" aria-label="Sessions" aria-busy="true">
+          <p className="clipped-panel__body">Reading your library…</p>
+        </section>
+      )}
+
+      {read.state === 'unread' && (
+        <section className="clipped-panel" aria-label="Sessions">
+          <h2 className="clipped-panel__heading">Your library could not be read</h2>
+          <p className="clipped-panel__body">{describeProblem(read.problem)}</p>
+          <p className="clipped-panel__body clipped-muted">
+            This is not the same as an empty library, and nothing here has been guessed at. Your
+            recordings are ordinary video files and play in anything; the session record beside them
+            is JSON, and is what the index is rebuilt from.
+          </p>
+        </section>
+      )}
+
+      {read.state === 'read' && read.value.length === 0 && (
+        <section className="clipped-panel" aria-label="Sessions">
+          <h2 className="clipped-panel__heading">
+            {query === '' ? 'Nothing recorded yet' : 'Nothing matches that search'}
+          </h2>
+          <p className="clipped-panel__body">
+            {query === ''
+              ? 'Your library was read and holds no sittings. One appears here after Clipped has recorded a game.'
+              : 'Your library was read and no sitting matches. Clearing the search shows everything.'}
+          </p>
+        </section>
+      )}
+
+      {read.state === 'read' && read.value.length > 0 && (
+        <section aria-label="Sessions">
+          <SessionList sessions={read.value} label="Sessions" />
+          {hasMore && (
+            <button
+              type="button"
+              disabled={loadingMore}
+              onClick={() => {
+                loadMore();
+              }}
+            >
+              {loadingMore ? 'Loading…' : 'Show more'}
+            </button>
+          )}
+        </section>
+      )}
 
       <h2 className="clipped-screen__heading">What this screen will show</h2>
       <p className="clipped-screen__lead clipped-muted">
