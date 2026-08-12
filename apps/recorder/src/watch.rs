@@ -323,7 +323,15 @@ fn load_catalogue() -> Result<Catalogue, WatchCommandError> {
 /// [`ConfigurationStore::store`], which is what stops a build that cannot read
 /// a newer settings file from replacing it with what this one understood
 /// (AGENTS.md section 56; the same defect was found in #108 during review).
-fn load_configuration(path: Option<&Path>) -> Configuration {
+///
+/// `pub` for one reason, and it is a test: `tests/unreadable_settings.rs` has
+/// to be a binary of its own to observe the report this makes — installing a
+/// second subscriber in a process makes `tracing` abandon its cached
+/// per-callsite decisions, so a subscriber that shares a process with the rest
+/// of this crate's tests sees nothing (`crates/logging/tests/frame_tracing.rs`
+/// is split for the same reason). Nothing outside this crate should call it;
+/// the whole library target is documented as not being a public API.
+pub fn load_configuration(path: Option<&Path>) -> Configuration {
     let Some(path) = path else {
         return Configuration::defaults();
     };
@@ -332,14 +340,31 @@ fn load_configuration(path: Option<&Path>) -> Configuration {
     match store.load() {
         Ok(_) => store.current().clone(),
         Err(error) => {
-            tracing::warn!(
-                %error,
-                "the settings file could not be read, so this run uses the shipped defaults"
-            );
-            eprintln!("{}", unreadable_settings_sentence(&error));
+            report_unreadable_settings(&error);
             Configuration::defaults()
         }
     }
+}
+
+/// Says, once, that a settings file could not be read.
+///
+/// One function rather than two statements at the call site so that "it was
+/// reported" is a single thing to delete and a single thing to observe:
+/// `tests/unreadable_settings.rs` drives [`load_configuration`] into a
+/// subscriber and fails if this stops happening.
+///
+/// The same sentence goes to both places. The log is where it is found months
+/// later and the console is where somebody who started `watch` in a terminal
+/// sees it now, and a diagnostic that only one of them carries is one half of
+/// the users never see (`docs/logging.md`, AGENTS.md section 45).
+fn report_unreadable_settings(error: &ConfigurationError) {
+    let sentence = unreadable_settings_sentence(error);
+    tracing::warn!(
+        %error,
+        report = sentence.as_str(),
+        "the settings file could not be read, so this run uses the shipped defaults"
+    );
+    eprintln!("{sentence}");
 }
 
 /// What somebody is told when their settings file cannot be read.

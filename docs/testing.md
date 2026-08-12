@@ -233,11 +233,12 @@ rather than any one crate:
 | `ctrl_c.rs` | The half of Ctrl+C that needs no capture engine: that the finalisation hook runs exactly once and the process exits cleanly, against a real child sent a real console event. `record_end_to_end.rs` is what proves the resulting *file* plays |
 | `supervision.rs` | That the recorder is a process with a lifetime of its own, against real processes ended with a real `TerminateProcess` — no signal, no destructors: that a recorder outlives the process that started it and keeps serving, that a second launch attaches rather than competing and one holding the instance name touches nothing at all, that a killed recorder is reported and replaced rather than left showing a stale state, and that a recorder which cannot start is given up on after a bounded number of attempts. Two of its tests need a GPU and record a real window: one kills the supervisor mid-recording and proves the recording carried on and the file plays, the other kills the *recorder* mid-recording and proves the file it left is playable and that the supervisor named it |
 | `command_line.rs` | The command-line surface: that `record --help` documents a default for every option, that invalid values are usage errors and not panics, that a missing target names all three ways of giving one, that an existing recording is not overwritten without being asked, and that `list-windows` and `capabilities` report what they claim to |
+| `unreadable_settings.rs` | That a settings file `watch` cannot read is **reported** — once, as a warning, carrying the sentence that says the file was left alone — and that a file which reads cleanly, or is not there at all, is not worth a word. It is a binary of its own because observing a report means installing a subscriber, and a second subscriber in a process makes `tracing` abandon its cached per-callsite decisions; sharing a process with this crate's other tests made it fail about half the time. What such a file does to a *recording* is `watch`'s own tests |
 
 Most of these need a GPU and a display, so they skip themselves without one and
-`CLIPPED_REQUIRE_CAPTURE` turns that skip into a failure. The command-line and
-Ctrl+C tests do not, and run anywhere; so does all of `supervision.rs` except
-the two `#[ignore]`d tests that record a real window.
+`CLIPPED_REQUIRE_CAPTURE` turns that skip into a failure. The command-line, the
+settings-report and the Ctrl+C tests do not, and run anywhere; so does all of
+`supervision.rs` except the two `#[ignore]`d tests that record a real window.
 
 ### Running one of them on its own
 
