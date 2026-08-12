@@ -647,6 +647,47 @@ mod tests {
     }
 
     #[test]
+    fn an_overlay_ending_exactly_at_the_end_of_the_clip_is_on_screen_for_its_last_moment() {
+        // The boundary the test above does not reach, and the one a `>=` would
+        // get wrong. Ranges are half-open, so an overlay ending at the clip's
+        // duration ends where the clip does and still covers its final moment;
+        // one nanosecond past that is the first value the model refuses. Both
+        // sides are asserted here because a validator a nanosecond too strict
+        // rejects exactly the overlay the editor produces when a user drags a
+        // title to the end of the timeline.
+        let clip_nanos = 10_000_000_000;
+
+        let exactly = simple().with_overlay(TextOverlay::new(
+            "Ace",
+            output_span(9_000_000_000, clip_nanos),
+        ));
+        exactly
+            .validate()
+            .expect("an overlay ending where the clip ends is inside the clip");
+        assert_eq!(
+            exactly
+                .overlays_at(OutputTime::from_nanos(clip_nanos - 1))
+                .count(),
+            1,
+            "and it is still on screen for the clip's last nanosecond"
+        );
+
+        let one_nanosecond_over = simple().with_overlay(TextOverlay::new(
+            "Ace",
+            output_span(9_000_000_000, clip_nanos + 1),
+        ));
+        assert_eq!(
+            one_nanosecond_over.validate(),
+            Err(DocumentProblem::OverlayPastTheEnd {
+                overlay: 0,
+                ends_at_nanos: clip_nanos + 1,
+                clip_nanos,
+            }),
+            "and one nanosecond past the end is the first value refused"
+        );
+    }
+
+    #[test]
     fn an_overlay_has_to_say_something_somewhere_on_the_frame() {
         let empty = simple().with_overlay(TextOverlay::new(" ", output_span(0, 1_000)));
         assert_eq!(
