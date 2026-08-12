@@ -18,6 +18,13 @@ file: `recorder record` records. The loop is
 `crates/session/src/recording.rs` and it obeys the ownership and threading rules
 this document sets out.
 
+Since [issue #97](https://github.com/wildware-uk/clipped/issues/97) the crate
+also knows what to do when the backend under a recording stops working:
+[Automatic capture fallback](#automatic-capture-fallback) restarts or replaces
+it, notices a capture that has silently gone black, and reports which method is
+actually in use. That part is built in `crates/capture` and is not yet called by
+a session — the section says exactly where the boundary is.
+
 So this document describes an interface, the rules a backend has to obey, and
 the two backends that obey them. Where it describes behaviour that does not
 exist yet it says so, because a document that quietly describes intentions as
@@ -693,18 +700,13 @@ because the 4 Hz state is an order of magnitude, not a few percent.
 - **Multiple displays and display changes** belong to
   [issue #98](https://github.com/wildware-uk/clipped/issues/98).
 
-### Runtime fallback is not built
+### Runtime fallback
 
-Falling back to a *different backend* after one fails mid-recording — black
-frames, no frames — is
-[issue #97](https://github.com/wildware-uk/clipped/issues/97) in M13, and none of
-it exists. (Desktop Duplication losing access to its display is a different
-thing, and that one is handled: it rebuilds its own duplication rather than
-asking anybody to choose another backend. See below.) No seam had to be invented
-for #97: because selection is a pure function of the candidate list, falling back
-is calling `select` again with the failed method removed. What it has to add is
-the part that is genuinely missing, which is deciding *when* a backend has failed
-and remembering the answer per game.
+Falling back to a *different backend* after this one fails mid-recording is
+["Automatic capture fallback"](#automatic-capture-fallback) below. (Desktop
+Duplication losing access to its display is a different thing, and that one is
+handled inside the backend: it rebuilds its own duplication rather than asking
+anybody to choose another backend. See further below.)
 
 ## Desktop Duplication
 
@@ -963,6 +965,191 @@ updates.
 `TargetLost` means the recording is over, `Interrupted` means reinitialise this
 same backend, `UnsupportedTarget` means try another — which is the
 classification that decision will read.
+
+## Automatic capture fallback
+
+**Status: built in `crates/capture`, and not yet wired into a session.**
+`CaptureFallback` ([issue #97](https://github.com/wildware-uk/clipped/issues/97))
+is what keeps a recording going when the backend under it stops working. The
+recording loop in `crates/session/src/recording.rs` still creates a backend
+directly and ends the recording on the first error; adopting the fallback there
+is [issue #285](https://github.com/wildware-uk/clipped/issues/285), because
+`crates/session` is owned by other work in this milestone. Everything below
+describes what the capture crate does today, and says where the boundary is.
+
+### The shape, and why it is not a wrapper
+
+`CaptureFallback` is a policy object. The caller goes on owning the
+`CaptureBackend` and goes on calling `acquire` on it; when that fails, it hands
+the backend over **by value** and gets a running replacement back:
+
+```rust
+let (mut fallback, mut backend, format) =
+    CaptureFallback::start(candidates, &target, &config, setting)?.into_parts();
+
+match backend.acquire(timeout) {
+    Ok(Acquisition::Frame(frame)) => { /* fallback.inspect(&frame); encode it */ }
+    Ok(Acquisition::Timeout) => fallback.note_silence(timeout),
+    Err(error) => backend = fallback.recover(backend, error)?.into_parts().0,
+}
+```
+
+Wrapping the acquisition instead would mean handing out a frame borrowed from
+the same value that has to replace the backend the frame came from, which the
+borrow checker will not have and which would put a second layer of indirection
+in the hottest loop in the recorder. Passing the failed backend by value is also
+enforcement rather than manners: the caller cannot go on using a backend it has
+given up, and the fallback shuts it down *before* asking the platform for
+another — necessary, because DXGI gives a process one duplication per display,
+and a replacement would be refused while the corpse of the old one still held
+it.
+
+### What counts as a failure
+
+| What happened | What the fallback does |
+| --- | --- |
+| `CaptureError::TargetLost` | Nothing. The recording is over; no backend records a window that has closed. Reported as `FallbackError::Unrecoverable`, keeping the original error so a caller can still tell it apart. |
+| `CaptureError::NotInitialised`, `AlreadyInitialised` | The same. These are programming errors, and another backend would meet the same caller. |
+| `CaptureError::UnsupportedTarget` | Falls back. This backend has said it cannot capture this target; another may. |
+| `CaptureError::Interrupted` | Restarts the *same* backend, which is what that variant means — a driver reset or a mode change leaves the target where it was. Twice at most, then the method is retired and the next candidate takes over. |
+| `CaptureError::Backend` (unclassified) | The same as `Interrupted`: a hiccup in the preferred backend is likelier than a broken one, and the cost of being wrong is one restart before the fall back happens anyway. |
+| Black frames | Falls back, without a restart first: the backend is running, and running is the problem. See below. |
+| No frames at all | **Nothing but a log line.** See below. |
+| Initialisation failure, before the first frame | Falls past that candidate to the next, so a machine where Windows Graphics Capture is present but broken records through Desktop Duplication rather than not recording. |
+
+A method that has failed is not asked again during that recording, so the chain
+is walked at most once per candidate and a recording cannot spend its length
+cycling between two broken backends.
+
+### The rule that constrains everything: the frame size cannot change
+
+Matroska fixes a track's dimensions in the header
+([ADR 0001](adr/0001-mkv-archival-container.md)) and the encoder is configured
+for one resolution, so **a replacement that produces a different `FrameFormat`
+than the recording committed to is not used.** It is shut down again, the
+mismatch is recorded with both sizes in it, and the next candidate is tried;
+when none matches, the recording ends where it is, with a report that says
+exactly that:
+
+```text
+Windows Graphics Capture cannot capture a window: the window has opted out of
+being captured; no other capture backend could take over; Desktop Duplication:
+it would produce 1280x720 BGRA8 unorm frames, and this recording's video track
+is fixed at 1920x1080 BGRA8 unorm
+```
+
+This is the honest answer rather than a limitation nobody mentioned: continuing
+would write frames of one size into a track that declares another, and a player
+would show the difference as a stretched or torn picture in a file that looks
+finished. It is also the same answer the pipeline already gives to a window
+resized mid-recording, which is
+[issue #184](https://github.com/wildware-uk/clipped/issues/184). When #184
+decides how a session follows a size change — by scaling in the capture path, or
+by starting a second file — the rule here relaxes in that same change, and the
+seam it relaxes at is `CaptureFallback::resize`, which is how a caller that
+followed a resize tells the fallback what size the recording now is.
+
+In practice the mismatch is rare: both Windows backends produce the target's
+client area in `B8G8R8A8`, so a replacement normally produces exactly what the
+failed one did. It is the transition cases — a game that changed resolution in
+the same moment its capture broke — that end here.
+
+A second consequence of a backend change is recorded rather than solved: **the
+replacement's frames come from a different Direct3D device.** An encoder opened
+against the old device (`crates/session/src/windows/device.rs`) cannot bind them
+and has to be reopened. Nothing in `crates/capture` can do that, and it is part
+of what issue #285 has to do when it adopts this.
+
+### Black frames
+
+A capture that has silently stopped working does not return an error: it keeps
+returning frames, and every pixel in them is zero. That is the failure the issue
+calls "never silently produce a black recording", and it is the only capture
+failure that cannot be seen from the API's return values — so it is the only one
+worth reading pixels for.
+
+- **The rule is exactly zero, not a threshold.** A pixel counts as *lit* when any
+  of its red, green or blue channels is non-zero. A sample is black only when
+  none of the pixels it read is lit. A dark scene is dark, not empty: a
+  night-time game frame, a dim menu or an unlit corridor has dithering, noise and
+  a heads-up display in it, so its pixels are 3, 8 or 20 rather than 0, and a
+  threshold of "below 16 is black" would call it a broken capture. Alpha is
+  ignored, because a compositor leaves whatever it likes there.
+- **Sixteen pixels, twice a second.** `D3d11FrameSampler` copies a 4x4 grid of
+  single pixels into a 16x1 staging texture with `CopySubresourceRegion` and maps
+  it once — 64 bytes, and the expense is the map rather than the bytes, because
+  it waits for those copies. `BlackFrameWatch` therefore rations sampling to one
+  frame every 500 ms, so 58 frames in 60 are never touched at 60 fps. The grid is
+  inset by half a cell so that no sample lands on the frame's very edge, which is
+  legitimately black in plenty of working captures.
+- **Ten seconds, because duration is the only thing that separates the two
+  cases.** A source that is *deliberately* black — a loading screen, a fade, a
+  paused game — produces exactly the same pixels as a broken capture. Nothing in
+  any capture API distinguishes them, so the watch waits: ten continuous seconds
+  of black is far beyond a fade and longer than most loading screens. When it is
+  wrong, the cost is bounded and visible — the recording carries on, one method
+  change is logged, and the frames it was recording were black anyway.
+- **A frame that cannot be sampled is no evidence.** An unsupported pixel format
+  (HDR, [issue #99](https://github.com/wildware-uk/clipped/issues/99)) or a
+  Direct3D call that declines produces no sample rather than a black one, so a
+  readback failure can never end a recording.
+
+The sampler is tested against real Direct3D textures with no window and no
+capture involved: a texture filled with opaque black samples as black, one
+filled with a blue channel of 4 does not, and one that is black apart from a
+painted corner does not — which is the assertion that the grid reaches a
+heads-up display rather than only the middle of a dark screen.
+
+### Silence is reported, not acted on
+
+A capture producing *no* frames is indistinguishable from a source producing
+none, and the commonest reason for the second is a minimised window — which both
+backends deliberately wait out (see the tables above). Falling back on silence
+would swap a user's preferred backend for a worse one every time they alt-tabbed,
+and the replacement would be just as silent. So `note_silence` accumulates it,
+logs it every thirty seconds, and `silent_for` can be shown on a diagnostics
+screen; nothing else happens. This is a deliberate narrowing of the issue's
+"no frames" bullet, and the alternative would need a backend able to say "the
+source is idle" rather than "no frame arrived", which neither Windows API
+offers.
+
+### What the user and the diagnostics see
+
+`CaptureStatus` is the whole of it, and the two lines SPEC.md section 8 asks for
+are unchanged by any of this — a user never learns that a backend was swapped
+underneath them for their recording to survive:
+
+```text
+Capture method: Automatic
+Current method: Desktop Duplication
+```
+
+`status().changes()` is the third thing, for the diagnostics screen and the
+session log: every restart and replacement, in order, each carrying the method
+before, the method after, what triggered it, and the failure in the words the
+failure used. "Desktop Duplication", in a recording that started on Windows
+Graphics Capture, is otherwise a fact with no explanation attached.
+
+Every attempt and every outcome is also logged as it happens, with
+`capture_backend`, `previous_capture_backend` and `trigger` fields, at `warn`
+for a change and `error` for a recording that ends because nothing could take
+over.
+
+### What is not built
+
+- **Remembering per game what worked.** The issue asks for it and it is not here:
+  the value to remember is `status().current_method()`, and the place to keep it
+  is per-game configuration, which is `clipped-config`'s
+  ([issue #108](https://github.com/wildware-uk/clipped/issues/108)) rather than
+  this crate's. [Issue #286](https://github.com/wildware-uk/clipped/issues/286)
+  covers storing it and preferring it at the next launch of that game.
+- **The session using any of this**
+  ([issue #285](https://github.com/wildware-uk/clipped/issues/285)), including
+  reopening the encoder against the replacement's graphics device.
+- **The desktop UI showing the current method.** The status is there to be shown;
+  no screen shows it yet
+  ([issue #101](https://github.com/wildware-uk/clipped/issues/101) owns
+  diagnostics).
 
 ## How platform-neutral this is
 

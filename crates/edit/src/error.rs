@@ -1,12 +1,15 @@
 //! What can be wrong with a document, said in a way somebody can act on.
 //!
-//! Two levels, because they have two audiences. [`DocumentProblem`] is about
-//! the *contents* — a segment naming a source that is not declared — and is
-//! produced by validation, which runs on every read and every write; the editor
-//! can put it in front of a user. [`EditDocumentError`] is about the document
-//! as a whole — it is not JSON, it is from a newer build, a migration refused —
-//! and the important thing about most of its variants is what they imply the
-//! caller must **not** do next, which is write anything back.
+//! Three levels, because they have three audiences. [`DocumentProblem`] is
+//! about the *contents* — a segment naming a source that is not declared — and
+//! is produced by validation, which runs on every read and every write; the
+//! editor can put it in front of a user. [`EditDocumentError`] is about the
+//! document as a whole — it is not JSON, it is from a newer build, a migration
+//! refused — and the important thing about most of its variants is what they
+//! imply the caller must **not** do next, which is write anything back.
+//! [`OperationRefused`] is about an edit somebody just asked for, and its
+//! audience is the editor: every variant is something a user did, at a place
+//! they can see.
 
 use core::fmt;
 
@@ -327,9 +330,93 @@ impl From<DocumentProblem> for EditDocumentError {
     }
 }
 
+/// Why an edit was not made.
+///
+/// A refusal means **nothing happened**: [`EditDocument::apply`](crate::EditDocument::apply)
+/// builds a new document and hands back either that or this, so there is no
+/// partly-edited state for a caller to notice or repair.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum OperationRefused {
+    /// The document could not be read, so there was nothing to edit.
+    ///
+    /// Only reachable for a document that was never validated: everything
+    /// [`EditDocument::read`](crate::EditDocument::read) returns is checked.
+    Unreadable(DocumentProblem),
+    /// The time asked for is not on this clip's timeline.
+    OutsideTheClip {
+        /// The time asked for, in nanoseconds on the edited timeline.
+        at_nanos: u64,
+        /// How long the clip is, in nanoseconds.
+        clip_nanos: u64,
+    },
+    /// A trim was asked to keep nothing at all.
+    ///
+    /// Trimming says where the material that is *kept* begins or ends, and a
+    /// kept range that ends where it starts is not a range. Emptying a clip on
+    /// purpose is a deletion of all of it, which is allowed and leaves a valid
+    /// empty document.
+    NothingWouldRemain,
+    /// The edit would have produced a document that could not be saved.
+    ///
+    /// The last line of defence rather than an expected outcome: an operation
+    /// validates its own result, so this is what stops a corner of the
+    /// arithmetic — a piece so short at its speed that it contributes no
+    /// output — from reaching the database instead of the user.
+    WouldBreakTheDocument(DocumentProblem),
+}
+
+impl fmt::Display for OperationRefused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable(problem) => {
+                write!(formatter, "this edit cannot be changed: {problem}")
+            }
+            Self::OutsideTheClip {
+                at_nanos,
+                clip_nanos,
+            } => write!(
+                formatter,
+                "that is at {at_nanos} ns, which is past the end of a clip that lasts \
+                 {clip_nanos} ns"
+            ),
+            Self::NothingWouldRemain => {
+                formatter.write_str("trimming there would leave nothing of the clip")
+            }
+            Self::WouldBreakTheDocument(problem) => {
+                write!(
+                    formatter,
+                    "that edit would leave an edit that cannot be saved: {problem}"
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for OperationRefused {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Unreadable(problem) | Self::WouldBreakTheDocument(problem) => Some(problem),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_edit_says_where_the_user_pointed_and_where_the_clip_ends() {
+        let message = OperationRefused::OutsideTheClip {
+            at_nanos: 31_000_000_000,
+            clip_nanos: 30_000_000_000,
+        }
+        .to_string();
+
+        assert!(message.contains("31000000000"), "{message}");
+        assert!(message.contains("30000000000"), "{message}");
+    }
 
     #[test]
     fn a_newer_document_tells_the_user_what_to_do_and_that_nothing_was_lost() {

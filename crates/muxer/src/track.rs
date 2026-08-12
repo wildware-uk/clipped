@@ -7,12 +7,12 @@
 //! (SPEC.md section 44), so the layout here is a video track and a list, and
 //! nothing in it assumes the list has one entry.
 //!
-//! Only two audio tracks are written by anything today
-//! ([issue #28](https://github.com/wildware-uk/clipped/issues/28) is where the
-//! real routing arrives), but the container is where a track's identity has to
-//! survive: Matroska carries a name and a language tag per track, so an editor
-//! opening the file sees "Microphone" rather than "Audio 3" without a sidecar
-//! (ADR 0001).
+//! The container is where a track's identity has to survive: Matroska carries a
+//! name and a language tag per track, so an editor opening the file sees
+//! "Microphone" rather than "Audio 3" without a sidecar (ADR 0001). Which
+//! sources those tracks carry, what each is called and what order they come in
+//! is [`AudioSource`](crate::AudioSource) in [`crate::audio`], and
+//! [`AudioTrack::for_source`] is how a track is described from one.
 //!
 //! # Why the codecs are named here rather than taken from `clipped-encoder`
 //!
@@ -31,6 +31,8 @@ use core::fmt;
 use core::time::Duration;
 
 use rusty_ffmpeg::ffi;
+
+use crate::audio::{AudioSource, RECORDING_AUDIO_CODEC};
 
 /// Which track of a recording a packet belongs to.
 ///
@@ -107,10 +109,13 @@ impl fmt::Display for VideoCodec {
 
 /// An audio codec a recording can be written in.
 ///
-/// Which one Clipped records in is not settled — ADR 0001 leaves it to the
-/// muxing work in M2 ([issue #28](https://github.com/wildware-uk/clipped/issues/28))
-/// — so the three plausible answers are all carried. Matroska imposes no
-/// constraint of its own here, which is part of why it was chosen.
+/// Clipped records in
+/// [`RECORDING_AUDIO_CODEC`](crate::RECORDING_AUDIO_CODEC), which is
+/// uncompressed PCM; `docs/muxing.md` records that decision and what it costs.
+/// The others are carried because a remux copies whatever the file it was handed
+/// contains ([issue #92](https://github.com/wildware-uk/clipped/issues/92)), and
+/// because an audio encoder is work this workspace has not done yet. Matroska
+/// imposes no constraint of its own here, which is part of why it was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum AudioCodec {
@@ -471,11 +476,17 @@ pub struct AudioTrack {
     name: Option<String>,
     language: Language,
     default: bool,
+    source: Option<AudioSource>,
 }
 
 impl AudioTrack {
     /// Describes an audio track in `codec` at `sample_rate` hertz with
     /// `channels` channels.
+    ///
+    /// The track has no source, so it is named by the caller and keeps the
+    /// position it was declared in. That is what a remux wants — it copies a
+    /// file it did not record — and what a recording of Clipped's own sources
+    /// does not: use [`for_source`](Self::for_source) for those.
     #[must_use]
     pub const fn new(codec: AudioCodec, sample_rate: u32, channels: u16) -> Self {
         Self {
@@ -486,6 +497,67 @@ impl AudioTrack {
             name: None,
             language: Language::UNDETERMINED,
             default: false,
+            source: None,
+        }
+    }
+
+    /// Describes the track one of a recording's audio sources goes to.
+    ///
+    /// Everything about the track that is not the format comes from the source:
+    /// the name a player and an editor show, where the track sits among the
+    /// others, and whether it is the one a player selects on its own. That is
+    /// the point — a recording made on any machine with any routing labels and
+    /// orders its tracks the same way (SPEC.md sections 11 and 13), and no
+    /// caller has to remember that the compatibility mix goes first and carries
+    /// the flag.
+    ///
+    /// The format is the caller's, because it is the capture's: a microphone is
+    /// often mono where system audio is stereo, and resampling to make them
+    /// match is a decision this crate is not entitled to take (AGENTS.md section
+    /// 21).
+    ///
+    /// The language is left as [`Language::UNDETERMINED`], which is what
+    /// Matroska specifies for a track whose language is not known. Game audio
+    /// has none; a microphone's is a fact about the person speaking, and
+    /// guessing it from the operating system's locale would put a wrong tag in a
+    /// file nobody can rewrite. A caller that *knows* says so with
+    /// [`with_language`](Self::with_language).
+    #[must_use]
+    pub fn for_source(source: AudioSource, sample_rate: u32, channels: u16) -> Self {
+        let default = source.is_default_track();
+        Self {
+            name: Some(source.track_name().to_owned()),
+            default,
+            source: Some(source),
+            ..Self::new(RECORDING_AUDIO_CODEC, sample_rate, channels)
+        }
+    }
+
+    /// Says which of a recording's sources this track carries.
+    ///
+    /// For a track described by hand that is nonetheless one of the model's:
+    /// [`for_source`](Self::for_source) is the usual way in, and does this as
+    /// well as naming and ordering the track.
+    #[must_use]
+    pub fn with_source(mut self, source: AudioSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// What this track carries, when it was described from a source.
+    #[must_use]
+    pub const fn source(&self) -> Option<&AudioSource> {
+        self.source.as_ref()
+    }
+
+    /// Where this track sits among a recording's audio tracks.
+    ///
+    /// A track with no source ranks last, so a layout built by hand keeps the
+    /// order it was declared in.
+    pub(crate) fn ordering_rank(&self) -> u8 {
+        match &self.source {
+            Some(source) => source.ordering_rank(),
+            None => u8::MAX,
         }
     }
 
@@ -521,8 +593,23 @@ impl AudioTrack {
     /// is the track that should play, and it is not necessarily the first one
     /// declared.
     #[must_use]
-    pub const fn as_default(mut self) -> Self {
-        self.default = true;
+    pub const fn as_default(self) -> Self {
+        self.with_default_flag(true)
+    }
+
+    /// Sets whether a player should select this track on its own.
+    ///
+    /// [`for_source`](Self::for_source) already answers this from the track
+    /// model, and a recording has no reason to disagree with it. The setter
+    /// exists because the flag is only *testable* on a file whose default track
+    /// is not the first one — FFmpeg's MP4 muxer enables the first track of each
+    /// kind whether or not it was told to, so a recording that marks the first
+    /// track produces an identical copy with the flag honoured and with it
+    /// dropped (`crates/muxer/tests/mp4_remux.rs`) — and something has to be
+    /// able to write that file.
+    #[must_use]
+    pub const fn with_default_flag(mut self, default: bool) -> Self {
+        self.default = default;
         self
     }
 
@@ -595,11 +682,57 @@ impl RecordingLayout {
         }
     }
 
-    /// Appends an audio track. It becomes `TrackId::Audio(n)` for the next `n`.
+    /// Adds an audio track, in the position the track model gives it.
+    ///
+    /// Tracks with a source are ordered by
+    /// [`AudioSource::ordering_rank`](crate::AudioSource::ordering_rank) — the
+    /// compatibility mix first — whatever order they are added in, and tracks
+    /// with the same rank keep the order they were added in. A track with no
+    /// source ranks last, so a layout described entirely by hand is in
+    /// declaration order and nothing about a remuxed file moves.
+    ///
+    /// The ordering is here rather than in the caller because it is the file
+    /// that has to be predictable: a container fixes its track list in the
+    /// header, an editor project refers to tracks by index, and a recording
+    /// whose microphone is track 3 on one machine and track 2 on another is a
+    /// recording nobody can write an instruction about.
+    ///
+    /// The track's number — the `n` in `TrackId::Audio(n)` — is its position
+    /// after this insertion, so ask for it with
+    /// [`audio_track_for`](Self::audio_track_for) rather than counting calls.
     #[must_use]
     pub fn with_audio_track(mut self, track: AudioTrack) -> Self {
-        self.audio.push(track);
+        let rank = track.ordering_rank();
+        let position = self
+            .audio
+            .iter()
+            .rposition(|declared| declared.ordering_rank() <= rank)
+            .map_or(0, |index| index + 1);
+        self.audio.insert(position, track);
         self
+    }
+
+    /// Which track carries `source`, once every track has been added.
+    ///
+    /// The way a caller addresses its packets: the alternative is counting the
+    /// order tracks were declared in, which is the arithmetic that puts the
+    /// microphone's audio on the game's track. Returns [`None`] for a source
+    /// this recording has no track for — a recording made with the microphone
+    /// turned off has no microphone track, and asking for one is a question with
+    /// an answer rather than a failure.
+    ///
+    /// A layout carrying two tracks for one source — SPEC.md section 14's
+    /// processed and raw microphone,
+    /// [issue #32](https://github.com/wildware-uk/clipped/issues/32) — gets the
+    /// first of them here, and needs [`audio_tracks`](Self::audio_tracks) to
+    /// tell them apart.
+    #[must_use]
+    pub fn audio_track_for(&self, source: &AudioSource) -> Option<TrackId> {
+        let index = self
+            .audio
+            .iter()
+            .position(|track| track.source() == Some(source))?;
+        u16::try_from(index).ok().map(TrackId::Audio)
     }
 
     /// The video track.
@@ -608,7 +741,7 @@ impl RecordingLayout {
         &self.video
     }
 
-    /// The audio tracks, in the order they were added.
+    /// The audio tracks, in the order the container will declare them.
     #[must_use]
     pub fn audio_tracks(&self) -> &[AudioTrack] {
         &self.audio
@@ -716,6 +849,127 @@ mod tests {
         assert_eq!(names, ["Mix", "Game", "Microphone"]);
         assert_eq!(layout.audio_tracks()[2].channels(), 1);
         assert_eq!(layout.video().width(), 1920);
+    }
+
+    #[test]
+    fn sourced_tracks_are_ordered_by_the_model_and_not_by_the_caller() {
+        // Declared in the order somebody's settings screen might produce, which
+        // is not the order the file has to be in.
+        let layout = RecordingLayout::new(VideoTrack::new(VideoCodec::H264, 1920, 1080))
+            .with_audio_track(AudioTrack::for_source(AudioSource::Microphone, 48_000, 1))
+            .with_audio_track(AudioTrack::for_source(
+                AudioSource::application("Spotify"),
+                48_000,
+                2,
+            ))
+            .with_audio_track(AudioTrack::for_source(AudioSource::Game, 48_000, 2))
+            .with_audio_track(AudioTrack::for_source(
+                AudioSource::application("Discord"),
+                48_000,
+                2,
+            ))
+            .with_audio_track(AudioTrack::for_source(
+                AudioSource::CompatibilityMix,
+                48_000,
+                2,
+            ))
+            .with_audio_track(AudioTrack::for_source(
+                AudioSource::OtherSystemAudio,
+                48_000,
+                2,
+            ));
+
+        let names: Vec<_> = layout
+            .audio_tracks()
+            .iter()
+            .map(|track| track.name().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Compatibility Mix",
+                "Game",
+                "Other System Audio",
+                "Microphone",
+                // Two application tracks of equal rank, in the order they were
+                // configured: nothing else distinguishes them, and reordering
+                // them would be a file whose tracks moved because a name was
+                // edited.
+                "Spotify",
+                "Discord",
+            ]
+        );
+
+        // And a caller addresses its packets by source rather than by counting.
+        assert_eq!(
+            layout.audio_track_for(&AudioSource::CompatibilityMix),
+            Some(TrackId::Audio(0))
+        );
+        assert_eq!(
+            layout.audio_track_for(&AudioSource::Microphone),
+            Some(TrackId::Audio(3))
+        );
+        assert_eq!(
+            layout.audio_track_for(&AudioSource::application("Discord")),
+            Some(TrackId::Audio(5))
+        );
+        // A source this recording does not have. A microphone that was turned
+        // off is a question with an answer, not a failure.
+        assert_eq!(layout.audio_track_for(&AudioSource::VoiceChat), None);
+    }
+
+    #[test]
+    fn a_track_described_from_a_source_carries_what_the_model_says() {
+        let mix = AudioTrack::for_source(AudioSource::CompatibilityMix, 48_000, 2);
+        assert_eq!(mix.name(), Some("Compatibility Mix"));
+        assert_eq!(mix.codec(), RECORDING_AUDIO_CODEC);
+        assert!(
+            mix.is_default(),
+            "a player that picks one track has to pick this one (SPEC.md section 13)"
+        );
+        // Not guessed from the machine's locale: a wrong language tag is in the
+        // file for good.
+        assert_eq!(mix.language(), Language::UNDETERMINED);
+
+        let microphone = AudioTrack::for_source(AudioSource::Microphone, 44_100, 1);
+        assert!(!microphone.is_default());
+        assert_eq!(microphone.channels(), 1, "a mono capture stays mono");
+        assert_eq!(microphone.sample_rate(), 44_100);
+        assert_eq!(
+            microphone.with_language(Language::ENGLISH).language(),
+            Language::ENGLISH,
+            "a caller that knows the language can still say so"
+        );
+    }
+
+    #[test]
+    fn tracks_with_no_source_keep_the_order_they_were_declared_in() {
+        // What a remux writes: tracks copied from a file this crate did not
+        // record, whose order is the source file's and must not be rearranged.
+        let layout = RecordingLayout::new(VideoTrack::new(VideoCodec::H264, 1920, 1080))
+            .with_audio_track(AudioTrack::new(AudioCodec::Opus, 48_000, 2).with_name("Third"))
+            .with_audio_track(AudioTrack::new(AudioCodec::Opus, 48_000, 2).with_name("Second"))
+            .with_audio_track(AudioTrack::new(AudioCodec::Opus, 48_000, 2).with_name("First"));
+
+        let names: Vec<_> = layout
+            .audio_tracks()
+            .iter()
+            .map(|track| track.name().unwrap_or_default())
+            .collect();
+        assert_eq!(names, ["Third", "Second", "First"]);
+
+        // And a sourced track added afterwards still leads, because the file's
+        // first audio track is the one a naive player will take.
+        let layout = layout.with_audio_track(AudioTrack::for_source(
+            AudioSource::CompatibilityMix,
+            48_000,
+            2,
+        ));
+        assert_eq!(
+            layout.audio_tracks()[0].name(),
+            Some("Compatibility Mix"),
+            "a sourced track sorts ahead of tracks that have no source"
+        );
     }
 
     #[test]

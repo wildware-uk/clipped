@@ -102,6 +102,11 @@ struct TrackState {
     id: TrackId,
     stream_index: c_int,
     timeline: TrackTimeline,
+    /// How many packets this track has taken. Counted per track rather than
+    /// only in total because a track that took none is a source that produced
+    /// nothing, and that is the thing a recording with a silent microphone
+    /// needs to be able to say (AGENTS.md section 21).
+    packets: u64,
 }
 
 /// What a finished recording turned out to contain.
@@ -127,6 +132,19 @@ pub struct RecordingSummary {
     pub timestamps_forced_monotonic: u64,
     /// Packets that would have been presented before they were decoded.
     pub timestamps_presented_before_decoded: u64,
+    /// Audio tracks that were declared and never written to.
+    ///
+    /// One of these is a source that produced nothing for the whole recording:
+    /// a microphone Windows had muted, a device that never opened, an
+    /// application that was routed to a track and never started. The track is
+    /// still in the file — Matroska fixes its track list in the header, so it
+    /// could not have been left out once the recording began — and it is empty.
+    ///
+    /// Worth a number rather than a log line alone because the session that owns
+    /// the recording is the layer that can tell the user, and "your microphone
+    /// track is empty" is only sayable by something that knows
+    /// (AGENTS.md section 45).
+    pub audio_tracks_without_packets: usize,
 }
 
 impl RecordingSummary {
@@ -147,7 +165,18 @@ impl fmt::Display for RecordingSummary {
             self.packets,
             self.duration.as_secs_f64(),
             self.timestamps_corrected()
-        )
+        )?;
+        // Only when there are any: a line that ends "0 empty audio tracks" on
+        // every healthy recording is a line nobody reads on the one where it
+        // matters.
+        if self.audio_tracks_without_packets > 0 {
+            write!(
+                formatter,
+                ", {} audio tracks with no audio in them",
+                self.audio_tracks_without_packets
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -333,6 +362,7 @@ impl MkvWriter {
                     id,
                     stream_index,
                     timeline: TrackTimeline::new(time_base),
+                    packets: 0,
                 })
             })
             .collect::<Result<Vec<_>, MuxError>>()?;
@@ -374,7 +404,30 @@ impl MkvWriter {
     pub fn summary(&self) -> RecordingSummary {
         let mut summary = self.summary;
         summary.duration = self.duration();
+        summary.audio_tracks_without_packets = self.silent_audio_tracks().count();
         summary
+    }
+
+    /// How many packets one track has taken, or [`None`] for a track this
+    /// recording does not have.
+    ///
+    /// Per track rather than only in total, because the failure multi-track
+    /// audio has to be able to report is one source among several producing
+    /// nothing while the recording otherwise looks healthy.
+    #[must_use]
+    pub fn packets_written(&self, track: TrackId) -> Option<u64> {
+        self.tracks
+            .iter()
+            .find(|declared| declared.id == track)
+            .map(|declared| declared.packets)
+    }
+
+    /// The audio tracks that have taken no packets at all.
+    fn silent_audio_tracks(&self) -> impl Iterator<Item = TrackId> + '_ {
+        self.tracks
+            .iter()
+            .filter(|track| track.packets == 0 && track.id != TrackId::Video)
+            .map(|track| track.id)
     }
 
     /// Writes one encoded packet.
@@ -414,7 +467,8 @@ impl MkvWriter {
             .origin_nanos
             .get_or_insert(presentation_nanos.min(decode_nanos));
 
-        let track = self.track_mut(packet.track())?;
+        let position = self.track_position(packet.track())?;
+        let track = &mut self.tracks[position];
         let stamps = track.timeline.stamp(
             presentation_nanos.saturating_sub(origin),
             decode_nanos.saturating_sub(origin),
@@ -467,6 +521,10 @@ impl MkvWriter {
         }
 
         self.summary.packets += 1;
+        // Counted after the write rather than before it, so that a track's
+        // count is packets the container took rather than packets somebody
+        // tried to write.
+        self.tracks[position].packets += 1;
         self.last_presentation_nanos = self
             .last_presentation_nanos
             .max(presentation_nanos.saturating_sub(origin));
@@ -490,6 +548,7 @@ impl MkvWriter {
     /// either way, and what was written before the failure remains.
     pub fn finish(mut self) -> Result<RecordingSummary, MuxError> {
         let summary = self.summary();
+        self.warn_about_silent_tracks();
 
         // SAFETY: the context is live, the header was written when this value
         // was created, and this runs at most once — `finished` stops `Drop`
@@ -515,20 +574,45 @@ impl MkvWriter {
         Ok(summary)
     }
 
+    /// Says so when a declared audio track took nothing at all.
+    ///
+    /// Once, as the file is finished, rather than while it is being written: a
+    /// track that has no packets yet is the ordinary state of every track for
+    /// the first few milliseconds of a recording, and only the end of the
+    /// session makes it a fact. The message names the tracks rather than
+    /// counting them, because "audio track 2" is what the person reading the log
+    /// has to match against the routing they configured.
+    fn warn_about_silent_tracks(&self) {
+        let silent: Vec<String> = self
+            .silent_audio_tracks()
+            .map(|track| track.to_string())
+            .collect();
+        if silent.is_empty() {
+            return;
+        }
+
+        warn!(
+            path = %RedactedPath::new(&self.path),
+            tracks = %silent.join(", "),
+            "the recording has audio tracks that were declared and never written to; the \
+             sources routed to them produced nothing for the whole recording"
+        );
+    }
+
     /// The span between the first and the last timestamp written.
     fn duration(&self) -> Duration {
         Duration::from_nanos(self.last_presentation_nanos.max(0).unsigned_abs())
     }
 
-    /// The track a packet named, or an error naming what the file does have.
-    fn track_mut(&mut self, id: TrackId) -> Result<&mut TrackState, MuxError> {
-        let audio_tracks = self.audio_tracks;
+    /// Where the track a packet named is, or an error naming what the file does
+    /// have.
+    fn track_position(&self, id: TrackId) -> Result<usize, MuxError> {
         self.tracks
-            .iter_mut()
-            .find(|track| track.id == id)
+            .iter()
+            .position(|track| track.id == id)
             .ok_or(MuxError::UnknownTrack {
                 track: id,
-                audio_tracks,
+                audio_tracks: self.audio_tracks,
             })
     }
 
@@ -761,6 +845,19 @@ fn add_audio_stream(
         return Err(MuxError::InvalidTrack {
             track: id,
             reason: audio_header_missing(track.codec()),
+        });
+    }
+    if track.name().is_some_and(|name| name.trim().is_empty()) {
+        // A blank name is worse than none: Matroska writes the element, an
+        // editor shows an unnamed row where it would otherwise show `Audio 2`,
+        // and the recording is the one thing that cannot be corrected
+        // afterwards. Reachable through an application track configured with an
+        // empty name (`AudioSource::application`), so it is refused where the
+        // caller can still fix it.
+        return Err(MuxError::InvalidTrack {
+            track: id,
+            reason: "an audio track's name is what an editor shows in place of `Audio 2`, and \
+                     this one is blank",
         });
     }
     let sample_rate = c_int::try_from(track.sample_rate()).map_err(|_| MuxError::InvalidTrack {

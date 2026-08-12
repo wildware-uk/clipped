@@ -1,14 +1,16 @@
 # Highlights and virtual clips
 
-**Status: the virtual clip model exists and is tested; nothing creates, stores
-or lists one yet.** `crates/library/src/virtual_clip.rs` defines what a clip
-*is* before anything has been exported. The rules that decide which moments
-deserve one are [issue #75], generating them from a session's events is [#76],
-the two capture modes built on them are [#77] and [#78], and creating one by
-hand from the timeline is [#91]. This document is the specification all of them
-are held to.
+**Status: the virtual clip model and the highlight rules exist and are tested;
+nothing creates, stores or lists a clip yet.**
+`crates/library/src/virtual_clip.rs` defines what a clip *is* before anything
+has been exported, and `crates/session/src/highlights/` decides which moments
+deserve one ([#75]). Generating them from a session's events is [#76], the two
+capture modes built on them are [#77] and [#78], and creating one by hand from
+the timeline is [#91]. This document is the specification all of them are held
+to.
 
-[issue #75]: https://github.com/wildware-uk/clipped/issues/75
+[#75]: https://github.com/wildware-uk/clipped/issues/75
+[#290]: https://github.com/wildware-uk/clipped/issues/290
 [#76]: https://github.com/wildware-uk/clipped/issues/76
 [#77]: https://github.com/wildware-uk/clipped/issues/77
 [#78]: https://github.com/wildware-uk/clipped/issues/78
@@ -120,6 +122,119 @@ was reported. `clipped_events::EventTiming` keeps those apart precisely because
 a plugin observes a game telling it something rather than the thing itself, and
 a clip built around the arrival time is a clip built around the wrong second.
 
+## Which moments are worth a clip
+
+The rules live in `crates/session/src/highlights/`, which is where the layer
+table in [architecture.md](architecture.md) puts the highlight engine's policy
+half: `clipped-events` is the vocabulary, `clipped-session` is what decides
+anything about it. They take a list of `GameEvent`s and produce the ranges that
+would be worth keeping. They create nothing — no clip, no file, no row, no
+title — which is why the whole of this behaviour is tested against constructed
+event streams with no game, no GPU and no recording.
+
+A rule set answers three questions per event kind, and two about the set:
+
+| Setting | Per | What it means |
+| --- | --- | --- |
+| `enabled` | kind | Whether events of this kind are worth a clip at all |
+| `lead_seconds` | kind | How much of the recording before the event to keep |
+| `trail_seconds` | kind | How much after it |
+| `minimum_confidence` | kind | How sure the source has to be that it happened |
+| `merge_gap_seconds` | set | How close two windows have to be to become one |
+| `maximum_length_seconds` | set | How long merging across a gap may make a clip |
+
+### What Clipped ships
+
+Fifteen seconds before a kill and ten after (SPEC.md section 7); ten and five
+for a death, because the interesting part of dying is what led to it. On by
+default: kill, death, assist, score, goal, achievement and a win — the things
+the player did that they would watch again. Off: everything that is a boundary
+rather than a moment — a game, match or round starting or ending — and a loss,
+because a lost match is a scoreboard. Each of them still carries a real window,
+so switching one on is one change rather than four.
+
+**A plugin's own invention is off by default**, and that is the more important
+half of the table. `EventKind::Custom` is how a plugin says something the
+vocabulary does not cover ([plugin-api.md](plugin-api.md)), and a plugin that
+could put clips in a user's library by inventing a name would be deciding what
+that library contains.
+
+An event kind this build has never heard of is off for the same reason — but a
+*rule* for one still works. A newer Clipped's `objective_taken` rule reads back
+as `EventKind::Unrecognised("objective_taken")` and applies to events carrying
+that tag, because both are keyed by the string that arrived. Nothing about that
+needed code; it is what the open vocabulary in `clipped-events` is for.
+
+### Merging is the substance
+
+A kill streak is one moment that produced five events. Five clips of the same
+twenty seconds is not a feature — it is the library becoming useless silently,
+with nothing to fail and nothing to report. So the guarantee is stated as an
+invariant and asserted over every scenario the tests construct: **no two
+highlights overlap**.
+
+Two rules produce it, and where they disagree the answer is written down rather
+than left to the order of the `if`s:
+
+- **Windows that touch always join**, whatever the maximum length says. Two
+  clips of the same footage is the failure being prevented, and a user who set a
+  short maximum asked for shorter clips, not for duplicates of the same seconds.
+- **A gap is bridged only while the result stays inside the maximum.** This is
+  where the ceiling bites: a burst that keeps going after a lull gets a second
+  clip rather than one that swallows the round.
+
+Nothing is truncated and nothing is dropped. A rule whose own window is longer
+than the maximum produces that window and merges nothing into it; truncating it
+would be the recorder deciding that the user's fifteen seconds of lead were
+really nine (AGENTS.md section 27). Every selected event is a cause of exactly
+one highlight, and the causes of each are in the order things happened, which is
+not the order their windows opened.
+
+Events the rules do not select take no part: a round ending in the middle of a
+firefight neither extends that firefight's clip nor splits it, because a rule
+that is off is off.
+
+### Certainty and precision are different questions
+
+`clipped_events::Confidence` is how sure a source is *that* an event happened;
+`EventTiming::precision` is how well it knows *when*. They come apart in both
+directions — Game State Integration is certain and imprecise, a detector
+watching a kill feed is precise and unsure — so **a rule filters on the first
+and pads its window with the second**. A source polled every two seconds knows
+the moment to within a second and says so; a window built from the nominal time
+alone would cut a second before the kill it is a clip of.
+
+A confidence read back from storage may be outside 0 to 1, because
+`clipped-events` keeps what is already in a user's library verbatim rather than
+destroying the event over it. There is no honest comparison to make against such
+a value, so the event is skipped and the reason says so, rather than a number
+being invented for it.
+
+### Per-game rules, and where they are not yet
+
+Resolution is `crate::config`'s three-layer fold, used rather than reimplemented
+(AGENTS.md sections 30 and 55): the shipped defaults, then the global rules,
+then one game's, each layer overriding only what it mentions. Inheritance is per
+*field* and not per rule, so a game that wants five more seconds after a kill
+says only that and keeps following the global lead. Every answer carries which
+layer supplied it, which is what a settings screen's Reset control needs.
+
+**What does not exist yet is the section in the file.** `HighlightRules::read`
+and `HighlightRules::write` are the format — `merge_gap_seconds`,
+`maximum_length_seconds` and an `events` object keyed by event kind — and
+`config::Configuration` does not hold it, so today every caller resolves the
+shipped defaults and a user cannot change a rule by editing `settings.json`.
+That wiring is [#290], and it was kept out of this change because it is entirely
+inside the configuration module and is a change to the settings file format.
+Until it lands, a build with the rules and a build without can still exchange a
+settings file: the older one keeps the whole `highlights` section among the
+top-level keys it does not recognise and writes it back.
+
+The migration path for the section itself is that there is nothing to migrate
+from. No build has written it, so the only older shape is its absence, and
+absence means every rule is inherited — which is exactly what an unconfigured
+user gets. It carries no version of its own, because the settings file has one.
+
 ## What #76 will produce
 
 For each event the rules select, generation produces exactly this and writes
@@ -153,8 +268,12 @@ Two things it does that a subtraction at the call site gets wrong:
   would be a marker the user cannot check (AGENTS.md section 27).
 
 It is arithmetic, not policy. Which events are worth a clip, how much lead and
-trail each kind gets, and how a burst of them is merged into one clip are [#75]'s
-rules, which produce the `lead` and `trail` passed in.
+trail each kind gets, and how a burst of them is merged into one clip are the
+rules above, which produce the `lead` and `trail` passed in — as
+`ResolvedHighlightRules::highlights`, whose `Highlight` carries the merged range
+and the events that caused it. #76's loop is therefore over highlights rather
+than over events, and its `cause` comes from `HighlightCause::of(highlight
+.primary())`.
 
 ## What it costs
 

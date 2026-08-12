@@ -29,6 +29,15 @@ clipped-replay.workspace = true
 # layer table gives — game detection is layer 1, this crate is layer 3 — and
 # `tests/integration/tests/workspace_layering.rs` asserts it.
 clipped-game-detection.workspace = true
+# What happened in a game, and when it happened on the recording's timeline.
+# `src/highlights` is the policy over that vocabulary — which events are worth a
+# clip and how much of the recording each keeps (#75, docs/highlights.md) — and
+# it lives here for the reason README.md's layer table gives: `clipped-events`
+# is a layer 0 vocabulary that names no game and holds no rule, and the crate
+# that decides what to do about an event is this one. The dependency is on the
+# types only; producing events is `clipped-plugins`' and persisting them is
+# `clipped-storage`'s.
+clipped-events.workspace = true
 # What a hotkey binding is. `src/config` holds the hotkey layer of the
 # configuration, because a binding is a setting like any other and the ticket
 # that defines the configuration API (#108) names them; the dependency points

@@ -20,13 +20,23 @@ authors.workspace = true
 # - Win32_Graphics_Gdi           monitors: EnumDisplayMonitors, GetMonitorInfoW
 # - Win32_Graphics_Dwm           DWMWA_CLOAKED, which is how a window can be
 #                                "visible" and yet show nothing
-# - Win32_System_Threading       OpenProcess and the executable name behind a PID
+# - Win32_System_Threading       OpenProcess, and what a process handle answers:
+#                                the executable behind a PID, when the process
+#                                started, and whether it is still running
+# - Win32_System_Diagnostics_ToolHelp
+#                                the process table in one call, which is how a
+#                                process tree finds children it has not met
+# - Win32_System_SystemInformation
+#                                the current file time, which is the moment a
+#                                process table snapshot is judged against
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 
