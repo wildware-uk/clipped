@@ -1,0 +1,44 @@
+{
+  "activePlayer": {
+    "currentGold": 980.0,
+    "level": 9,
+    "riotId": "Rosalind#EU1",
+    "riotIdGameName": "Rosalind",
+    "riotIdTagLine": "EU1",
+    "summonerName": "",
+    "teamRelativeColors": true,
+    "somethingAddedLater": { "nested": [1, 2, 3] }
+  },
+  "allPlayers": [],
+  "aWholeNewSection": { "introduced": "by a patch this build has never seen" },
+  "events": {
+    "Events": [
+      { "EventID": 0, "EventName": "GameStart", "EventTime": 0.03 },
+      {
+        "EventID": 1,
+        "EventName": "VoidGrubKill",
+        "EventTime": 361.0,
+        "KillerName": "Rosalind#EU1",
+        "GrubCount": 3
+      },
+      {
+        "EventID": 2,
+        "EventName": "ChampionKill",
+        "EventTime": 402.5,
+        "KillerName": "Rosalind#EU1",
+        "VictimName": "Kestrel#EUW",
+        "Assisters": [],
+        "KillType": "SOMETHING_NEW"
+      },
+      { "EventName": "AnEntryWithNoIdentifier", "EventTime": 402.6 }
+    ]
+  },
+  "gameData": {
+    "gameMode": "CLASSIC",
+    "gameTime": 410.9,
+    "mapName": "Map11",
+    "mapNumber": 11,
+    "mapTerrain": "Default",
+    "aFieldAddedLater": 7
+  }
+}

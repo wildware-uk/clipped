@@ -1,0 +1,48 @@
+{
+  "activePlayer": {
+    "currentGold": 640.0,
+    "level": 7,
+    "summonerName": "Rosalind",
+    "teamRelativeColors": true
+  },
+  "allPlayers": [
+    {
+      "championName": "Ahri",
+      "isBot": false,
+      "isDead": false,
+      "level": 7,
+      "position": "MIDDLE",
+      "scores": { "assists": 0, "creepScore": 61, "deaths": 1, "kills": 1, "wardScore": 4.0 },
+      "summonerName": "Rosalind",
+      "team": "ORDER"
+    }
+  ],
+  "events": {
+    "Events": [
+      { "EventID": 0, "EventName": "GameStart", "EventTime": 0.03 },
+      {
+        "EventID": 1,
+        "EventName": "ChampionKill",
+        "EventTime": 305.7,
+        "KillerName": "Rosalind",
+        "VictimName": "Kestrel",
+        "Assisters": []
+      },
+      {
+        "EventID": 2,
+        "EventName": "ChampionKill",
+        "EventTime": 388.2,
+        "KillerName": "Marlowe#EUW",
+        "VictimName": "Rosalind#EU1",
+        "Assisters": ["Kestrel#EUW"]
+      }
+    ]
+  },
+  "gameData": {
+    "gameMode": "CLASSIC",
+    "gameTime": 401.0,
+    "mapName": "Map11",
+    "mapNumber": 11,
+    "mapTerrain": "Default"
+  }
+}

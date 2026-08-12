@@ -297,6 +297,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-league-plugin"
+version = "0.1.0"
+dependencies = [
+ "clipped-events",
+ "clipped-plugins",
+ "serde",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
 name = "clipped-library"
 version = "0.1.0"
 dependencies = [

@@ -1,19 +1,27 @@
 # Plugin API
 
-**Status: written, and nothing uses it yet.** Both halves exist. The *event
-model* — what a plugin reports, how it is timed, and how it stays readable for
-years — is `crates/events`
+**Status: there is one plugin, and nothing starts it yet.** Both halves of the
+contract exist. The *event model* — what a plugin reports, how it is timed, and
+how it stays readable for years — is `crates/events`
 ([issue #68](https://github.com/wildware-uk/clipped/issues/68)). The *plugin
 contract* — what a plugin is, how one is found, started, supervised and kept
 away from a recording — is `crates/plugins`
-([issue #69](https://github.com/wildware-uk/clipped/issues/69)). What does not
-exist is a plugin: the three game integrations
-([#70](https://github.com/wildware-uk/clipped/issues/70),
-[#72](https://github.com/wildware-uk/clipped/issues/72),
-[#73](https://github.com/wildware-uk/clipped/issues/73)) are written against
-this, and nothing in the recorder attaches a supervisor to a session yet. The
-worked example in this document is `crates/plugins/examples/example_plugin.rs`,
-which is a real plugin that a real supervisor runs in the crate's tests.
+([issue #69](https://github.com/wildware-uk/clipped/issues/69)). The first
+integration written against it is `plugins/league`
+([issue #72](https://github.com/wildware-uk/clipped/issues/72)), described in
+[The League of Legends plugin](#the-league-of-legends-plugin); Counter-Strike 2
+([#70](https://github.com/wildware-uk/clipped/issues/70)) and Dota 2
+([#73](https://github.com/wildware-uk/clipped/issues/73)) do not exist yet.
+
+What is still missing is the wiring: **nothing in the recorder attaches a
+supervisor to a session**, so no plugin runs during a real recording, and the
+League plugin is a program that has to be started by hand to see it work. That
+is [What is not built](#what-is-not-built), and it is stated here as well
+because it is the thing most likely to be misread (AGENTS.md section 7).
+
+The worked example in this document is
+`crates/plugins/examples/example_plugin.rs`, which is a real plugin that a real
+supervisor runs in the crate's tests.
 
 The order was deliberate rather than an accident of scheduling. A plugin API is
 a compatibility surface: once it is published, third-party plugins depend on it
@@ -49,6 +57,10 @@ The contract:
 - [What a plugin may not do](#what-a-plugin-may-not-do)
 - [Versioning the contract](#versioning-the-contract)
 - [What is not built](#what-is-not-built)
+
+The plugins:
+
+- [The League of Legends plugin](#the-league-of-legends-plugin)
 
 ## What the model is for
 
@@ -386,18 +398,21 @@ made without a version-1 document being read by the version-2 build.
 
 ## How the three planned integrations map
 
-**None of these exist.** They are the three shapes the model was designed
-against, and they are recorded here because the design's only real test is
-whether it absorbs their differences without any of them reaching the core.
+**One of these exists** — League of Legends, below — and the other two do not.
+They are the three shapes the model was designed against, and they are recorded
+here because the design's only real test is whether it absorbs their differences
+without any of them reaching the core. The League column is now what the code
+does rather than what was expected of it, and it turned out to be what this
+table said, which is the most that can be claimed for a prediction.
 
 | | Counter-Strike 2 ([#70](https://github.com/wildware-uk/clipped/issues/70)) | League of Legends ([#72](https://github.com/wildware-uk/clipped/issues/72)) | Dota 2 ([#73](https://github.com/wildware-uk/clipped/issues/73)) |
 | --- | --- | --- | --- |
 | Native shape | Game State Integration: a JSON state blob posted to a local endpoint on change | Live Client Data: a polled local HTTPS API returning a list of events with a match-relative time | Game State Integration: a different JSON state blob, posted the same way |
 | What an event is natively | A *difference* between two state blobs — the previous round score and this one | An entry in an array, with `EventID` and `EventTime` in seconds since the match began | A difference between two state blobs, with a different shape again |
 | Becomes | `kill`, `death`, `assist`, `round_started`, `round_ended`, `match_started`, `match_ended`, `win` | the same set, from a different derivation | the same set again |
-| `at` | when the state changed, which is bounded by how often the game posts | the match-relative time, anchored to the media time of `match_started` | as CS2 |
-| `precision` | the posting interval the plugin configured | whatever the match-relative clock's resolution is, plus the error in the anchor | as CS2 |
-| `latency` | transport and parse | the poll interval, worst case | transport and parse |
+| `at` | when the state changed, which is bounded by how often the game posts | the match clock in the same payload, minus the event's match-relative time: how long ago it happened, which is what the wire carries | as CS2 |
+| `precision` | the posting interval the plugin configured | the request's measured round trip, plus an assumed bound on how precisely the two times are reported | as CS2 |
+| `latency` | transport and parse | how long ago it happened, which for an event from an earlier poll is longer than the poll interval | transport and parse |
 | `data` | `weapon`, `headshot`, and the rest of the game's own words | `KillerName`, `VictimName`, … | Dota's own words |
 
 The third row is the point: three unrelated derivations produce the same seven
@@ -825,15 +840,215 @@ Today there is one contract version. Within a version:
 A plugin declaring a contract this build does not speak is not started, and the
 message says which is behind.
 
+## The League of Legends plugin
+
+`plugins/league`, [issue #72](https://github.com/wildware-uk/clipped/issues/72).
+The first integration written against the contract above, and the answer to
+what a plugin actually looks like once the contract stops being theoretical.
+
+**The interface is Riot's own.** League serves a **Live Client Data API** over
+HTTPS on `127.0.0.1:2999` while a match is running: a documented, supported,
+read-only local endpoint. Nothing else is touched. AGENTS.md section 34 is
+absolute about that, and it is a rule about a user's account rather than about
+code quality — a plugin that read the game's memory to find a better kill feed
+would be trading somebody's ranked account for a highlight.
+
+**What it reports:**
+
+| League says | The recording gets |
+| --- | --- |
+| `GameStart` | `match_started` |
+| `GameEnd` | `match_ended`, and `win` or `loss` from its `Result` |
+| `ChampionKill` | `kill`, `death` or `assist`, depending on which name in it is the player's |
+| `TurretKilled`, `DragonKill`, `BaronKill`, `Multikill`, `Ace`, `FirstBlood`, and the rest | nothing, deliberately — see below |
+
+Each event carries the game's own fields as its payload — `KillerName`,
+`VictimName`, `Assisters`, `EventTime` — including fields from a patch this
+build has never seen, because `data` is opaque above the plugin and filtering it
+to the fields this build happens to know would be deciding what a future build
+may read. `EventID` and `EventName` are dropped: the first is an index into a
+list that only exists inside League, and the second is what the `kind` was
+derived from, and keeping it would invite a consumer to switch on it.
+
+The objectives are left out because each is a decision about the *shared*
+vocabulary rather than a line of code. A dragon is not a `goal` in the sense
+another game's plugin would mean by it, and inventing
+`league-of-legends.dragon_killed` commits the project to a custom name before
+anybody has asked for one ([Custom events](#custom-events)). They are already
+read, indexed and timed; adding one is a match arm and a test.
+
+### What is different about a polled API
+
+Counter-Strike 2 pushes; League is asked. Three things follow, and they are the
+whole of what is interesting here.
+
+**A poll that misses a window loses nothing.** League's event list is
+*cumulative and indexed*: every poll returns the whole match, each entry with an
+`EventID` that never moves. So the state the plugin keeps is the identifier
+after the last one it reported. A poll that took ten seconds returns ten seconds
+of events, and none of them is lost. This is the property that makes polling
+acceptable at all, and `plugins/league`'s tests drive three payloads of one
+match through one watch to hold it.
+
+**The same property is a hazard for a restarted plugin.** A plugin that exited
+or went silent is restarted ([Supervision and restart](#supervision-and-restart)),
+and the replacement is a new process with a cursor at zero attached to a
+recording that already has marks on it. Its first poll carries the whole match,
+and reporting it would put a second copy of every kill, death, assist and
+`match_started` on the timeline. So the cursor is not the only thing that
+decides what is reported: an event is reported only if it happened **after the
+watch started observing**, which the match clock in the same payload answers
+without any memory of a previous process. That also stops a session which began
+recording part way through a match drawing the first ten minutes of it onto ten
+seconds of video.
+
+The cost is stated rather than implied: the events that happen during the second
+or two a restart takes are **lost**, because nothing was watching for them.
+That is the better direction to fail in — a timeline with two of every kill is
+wrong in a way nobody can repair afterwards. In the ordinary case it costs
+nothing at all, because the plugin is attached to `League of Legends.exe` and
+that process starts before the match clock does.
+
+The cursor needs one more thing beside it, and it is the part that is easy to
+get wrong: **a second match through the same attachment starts the identifiers
+again**, so the cursor has to be rewound. The list going backwards is the
+obvious signal and it is not sufficient — it only fires while the new match has
+fewer events than the old one had, and a first poll that lands a few minutes
+into the second match would see identifiers past the cursor and quietly skip
+everything below them. The match clock cannot go backwards inside a match, so a
+clock that has is a different match whatever the identifiers say. Both are
+checked, and there is a test for the case only the second one catches.
+
+**The poll interval is a cost, and it is a small one.** A second, on a machine
+that is also running League (AGENTS.md section 18). What it buys and what it
+costs are not what one might assume: the interval does **not** affect where an
+event is drawn, because an event's position comes from the match clock in the
+same payload rather than from when this process noticed. Polling twice as slowly
+does not make a mark twice as wrong. What it affects is how quickly anything
+could react, and it bounds `latency` — and for a replay buffer measured in
+minutes that is nowhere near mattering. The interval is set for the reporting to
+feel prompt, and could be several times longer without losing an event.
+
+**The two times come from one request.** `/liveclientdata/eventdata` would be
+the smaller request, but an event's time is match-relative and the recording's
+timeline is not, so turning one into the other needs the match clock *as it was
+when that list was produced*. Two requests would give a list from one instant
+and a clock from another, and the gap would be an error in every event's
+position that nothing downstream could see. `allgamedata` gives both from the
+same instant, for a few tens of kilobytes of JSON a second.
+
+### The certificate, and what "for that endpoint only" means
+
+League's certificate is signed by Riot's own authority, which is not in Windows'
+trust store, and is not issued to `127.0.0.1`. A client that validated it in the
+usual way would fail every request, so the certificate errors are ignored —
+**on the request handle, for that request, and nowhere else**. It is not a
+change to any trust store, it is not set on the session, and it cannot affect
+another request in this process, let alone another process.
+
+The plugin uses **WinHTTP**, the operating system's own HTTP stack, which is
+what makes that scoping possible without a TLS crate and its dependency graph
+for one loopback request a second. It also opens the session with
+`WINHTTP_ACCESS_TYPE_NO_PROXY`, which is what makes the manifest's `loopback`
+declaration true rather than nearly true: a machine with a system proxy
+configured must not be able to send this request off the machine
+([privacy.md](privacy.md)).
+
+**The request also refuses to be redirected**, and that is not a detail beside
+the certificate exception — it is what keeps the exception meaningful. WinHTTP
+follows redirects by default, and its default policy permits `https` to `https`,
+so a listener on port 2999 answering `302 Location: https://somewhere.else`
+would take this request off the machine *with certificate validation disabled*,
+under a manifest that declares loopback and nothing else. Every request
+therefore sets `WINHTTP_OPTION_REDIRECT_POLICY` to
+`WINHTTP_OPTION_REDIRECT_POLICY_NEVER` on the same handle, which makes a `3xx` a
+status code the plugin reads rather than an address it goes to. A test stands
+two loopback listeners up, has the first answer with a redirect to the second,
+and asserts the second is never connected to.
+
+What is left over is worth saying rather than glossing: because the certificate
+is not checked, the plugin cannot prove that the thing answering on port 2999 is
+League. So the body is treated as hostile input — bounded in size, bounded in
+how long it may take to arrive, parsed leniently, and never used for anything
+but producing marks on a timeline. The request carries no body, no cookie and no
+authorisation header, so there is nothing there to give away.
+
+### Which name in an event is the player
+
+League has spent years moving from summoner names to Riot IDs, and which of them
+the event list uses has changed with it. The plugin holds every name the payload
+offered for the active player — `riotId`, `riotIdGameName`, `summonerName` — and
+matches an event's name against all of them. The one piece of leniency is for a
+client that reports the player as `Rosalind` while its events say
+`Rosalind#EU1`: when no alias carries a tag, a tagged name is compared without
+one.
+
+It is deliberately not the other way round. Two players in one match can share a
+game name and differ only by tag, so stripping the tag off an event's name when
+the full Riot ID is known would trade a certain answer for an ambiguous one —
+and the event it got wrong would be a kill attributed to the person who died.
+
+When the payload names nobody at all — spectating, or a client that stopped
+reporting those fields — kills cannot be told from deaths, and the plugin
+**says so once** and keeps reporting the match events that do not need a name.
+An integration that silently reported nothing would look exactly like one that
+was working (AGENTS.md section 45).
+
+### When it goes wrong
+
+| What happens | What the plugin does |
+| --- | --- |
+| Nothing is listening on 2999 | Nothing. This is what a loading screen looks like, and what every machine that is not in a match looks like. After a minute of it, one line saying so |
+| The endpoint answers "no game" | Nothing at all — the API is there, the match is not |
+| The answer is not a payload this build can read | Counts it. After five in a row, one line saying a League patch may have changed it |
+| One entry in the event list cannot be read | Skips that entry, counts it, and reports the ones either side |
+| An event name this build has never seen | Ignored. The rule is a match arm, not a table of known names |
+| A `Result` that is neither `Win` nor `Lose` | The match ends without a verdict. Guessing between the two from a word nobody has seen would be inventing the outcome of somebody's match |
+
+### What has not been verified
+
+Stated plainly, because this is the gap between the tests and the claim:
+
+- **No match has been recorded through it.** League is not installed on the
+  machine it was written on, so the payloads in `plugins/league/tests/fixtures`
+  were constructed from the published shape of the API rather than captured —
+  which `plugins/league/tests/fixtures/README.md` says in as many words. They
+  prove the derivation; they cannot prove the shape matches the client on any
+  particular patch.
+- **The successful request has never run.** `tests/plugin_contract.rs` starts
+  the real executable and holds it to the contract — it says `hello`, keeps its
+  heartbeat while the API is unreachable, and leaves when its standard input
+  closes — and on a machine with no match in progress that exercises WinHTTP up
+  to `ERROR_WINHTTP_CANNOT_CONNECT` and no further. A local HTTPS server with a
+  self-signed certificate is not something to spin up in a unit test on a
+  machine that is also running a game.
+
+Whoever has League installed can close both gaps in a few minutes:
+
+```text
+cargo run -p clipped-league-plugin
+{"command":"attach","contract":1,"session":{"session":"by-hand","process":{"executable":"League of Legends.exe","process_id":1}}}
+```
+
+Start a match — a practice tool game is enough — and the events appear on
+standard output as they happen. Saving the body of one
+`GET https://127.0.0.1:2999/liveclientdata/allgamedata`, with the other nine
+players' Riot IDs replaced ([privacy.md](privacy.md)), and pointing a test at it
+is what turns the first gap into a fixture.
+
 ## What is not built
 
 Stated plainly, because the gap between this document and the running
 application is the thing most likely to be misread (AGENTS.md section 7):
 
 - **Nothing attaches a supervisor to a recording session.** `clipped-session`
-  does not yet create one, so no plugin runs during a real recording. That is
-  wiring, and it belongs with the first integration
-  ([#70](https://github.com/wildware-uk/clipped/issues/70)).
+  does not yet create one, so no plugin runs during a real recording — including
+  the League plugin, which exists and is started by hand or not at all. That is
+  wiring, and it belongs with
+  [#70](https://github.com/wildware-uk/clipped/issues/70).
+- **Nothing installs a plugin.** `plugins/league` builds an executable and has a
+  `plugin.json` beside it; putting the two in a directory under the plugins
+  folder is a manual step, and there is no packaging step that does it.
 - **Nothing stores which plugins are enabled**, or the consent each was enabled
   with ([issue #282](https://github.com/wildware-uk/clipped/issues/282)). That
   lives in the configuration API, not here: a plugin crate with its own settings

@@ -1,0 +1,26 @@
+{
+  "activePlayer": {
+    "currentGold": 120.0,
+    "level": 14,
+    "riotId": "Rosalind#EU1",
+    "riotIdGameName": "Rosalind",
+    "riotIdTagLine": "EU1",
+    "summonerName": "",
+    "teamRelativeColors": true
+  },
+  "allPlayers": [],
+  "events": {
+    "Events": [
+      { "EventID": 0, "EventName": "GameStart", "EventTime": 0.03 },
+      { "EventID": 1, "EventName": "MinionsSpawning", "EventTime": 65.0 },
+      { "EventID": 2, "EventName": "GameEnd", "EventTime": 1204.6, "Result": "Lose" }
+    ]
+  },
+  "gameData": {
+    "gameMode": "ARAM",
+    "gameTime": 1205.9,
+    "mapName": "Map12",
+    "mapNumber": 12,
+    "mapTerrain": "Default"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "errorCode": "RESOURCE_NOT_FOUND",
+  "httpStatus": 404,
+  "message": "No active game"
+}

@@ -84,7 +84,17 @@ const LAYERS: &[&[&str]] = &[
         "clipped-waveform",
     ],
     // Consumers of encoded output. `clipped-muxer` writes it to a container.
-    &["clipped-muxer"],
+    //
+    // `clipped-league-plugin` is a game integration from `plugins/`
+    // (docs/plugin-api.md), and layering is not what governs it: a plugin is a
+    // separate process the recorder starts rather than a crate anything links,
+    // so both directions are asserted directly by `PLUGINS` below — nothing may
+    // depend on it, and it may name only the plugin contract and the event
+    // vocabulary. It is placed here rather than up with the executables because
+    // the layer table has to cover every member, and because the two rules that
+    // do govern it are stricter than any layer, so the choice of layer decides
+    // nothing.
+    &["clipped-muxer", "clipped-league-plugin"],
     // `clipped-replay` holds a rolling window of encoded packets in memory so
     // that a hotkey pressed after something interesting can still save it, and
     // then writes that clip out (docs/replay-buffer.md).
@@ -309,6 +319,91 @@ fn test_only_packages_are_never_linked_into_the_product() {
         "these packages exist only to test other packages and must appear under \
          [dev-dependencies] so that nothing links them into a shipping binary \
          (README.md, docs/testing.md): {violations:#?}"
+    );
+}
+
+/// The game integrations under `plugins/`.
+///
+/// A plugin is not a library and not a layer. It is an executable a user
+/// installs beside a `plugin.json`, which the recorder starts as a separate
+/// process and talks to over its standard input and output
+/// (docs/plugin-api.md) — so the two rules that matter about it are not
+/// "which layer", and the two tests below assert them instead of trusting a
+/// comment. Adding a plugin to the workspace means adding it here.
+const PLUGINS: &[&str] = &["clipped-league-plugin"];
+
+/// The only crates of this workspace a plugin may name.
+///
+/// `clipped-plugins` is the contract — the wire, the manifest and the report
+/// types — and `clipped-events` is the vocabulary a plugin exists to translate
+/// its game into. Anything else is a game integration reaching into the
+/// recorder: a plugin that named `clipped-session` would be running a game's
+/// protocol inside the recording engine, which is the arrangement the process
+/// boundary exists to prevent (AGENTS.md sections 5 and 33), and one that named
+/// `clipped-capture` or `clipped-encoder` would be worse.
+///
+/// Deliberately not "anything at a lower layer". Layering would let a plugin
+/// name any of the crates below it, which is most of the workspace.
+const PLUGINS_MAY_NAME: &[&str] = &["clipped-plugins", "clipped-events"];
+
+#[test]
+fn nothing_in_the_workspace_depends_on_a_plugin() {
+    // Layering cannot say this: a plugin has to sit at *some* layer, and every
+    // crate above whichever one it is would be free to name it. The rule is not
+    // about direction at all — it is that a plugin is reached by starting a
+    // process, never by linking a crate, so that a game integration cannot end
+    // up inside the recorder even by accident.
+    let mut violations: Vec<String> = workspace_dependencies()
+        .into_iter()
+        .flat_map(|(crate_name, dependencies)| {
+            dependencies
+                .into_iter()
+                .filter(|dependency| PLUGINS.contains(&dependency.name.as_str()))
+                .map(move |dependency| {
+                    format!(
+                        "{crate_name} names {} as a {} dependency",
+                        dependency.name,
+                        dependency.kind.as_deref().unwrap_or("normal")
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    violations.sort();
+
+    assert!(
+        violations.is_empty(),
+        "a plugin is a separate process the recorder starts, not a crate anything links \
+         (docs/plugin-api.md): {violations:#?}"
+    );
+}
+
+#[test]
+fn a_plugin_names_only_the_plugin_contract_and_the_event_vocabulary() {
+    let dependencies = workspace_dependencies();
+    let mut violations = Vec::new();
+
+    for plugin in PLUGINS {
+        let named = dependencies
+            .get(*plugin)
+            .unwrap_or_else(|| panic!("{plugin} is a member of this workspace"));
+        for dependency in named {
+            if !PLUGINS_MAY_NAME.contains(&dependency.name.as_str()) {
+                violations.push(format!(
+                    "{plugin} names {} as a {} dependency",
+                    dependency.name,
+                    dependency.kind.as_deref().unwrap_or("normal")
+                ));
+            }
+        }
+    }
+    violations.sort();
+
+    assert!(
+        violations.is_empty(),
+        "a plugin translates one game into the shared vocabulary and may name nothing else \
+         this workspace builds; only {PLUGINS_MAY_NAME:?} are permitted \
+         (AGENTS.md section 33, docs/plugin-api.md): {violations:#?}"
     );
 }
 
