@@ -62,17 +62,14 @@ The contract:
 - [What a plugin may not do](#what-a-plugin-may-not-do)
 - [Versioning the contract](#versioning-the-contract)
 
-The plugin:
-
-- [The reference plugin](#the-reference-plugin)
-- [Writing into somebody else's game](#writing-into-somebody-elses-game)
-- [Deriving events from state](#deriving-events-from-state)
-- [What is not built](#what-is-not-built)
-
-The plugins:
+The plugins written against it, in the order they appear below:
 
 - [The League of Legends plugin](#the-league-of-legends-plugin)
+- [The reference plugin](#the-reference-plugin) — Counter-Strike 2
+- [Writing into somebody else's game](#writing-into-somebody-elses-game)
+- [Deriving events from state](#deriving-events-from-state)
 - [The Dota 2 plugin, and what it shares with Counter-Strike 2](#the-dota-2-plugin-and-what-it-shares-with-counter-strike-2)
+- [What is not built](#what-is-not-built)
 
 ## What the model is for
 
