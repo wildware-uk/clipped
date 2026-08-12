@@ -8,5 +8,17 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The calendar a `date:` term is compared against (`src/search/date.rs`).
+# `time::Date` is exactly what this needs — a date with no time and no zone,
+# ordered chronologically, validated against the Gregorian calendar — and
+# hand-rolling a second one here would put a second leap-year rule in the
+# product (AGENTS.md section 55). It also removes an adapter from issue #56:
+# the indexer holds an `OffsetDateTime`, and `OffsetDateTime::date()` is
+# already the day a row belongs to. `std` is the only feature named; nothing
+# here formats, parses or asks the operating system the time. Taken from the
+# workspace, which says why the version is pinned there.
+time = { workspace = true, features = ["std"] }
+
 [lints]
 workspace = true

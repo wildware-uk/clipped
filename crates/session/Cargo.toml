@@ -54,8 +54,8 @@ serde_json.workspace = true
 # [second]` form `clipped-recorder record` already names its files in. Working
 # a date out of a Unix timestamp by hand is exactly the kind of thing not to
 # hand-roll, and `apps/recorder` already depends on this crate for the same
-# reason. Dual MIT/Apache-2.0.
-time = { version = "0.3", default-features = false, features = [
+# reason. Taken from the workspace, which says why the version is pinned there.
+time = { workspace = true, features = [
     "std",
     "formatting",
     "local-offset",
