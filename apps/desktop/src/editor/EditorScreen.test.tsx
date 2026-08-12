@@ -191,7 +191,13 @@ describe('the playhead', () => {
     renderWithClip();
 
     // Zoom out and Fit are both disabled at the first zoom step, so the tab
-    // order into the timeline is Zoom in and then the playhead itself.
+    // order is Export, Zoom in, and then the playhead itself. This is the same
+    // order `docs/desktop-ui.md` sets out and `EditorEvents.test.tsx` asserts
+    // whole, seen on a clip with no events: the kind filters and the marks that
+    // would sit between Zoom in and the playhead are simply absent here.
+    await user.tab();
+    expect(document.activeElement).toHaveTextContent('Export…');
+
     await user.tab();
     expect(document.activeElement).toHaveTextContent('Zoom in');
 
@@ -287,10 +293,15 @@ describe('the playhead', () => {
     const user = userEvent.setup();
     renderWithClip();
 
-    // The three zoom controls are the only controls on the screen: every other
-    // action of an editor is somebody else's ticket, and a button that could
-    // not reach it would be a button with nothing behind it.
+    // The three zoom controls and Export are the only controls on the screen.
+    // Both are things this component can actually perform: the zoom is how the
+    // timeline is drawn, and Export opens a dialog, which is this component's
+    // own state. Every other action of an editor is somebody else's ticket, and
+    // a button that could not reach it would be a button with nothing behind
+    // it — which is also why the dialog Export opens has no Export button of
+    // its own (issue #322).
     expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
+      'Export…',
       'Zoom out',
       'Zoom in',
       'Fit',

@@ -155,8 +155,11 @@ fn editing_a_recording_leaves_the_recording_byte_for_byte_identical() {
 
     // Including editing it. Trimming, splitting and deleting are what a user
     // would call "cutting the recording up", and they are the operations most
-    // likely to be assumed to touch it: cut eighteen of this clip's twenty-two
-    // seconds away, undo all of it, redo all of it, and save each result.
+    // likely to be assumed to touch it: cut fourteen of this clip's eighteen
+    // seconds away, remix what is left — which is the other thing a user might
+    // reasonably expect to be written back into the recording ([issue
+    // #85](https://github.com/wildware-uk/clipped/issues/85)) — then undo all
+    // of it, redo all of it, and save each result.
     let mut history = EditHistory::new(loaded.document);
     for operation in [
         EditOperation::Split {
@@ -174,6 +177,19 @@ fn editing_a_recording_leaves_the_recording_byte_for_byte_identical() {
         },
         EditOperation::TrimEnd {
             at: OutputTime::from_nanos(4_000_000_000),
+        },
+        EditOperation::SetTrackGain {
+            track: 0,
+            gain_db: -11.5,
+        },
+        EditOperation::SetTrackMuted {
+            track: 1,
+            muted: false,
+        },
+        EditOperation::SetTrackFades {
+            track: 1,
+            fade_in: core::time::Duration::from_secs(1),
+            fade_out: core::time::Duration::from_millis(1500),
         },
     ] {
         assert!(

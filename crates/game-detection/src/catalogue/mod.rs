@@ -34,6 +34,20 @@
 //! [`matching`] for the whole precedence order, which is the part of this
 //! module with the most tests.
 //!
+//! # Two kinds of block in the user's file
+//!
+//! Replacing an entry is the right answer when the user is describing a game
+//! themselves and the wrong one when they are correcting somebody else's
+//! description of it, so the overlay also carries `[[decision]]` blocks:
+//! *what the user decided about* an entry, applied on top of whoever wrote it
+//! ([`decision`]). A rename therefore survives an update that improves the
+//! entry underneath, and an exclusion is a decision about a game rather than
+//! the deletion of one, which is what stops an update resurrecting a game
+//! somebody excluded.
+//!
+//! [`Overlay`] is the writing side of the same file, and the API a settings
+//! screen drives ([issue #45](https://github.com/wildware-uk/clipped/issues/45)).
+//!
 //! # Nothing is skipped quietly
 //!
 //! Every failure here is loud and names the file and the entry. A catalogue
@@ -44,14 +58,16 @@
 //! # What this module is not
 //!
 //! It is not a process watcher (#41), not launcher detection (#43, #44), and
-//! not the registration UI (#45). It answers one question — "what game, if
-//! any, is this process?" — and holds the data needed to answer it.
+//! not the registration *screen* (#63, #107) — only the operations that screen
+//! performs. It answers one question — "what game, if any, is this process?" —
+//! holds the data needed to answer it, and lets the user change that data.
 //!
 //! It is also not in SQLite, deliberately. M6's #55 introduces the database;
 //! this is reference data that ships with the application and is read once at
 //! start-up, and a second persistence mechanism arrived at by accident is what
 //! AGENTS.md section 55 exists to prevent.
 
+mod decision;
 mod entry;
 mod error;
 mod matching;
@@ -60,12 +76,13 @@ mod schema;
 
 use std::path::Path;
 
+pub use decision::Decision;
 pub use entry::{
-    CaptureCompatibility, CaptureSupport, Entry, EntrySource, ExecutableRule, GameId, Launcher,
-    LauncherKind, SettingValue,
+    AppliedDecision, CaptureCompatibility, CaptureSupport, Entry, EntrySource, ExecutableRule,
+    GameId, Launcher, LauncherKind, SettingValue,
 };
-pub use error::{CatalogueError, EntryLocation, EntryProblem};
-pub use matching::{Match, MatchStrength, ProcessCandidate};
+pub use error::{CatalogueError, DecisionProblem, EntryLocation, EntryProblem};
+pub use matching::{Considered, Match, MatchReport, MatchStrength, ProcessCandidate, Verdict};
 
 /// How a path is compared, shared with the launcher providers.
 ///
@@ -75,7 +92,9 @@ pub use matching::{Match, MatchStrength, ProcessCandidate};
 /// implementations of "is this path inside that one?" that disagreed about a
 /// trailing separator would be two different answers about the same game.
 pub(crate) use matching::{normalise_path, segments as path_segments};
-pub use overlay::{default_path as overlay_path, OverlayStatus, OVERLAY_FILE_NAME};
+pub use overlay::{
+    default_path as overlay_path, Overlay, OverlayStatus, Registration, OVERLAY_FILE_NAME,
+};
 
 /// The version of the catalogue file format.
 ///
@@ -100,6 +119,7 @@ const SEED_DATA: &str = include_str!("../../data/games.toml");
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Catalogue {
     entries: Vec<Entry>,
+    pending: Vec<Decision>,
 }
 
 /// A catalogue, and what happened to the user's overlay while loading it.
@@ -179,9 +199,9 @@ impl Catalogue {
     /// As [`load`](Self::load).
     pub fn load_with_overlay_at(path: &Path) -> Result<LoadedCatalogue, CatalogueError> {
         let seed = Self::seed()?;
-        let (entries, overlay) = overlay::load(path, SCHEMA_VERSION, schema::MIGRATIONS)?;
+        let (overlaid, overlay) = overlay::load(path, SCHEMA_VERSION, schema::MIGRATIONS)?;
         Ok(LoadedCatalogue {
-            catalogue: seed.overlaid_with(Self { entries }),
+            catalogue: seed.overlaid_with(overlaid),
             overlay,
         })
     }
@@ -189,8 +209,8 @@ impl Catalogue {
     /// Reads catalogue text that came from `source`.
     ///
     /// Public because writing an entry and finding out whether it is valid is
-    /// the same operation, and the registration UI (#45) will need to do it to
-    /// a string before it writes anybody's file.
+    /// the same operation, and [`Overlay`] does exactly that to a document
+    /// before it writes anybody's file.
     ///
     /// # Errors
     ///
@@ -198,17 +218,64 @@ impl Catalogue {
     /// entry, naming that entry.
     pub fn parse(text: &str, source: EntrySource) -> Result<Self, CatalogueError> {
         let parsed = schema::parse(text, &source, SCHEMA_VERSION, schema::MIGRATIONS)?;
-        Ok(Self {
-            entries: parsed.entries,
-        })
+        Ok(Self::from_parts(parsed.entries, parsed.decisions))
     }
 
-    /// This catalogue with `overlay`'s entries applied on top.
+    /// Entries and decisions from one file, with the decisions about entries in
+    /// that same file already applied.
+    ///
+    /// Applied here rather than only when two files are put together, so that a
+    /// user who registers a game *and* renames or excludes it sees both, and so
+    /// that no route through this module can produce a catalogue whose
+    /// exclusions have not been applied yet.
+    fn from_parts(entries: Vec<Entry>, decisions: Vec<Decision>) -> Self {
+        let mut catalogue = Self {
+            entries,
+            pending: Vec::new(),
+        };
+        catalogue.pending = catalogue.apply(decisions);
+        catalogue
+    }
+
+    /// Applies what it can and hands back the decisions with nothing to apply
+    /// to.
+    fn apply(&mut self, decisions: Vec<Decision>) -> Vec<Decision> {
+        let mut pending = Vec::new();
+        for decision in decisions {
+            let target = self
+                .entries
+                .iter_mut()
+                .find(|entry| entry.game_id() == decision.game_id());
+            let Some(entry) = target else {
+                // Kept rather than dropped: a decision about a game this build
+                // does not list is exactly the decision an update would
+                // otherwise undo (see [`decision`]).
+                pending.push(decision);
+                continue;
+            };
+            let renamed_from = decision
+                .name
+                .map(|name| std::mem::replace(&mut entry.name, name));
+            entry.decision = Some(AppliedDecision {
+                path: decision.path,
+                renamed_from,
+                excluded: decision.excluded,
+            });
+        }
+        pending
+    }
+
+    /// This catalogue with `overlay`'s entries and decisions applied on top.
     ///
     /// An overlay entry replaces the entry with the same `game_id` in place,
     /// keeping the shipped entry's position; one with a new identifier is
     /// appended. Position matters only for reporting: it is what makes an
     /// ambiguous match list its candidates predictably.
+    ///
+    /// The overlay's decisions are applied after its entries, so a decision
+    /// about a game the user also described applies to their description of it.
+    /// A decision about a game neither file has is kept — see
+    /// [`Self::pending_decisions`].
     #[must_use]
     pub fn overlaid_with(mut self, overlay: Self) -> Self {
         for replacement in overlay.entries {
@@ -221,13 +288,34 @@ impl Catalogue {
                 None => self.entries.push(replacement),
             }
         }
+        let mut decisions = std::mem::take(&mut self.pending);
+        decisions.extend(overlay.pending);
+        self.pending = self.apply(decisions);
         self
     }
 
     /// Every entry, in catalogue order.
+    ///
+    /// Entries the user excluded are included: an exclusion is a decision about
+    /// a game, not the absence of one, so a screen listing games can show it as
+    /// excluded rather than as missing ([`Entry::is_excluded`]).
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Decisions naming a game no entry in this catalogue has.
+    ///
+    /// Ordinarily empty. A decision ends up here when the game it is about is
+    /// not in this build's shipped data and the user has not described it
+    /// either — a game removed from a later seed catalogue, or one added by a
+    /// newer Clipped on another machine. The decision is kept rather than
+    /// dropped, so that an update which re-adds the game does not resurrect
+    /// something the user excluded, and a settings screen can list it as a
+    /// decision waiting for its game rather than silently losing it.
+    #[must_use]
+    pub fn pending_decisions(&self) -> &[Decision] {
+        &self.pending
     }
 
     /// The entry with this identifier, if the catalogue has one.
@@ -241,10 +329,22 @@ impl Catalogue {
     /// Which game, if any, a running process is.
     ///
     /// [`matching`] documents the precedence order and what makes an answer
-    /// ambiguous.
+    /// ambiguous. A game the user excluded is never the answer.
     #[must_use]
     pub fn match_process(&self, candidate: &ProcessCandidate<'_>) -> Match<'_> {
         matching::best_match(&self.entries, candidate)
+    }
+
+    /// The same answer, with every entry that had an opinion and what it was.
+    ///
+    /// This is what makes a wrong detection diagnosable — "why did Clipped
+    /// record this as Half-Life 2?", and the harder question, "why did it not
+    /// record at all?" — and it is what a settings or diagnostics screen shows
+    /// (issue #45). [`Self::match_process`] is this with the reasons discarded,
+    /// so the two cannot disagree.
+    #[must_use]
+    pub fn explain_process(&self, candidate: &ProcessCandidate<'_>) -> MatchReport<'_> {
+        matching::explain(&self.entries, candidate)
     }
 }
 
@@ -676,6 +776,362 @@ name = "a-game.exe"
         assert!(
             !message.contains("crates/game-detection"),
             "the message should not point at the repository: {message}"
+        );
+    }
+
+    /// Parses `body` as a user's own file at a fixed path.
+    fn overlay(body: &str) -> Catalogue {
+        Catalogue::parse(
+            &file(body),
+            EntrySource::Overlay {
+                path: std::path::PathBuf::from(r"C:\Users\somebody\games.toml"),
+            },
+        )
+        .expect("the fixture is a valid overlay")
+    }
+
+    /// Parses `body` as a user's own file and returns the error it must
+    /// produce.
+    fn rejected_overlay(body: &str) -> CatalogueError {
+        Catalogue::parse(
+            &file(body),
+            EntrySource::Overlay {
+                path: std::path::PathBuf::from(r"C:\Users\somebody\games.toml"),
+            },
+        )
+        .expect_err("this fixture is supposed to be rejected")
+    }
+
+    /// One shipped game, as a build might ship it today.
+    const SHIPPED: &str = r#"
+[[game]]
+game_id = "some-game"
+name = "Some Game"
+[[game.executables]]
+name = "some-game.exe"
+"#;
+
+    /// The same game after an update: a better name, and the executable the
+    /// publisher renamed in a patch.
+    const SHIPPED_AFTER_AN_UPDATE: &str = r#"
+[[game]]
+game_id = "some-game"
+name = "Some Game: Definitive Edition"
+[[game.executables]]
+name = "some-game.exe"
+[[game.executables]]
+name = "some-game-2024.exe"
+"#;
+
+    #[test]
+    fn a_rename_survives_an_update_that_changes_the_shipped_entry() {
+        // The acceptance criterion, and the reason a rename is a decision
+        // rather than a replacement entry: a user who calls a game something
+        // shorter must still receive the executable a later release adds, or
+        // they are the one person the fix never reaches.
+        let renamed = overlay(
+            r#"
+[[decision]]
+game_id = "some-game"
+name = "SG"
+"#,
+        );
+
+        let before = Catalogue::parse(&file(SHIPPED), EntrySource::Seed)
+            .expect("valid")
+            .overlaid_with(renamed.clone());
+        assert_eq!(
+            before.find_by_id("some-game").expect("present").name(),
+            "SG"
+        );
+
+        let after = Catalogue::parse(&file(SHIPPED_AFTER_AN_UPDATE), EntrySource::Seed)
+            .expect("valid")
+            .overlaid_with(renamed);
+        let entry = after.find_by_id("some-game").expect("still present");
+        assert_eq!(entry.name(), "SG", "the update must not undo the rename");
+        assert_eq!(
+            entry.renamed_from(),
+            Some("Some Game: Definitive Edition"),
+            "the name underneath is the updated one, so a screen can offer it back"
+        );
+        assert_eq!(
+            after
+                .match_process(&ProcessCandidate::new("some-game-2024.exe"))
+                .entry()
+                .map(|entry| entry.game_id().as_str()),
+            Some("some-game"),
+            "the rename must not freeze the entry's executables at this build's list"
+        );
+    }
+
+    #[test]
+    fn an_exclusion_is_a_decision_about_an_entry_rather_than_its_deletion() {
+        let excluded = overlay(
+            r#"
+[[decision]]
+game_id = "some-game"
+excluded = true
+"#,
+        );
+
+        let catalogue = Catalogue::parse(&file(SHIPPED_AFTER_AN_UPDATE), EntrySource::Seed)
+            .expect("valid")
+            .overlaid_with(excluded);
+
+        // Still there, still named, still findable — a session recorded before
+        // the exclusion still has a game to be filed under.
+        let entry = catalogue.find_by_id("some-game").expect("still catalogued");
+        assert_eq!(entry.name(), "Some Game: Definitive Edition");
+        assert!(entry.is_excluded());
+        assert_eq!(catalogue.entries().len(), 1);
+
+        // And every way in is closed, including the executable the update added
+        // — an exclusion the update could route around would be no exclusion.
+        for executable in ["some-game.exe", "some-game-2024.exe"] {
+            assert_eq!(
+                catalogue.match_process(&ProcessCandidate::new(executable)),
+                Match::None,
+                "{executable} still matched an excluded game"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_about_a_game_no_catalogue_has_is_kept_rather_than_dropped() {
+        // Dropping it is how an update resurrects an excluded game: the entry
+        // is missing from this build, so the decision has nothing to attach to,
+        // and a build that forgot it would start recording the moment the game
+        // came back.
+        let catalogue = Catalogue::parse(&file(SHIPPED), EntrySource::Seed)
+            .expect("valid")
+            .overlaid_with(overlay(
+                r#"
+[[decision]]
+game_id = "a-game-from-a-newer-clipped"
+excluded = true
+"#,
+            ));
+
+        let pending = catalogue.pending_decisions();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].game_id().as_str(), "a-game-from-a-newer-clipped");
+        assert!(pending[0].is_excluded());
+        assert_eq!(
+            pending[0].path(),
+            std::path::Path::new(r"C:\Users\somebody\games.toml"),
+            "a pending decision should say which file it came from"
+        );
+
+        // And when a later build ships the game, the decision is waiting.
+        let later = Catalogue::parse(
+            &file(
+                r#"
+[[game]]
+game_id = "a-game-from-a-newer-clipped"
+name = "A Game From A Newer Clipped"
+[[game.executables]]
+name = "newer.exe"
+"#,
+            ),
+            EntrySource::Seed,
+        )
+        .expect("valid")
+        .overlaid_with(overlay(
+            r#"
+[[decision]]
+game_id = "a-game-from-a-newer-clipped"
+excluded = true
+"#,
+        ));
+        assert!(later.pending_decisions().is_empty());
+        assert!(later
+            .find_by_id("a-game-from-a-newer-clipped")
+            .expect("present")
+            .is_excluded());
+    }
+
+    #[test]
+    fn a_decision_applies_to_the_users_own_entry_in_the_same_file() {
+        let catalogue = overlay(
+            r#"
+[[game]]
+game_id = "my-game"
+name = "My Game"
+[[game.executables]]
+name = "my-game.exe"
+
+[[decision]]
+game_id = "my-game"
+excluded = true
+"#,
+        );
+
+        assert!(catalogue.pending_decisions().is_empty());
+        assert!(catalogue
+            .find_by_id("my-game")
+            .expect("present")
+            .is_excluded());
+    }
+
+    #[test]
+    fn a_decision_applies_to_the_users_replacement_of_a_shipped_entry() {
+        // The overlay replaces the shipped entry and then decides about it, so
+        // the decision must land on the replacement rather than on the entry it
+        // displaced.
+        let catalogue = Catalogue::parse(&file(SHIPPED), EntrySource::Seed)
+            .expect("valid")
+            .overlaid_with(overlay(
+                r#"
+[[game]]
+game_id = "some-game"
+name = "Some Game, my install"
+[[game.executables]]
+name = "some-game.exe"
+path_contains = "games/some-game"
+
+[[decision]]
+game_id = "some-game"
+name = "SG"
+"#,
+            ));
+
+        let entry = catalogue.find_by_id("some-game").expect("present");
+        assert_eq!(entry.name(), "SG");
+        assert_eq!(entry.renamed_from(), Some("Some Game, my install"));
+    }
+
+    #[test]
+    fn the_shipped_catalogue_may_not_decide_things_about_itself() {
+        let error = rejected(&format!(
+            "{ONE_GAME}\n[[decision]]\ngame_id = \"a-game\"\nexcluded = true\n"
+        ));
+        assert!(
+            matches!(error, CatalogueError::DecisionInSeedData { position: 1 }),
+            "expected a refused decision, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("change the entry"),
+            "the message should say what to do instead: {error}"
+        );
+    }
+
+    #[test]
+    fn a_decision_that_decides_nothing_is_refused_rather_than_kept() {
+        let error = rejected_overlay(
+            r#"
+[[decision]]
+game_id = "some-game"
+"#,
+        );
+        assert!(
+            matches!(
+                error,
+                CatalogueError::InvalidDecision {
+                    problem: DecisionProblem::Empty,
+                    ..
+                }
+            ),
+            "expected an empty decision to be refused, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("decision 1 (`some-game`)") && message.contains("games.toml"),
+            "the message should locate the block in the user's file: {message}"
+        );
+    }
+
+    #[test]
+    fn two_decisions_about_one_game_are_refused_naming_both() {
+        let error = rejected_overlay(
+            r#"
+[[decision]]
+game_id = "some-game"
+excluded = true
+
+[[decision]]
+game_id = "some-game"
+name = "SG"
+"#,
+        );
+        assert!(
+            matches!(
+                error,
+                CatalogueError::InvalidDecision {
+                    position: 2,
+                    problem: DecisionProblem::Duplicated { first_at: 1 },
+                    ..
+                }
+            ),
+            "expected a duplicated decision, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_decision_renaming_a_game_to_nothing_is_refused() {
+        let error = rejected_overlay(
+            r#"
+[[decision]]
+game_id = "some-game"
+name = ""
+"#,
+        );
+        assert!(
+            matches!(
+                error,
+                CatalogueError::InvalidDecision {
+                    problem: DecisionProblem::NameEmpty,
+                    ..
+                }
+            ),
+            "expected an empty rename to be refused, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_decision_naming_something_that_is_not_a_game_identifier_is_refused() {
+        let error = rejected_overlay(
+            r#"
+[[decision]]
+game_id = "Some Game"
+excluded = true
+"#,
+        );
+        assert!(
+            matches!(
+                error,
+                CatalogueError::InvalidDecision {
+                    problem: DecisionProblem::GameIdInvalid,
+                    ..
+                }
+            ),
+            "expected an unusable identifier to be refused, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("Some Game"),
+            "the message should quote what was written: {error}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_key_in_a_decision_is_refused_rather_than_ignored() {
+        // The failure this prevents is the worst kind: `exclude = true` reads
+        // exactly like an exclusion and would leave the game recording.
+        let error = rejected_overlay(
+            r#"
+[[decision]]
+game_id = "some-game"
+exclude = true
+"#,
+        );
+        let message = error.to_string();
+        assert!(
+            matches!(error, CatalogueError::Syntax { .. }),
+            "expected a syntax error, got {error:?}"
+        );
+        assert!(
+            message.contains("exclude"),
+            "the message should name the key that was not understood: {message}"
         );
     }
 }

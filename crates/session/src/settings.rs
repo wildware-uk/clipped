@@ -190,6 +190,33 @@ impl AudioSourceSetting {
     }
 }
 
+/// What a recording does when a choice it was given cannot be honoured here.
+///
+/// The two callers want opposite answers, and both are right.
+///
+/// Someone who typed `--encoder nvenc` a second ago wants to be told it was not
+/// used, so the recording is refused ([`Refuse`](Self::Refuse)) — that is the
+/// rule `crate::encoding` documents and it does not change.
+///
+/// A per-game setting is not a sentence somebody just typed. It was chosen once,
+/// possibly on another machine, possibly before the graphics card was replaced,
+/// and the recording it governs starts because a game launched with nobody
+/// watching. Refusing it would mean losing footage that cannot be made again
+/// over a setting the user could not have known had gone stale, so
+/// [`Substitute`](Self::Substitute) records with the nearest thing that works
+/// and says in the log — and in the session's own record — what it did instead
+/// (AGENTS.md sections 16, 17 and 45).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnavailableChoice {
+    /// Fail the recording, naming what was asked for. The default, because a
+    /// caller that has said nothing has not agreed to be given something else.
+    #[default]
+    Refuse,
+    /// Record with the closest thing this machine can do, and log the
+    /// substitution.
+    Substitute,
+}
+
 /// Which encoder family to encode with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EncoderPreference {
@@ -198,8 +225,12 @@ pub enum EncoderPreference {
     /// candidate when one refuses to open.
     #[default]
     Automatic,
-    /// This encoder, or a failure explaining why it could not be opened. No
-    /// fallback: a user who named an encoder wants to know it was not used.
+    /// This encoder, or a failure explaining why it could not be opened.
+    ///
+    /// No fallback: a user who named an encoder wants to know it was not used —
+    /// unless the recording was also given
+    /// [`UnavailableChoice::Substitute`], which is what an encoder that came
+    /// from a settings file rather than from a command line is given.
     Fixed(EncoderKind),
 }
 
@@ -217,6 +248,7 @@ pub struct RecordingSettings {
     microphone: AudioSourceSetting,
     overwrite: bool,
     minimum_free_space: u64,
+    unavailable: UnavailableChoice,
 }
 
 impl RecordingSettings {
@@ -236,7 +268,18 @@ impl RecordingSettings {
             microphone: AudioSourceSetting::Off,
             overwrite: false,
             minimum_free_space: crate::disk::DEFAULT_MINIMUM_FREE_SPACE,
+            unavailable: UnavailableChoice::Refuse,
         }
+    }
+
+    /// Sets what happens when a choice cannot be honoured on this machine.
+    ///
+    /// [`UnavailableChoice::Refuse`] unless said otherwise, so nothing about a
+    /// recording asked for by hand changes.
+    #[must_use]
+    pub const fn with_unavailable_choice(mut self, choice: UnavailableChoice) -> Self {
+        self.unavailable = choice;
+        self
     }
 
     /// Sets how much of the output drive the recording refuses to consume.
@@ -392,25 +435,49 @@ impl RecordingSettings {
         self.minimum_free_space
     }
 
+    /// What happens when a choice cannot be honoured on this machine.
+    #[must_use]
+    pub const fn unavailable_choice(&self) -> UnavailableChoice {
+        self.unavailable
+    }
+
     /// The size the encoder will be configured for, given what capture is
     /// actually producing.
+    ///
+    /// A fixed size that is not what capture produced is refused
+    /// ([`UnavailableChoice::Refuse`]) or recorded at the source size and
+    /// logged ([`UnavailableChoice::Substitute`]).
     ///
     /// # Errors
     ///
     /// [`SessionError::ScalingNotSupported`] when a fixed size was asked for
-    /// that is not the size the capture is producing.
+    /// that is not the size the capture is producing, and this recording
+    /// refuses what it cannot honour.
     pub(crate) fn encode_size(&self, captured: FrameSize) -> Result<(u32, u32), SessionError> {
+        let source = (captured.width(), captured.height());
         match self.resolution {
-            ResolutionSetting::Source => Ok((captured.width(), captured.height())),
-            ResolutionSetting::Fixed { width, height }
-                if width == captured.width() && height == captured.height() =>
-            {
-                Ok((width, height))
-            }
-            ResolutionSetting::Fixed { width, height } => Err(SessionError::ScalingNotSupported {
-                requested: (width, height),
-                captured: (captured.width(), captured.height()),
-            }),
+            ResolutionSetting::Source => Ok(source),
+            ResolutionSetting::Fixed { width, height } if (width, height) == source => Ok(source),
+            ResolutionSetting::Fixed { width, height } => match self.unavailable {
+                UnavailableChoice::Refuse => Err(SessionError::ScalingNotSupported {
+                    requested: (width, height),
+                    captured: source,
+                }),
+                // Called once, when the encoder is opened, so this is one line
+                // per recording rather than anything on a frame path.
+                UnavailableChoice::Substitute => {
+                    tracing::warn!(
+                        requested_width = width,
+                        requested_height = height,
+                        width = source.0,
+                        height = source.1,
+                        "the resolution configured for this recording is not the size being \
+                         captured and nothing in this build can scale a frame, so it is being \
+                         recorded at the size it is captured at"
+                    );
+                    Ok(source)
+                }
+            },
         }
     }
 }
@@ -500,6 +567,31 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_size_that_would_need_scaling_is_recorded_at_the_source_size() {
+        // The other half of the refusal above, and the reason there are two:
+        // this size was not typed a second ago, it was configured once and the
+        // game has since changed resolution. Losing the session over it would
+        // be the worse failure, so the frames that exist are recorded and the
+        // substitution is logged.
+        let settings = RecordingSettings::new(
+            CaptureTargetSettings::window(1, 2560, 1440),
+            PathBuf::from("out.mkv"),
+        )
+        .with_resolution(ResolutionSetting::Fixed {
+            width: 1920,
+            height: 1080,
+        })
+        .with_unavailable_choice(UnavailableChoice::Substitute);
+
+        assert_eq!(
+            settings
+                .encode_size(size(2560, 1440))
+                .expect("a configured size that cannot be produced must not fail the recording"),
+            (2560, 1440)
+        );
+    }
+
+    #[test]
     fn the_defaults_are_the_ones_the_command_line_documents() {
         let settings = RecordingSettings::new(
             CaptureTargetSettings::window(1, 1280, 720),
@@ -516,6 +608,11 @@ mod tests {
         );
         assert_eq!(settings.system_audio(), &AudioSourceSetting::Off);
         assert_eq!(settings.microphone(), &AudioSourceSetting::Off);
+        assert_eq!(
+            settings.unavailable_choice(),
+            UnavailableChoice::Refuse,
+            "a caller that has said nothing has not agreed to be given something else"
+        );
         assert_eq!(
             settings.minimum_free_space(),
             crate::disk::DEFAULT_MINIMUM_FREE_SPACE,

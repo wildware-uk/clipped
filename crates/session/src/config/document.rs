@@ -66,7 +66,9 @@ use serde_json::{Map, Value};
 use crate::config::error::{ConfigurationError, Section, SettingError};
 use crate::config::game::GameKey;
 use crate::config::hotkeys::{HotkeyOverride, HotkeyOverrides};
-use crate::config::preferences::{AudioDeviceSetting, CaptureTargetSetting, Preferences};
+use crate::config::preferences::{
+    AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings,
+};
 use crate::config::value::SettingKey;
 use crate::config::Configuration;
 use crate::settings::{CodecPreference, EncoderPreference, ResolutionSetting};
@@ -404,6 +406,27 @@ fn read_setting(
 const CODECS: &str = "\"auto\", \"h264\", \"hevc\" or \"av1\"";
 const ENCODERS: &str = "\"auto\", \"nvenc\", \"amf\", \"quicksync\" or \"software\"";
 const DEVICES: &str = "\"default\", \"none\" or a device name";
+
+/// One *resolved* setting, spelled the way the settings file spells it.
+///
+/// The file's vocabulary is also the command line's (`docs/recorder-cli.md`),
+/// so it is the vocabulary a log line and a session's record should use as
+/// well: a user comparing what was recorded against what they set should not
+/// have to translate between three spellings of the same encoder. It is written
+/// here, beside the parser, because a second renderer is exactly how the two
+/// would drift (AGENTS.md section 55).
+pub(crate) fn written_setting(settings: &ResolvedSettings, key: SettingKey) -> String {
+    match key {
+        SettingKey::CaptureTarget => settings.capture_target().get().token().to_owned(),
+        SettingKey::Resolution => write_resolution(settings.resolution().get()),
+        SettingKey::Framerate => settings.framerate().get().to_string(),
+        SettingKey::Codec => write_codec(settings.codec().get()),
+        SettingKey::Encoder => write_encoder(settings.encoder().get()),
+        SettingKey::Microphone => write_device(settings.microphone().value()),
+        SettingKey::SystemAudio => write_device(settings.system_audio().value()),
+        SettingKey::ReplayWindow => settings.replay_window().get().as_secs().to_string(),
+    }
+}
 
 fn write_preferences(preferences: &Preferences) -> Map<String, Value> {
     let mut object = Map::new();

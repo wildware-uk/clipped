@@ -1,6 +1,7 @@
 # Audio routing
 
-**Status: three captures exist, and they are not a track model yet.**
+**Status: three captures and a mixer exist; nothing assembles them into a
+recording's tracks yet.**
 [Issue #19](https://github.com/wildware-uk/clipped/issues/19) built system audio
 capture: `clipped-audio` can record the output device Windows is playing
 through, as a continuous, timestamped stream of `f32` samples.
@@ -8,20 +9,23 @@ through, as a continuous, timestamped stream of `f32` samples.
 capture beside it, on the same engine, and
 [issue #26](https://github.com/wildware-uk/clipped/issues/26) added the one this
 product exists for: **everything one game's process tree plays, and nothing
-else**. That is the foundation the track model is built on, and it is all there
-is — assembling a configured set of tracks, mixing the compatibility track
-([issue #29](https://github.com/wildware-uk/clipped/issues/29)) and capturing
-the complement of a game
-([issue #27](https://github.com/wildware-uk/clipped/issues/27)) are still to
-come, and the sections at the end that describe them are unwritten because
-describing behaviour before it is built produces a page that is wrong from the
-day it is committed (AGENTS.md section 7).
+else**. [Issue #29](https://github.com/wildware-uk/clipped/issues/29) added the
+other end of the model — the **compatibility mix**, the single track a player
+that takes one arbitrarily should take — which is the only place in Clipped where
+sources are deliberately combined. What is still to come is the routing that
+decides which captures a recording opens and which track each one feeds, and
+capturing the complement of a game
+([issue #27](https://github.com/wildware-uk/clipped/issues/27)); the sections at
+the end that describe those are unwritten because describing behaviour before it
+is built produces a page that is wrong from the day it is committed (AGENTS.md
+section 7).
 
-So this document describes three captures and one process tree: what they do,
-the problems they exist to solve, what they convert, what happens when the user
-changes their audio device mid-recording, how a game's process tree is resolved
-and kept current, and how to check any of it for yourself. Most of it is written
-about system audio because that is where the machinery was built and where it is
+So this document describes three captures, one process tree and one mixer: what
+they do, the problems they exist to solve, what they convert, what happens when
+the user changes their audio device mid-recording, how a game's process tree is
+resolved and kept current, what goes into the compatibility mix and what it
+refuses, and how to check any of it for yourself. Most of it is written about
+system audio because that is where the machinery was built and where it is
 easiest to describe; the [Microphone](#microphone) and
 [The game's own audio](#the-games-own-audio) sections say what is different
 about the other two, and everything not listed there is the same code. The
@@ -586,6 +590,97 @@ never changes.
   [issue #22](https://github.com/wildware-uk/clipped/issues/22), and that is
   where this meets one.
 
+## The compatibility mix
+
+**The one place sources are deliberately combined, and it combines copies.**
+
+Several audio tracks is the product, and it is also a shape some players handle
+badly: handed a file with four audio tracks, a player that takes one arbitrarily
+can land on the microphone, and the recording sounds broken to somebody who only
+double-clicked it. SPEC.md section 13's answer is a mix of everything on track 1,
+carrying Matroska's default flag, so casual playback sounds right while an editor
+still sees every source on its own. `clipped-muxer` already puts that track first
+and flags it ([issue #28](https://github.com/wildware-uk/clipped/issues/28));
+`clipped_audio::Mixer` is what fills it
+([issue #29](https://github.com/wildware-uk/clipped/issues/29)).
+
+```rust
+let mut mix = Mixer::new(format).anchored_at(epoch);
+let game = mix.add_source(AudioSource::Game, game_format, Level::UNITY)?;
+let voice = mix.add_source(AudioSource::Microphone, microphone_format, level)?;
+
+// per packet, from whichever source produced it
+mix.contribute(game, audio.timestamp(), audio.samples())?;
+while let Some(block) = mix.take() {
+    // block.samples() → the compatibility mix track
+}
+```
+
+Everything about it follows from AGENTS.md section 21, which forbids silently
+combining sources the user expects to stay isolated.
+
+**It cannot touch a source's own track.** `contribute` takes `&[f32]`. There is
+no path through the mixer that writes to a caller's buffer, so a level, a mute or
+the limiter is visible in the mix and nowhere else — which is what makes it safe
+to move a level *during* a recording, and what makes the isolated tracks worth
+having when somebody turns the game down to hear themselves talk.
+
+**Sources are placed, not appended.** A contribution's timestamp decides which
+frames of the mix it is added to, so a microphone opened half a second after the
+game lands half a second in and two sources that overlap are summed over the
+frames they share. This is not a nicety: every source is on its own clock and its
+own thread, and a mixer that concatenated what it was handed would produce a mix
+of the same session with every source sliding against every other. Audio that
+arrives after the mix has already passed the moment it belongs to is **counted
+and dropped** rather than placed where the mix happens to be — it is still on
+that source's own track, in full, which is the point of having isolated tracks.
+
+**A source that produces nothing does not silence the rest.** The mix cannot emit
+a frame until every source has had its chance at it, so the slowest source sets
+the latency and a source that has *stopped* — a microphone Windows muted, a
+capture whose device never came back — would set it to for ever. So the mix waits
+for the slowest source for half a second and then carries on without it. What is
+deliberately not done is dividing by the number of sources: a mix 12 dB quieter
+because four tracks were declared and three are silent is a recording somebody
+turns up and then finds is noisy.
+
+**Clipping is prevented rather than allowed.** Two sources at −6 dBFS are exactly
+full scale and three are past it. The mix is held under 0.99 by a peak limiter —
+one gain per frame, applied to every channel of that frame together, dropping
+instantly to whatever the frame needs and recovering towards unity over 200 ms —
+so a loud passage is turned *down* rather than having its peaks sliced off. The
+alternative, clamping each sample at ±1.0, squares off the waveform and produces
+broadband harmonic distortion at exactly the moments a recording matters most;
+`tests/compatibility_mix.rs` measures the difference at the third harmonic rather
+than asserting it. There is no look-ahead, deliberately: a true brickwall limiter
+delays the signal by a few milliseconds, and a mix that is late against the
+picture to avoid an artefact nobody can hear is a bad trade.
+
+**What it will not do.** It does not resample, so a source captured at a rate the
+mix is not being written at is refused when it is *added* — before the recording
+starts, with a message saying so — rather than dropped from the mix during it.
+Reconciling capture clocks is
+[issue #30](https://github.com/wildware-uk/clipped/issues/30). Channel layouts
+are handled for the cases a recording actually produces: channel for channel, a
+mono source spread across every channel of the mix, and any source folded into a
+mono mix. A genuine downmix — 5.1 into stereo — needs a coefficient table, which
+is a decision about what the user hears, and is refused the same way for the same
+reason.
+
+**Where it runs.** A `Mixer` is owned by one thread and holds no lock; it is
+`Send` and not `Sync`. The alternative would be a lock every capture thread takes
+on every packet, which AGENTS.md section 20 rules out on a capture path. Its
+memory is bounded — it buffers at most two seconds, and hands blocks over in
+100 ms instalments — and its per-buffer work is a multiply-add per sample with no
+allocation once the accumulator has reached its steady size.
+
+**What is not built.** Nothing writes the mix to a file yet: `clipped-session`
+opens the captures and writes their tracks, and giving the compatibility track
+its samples — along with the setting that turns the track off, which SPEC.md
+section 13 asks for and which belongs with the rest of the configuration — is the
+remaining half of issue #29. Until then a recording still declares a mix track
+only when a session declares one, and this build's session does not.
+
 ## Threading
 
 **One capture, one thread, and this crate does not create it.**
@@ -798,6 +893,30 @@ cargo test -p clipped-audio
   to, an activation that never completes being given up on, the completion
   handler signalling through its real vtable, and the check that decides whether
   a stream's reported positions are performance-counter readings at all.
+- **The compatibility mix**, in two places, because it makes two different kinds
+  of claim. `src/mix/` holds the mechanics — where a buffer is placed, what a
+  level multiplies, which layouts and rates are refused, how far the mix may run
+  before the slowest source has caught up, that a block never prints its samples
+  — and `tests/compatibility_mix.rs` holds what is *audible*, because a mixer
+  that summed nothing and emitted silence of exactly the right length would pass
+  every one of the mechanical assertions. That file synthesises the three tones
+  of AGENTS.md section 26 — 440 Hz game, 880 Hz other system audio, 1320 Hz
+  microphone — feeds them in 10 ms packets the way WASAPI delivers them, and
+  measures the result with the same Goertzel filter, through the same
+  `clipped-media-validation::AudioContent`, that
+  `crates/muxer/tests/multi_track_audio.rs` asserts a finished recording with. It
+  asserts that every tone is in the mix; that each source's own buffer is
+  bit-identical afterwards and still carries only its own tone; that a source
+  which starts a second in is *heard* a second in; that turning one source down
+  12 dB makes it four times quieter in the mix and moves nothing else; that a
+  source driven past full scale is held under the ceiling with an order of
+  magnitude less third-harmonic distortion than clamping produces; and that a
+  source producing nothing does not take the others with it.
+
+  None of it opens a device, renders anything or runs `ffprobe`, so it makes no
+  sound and needs no sound card. What it does not cover is the end-to-end claim —
+  that a *recording* plays correctly in a naive player — which needs the session
+  wiring that is the remaining half of issue #29.
 - **Isolation**, in `test-apps/process-tree-audio/tests/`, which is the
   acceptance criterion this feature stands or falls on and the one thing here
   that makes a noise. Two process trees play two tones at once — 997 Hz from a
@@ -930,9 +1049,11 @@ Written during M2, alongside the code:
 - Application-to-track routing configuration, how it is persisted, and how it
   behaves when a routed application is not running
   ([issue #33](https://github.com/wildware-uk/clipped/issues/33)).
-- The compatibility mix: what is mixed into it, at what point, and how muting a
-  source interacts with it
-  ([issue #29](https://github.com/wildware-uk/clipped/issues/29)).
+- Where the compatibility mix is assembled in a *recording* — which thread owns
+  the mixer, how its blocks reach the muxer's track 1, and the setting that turns
+  the track off (SPEC.md section 13). What the mix does with what it is given is
+  written above; the remaining half of
+  [issue #29](https://github.com/wildware-uk/clipped/issues/29) is the wiring.
 - Clock drift and sample-rate handling between independent capture clients, and
   how audio stays aligned with video over a multi-hour session
   ([issue #30](https://github.com/wildware-uk/clipped/issues/30)) — including

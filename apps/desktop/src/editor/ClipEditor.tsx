@@ -11,6 +11,7 @@ import {
 
 import { recordingOf, type AudioTrack, type EditDocument } from './document';
 import { countByKind, describeKind, kindsPresent, type EventMark } from './events';
+import { ExportDialog } from './ExportDialog';
 import {
   anySoloed,
   boundaries,
@@ -44,11 +45,16 @@ import {
  *
  * The **operations** are not here. Trim, split and delete are built, in
  * `crates/edit` (issue #84); the mix is #85, framing and speed #86, overlays
- * #87, combining recordings #88 and export #89. Each of those tickets owns its
- * own control, and drawing a Split button here that could not reach the crate
- * behind it is the control with nothing behind it AGENTS.md section 27 forbids.
- * What this screen does is show a document and let somebody move about inside
- * it accurately, which is what every one of those controls will be aimed with.
+ * #87 and combining recordings #88. Each of those tickets owns its own control,
+ * and drawing a Split button here that could not reach the crate behind it is
+ * the control with nothing behind it AGENTS.md section 27 forbids. What this
+ * screen does is show a document and let somebody move about inside it
+ * accurately, which is what every one of those controls will be aimed with.
+ *
+ * The one control over the whole clip is **Export**, which opens the export
+ * dialog (issue #90). Opening it is this component's own state, as the zoom is;
+ * what the dialog says an export of this clip would be — and that no export can
+ * be started from this window yet — is `ExportDialog`'s.
  *
  * # Two things are absent rather than drawn
  *
@@ -177,6 +183,7 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
   const [playheadNanos, setPlayheadNanos] = useState(0);
   const [zoom, setZoom] = useState(ZOOM_STEPS[0] ?? 1);
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
+  const [showExport, setShowExport] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
 
   /*
@@ -322,7 +329,38 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
 
   return (
     <section className="clipped-editor" aria-label={`Clip: ${clip.title}`}>
-      <h2 className="clipped-screen__heading">{clip.title}</h2>
+      <div className="clipped-editor__header">
+        <h2 className="clipped-screen__heading">{clip.title}</h2>
+        {/*
+         * Opening the dialog is this component's own state, which is why it is
+         * a control this screen may draw at all — the same reason the zoom
+         * controls are here and a Split button is not. What the dialog then
+         * says about exporting, including that no export can be started from
+         * this window, is `ExportDialog`'s (issue #90).
+         *
+         * Export is the **first** tab stop of the editor, ahead of the zoom
+         * controls, the kind filters, the event marks and the playhead. That is
+         * not an accident of where two branches happened to meet: it is where
+         * the button is drawn — in the header, beside the clip's title — and
+         * focus order follows visual order. Putting the whole-document action
+         * last, after the timeline "content", would read well in the abstract
+         * and would mean a keyboard user's focus jumping from the bottom of the
+         * screen back to the top, which is the mismatch WCAG 2.4.3 is about and
+         * which only a positive `tabIndex` could produce. `docs/desktop-ui.md`
+         * carries the reasoning and the whole order; `EditorEvents.test.tsx`
+         * asserts every stop of it, so a control added here fails a test rather
+         * than silently reordering the editor.
+         */}
+        <button
+          type="button"
+          className="clipped-btn clipped-btn--secondary"
+          onClick={() => {
+            setShowExport(true);
+          }}
+        >
+          Export&hellip;
+        </button>
+      </div>
 
       <div className="clipped-editor__top">
         <div className="clipped-editor__frame">
@@ -577,6 +615,16 @@ export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorPro
           (issue #66); this window cannot read a file, so a lane is drawn empty rather than as a
           flat line, which would be indistinguishable from silence. Issue #306.
         </p>
+      )}
+
+      {showExport && (
+        <ExportDialog
+          clip={clip}
+          durationNanos={durationNanos}
+          onClose={() => {
+            setShowExport(false);
+          }}
+        />
       )}
     </section>
   );

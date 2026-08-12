@@ -1,18 +1,21 @@
 # Editing
 
-**Status: the document model and the operations that cut a clip up exist and are
-tested, and the editor screen draws a document it is given — but nothing in the
-desktop application can open one yet
+**Status: the document model, the operations that cut a clip up and the mix
+exist and are tested, and the editor screen draws a document it is given — but
+nothing in the desktop application can open one yet
 ([#306](https://github.com/wildware-uk/clipped/issues/306)), and nothing
 renders a clip to a file.** `crates/edit` defines what an edit *is*,
 reads and writes it, converts an older one, answers the question an exporter
-asks — "what is on screen at this moment, and where does it come from?" — and
-performs the four edits that change what material a clip plays: trim start, trim
-end, split and delete section, with undo and redo
-([#84](https://github.com/wildware-uk/clipped/issues/84)). The editor's shell is
-[issue #83](https://github.com/wildware-uk/clipped/issues/83) and is described
-in [desktop-ui.md](desktop-ui.md#the-editor-screen), the remaining
-operations are [#85](https://github.com/wildware-uk/clipped/issues/85) to
+asks — "what is on screen at this moment, where does it come from, and how loud
+is each track here?" — and performs the seven edits a user can make: trim start,
+trim end, split and delete section
+([#84](https://github.com/wildware-uk/clipped/issues/84)), and a level, a mute
+and a pair of fades on any audio track
+([#85](https://github.com/wildware-uk/clipped/issues/85)), all with undo and
+redo. The editor's shell is [issue
+#83](https://github.com/wildware-uk/clipped/issues/83) and is described in
+[desktop-ui.md](desktop-ui.md#the-editor-screen), the remaining operations are
+[#86](https://github.com/wildware-uk/clipped/issues/86) to
 [#88](https://github.com/wildware-uk/clipped/issues/88), and the export engine
 is [#89](https://github.com/wildware-uk/clipped/issues/89). This document is the
 specification all of them are held to.
@@ -69,7 +72,7 @@ claim the frame there.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "title": "Round 12 ace",
   "aspect_ratio": { "width": 16, "height": 9 },
   "sources": [
@@ -98,7 +101,6 @@ claim the frame there.
       "inputs": [{ "source": 0, "stream": 0 }, { "source": 1, "stream": 0 }],
       "gain_db": -3.0,
       "muted": false,
-      "soloed": false,
       "fade_in": 0,
       "fade_out": 1000000000
     }
@@ -187,7 +189,8 @@ snap to anyway.
 Four operations change what material a clip plays, and every one of them is
 about the distinction above: the user points at a moment of **output** time, and
 what changes is which **source** material the document names and where it lands
-in the output afterwards.
+in the output afterwards. Three more change how the clip *sounds*, and are
+described under [changing the mix](#changing-the-mix); they move nothing at all.
 
 | | What it does | Source time | Output time |
 | --- | --- | --- | --- |
@@ -195,6 +198,7 @@ in the output afterwards.
 | **Trim end** | Drops everything from the playhead on | Unchanged | Unchanged |
 | **Split** | Turns one segment into two | Unchanged | Unchanged |
 | **Delete section** | Removes a selected range and joins what is left | Unchanged | Everything after the cut moves earlier by the length of the cut |
+| **A change to the mix** | Sets a level, a mute or a fade on one track | Unchanged | Unchanged |
 
 Deleting eight seconds out of the middle does not move a frame in any recording.
 It moves every frame after the cut eight seconds earlier in the export, while
@@ -272,6 +276,12 @@ there is nothing here to measure and no number is claimed.
   be left with fades that no longer fit, which validation refuses. They are
   shortened rather than the edit being refused — a user who has faded a clip must
   still be able to trim it. The fade *in* is kept in preference to the fade out.
+  A cut that leaves them fitting does not change them at all, which means the
+  material under a fade moves while the fade does not: [see
+  above](#fades).
+- **Levels and mutes** are untouched by every operation. They belong to a track
+  of the output and not to any stretch of material, so there is nothing for a
+  cut to do to them.
 - **Sources stay declared** even when nothing plays them any more. An unused
   source breaks nothing, dropping one would silently break any audio track fed
   from it, and undo has to be able to put the material back.
@@ -283,9 +293,13 @@ there is nothing here to measure and no number is claimed.
 An operation returns either a new document or a refusal; the original is never
 modified, so there is no half-applied state. Refused are: a time past the end of
 the clip; a trim that would keep nothing, because trimming says which range is
-*kept* and a kept range that ends where it starts is not a range; and — as a last
-line of defence rather than an expected outcome — any result that would not
-validate, since an operation checks its own output before returning it.
+*kept* and a kept range that ends where it starts is not a range; a change to
+the mix of a track the clip does not have; and — as a last line of defence
+rather than an expected outcome — any result that would not validate, since an
+operation checks its own output before returning it. That last one is how a
+level outside -60 dB to +12 dB and a pair of fades longer than the clip are
+refused: there is one statement of what a document may say, and the operations
+are held to it rather than repeating it.
 
 Deleting *all* of a clip is allowed, and leaves the valid empty document
 described under [what a document may not say](#what-a-document-may-not-say): a
@@ -340,28 +354,149 @@ name, which would be wrong for exactly the users who route their own
 applications to their own tracks (SPEC.md section 12).
 
 **Levels** are decibels, `0.0` meaning "as recorded", between -60 dB and +12 dB.
+Decibels are what the user drags and what the document stores; what a renderer
+needs is an amplitude multiplier, and the one conversion — `10^(dB/20)`, so -6 dB
+is very nearly half — lives in `TrackOutput::amplitude` so that a preview and an
+export cannot each round their own way.
 
-**Mute and solo**, which [#85](https://github.com/wildware-uk/clipped/issues/85)
-asks to be predictable and documented, follow the rules every mixing desk uses:
+### Solo is not a property of a track
 
-- **Mute wins**, including over solo on the same track. Soloing a muted track
-  does not unmute it. Solo is a way of listening to part of a mix, not a second
-  mute button with the opposite sense.
-- **Solo is exclusive.** If any track in the document is soloed, every track
-  that is not soloed is silent.
+A **level**, a **mute** and a **fade** describe the clip: they are what the
+exported file must carry, so they are fields of the track, they are saved, and
+they reach the export. **Solo is none of those things.** Soloing is how somebody
+listens to part of their own mix while they work, and it is undone by clicking
+it again ten seconds later.
+
+So a solo is `Solo` — a value the editor holds *beside* the document — and not a
+field of `AudioTrack`. Format version 1 stored `soloed` on each track, and
+version 2 [drops it](#compatibility). Two things were wrong with it:
+
+- **It could be exported.** A clip saved while the user was listening to Discord
+  on its own is a clip whose document says every other track is silent. The
+  export would honour that, and the user would get a file of one track and no
+  game audio, for a button they pressed while editing.
+- **"Two tracks are soloed" was expressible and undefined.** Any number of
+  tracks could carry the flag, and each reader had to invent a rule for what
+  several of them meant. A `Solo` names **at most one track**: pressing solo on
+  another track moves it, pressing it again clears it, and there is no ambiguous
+  state to arbitrate.
+
+The consequence, stated plainly because it is a deliberate loss: **a solo does
+not survive closing the clip.** Reopening it plays the whole mix. That is the
+right trade against exporting a clip with most of its audio missing.
+
+### Mute and solo together
+
+| | Nothing soloed | This track soloed | Another track soloed |
+| --- | --- | --- | --- |
+| **Not muted** | heard | heard | silent in the preview, heard in the export |
+| **Muted** | silent | silent | silent |
+
+- **Mute wins**, including over a solo on the same track. Soloing a muted track
+  does not unmute it: solo is a way of listening to part of a mix, not a second
+  mute button with the opposite sense, and a control that quietly undoes another
+  control is the surprise AGENTS.md section 27 is about.
+- **Solo is exclusive**, and only in the preview. While a track is soloed every
+  other track is silent *to the person listening*.
 - **Solo does nothing when nothing is soloed**, so the ordinary case is just
-  mute and gain.
+  mute and level, and the preview and the export agree exactly.
 
-`EditDocument::track_output` resolves all of that into `Silent` or
-`Audible { gain_db }` — a type rather than an `f64`, so that "silent" cannot be
-misread as "no gain applied", which is the mistake that exports a muted
-microphone at full volume.
+Two methods, and the difference between them is the whole point:
+`EditDocument::track_output(index)` is what an **export** reads and is never
+given a solo; `EditDocument::monitored_output(index, solo)` is what the
+**preview** reads. Both answer `Silent` or `Audible { gain_db }` — a type rather
+than an `f64`, so that "silent" cannot be misread as "no gain applied", which is
+the mistake that exports a muted microphone at full volume.
 
-**Fades** are a length at the start and a length at the end of the clip, in
-output time. The curve is defined here so that preview and export cannot differ:
-the multiplier rises **linearly in amplitude** from zero to the track's level
-across `fade_in`, and falls linearly to zero across `fade_out`. Fades may not
-add up to more than the clip lasts.
+### Fades
+
+A fade is a length at the start and a length at the end of the clip, in **output
+time**. The curve is defined here so that preview and export cannot differ: the
+multiplier rises **linearly in amplitude** from zero across `fade_in`, and falls
+linearly to zero across `fade_out`.
+
+```text
+       ╱▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔╲
+      ╱                     ╲
+  0s ╯  fade_in     fade_out ╰ clip
+```
+
+`EditDocument::track_amplitude_at(index, at)` is that curve multiplied by the
+track's level and its mute: one number, between `0.0` and `1.0` at a normal
+level, for one track at one moment. It is the audio half of `locate`, and for
+the same reason — an exporter and a preview that computed it separately would
+disagree somewhere.
+
+Three consequences worth stating, because each of them is a question somebody
+will ask of an export that sounds wrong:
+
+- **Fades are anchored to the ends of the clip, not to the material.** Material
+  moves in output time every time a section is deleted, so a fade pinned to a
+  frame would wander off the front of the clip the first time the user trimmed
+  it. Deleting three seconds out of the middle of a clip with a six-second fade
+  in therefore leaves the fade six seconds long, and the material that used to
+  be past the end of it is now inside it and quieter than it was.
+- **Fades may not overlap**, which is the same rule as "they may not add up to
+  more than the clip lasts": a passage that is fading in and out at once is not
+  something a user asked for. Where a document says it anyway — one that has
+  never been validated — the two envelopes multiply, so the answer stays between
+  zero and one rather than becoming a multiplier greater than the level.
+- **A shorter clip shortens the fades**, and only when it has to. Trimming a
+  clip whose fades no longer fit shortens them rather than refusing the trim,
+  keeping the fade *in* in preference to the fade out. Setting a fade that does
+  not fit is refused instead — the difference is that a trim is a user asking
+  for something else and finding a fade in the way, while a fade that does not
+  fit is the user asking for the impossible thing directly.
+
+### Changing the mix
+
+Lowering Discord is an **operation**, like trimming:
+
+| | What it does |
+| --- | --- |
+| **Set track gain** | Plays one track at a different level |
+| **Set track muted** | Silences one track, or lets it be heard again |
+| **Set track fades** | Sets how long that track fades in and out for |
+
+They go through `EditDocument::apply` and `EditHistory` for two reasons, both of
+them a user pressing Ctrl+Z: undoing a level has to restore the exact level that
+was there, and a level outside -60 dB to +12 dB, or a pair of fades longer than
+the clip, is refused *when the slider is dragged* rather than when the user
+saves. A mix change moves no material, so nothing on the timeline is remapped.
+
+Soloing is deliberately not an operation. It changes no document, so there would
+be nothing for undo to restore.
+
+### What a mix costs an export
+
+The model decides what [#89](https://github.com/wildware-uk/clipped/issues/89)
+can copy and what it must produce sample by sample. `AudioTrack::is_unmixed` is
+the model's half of the question — it answers about the mix only, exactly as
+`Segment::is_untransformed` answers about a segment's own transformations —
+and the rules are:
+
+| The track | Can the recorded stream be copied? |
+| --- | --- |
+| One input, `0.0` dB, not muted, no fades | **Yes.** Nothing is done to a sample |
+| A level other than `0.0` dB | **No.** Every sample is scaled, so the track is decoded, mixed and re-encoded |
+| A fade in or out | **No.** Every sample the fade covers is scaled by a different amount |
+| Muted | **No stream is needed at all** — see below |
+| Soloed | **Not a question.** A solo never reaches an export |
+| Two or more inputs | Not a mix question: it is a join, and [#88](https://github.com/wildware-uk/clipped/issues/88)'s |
+
+Muting is the interesting row. A muted track contributes no samples from the
+recording, so nothing has to be decoded for it — but the exported file still has
+to have that track, or a clip with four sliders becomes a file with three, and
+the user who unmutes it later finds the audio gone. **Producing silence needs an
+encoder; omitting the track needs nothing.** Today `crates/export` produces
+silence and names the mute as a reason a copy is impossible
+([exporting.md](exporting.md#audio)); whether that or an omitted track is the
+better answer is a decision for that engine, tracked in
+[#325](https://github.com/wildware-uk/clipped/issues/325) so it is made
+deliberately rather than by whichever crate got there first.
+
+Nothing in this crate can answer whether a copy is possible *at all*: that
+depends on the codecs in the file, which `crates/edit` never opens.
 
 ## Overlays and framing
 
@@ -435,12 +570,21 @@ overshoot the version this build reads is not taken. A conversion that fails, or
 whose result does not validate, refuses the document and leaves it exactly as it
 was.
 
-`SCHEMA_VERSION` is 1 and the shipped migration list is **empty**, correctly:
-version 1 is the first version there has ever been, so no older document exists
-anywhere and writing a migration from one would be inventing history. The
-machinery that runs them is built and tested now, against conversions the tests
-supply themselves, so that the first time a migration runs is not also the first
-time the code around it does.
+`SCHEMA_VERSION` is **2**, and one migration has shipped:
+
+| Version | What changed | Converting a document from the version before it |
+| --- | --- | --- |
+| 1 | The first there has ever been ([#82](https://github.com/wildware-uk/clipped/issues/82)) | — |
+| 2 | An audio track no longer carries `soloed` ([#85](https://github.com/wildware-uk/clipped/issues/85)) | The flag is dropped |
+
+Dropping it is the only honest conversion. A solo describes a moment of
+somebody's editing session rather than the clip, so there is nothing in a
+version 2 document for it to become; turning it into mutes on the other tracks
+would silence material the user never asked to lose, which is the opposite of
+AGENTS.md section 56. Everything that *is* the edit — the level, the mute and
+the fades of every track — comes through untouched, and the caller is told the
+document was converted so it can decide whether to store the newer text (keeping
+the original).
 
 ## What a document may not say
 
@@ -478,37 +622,50 @@ cargo test -p clipped-edit
 ```
 
 No hardware, no files, no fixtures on disk. The suite covers the timeline
-arithmetic at and either side of every boundary, the mute/solo matrix, every
-validation refusal, the version and migration behaviour above, and each
-operation at a boundary, across a boundary, over a whole segment, at the ends of
-the clip and where it would leave nothing. Three whole-model tests carry the
-acceptance criteria of [#82](https://github.com/wildware-uk/clipped/issues/82)
-and [#84](https://github.com/wildware-uk/clipped/issues/84):
+arithmetic at and either side of every boundary, the mute/solo matrix, the fade
+envelope at both ends and where two fades meet, every validation refusal, the
+version and migration behaviour above, and each operation at a boundary, across
+a boundary, over a whole segment, at the ends of the clip and where it would
+leave nothing. Three whole-model tests carry the acceptance criteria of
+[#82](https://github.com/wildware-uk/clipped/issues/82),
+[#84](https://github.com/wildware-uk/clipped/issues/84) and
+[#85](https://github.com/wildware-uk/clipped/issues/85):
 
 - `tests/sources_are_never_touched.rs` — a checksummed file before and after
   everything the crate can do to a document that names it, **including trimming,
-  splitting, deleting, undoing and redoing**, and a check that the crate's source
-  contains no file access at all.
+  splitting, deleting, remixing, undoing and redoing**, and a check that the
+  crate's source contains no file access at all. Lowering a track is in that
+  list because "changing the audio levels of a recording" is exactly the phrase
+  a user would expect to mean the recording changed.
 - `tests/an_edited_clip_plays_what_is_left.rs` — the clip is kept a second way,
   as a plain list of the moments of the original timeline that survived each
   operation, and every position of the edited clip must play what the
   corresponding element of that list played. The list knows nothing about
   segments or spans, so it cannot agree with the implementation by construction
   the way an assertion about segment spans does. The same file walks undo and
-  redo across four operations and compares the *stored text* at every step.
+  redo across six operations — four cuts and two changes to the mix — and
+  compares the *stored text* at every step.
 - `tests/round_trip_is_identical_playback.rs` — the clip is *read* at
   one-tenth-second steps from before its start to past its end, recording which
-  recording is on screen, which frame of it, which text is over it and what each
-  audio track contributes; that transcript must be identical after a save and a
-  reload, and saving what was read must produce the same bytes.
+  recording is on screen, which frame of it, which text is over it, what each
+  audio track contributes and **how loud each track is at that moment**; that
+  transcript must be identical after a save and a reload, and saving what was
+  read must produce the same bytes. The level is sampled through the walk rather
+  than read off the track because a fade is a different number at every step: a
+  save that lost one leaves the curve flat, which a comparison of fields would
+  have shown as a missing field and a comparison of playback shows as the clip
+  sounding different.
 
 Comparing two documents with `==` would have been the easy version of the
 second, and would prove less: two documents can be equal and still be read
 differently if the reading depends on anything outside them.
 
 A round trip is also only worth what its fixture covers, which is a trap this
-one fell into: the first version of it left `aspect_ratio` and `soloed` at their
-defaults, so a build that discarded both on every save passed. The fixture now
+one fell into: the first version of it left `aspect_ratio` and the old `soloed`
+flag at their defaults, so a build that discarded both on every save passed.
+(That flag is gone — it is [not part of the
+document](#solo-is-not-a-property-of-a-track) — and the check that caught it is
+what the level and the fades now go through.) The fixture
 holds a value other than the default for every field of every structure this
 crate writes, and a second test enforces that by comparing it against a baseline
 document built from the plain constructors, over the serialised text, field by

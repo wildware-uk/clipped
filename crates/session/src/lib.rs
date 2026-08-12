@@ -75,17 +75,21 @@
 //! outside is ahead of the file by however long the encoder took to open.
 //! `apps/recorder`'s `serve` subcommand answers `add_bookmark` with it.
 //!
-//! Per-game settings are modelled but not yet applied. [`config`] is the
-//! configuration API — global settings, per-game overrides that inherit from
-//! them, validation, and a versioned file that survives being opened by an
-//! older build ([issue
-//! #108](https://github.com/wildware-uk/clipped/issues/108), AGENTS.md section
-//! 30). What it does *not* do is choose a recording's settings: [`record`] and
-//! [`automatic`] still take what their caller hands them, and reading the
-//! resolved settings at the moment a recording starts is
-//! [issue #61](https://github.com/wildware-uk/clipped/issues/61).
-//! A catalogue entry's own `default_settings` remain uninterpreted
-//! (SPEC.md section 31).
+//! **A game is recorded at its own settings.** [`config`] is the configuration
+//! API — global settings, per-game overrides that inherit from them,
+//! validation, and a versioned file that survives being opened by an older
+//! build ([issue #108](https://github.com/wildware-uk/clipped/issues/108),
+//! AGENTS.md section 30), and [`automatic`] reads it: each recording it asks
+//! for carries the settings resolved for that game, once, at the moment it
+//! starts ([issue #61](https://github.com/wildware-uk/clipped/issues/61),
+//! `docs/configuration.md`). [`record`] itself still takes what its caller
+//! hands it — a library call has no game — and
+//! [`config::ResolvedSettings::apply_to`] is the conversion between the two.
+//! What is not done yet is the last link in `apps/recorder`'s `watch`, which
+//! neither hands over a configuration nor applies what it is given, so a
+//! settings file changes nothing about a shipped build's recordings. A
+//! catalogue entry's own `default_settings` remain uninterpreted (SPEC.md
+//! section 31).
 //!
 //! And which moments in a recording would be worth a clip: [`highlights`] is
 //! the rule between `clipped-events`' vocabulary and `clipped-library`'s
@@ -214,7 +218,7 @@ pub use progress::RecordingProgress;
 pub use report::{AudioSyncReport, AudioTrackReport, EndReason, RecordingReport};
 pub use settings::{
     AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,
-    RecordingSettings, ResolutionSetting, DEFAULT_FRAMERATE,
+    RecordingSettings, ResolutionSetting, UnavailableChoice, DEFAULT_FRAMERATE,
 };
 pub use stop::StopSignal;
 

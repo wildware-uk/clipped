@@ -59,9 +59,12 @@ The controls a screen does draw change nothing outside the window: the Settings
 screen's rail, which moves between that screen's own sections — see
 [The Settings screen](#the-settings-screen); the Diagnostics screen's Copy
 report, which does what it says with a browser API and no recorder involved — see
-[The Diagnostics screen](#the-diagnostics-screen); and the Editor's three zoom
-controls, which change how the timeline is drawn and nothing else — this window's
-own state, and therefore something it can actually perform.
+[The Diagnostics screen](#the-diagnostics-screen); the Editor's three zoom
+controls, which change how the timeline is drawn and nothing else; and the
+Editor's Export, which opens a dialog — all of them this window's own state, and
+therefore things it can actually perform. What that dialog then says about
+exporting, including that no export can be started from here, is
+[The export dialog](#the-export-dialog).
 
 There is one **link** in the chrome that is not navigation, and a link is a
 destination rather than an action: when a recorder dies mid-recording, the notice
@@ -374,12 +377,87 @@ mute and solo are resolved.
 There are none — not a Split, not a volume slider. The four operations that cut
 a clip up are **built and tested**, in `crates/edit` with undo and redo (#84),
 and a button here could not reach them any more than it could open a clip. The
-mix is #85, framing and speed #86, overlays #87, combining recordings #88 and
-export #89, and each owns its own control.
+mix is #85, framing and speed #86, overlays #87 and combining recordings #88,
+and each owns its own control.
 
 The three zoom controls are the exception, because zoom is this component's own
 state and they do exactly what they say. Each is disabled at the end of the
-scale where it would do nothing.
+scale where it would do nothing. **Export** is the fourth, for the same reason:
+opening a dialog is this component's own state.
+
+### The export dialog
+
+SPEC.md sections 19 and 20, `docs/exporting.md`, and issue #90. It is opened by
+Export beside the clip's name, and it is the only dialog in the application.
+
+The engine behind it (#89) implements **one** method. A **stream copy** writes
+the recording's own coded packets: about as fast as reading the file, with the
+pictures bit for bit. Everything else needs a re-encode, and **there is no
+re-encode** — an edit that needs one is refused with every reason named, rather
+than exported as something that is not the clip. That shapes the whole dialog:
+its job is to say what is about to happen before somebody waits for it, and to
+name what stands in the way in words they can act on (AGENTS.md sections 27
+and 45).
+
+#### What it says
+
+| The clip | What the dialog says |
+| --- | --- |
+| Nothing in the edit rules out a copy | That it would be a fast lossless copy, that the recording is never modified, and the four or five things still to be checked against the recording itself |
+| Something does | That Clipped cannot export it yet, and one line per reason: which edit is responsible, and what to change so that it can be copied |
+| Something the engine would refuse to plan at all | That sentence, on its own — "nothing rules out a copy" about a document the engine would reject is the more confident of the two wrong answers |
+
+The reasons are the engine's own `CopyBlocker`s, in the order `ExportPlan::of`
+collects them, so a reason read here and a refusal read in a log are the same
+list in the same order. The **words** are not the crate's: `CopyBlocker`'s
+`Display` writes for a log — "the recording's picture is {codec}, which
+Clipped's container writer cannot describe" — and a dialog has the document
+open, so it says *which* transformation, *what* level and *how many* streams
+where the crate says "transformed" and "a mix".
+
+#### Half the answer, and the half that is missing
+
+`ExportPlan::of` decides from the document plus one demuxing pass over the
+recording. This window has the document and **cannot open the recording**, so
+`apps/desktop/src/editor/exportPlan.ts` ports exactly the half the document
+settles — several recordings, a transformed segment, an overlay, an audio mix —
+and names the rest instead of guessing:
+
+| Settled here, from the document | Needs the recording, and is named rather than answered |
+| --- | --- |
+| The clip joins more than one recording | A cut that does not fall on a keyframe |
+| A segment is sped up, cropped or rotated | A codec the container writer cannot describe |
+| Text is drawn over the picture | Pictures stored out of the order they are shown |
+| A track is a mix: several inputs, a level, a mute or a solo elsewhere, a fade | A segment covering no pictures, and the recording's shape |
+
+That split is the crate's own structure rather than an approximation of it, and
+`exportPlan.test.ts` holds the port to the cases `crates/export`'s own tests
+assert. [Issue #322](https://github.com/wildware-uk/clipped/issues/322) is the
+gap: no command carries a plan, an export, its progress or its cancellation, and
+`ExportPlan` does not serialise at all.
+
+#### What it deliberately does not have
+
+- **No resolution, framerate, codec or quality**, and none of the deck's preset
+  chips. All four are properties of a re-encode that does not exist, and a copy
+  has no settings by definition — it writes what the recording holds. A quality
+  picker over a lossless copy is the worst kind of control that does nothing,
+  because its label implies the file was affected by it.
+- **No Export button.** Nothing here can start one: no command, no file-system
+  permission, no way to choose a destination. The dialog says so in its marked
+  panel rather than offering a button that would fail.
+- **No estimated size.** `ExportPlan` reports the method, the blockers, the
+  segments, the tracks and the duration, and no bytes;
+  [#323](https://github.com/wildware-uk/clipped/issues/323) is what makes a
+  figure possible. Drawing one now would be a figure nobody measured — and it is
+  the figure somebody decides whether they have room for.
+- **No progress bar and no Cancel.** Both are the engine's (`ExportProgress`,
+  `Cancellation`) and arrive with #322. A progress bar that does not move and a
+  cancel button that does nothing are two of the same bug.
+
+Three of #90's acceptance criteria are therefore **not met**, and the issue says
+so: the estimated size, every option being honoured, and cancellation from the
+UI.
 
 ### The keyboard
 
@@ -394,7 +472,7 @@ milliseconds.
 
 | Key | What it does |
 | --- | --- |
-| Tab | Reaches the playhead, after the zoom controls |
+| Tab | Moves through the editor's controls, in [the order below](#the-tab-order) |
 | ← / → | Steps a tenth of a second |
 | Shift + ← / → | Steps a second |
 | Home / End | The start of the clip, and its end |
@@ -409,6 +487,41 @@ End lands on the end of the clip, where the screen says nothing plays: every
 range in the model is half-open, so the last position of a clip is the
 nanosecond before its end and the end itself belongs to nothing. Saying that is
 better than silently moving the playhead somewhere the user did not ask for.
+
+### The tab order
+
+The editor is the one screen where controls from several issues share a
+component — the export dialog's button (#90) and the event filters and marks
+(#71) arrived separately, at opposite ends of the same screen. The order between
+them is decided here rather than left to whichever branch merged last:
+
+1. **Export**, in the header beside the clip's title;
+2. **Zoom in**, and Zoom out and Fit when they are enabled — all three are
+   disabled at the first zoom step, where only Zoom in is a tab stop;
+3. **the kind filters**, one per kind of event on the clip, when there are any;
+4. **the event marks**, in the order they occur on the edited timeline;
+5. **the playhead**.
+
+Two rules produce that list, and both are worth stating because the plausible
+alternative — content first, whole-document actions last — fails them:
+
+- **Focus order follows visual order.** Export is drawn first, at the top, so it
+  is reached first. Ordering by importance instead would send focus from the
+  bottom of the screen back to the top, which is exactly the mismatch WCAG 2.4.3
+  Focus Order is about; in this component it could only be built with a positive
+  `tabIndex`, which the shell uses nowhere.
+- **Outermost inwards, and the playhead last.** The controls that change how the
+  timeline is *drawn* come before the things drawn on it, and the playhead is
+  the innermost of those and the one a user stays on — the arrow keys, Home, End
+  and Page Up/Down all work from it, so it is where Tab leaves somebody who
+  wants to move about the clip.
+
+`EditorEvents.test.tsx` asserts that list **whole**, as a single comparison
+rather than a search for one element in it, so a control added to the editor
+without a decision about where it belongs fails a test instead of quietly
+reordering the screen. `EditorScreen.test.tsx` asserts the same order for a clip
+with no events, where the filters and marks are absent.
+
 ## The Settings screen
 
 SPEC.md sections 10, 12, 15, 27 and 34, and
@@ -1346,7 +1459,23 @@ accordion, no toast and no tooltip, because no screen in the deck has one
 (AGENTS.md section 1). Two patterns the deck does use are not here either — the
 Library's underlined tab strip and the export dialog's selectable preset chips —
 and [issue #215](https://github.com/wildware-uk/clipped/issues/215) covers them
-with the screen that first needs them. Five screens are now written and none
+with the screen that first needs them. **The export dialog has since been
+written and deliberately has no chips**: the presets they would select are
+resolution, framerate, codec and quality, none of which the export engine can
+honour — see [The export dialog](#the-export-dialog). So #215's chips are now
+waiting on the first screen that has something to select, which is not this one.
+
+The dialog is the one part of the set that is also a **component**,
+`Dialog` in `@clipped/ui`. Its classes are in `components.css` with the rest;
+what the component adds is the behaviour no class can carry and that every
+dialog has to have the same way (AGENTS.md section 46) — the `dialog` role and
+an accessible name taken from the title on screen, Escape, focus moving in when
+it opens and back to whatever opened it when it closes, and Tab cycling inside
+it. It is not built on the platform's `<dialog>` and `showModal()`, which would
+give all of that for nothing: jsdom 27, the environment every test here runs in,
+does not implement `showModal`, so a dialog built on it would be non-modal and
+always visible in tests and every assertion about modality would be an
+assertion about nothing. Five screens are now written and none
 needed either — the Settings rail draws `role="tab"` buttons, but that is the
 rail pattern below rather than the deck's underlined strip: the tab strip belongs
 to the per-game detail view behind the game list, which #245 has to land first,
@@ -1367,7 +1496,7 @@ They are not from the reference pages, which have no screen in them:
 | `.clipped-code` | Text somebody types or finds in a file: a settings key, a path, a command |
 | `.clipped-path` | A file path, printed in full: monospaced, and broken anywhere, because a Windows path has no spaces to break at. It sets no size, so it takes whatever block it sits in, and no colour, so it is the window's own ink |
 | `.clipped-screen__report` | A block of machine-written text a person is meant to read before sending it on: the Diagnostics screen's support report. Monospaced, on the card ground, wrapping rather than scrolling and with no height limit |
-| `.clipped-editor__*`, `.clipped-timeline__*` | The Editor's timeline — see below |
+| `.clipped-editor__*`, `.clipped-timeline__*` | The Editor's timeline — see below. `.clipped-editor__header` carries the clip's name and Export, and `.clipped-editor__reasons` is the export dialog's list of what decides an export; both are the Editor's, and neither sets a colour |
 
 **Every screen written so far consumes the component layer** — Home, Library,
 Games, Editor, Settings, Playback and Diagnostics, between them `.clipped-table`,

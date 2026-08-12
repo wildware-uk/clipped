@@ -361,6 +361,47 @@ impl fmt::Display for SettingValue {
     }
 }
 
+/// The user's decision about an entry, as it was applied to that entry.
+///
+/// Held on the entry it changed rather than kept in a list beside it, so that
+/// anything holding an [`Entry`] — a settings screen listing games, a
+/// diagnostics screen explaining a match — can say *why* it reads the way it
+/// does without having to consult a second structure and get the join right.
+///
+/// The entry keeps its shipped shape underneath: only [`Entry::name`] is
+/// replaced, and [`Self::renamed_from`] is what it was, so "reset to the name
+/// Clipped ships" is an offer a screen can make without knowing anything else.
+/// See [`super::decision`] for why a rename and an exclusion are stored this way
+/// rather than as a replacement entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedDecision {
+    pub(crate) path: PathBuf,
+    pub(crate) renamed_from: Option<String>,
+    pub(crate) excluded: bool,
+}
+
+impl AppliedDecision {
+    /// The user's file the decision was read from.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The name the entry had before the user renamed it.
+    ///
+    /// `None` when the decision did not rename anything.
+    #[must_use]
+    pub fn renamed_from(&self) -> Option<&str> {
+        self.renamed_from.as_deref()
+    }
+
+    /// Whether the user asked for this game never to be recorded.
+    #[must_use]
+    pub const fn is_excluded(&self) -> bool {
+        self.excluded
+    }
+}
+
 /// One game, as the catalogue knows it.
 ///
 /// The field list is SPEC.md section 6's, in the order it gives them.
@@ -376,6 +417,7 @@ pub struct Entry {
     pub(crate) default_settings: BTreeMap<String, SettingValue>,
     pub(crate) highlight_providers: Vec<String>,
     pub(crate) source: EntrySource,
+    pub(crate) decision: Option<AppliedDecision>,
 }
 
 impl Entry {
@@ -451,5 +493,32 @@ impl Entry {
     #[must_use]
     pub const fn source(&self) -> &EntrySource {
         &self.source
+    }
+
+    /// What the user decided about this game, where they decided anything.
+    #[must_use]
+    pub const fn decision(&self) -> Option<&AppliedDecision> {
+        self.decision.as_ref()
+    }
+
+    /// Whether the user asked for this game never to be recorded.
+    ///
+    /// An excluded entry stays in the catalogue — it is still listed, still
+    /// found by [`super::Catalogue::find_by_id`], and still names sessions
+    /// recorded before the user excluded it — and simply never matches a
+    /// process ([`super::matching`]).
+    #[must_use]
+    pub fn is_excluded(&self) -> bool {
+        self.decision
+            .as_ref()
+            .is_some_and(AppliedDecision::is_excluded)
+    }
+
+    /// The name the user replaced, where they renamed this game.
+    #[must_use]
+    pub fn renamed_from(&self) -> Option<&str> {
+        self.decision
+            .as_ref()
+            .and_then(AppliedDecision::renamed_from)
     }
 }

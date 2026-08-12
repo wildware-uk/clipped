@@ -26,12 +26,35 @@
 //!   "game": { "kind": "known", "game_id": "counter-strike-2", "name": "Counter-Strike 2" },
 //!   "started_at": "2026-08-11T14:32:05+01:00",
 //!   "ended_at": null,
-//!   "recordings": [ … ],
+//!   "recordings": [ { …, "settings": { … } } ],
 //!   "clips": [],
 //!   "bookmarks": [],
 //!   "events": [ … ]
 //! }
 //! ```
+//!
+//! Each recording carries the settings it was made with, and where each of them
+//! came from:
+//!
+//! ```json
+//! "settings": {
+//!   "resolution": { "value": "2560x1440", "source": "game" },
+//!   "framerate":  { "value": "60",        "source": "global" }
+//! }
+//! ```
+//!
+//! It is per recording rather than per session because that is where the answer
+//! can differ — a session that spans a settings change holds one recording made
+//! at the old settings and one at the new — and it is kept at all because
+//! "why is this game's file 1440p when the global settings say 1080p" is a
+//! question a log that has rotated away can no longer answer
+//! ([issue #61](https://github.com/wildware-uk/clipped/issues/61)).
+//!
+//! The key was added after the schema shipped, and the version is deliberately
+//! unchanged: a reader of version 1 that does not know the key ignores it, and
+//! every other field means exactly what it did. `docs/sessions.md` says the
+//! same, and says that a file written by an older build has no `settings` on
+//! its recordings — which is not the same as a recording made at the defaults.
 //!
 //! `clips` and `bookmarks` are reserved and are **always empty in this build**.
 //! Nothing here can create either, and for two different reasons now. A clip
@@ -60,6 +83,7 @@
 //! `std::fs::rename` replaces the destination on Windows, which is the whole
 //! reason this is two steps rather than one.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -71,6 +95,7 @@ use super::clock;
 use super::session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEvent, SessionEventKind,
 };
+use crate::config::{ResolvedSettings, SettingKey};
 
 /// The version of the sidecar schema.
 ///
@@ -198,6 +223,23 @@ struct SidecarRecording<'a> {
     end_reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<&'a str>,
+    /// What this recording was made with, and which layer each answer came
+    /// from. See [`SidecarSetting`].
+    settings: BTreeMap<&'static str, SidecarSetting>,
+}
+
+/// One effective setting, as a session's record keeps it.
+///
+/// The value *and* its source, because the two answer different questions. The
+/// value is what the recording was made with, which is what somebody comparing
+/// two files of the same game wants. The source is why — "this game overrode
+/// it" against "it followed the global settings" — which is what makes a
+/// surprising recording explicable months later without the log that has since
+/// rotated away (`docs/logging.md`).
+#[derive(Debug, Serialize)]
+struct SidecarSetting {
+    value: String,
+    source: &'static str,
 }
 
 impl<'a> SidecarRecording<'a> {
@@ -214,6 +256,7 @@ impl<'a> SidecarRecording<'a> {
             height: None,
             end_reason: None,
             detail: None,
+            settings: settings_of(recording.settings()),
         };
 
         match recording.outcome() {
@@ -238,6 +281,27 @@ impl<'a> SidecarRecording<'a> {
 
         written
     }
+}
+
+/// Every setting a recording was made with, keyed as the settings file keys
+/// them.
+///
+/// The same names `settings.json` uses, and the same spelling of each value
+/// (`crate::config::ResolvedSettings::written_value`), so that a session's
+/// record can be read against the file that produced it without translation.
+fn settings_of(settings: &ResolvedSettings) -> BTreeMap<&'static str, SidecarSetting> {
+    SettingKey::ALL
+        .into_iter()
+        .map(|key| {
+            (
+                key.name(),
+                SidecarSetting {
+                    value: settings.written_value(key),
+                    source: settings.source_of(key).token(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// The token a recording's end reason is written as.
@@ -354,10 +418,38 @@ mod tests {
 
     use super::*;
     use crate::automatic::session::SessionEndReason;
+    use crate::config::{Configuration, GameKey, Preferences, ResolutionSetting};
     use crate::report::EndReason;
 
     fn at(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    /// Counter-Strike 2 at 1440p, on a machine whose global frame rate is 144.
+    ///
+    /// Two layers rather than one, so that what is written can be shown to
+    /// carry *where* each answer came from and not only what it was.
+    fn resolved() -> ResolvedSettings {
+        let mut configuration = Configuration::defaults();
+
+        let mut global = Preferences::none();
+        global
+            .set_framerate(Some(144))
+            .expect("144 is an acceptable frame rate");
+        configuration.set_global(global);
+
+        let mut game = Preferences::none();
+        game.set_resolution(Some(ResolutionSetting::Fixed {
+            width: 2560,
+            height: 1440,
+        }))
+        .expect("1440p is an acceptable size");
+        configuration.set_game(
+            GameKey::parse("counter-strike-2").expect("a valid identifier"),
+            game,
+        );
+
+        configuration.resolve_for(&GameKey::parse("counter-strike-2").expect("a valid identifier"))
     }
 
     fn session() -> Session {
@@ -378,6 +470,7 @@ mod tests {
         session.begin_recording(
             1,
             PathBuf::from(r"D:\clips\clipped-a.mkv"),
+            resolved(),
             at(1_786_458_725),
         );
         session.end_recording(
@@ -422,6 +515,34 @@ mod tests {
                 .ends_with("clipped-a.mkv"),
             "{recording}"
         );
+    }
+
+    #[test]
+    fn a_recording_carries_the_settings_it_was_made_with_and_where_each_came_from() {
+        // The question this answers months later is "why is this game's file
+        // 1440p when my settings say source?" — and the answer is only useful
+        // if the *source* of each value is there too, because "the game
+        // overrode it" and "it followed the global settings" are different
+        // things to go and change.
+        let settings = &written()["recordings"][0]["settings"];
+
+        assert_eq!(settings["resolution"]["value"], Value::from("2560x1440"));
+        assert_eq!(settings["resolution"]["source"], Value::from("game"));
+        assert_eq!(settings["framerate"]["value"], Value::from("144"));
+        assert_eq!(settings["framerate"]["source"], Value::from("global"));
+        assert_eq!(settings["codec"]["value"], Value::from("auto"));
+        assert_eq!(settings["codec"]["source"], Value::from("default"));
+
+        // Every setting, not the interesting ones: a recording whose record
+        // says nothing about the encoder it was configured for is one nobody
+        // can explain afterwards.
+        for key in SettingKey::ALL {
+            assert!(
+                settings[key.name()]["value"].is_string(),
+                "{} is missing from a recording's settings: {settings}",
+                key.name()
+            );
+        }
     }
 
     #[test]

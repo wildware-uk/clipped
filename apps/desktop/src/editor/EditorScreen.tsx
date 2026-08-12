@@ -79,7 +79,8 @@ const MISSING: readonly Missing[] = [
   },
   {
     does: 'Export the clip to a file',
-    needs: 'The export engine, issue #89, and the export settings, issue #90',
+    needs:
+      'The engine is built (issue #89) and the dialog in front of it says what an export of an open clip would be (issue #90). Starting one needs a command this window does not have. Issue #322',
   },
 ];
 

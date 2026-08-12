@@ -338,6 +338,9 @@ fn write_recordings(
 /// measure.
 struct ExistingRecording {
     recording_id: i64,
+    /// Where the row says the file is, which is **not** where the sidecar says
+    /// it is once the recording has been deleted (`crate::trash`).
+    path: String,
     missing_since: Option<String>,
     deleted_at: Option<String>,
     size_bytes: Option<i64>,
@@ -363,18 +366,30 @@ fn write_recording(
 
     let existing: Option<ExistingRecording> = savepoint
         .prepare(
-            "SELECT recording_id, missing_since, deleted_at, size_bytes FROM recordings \
+            "SELECT recording_id, path, missing_since, deleted_at, size_bytes FROM recordings \
              WHERE session_id = ?1 AND session_index = ?2",
         )?
         .query_row(params![session_id, recording.index], |row| {
             Ok(ExistingRecording {
                 recording_id: row.get(0)?,
-                missing_since: row.get(1)?,
-                deleted_at: row.get(2)?,
-                size_bytes: row.get(3)?,
+                path: row.get(1)?,
+                missing_since: row.get(2)?,
+                deleted_at: row.get(3)?,
+                size_bytes: row.get(4)?,
             })
         })
         .optional()?;
+
+    // A recording in the trash has been moved on purpose, and its row's `path`
+    // is where it was moved *to* — the sidecar still names the location it came
+    // from, which is in `deleted_from`. Writing the sidecar's path here would
+    // lose the only record of where the file actually is and make restoring it
+    // impossible, so the trash keeps its column exactly as ingestion keeps a
+    // favourite (see this module's two-authorities table).
+    let path = match &existing {
+        Some(row) if row.deleted_at.is_some() => row.path.clone(),
+        _ => path,
+    };
 
     let judged = presence::judge(
         file.facts.present,

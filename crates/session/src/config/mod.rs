@@ -61,42 +61,27 @@
 //!
 //! # What reads this, and what does not yet
 //!
-//! Applying a resolved setting to a recording is
-//! [issue #61](https://github.com/wildware-uk/clipped/issues/61), and it is not
-//! this module. `crate::automatic` decides *when* to record and holds no
-//! recording settings at all; its driver — `apps/recorder/src/watch.rs` —
-//! builds one `RecordingPlan` from the `watch` command line and applies it to
-//! every game. What #61 changes is that
-//! [`crate::automatic::RecordingRequest`] carries the game it is for, in
-//! [`GameIdentity`](crate::automatic::GameIdentity), so its driver can ask:
+//! [`crate::automatic`] does, at one moment: when its `SessionManager` asks for
+//! a recording it resolves that game's settings through [`Configuration::resolve_for`]
+//! and hands the answer over on `RecordingRequest::settings`
+//! ([issue #61](https://github.com/wildware-uk/clipped/issues/61)). The answer
+//! is a value and is never re-read, so a settings change during a recording
+//! reaches the next one rather than the encoder that is running.
 //!
-//! ```text
-//! let resolved = match &request.game {
-//!     GameIdentity::Known { game_id, .. } => match GameKey::parse(game_id) {
-//!         Ok(game) => store.current().resolve_for(&game),
-//!         Err(_) => store.current().resolve_global(),
-//!     },
-//!     GameIdentity::Ambiguous { .. } => store.current().resolve_global(),
-//! };
+//! [`ResolvedSettings::apply_to`] is the conversion from what a user configured
+//! into what a recording is told
+//! ([`crate::RecordingSettings`]). Two settings are not part of it and
+//! deliberately: `capture_target` decides which *handle* the caller resolves,
+//! before a recording's target exists, and `replay_window` becomes a
+//! `clipped_replay::ReplayConfig` where a recording opens a replay buffer.
+//! `docs/configuration.md` has the whole of it.
 //!
-//! RecordingSettings::new(target, output)
-//!     .with_resolution(*resolved.resolution().value())
-//!     .with_framerate(resolved.framerate().get())
-//!     .with_codec(*resolved.codec().value())
-//!     .with_encoder(*resolved.encoder().value())
-//! ```
-//!
-//! The two audio selections and the replay window have no field to go into yet
-//! and #61 should not invent one: audio waits on being wired into a session
-//! ([#180](https://github.com/wildware-uk/clipped/issues/180)) and the replay
-//! window becomes a `clipped_replay::ReplayConfig`, which needs the bitrate the
-//! encoder session was opened with. `docs/configuration.md` has the whole of
-//! it.
-//!
-//! Until #61 lands, nothing in the workspace reads this module — which is
-//! stated here rather than left to be discovered, because a configuration API
-//! that looked as though it were in force would be worse than one that admits
-//! it is not (AGENTS.md section 54).
+//! What still does not read this module is `apps/recorder`'s `watch`: it hands
+//! the session manager no configuration and does not apply what it is given, so
+//! a settings file changes nothing about a shipped build's recordings yet. That
+//! is stated here rather than left to be discovered, because a configuration
+//! API that looked as though it were in force would be worse than one that
+//! admits it is not (AGENTS.md section 54).
 //!
 //! Per-game defaults from the game catalogue are a fourth layer that does not
 //! exist yet either: `clipped_game_detection::catalogue::Entry::default_settings`

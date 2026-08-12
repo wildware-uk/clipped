@@ -36,15 +36,20 @@
 //! older Clipped rewriting a file it cannot read is precisely how a user loses
 //! the entries they added on the machine that was up to date.
 
+mod edits;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use clipped_logging::application_directory;
 
-use super::entry::{Entry, EntrySource};
+use super::entry::EntrySource;
 use super::error::CatalogueError;
 use super::schema::{self, Migration};
+use super::Catalogue;
+
+pub use edits::{Overlay, Registration};
 
 /// The file name inside Clipped's per-user directory.
 pub const OVERLAY_FILE_NAME: &str = "games.toml";
@@ -115,12 +120,12 @@ pub(crate) fn load(
     path: &Path,
     target: u32,
     migrations: &[Migration],
-) -> Result<(Vec<Entry>, OverlayStatus), CatalogueError> {
+) -> Result<(Catalogue, OverlayStatus), CatalogueError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok((
-                Vec::new(),
+                Catalogue::default(),
                 OverlayStatus::Absent {
                     path: path.to_owned(),
                 },
@@ -138,14 +143,16 @@ pub(crate) fn load(
         path: path.to_owned(),
     };
     let parsed = schema::parse(&text, &file, target, migrations)?;
-    let entries = parsed.entries;
+    let migrated = parsed.migrated;
+    let overlay = Catalogue::from_parts(parsed.entries, parsed.decisions);
+    let entries = overlay.entries().len();
 
-    let Some(migrated) = parsed.migrated else {
+    let Some(migrated) = migrated else {
         let status = OverlayStatus::Loaded {
             path: path.to_owned(),
-            entries: entries.len(),
+            entries,
         };
-        return Ok((entries, status));
+        return Ok((overlay, status));
     };
 
     let backup = backup_path(path, migrated.from);
@@ -164,9 +171,9 @@ pub(crate) fn load(
         from: migrated.from,
         to: migrated.to,
         backup,
-        entries: entries.len(),
+        entries,
     };
-    Ok((entries, status))
+    Ok((overlay, status))
 }
 
 /// Where the original bytes of a version `from` file are kept.
@@ -202,13 +209,16 @@ mod tests {
     use crate::catalogue::SCHEMA_VERSION;
 
     /// A directory of one test's own, removed when it is dropped.
+    ///
+    /// Shared with `super::edits`'s tests, which write the same kind of file
+    /// into the same kind of place.
     #[derive(Debug)]
-    struct TestDirectory(PathBuf);
+    pub(super) struct TestDirectory(pub(super) PathBuf);
 
     impl TestDirectory {
         /// Named for the test, the process and the thread, so that tests
         /// running in parallel cannot share one.
-        fn new(label: &str) -> Self {
+        pub(super) fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
                 "clipped-catalogue-{label}-{}-{:?}",
                 std::process::id(),
@@ -220,10 +230,15 @@ mod tests {
         }
 
         /// Writes an overlay file into it and returns its path.
-        fn with_overlay(&self, text: &str) -> PathBuf {
-            let path = self.0.join(OVERLAY_FILE_NAME);
+        pub(super) fn with_overlay(&self, text: &str) -> PathBuf {
+            let path = self.path();
             fs::write(&path, text).expect("the overlay can be written");
             path
+        }
+
+        /// Where an overlay in it would be, whether or not one is there.
+        pub(super) fn path(&self) -> PathBuf {
+            self.0.join(OVERLAY_FILE_NAME)
         }
     }
 
@@ -327,10 +342,10 @@ name = "my-game.exe"
         let directory = TestDirectory::new("absent");
         let path = directory.0.join(OVERLAY_FILE_NAME);
 
-        let (entries, status) =
+        let (overlay, status) =
             load(&path, SCHEMA_VERSION, schema::MIGRATIONS).expect("no file is fine");
 
-        assert!(entries.is_empty());
+        assert!(overlay.entries().is_empty());
         assert_eq!(status, OverlayStatus::Absent { path });
     }
 
@@ -339,11 +354,11 @@ name = "my-game.exe"
         let directory = TestDirectory::new("current");
         let path = directory.with_overlay(CURRENT);
 
-        let (entries, status) =
+        let (overlay, status) =
             load(&path, SCHEMA_VERSION, schema::MIGRATIONS).expect("a current overlay loads");
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name(), "My Game");
+        assert_eq!(overlay.entries().len(), 1);
+        assert_eq!(overlay.entries()[0].name(), "My Game");
         assert_eq!(
             status,
             OverlayStatus::Loaded {
@@ -364,11 +379,11 @@ name = "my-game.exe"
         let directory = TestDirectory::new("migrated");
         let path = directory.with_overlay(OLDER);
 
-        let (entries, status) = load(&path, 2, &[RENAME]).expect("the migration runs");
+        let (overlay, status) = load(&path, 2, &[RENAME]).expect("the migration runs");
 
-        assert_eq!(entries.len(), 1);
+        assert_eq!(overlay.entries().len(), 1);
         assert_eq!(
-            entries[0].name(),
+            overlay.entries()[0].name(),
             "My Game",
             "the migrated entry should carry the converted field"
         );
@@ -412,9 +427,9 @@ name = "my-game.exe"
 
         // Deliberately out of order in the list: the chain is followed by
         // matching each step's `from`, not by the order somebody wrote them.
-        let (entries, status) = load(&path, 3, &[MARK, RENAME]).expect("both steps run");
+        let (overlay, status) = load(&path, 3, &[MARK, RENAME]).expect("both steps run");
 
-        assert_eq!(entries[0].name(), "My Game (v3)");
+        assert_eq!(overlay.entries()[0].name(), "My Game (v3)");
         assert!(
             matches!(
                 status,
@@ -436,8 +451,8 @@ name = "my-game.exe"
 
         // Target 2 with both steps available: the 2-to-3 step must not run, or
         // the file would end up claiming a version this build does not read.
-        let (entries, _) = load(&path, 2, &[RENAME, MARK]).expect("only the first step runs");
-        assert_eq!(entries[0].name(), "My Game");
+        let (overlay, _) = load(&path, 2, &[RENAME, MARK]).expect("only the first step runs");
+        assert_eq!(overlay.entries()[0].name(), "My Game");
         assert!(fs::read_to_string(&path)
             .expect("the file is there")
             .contains("schema_version = 2"));

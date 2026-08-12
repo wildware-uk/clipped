@@ -23,9 +23,14 @@
 //!   ([issue #83](https://github.com/wildware-uk/clipped/issues/83)) both ask
 //!   several thousand times per clip and must never answer differently.
 //! - **Editing it.** Trimming the ends, splitting at the playhead, deleting a
-//!   section and undoing any of it: [`operations`] and [`history`]. Every one
-//!   of them is arithmetic over the same two kinds of time, and none of them
-//!   goes anywhere near a recording.
+//!   section, changing what each audio track sounds like, and undoing any of
+//!   it: [`operations`] and [`history`]. Every one of them is arithmetic over
+//!   the same two kinds of time, and none of them goes anywhere near a
+//!   recording.
+//! - **The mix.** What each audio track of the export is fed by, how loud it
+//!   is, whether it is silenced and how it fades: [`audio`]. Soloing a track is
+//!   deliberately *not* part of the document — it is [`Solo`], which the editor
+//!   holds while it listens.
 //! - Validation: what makes a document readable at all, checked on the way in
 //!   and on the way out.
 //! - The encoding, its version, and the migration of documents written by an
@@ -43,10 +48,10 @@
 //! cannot rewrite one. `tests/sources_are_never_touched.rs` asserts it against
 //! the source of this crate rather than trusting this paragraph.
 //!
-//! **The rest of the edits.** [`operations`] covers what [issue
-//! #84](https://github.com/wildware-uk/clipped/issues/84) asks for and stops
-//! there: changing the mix is
-//! [#85](https://github.com/wildware-uk/clipped/issues/85), framing and speed
+//! **The rest of the edits.** [`operations`] covers what issues
+//! [#84](https://github.com/wildware-uk/clipped/issues/84) and
+//! [#85](https://github.com/wildware-uk/clipped/issues/85) ask for and stops
+//! there: framing and speed are
 //! [#86](https://github.com/wildware-uk/clipped/issues/86), overlays
 //! [#87](https://github.com/wildware-uk/clipped/issues/87) and combining
 //! recordings [#88](https://github.com/wildware-uk/clipped/issues/88). The
@@ -100,7 +105,8 @@
 //!
 //! ```
 //! use clipped_edit::{
-//!     EditDocument, EditOperation, OutputTime, RecordingId, SourceSpan, SourceTime,
+//!     AudioTrack, EditDocument, EditOperation, OutputTime, RecordingId, SourceId, SourceSpan,
+//!     SourceTime, TrackInput, TrackOutput,
 //! };
 //!
 //! // Twelve seconds of a recording, starting thirty seconds in.
@@ -129,6 +135,21 @@
 //!     .locate(OutputTime::ZERO)
 //!     .expect("the clip now starts where the trim did");
 //! assert_eq!(placement.source_time, SourceTime::from_nanos(32_000_000_000));
+//!
+//! // And Discord was too loud, which is a slider rather than a re-record.
+//! let mixed = document
+//!     .with_audio_track(AudioTrack::new(
+//!         "Discord",
+//!         vec![TrackInput::new(SourceId::new(0), 2)],
+//!     ))
+//!     .apply(EditOperation::SetTrackGain {
+//!         track: 0,
+//!         gain_db: -8.0,
+//!     })?;
+//! assert_eq!(
+//!     mixed.track_output(0),
+//!     Some(TrackOutput::Audible { gain_db: -8.0 })
+//! );
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -145,7 +166,7 @@ pub mod source;
 pub mod time;
 pub mod timeline;
 
-pub use audio::{AudioTrack, TrackInput, TrackOutput};
+pub use audio::{AudioTrack, Solo, TrackInput, TrackOutput};
 pub use document::EditDocument;
 pub use error::{DocumentProblem, EditDocumentError, OperationRefused};
 pub use framing::{AspectRatio, CropRect, Rotation};

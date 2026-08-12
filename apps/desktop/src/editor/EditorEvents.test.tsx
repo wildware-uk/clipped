@@ -1,5 +1,5 @@
 import { cleanup, render, screen, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { storedDocument } from '../test/editDocumentFixture';
@@ -80,6 +80,46 @@ function filters(): readonly { readonly label: string; readonly pressed: string 
       label: button.textContent ?? '',
       pressed: button.getAttribute('aria-pressed'),
     }));
+}
+
+/**
+ * How the focused element reads, for the tab-order assertions.
+ *
+ * A mark carries its whole name in `aria-label` and has no text at all, so the
+ * label is preferred; every other control is read by its words.
+ */
+function focusedName(): string {
+  const element = document.activeElement;
+  if (element === null || element === document.body) {
+    return '(none)';
+  }
+  return element.getAttribute('aria-label') ?? element.textContent ?? '(unnamed)';
+}
+
+/**
+ * Every stop in the editor's tab order, in order.
+ *
+ * Asserted **whole** rather than probed one stop at a time. This component is
+ * where two features' controls meet — the export dialog's button (#90) and this
+ * issue's filters and marks — and the order between them is a decision recorded
+ * in `docs/desktop-ui.md`, not a consequence of which branch merged last. A
+ * control added to the editor without a place in that order changes this list
+ * and fails here, which is the point of comparing the list rather than hunting
+ * for one element in it.
+ */
+async function tabOrder(user: UserEvent): Promise<readonly string[]> {
+  const stops: string[] = [];
+  // Tab wraps back through the body at the end, which is the terminator. The
+  // cap only means a focus trap fails as a wrong list rather than as a test
+  // that never returns.
+  for (let stop = 0; stop < 32; stop += 1) {
+    await user.tab();
+    if (document.activeElement === null || document.activeElement === document.body) {
+      break;
+    }
+    stops.push(focusedName());
+  }
+  return stops;
 }
 
 describe('events on the timeline', () => {
@@ -174,16 +214,53 @@ describe('events on the timeline', () => {
     expect(position()).toBe('00:11.000 of 00:24.000');
   });
 
-  it('reaches every mark with the keyboard', async () => {
+  it('puts every control of the editor in one documented order', async () => {
+    const user = userEvent.setup();
+    render(
+      <EditorScreen
+        clip={storedDocument()}
+        events={[event('kill', 34), event('kill', 95), event('death', 35)]}
+      />,
+    );
+
+    /*
+     * The whole order, top to bottom, which is the order the screen is drawn
+     * in:
+     *
+     * - **Export first.** It is drawn first, in the header beside the clip's
+     *   title, and focus order follows visual order. Sending the whole-document
+     *   action to the end would make a keyboard user's focus jump from the
+     *   bottom of the screen back to the top.
+     * - then the timeline's own controls, outermost inwards: the zoom, the kind
+     *   filters, the marks themselves.
+     * - **the playhead last**, because it is the innermost thing and the one a
+     *   user stays on: the arrow keys, Home, End and Page Up/Down all work from
+     *   there, so it is where a keyboard user wants to be left.
+     *
+     * Zoom out and Fit are disabled at the first zoom step, so neither is a tab
+     * stop; that is why the zoom contributes one entry and not three.
+     */
+    expect(await tabOrder(user)).toEqual([
+      'Export…',
+      'Zoom in',
+      'Kill (2)',
+      'Death (1)',
+      'Kill at 00:04.000, reported by counter-strike-2',
+      'Death at 00:05.000, reported by counter-strike-2',
+      'Kill at 00:11.000, reported by counter-strike-2',
+      'Playhead',
+    ]);
+  });
+
+  it('reaches every mark with the keyboard, and seeks with Enter', async () => {
     const user = userEvent.setup();
     render(<EditorScreen clip={storedDocument()} events={[event('kill', 34)]} />);
 
-    // Zoom out and Fit are disabled at the first zoom step, so the tab order
-    // follows the screen: Zoom in, the kind toggle under it, then the mark.
+    // The fourth stop, by the order above: Export, Zoom in, the kind toggle,
+    // then the mark.
     await user.tab();
-    expect(document.activeElement).toHaveTextContent('Zoom in');
     await user.tab();
-    expect(document.activeElement).toHaveTextContent('Kill (1)');
+    await user.tab();
     await user.tab();
     expect(document.activeElement).toHaveAttribute(
       'aria-label',
@@ -237,7 +314,9 @@ describe('the event filter', () => {
     const user = userEvent.setup();
     renderWithEvents();
 
-    // Past Zoom in, which is the first control the screen offers.
+    // Past Export and Zoom in, which are the two controls drawn above the
+    // filters; the whole order is asserted once, above.
+    await user.tab();
     await user.tab();
     await user.tab();
     expect(document.activeElement).toHaveTextContent('Kill (2)');

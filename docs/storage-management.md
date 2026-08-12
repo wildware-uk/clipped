@@ -7,21 +7,32 @@ storage a product feature: a user configures a maximum size, a minimum amount of
 free disk space and a maximum recording age, and expects the figures they are
 shown to be the truth about their own disk.
 
-This document covers the part of that which exists today: **storage
-accounting** — measuring what the library occupies, attributing it, and saying
-whether the configured limits are met. It lives in
-[`crates/library/src/accounting`](../crates/library/src/accounting)
-([issue #93](https://github.com/wildware-uk/clipped/issues/93)).
+Two parts of that exist today, in two modules that deliberately know nothing
+about each other:
 
-**Nothing described here deletes anything.** That is deliberate and it is the
-line the module is built around. Acting on a breached limit is
-[issue #111](https://github.com/wildware-uk/clipped/issues/111), the trash and
-its retention are [issue #94](https://github.com/wildware-uk/clipped/issues/94),
-and the screen that shows all of it is
+- **Storage accounting** — measuring what the library occupies, attributing it,
+  and saying whether the configured limits are met. It lives in
+  [`crates/library/src/accounting`](../crates/library/src/accounting)
+  ([issue #93](https://github.com/wildware-uk/clipped/issues/93)) and is the
+  first half of this document.
+- **The trash** — what deleting a recording actually does, how long it is
+  recoverable for, and what restoring it puts back. It lives in
+  [`crates/library/src/trash`](../crates/library/src/trash)
+  ([issue #94](https://github.com/wildware-uk/clipped/issues/94)) and is
+  ["The trash"](#the-trash) below.
+
+**Nothing in accounting deletes anything**, and that is the line that module is
+built around. Acting on a breached limit is
+[issue #111](https://github.com/wildware-uk/clipped/issues/111) and the screen
+that shows all of it is
 [issue #95](https://github.com/wildware-uk/clipped/issues/95). Recordings are
 irreplaceable (AGENTS.md section 56), so the code that measures them and the code
 that removes them are different modules in different tickets, and the measuring
 one has no capability to delete.
+
+The trash is what makes #111 defensible. Automatic cleanup deletes recordings on
+the user's behalf, on a schedule nobody watches, and that is only an acceptable
+thing to build if there is a way back from it.
 
 ## Where it lives, and why not in `clipped-storage`
 
@@ -362,7 +373,7 @@ inventory, where the settings screen can write "your D: drive is not connected"
 from it. A path a user can see about their own machine is not a path a diagnostic
 bundle should carry.
 
-## How it is tested
+## How accounting is tested
 
 `cargo test -p clipped-library` — no window, no GPU, no audio device, and no
 installed game. The filesystem tests build a small library of their own under the
@@ -387,3 +398,225 @@ The cost harness is an executable that writes thousands of files and then
 removes what it wrote, so it **refuses a `--path` that already exists**. Pointed
 at a real library it would otherwise have deleted it, and recordings are
 irreplaceable (AGENTS.md section 56).
+
+## The trash
+
+SPEC.md section 28: deleting footage moves it into an application trash, a
+configurable retention decides how long it stays, and it can be restored until
+then. [`crates/library/src/trash`](../crates/library/src/trash) is that
+([issue #94](https://github.com/wildware-uk/clipped/issues/94)).
+
+It is the load-bearing half of M12. Everything else in this milestone either
+measures the disk or removes things from it on the user's behalf, and the second
+of those is only defensible because of this.
+
+### What "in the trash" means physically
+
+**The file is moved, on the same volume, with a rename.** It goes to
+`<trash>\<when it was deleted>\<its own name>`; its row keeps existing, and
+`path`, `deleted_at` and `deleted_from` say where it is now, when it went and
+where it came from. That schema was written for this in
+[#55](https://github.com/wildware-uk/clipped/issues/55) and reconciliation has
+respected it since [#56](https://github.com/wildware-uk/clipped/issues/56): a row
+in the trash is left alone, because its file being absent from where it used to
+be is the expected outcome of a deletion rather than a discovery.
+
+The decision matters because of *when* the code runs. Automatic cleanup runs on a
+disk that is nearly full, which rules two of the three plausible answers out:
+
+| Answer | Consequence on a nearly-full drive |
+| --- | --- |
+| Marked in place, file untouched | **Nothing is reclaimed.** A user who deletes 40 GB to make room and sees no change in free space has been lied to, and #111 deletes *to make room* |
+| Copied into the trash, then unlinked | **Needs as much free space as the file**, on the one occasion when there is none, and holds two copies of a recording while a machine already in trouble decides what to do |
+| **Moved with a rename** | Costs no space and no time whatever the file's size: a rename within a volume rewrites a directory entry and never touches the data |
+
+The rename is also what makes "restored byte for byte" a property of the
+filesystem rather than a promise this code makes. The bytes are never read,
+copied or rewritten at any point between a delete and a restore.
+
+Its one limitation is that a rename cannot cross a volume, so a library spread
+over two drives needs a trash on each. That is refused explicitly, with a message
+naming both drives, rather than silently becoming a copy. Two paths can also
+share a drive letter and still be on two volumes — a directory can be a mount
+point — and only the rename finds that out, so the operating system's own
+`ERROR_NOT_SAME_DEVICE` is translated into the same message rather than surfacing
+as "the system cannot move the file to a different disk drive".
+
+**Each file gets a directory of its own** inside the trash, named for the moment
+it was deleted (`20260812-091500`, with a counter when a second already has one).
+The alternative — renaming the file itself to something unique — would lose the
+name the user recognises, which is the name the trash screen has to show and the
+name a restore has to put back.
+
+The trash directory must not sit inside the recordings directory: `StorageRoots`
+refuses that overlap, because a trash inside a root it measures would be walked
+twice and the total would be wrong in the direction that makes a cleanup delete
+more than it needed to. It also **counts towards the quota** — the category table
+above says so, and the reasoning is the same one: footage in the trash still
+occupies the disk.
+
+### Retention, and what happens when it expires
+
+The four values SPEC.md section 28 names, and no fifth:
+
+| Setting | Kept for |
+| --- | --- |
+| Immediately | Expires the moment it is deleted |
+| 3 days | 3 days |
+| 7 days | 7 days — the default |
+| 30 days | 30 days |
+
+Seven days is the default because SPEC.md names none, and an unset setting must
+not be the one that destroys. A stored number outside the four is refused rather
+than rounded to the nearest, so a hand-edited settings file cannot install a
+retention this code would not have offered (AGENTS.md section 30). Persisting the
+choice belongs to the configuration API,
+[issue #108](https://github.com/wildware-uk/clipped/issues/108), and
+`Retention::from_days` is the route back in.
+
+When retention expires, a sweep destroys the item: the file is unlinked and **the
+row is deleted**. That is the only place in `clipped-library` that removes a row.
+It is deliberate — an entry that can never be restored, played or acted on is not
+a record of anything — and the schema's `ON DELETE` rules were written for this
+moment: a clip outlives the recording it came from (`source_recording_id` becomes
+`NULL`), and the session is never touched.
+
+Three things bound it, and they are what make an automatic sweep something to
+build rather than something to fear:
+
+- **A sweep is always an explicit call.** Nothing here runs on a timer, so the
+  moment footage is destroyed is a moment the application chose.
+- **It reaches only rows that are already in the trash.** The list it works from
+  is `WHERE deleted_at IS NOT NULL`.
+- **A `deleted_at` that cannot be read never expires.** A row that was
+  hand-edited or restored from a corrupt backup would otherwise be destroyed on
+  the strength of a value nothing understands.
+
+"Immediately" means *expires the instant it is deleted*, not *unlinked by the
+delete itself*. There is one code path rather than two, the file is still
+recoverable until the next sweep, and a user who chose the setting that keeps
+nothing still gets the few minutes in which they realise.
+
+### What restore does
+
+| The original location | What happens |
+| --- | --- |
+| Free | The file goes back to it exactly, and the row with it |
+| Its folder has been deleted | The folder is recreated, and the file goes back to it |
+| **Occupied by another file** | The file goes back *beside* it as `name (restored).mkv`, and the outcome says it was diverted |
+| On a drive that is not there | The move fails, nothing changes, and the item is still in the trash |
+| The trash file has gone (emptied in Explorer) | The row is restored and reports that no file came with it |
+
+Overwriting is never an option. Whatever is at the original location is a file
+the user did not ask to lose — most often the same recording put back from a
+backup — and destroying it to make room for a restore is exactly the deletion
+nobody asked for. The free name is *claimed* by creating an empty file at it
+rather than by asking whether one is there, because `MoveFileExW` replaces an
+existing destination and a check followed by a rename would overwrite a file that
+appeared in between.
+
+Everything the user put on the item comes back with it — its favourite, its tags,
+its bookmarks, the clips cut from it — because the row was never removed. That is
+the whole reason deleting marks a row instead of dropping one.
+
+One interaction is easy to get wrong and is tested for that reason. A session
+sidecar still names the location a recording came from, and reconciliation
+rewrites every column it is authoritative for; `path`, which now points into the
+trash, has to be one it leaves alone. Ingestion therefore keeps the path of a row
+in the trash exactly as it keeps a favourite (`crates/library/src/index/ingest.rs`
+lists the three authorities). Without that, re-indexing would lose the only
+record of where the deleted file is and no restore would work afterwards.
+
+### The Windows Recycle Bin's role: none
+
+Asked on [issue #103](https://github.com/wildware-uk/clipped/issues/103), where
+`clipped-recorder recover --discard` faced the same question, and answered here.
+Clipped never sends anything to the Recycle Bin, for reasons that get worse the
+larger the file is:
+
+- **It silently destroys large files.** The Recycle Bin has a per-volume size cap,
+  around 5% of the volume by default. A file larger than the cap is *permanently
+  deleted* rather than recycled. A recording is the largest file on most machines,
+  so the case the Recycle Bin would be there to protect is the case it does not.
+- **It evicts silently too.** Recycling one large recording can push older items
+  out of the bin to stay under the cap, so deleting one thing would destroy
+  another.
+- **It is not everywhere.** Network shares and some removable media have no
+  Recycle Bin, so a library kept on one would need this trash anyway — and two
+  mechanisms that both mean "thrown away" is worse than one that is explicit.
+- **Its retention is not the user's.** SPEC.md section 28 offers 3, 7 and 30 days;
+  the Recycle Bin offers whatever Windows decides. A restore made from Explorer
+  would also put a file back with the index still saying it was deleted.
+- **It needs `IFileOperation`, a COM surface with thread affinity**, for a
+  behaviour that is worse than the one it would replace.
+
+What the Recycle Bin does keep is its place as the *user's* tool. Recordings are
+ordinary files in an ordinary folder (AGENTS.md section 32), so somebody who
+deletes one in Explorer gets Windows' behaviour, and Clipped's reconciliation
+notices the file has gone and marks the row rather than removing it.
+
+### Never delete anything a user did not ask to delete
+
+Four interlocks, each in one place so that each can be reviewed:
+
+- **Only the trash's own files can be unlinked.** One function in the crate calls
+  `remove_file` on media, and it refuses a path that is not inside the trash
+  directory — the path is compared component by component and case-insensitively,
+  the same comparison `StorageRoots` uses, so `C:\Videos2` is not treated as
+  living inside `C:\Videos`.
+- **Only something already in the trash can be destroyed.** Permanent deletion
+  refuses an item whose `deleted_at` is unset, so no single call can reach a
+  recording the library still holds.
+- **Emptying the trash is confirmed against what the user was shown.** The
+  confirmation carries the count and the total size from the listing the
+  dialogue quoted, and emptying refuses if the trash has changed since. A boolean
+  would satisfy "requires explicit confirmation" literally and mean nothing: the
+  interesting failure is not that the code forgot to ask but that the user agreed
+  to destroy the twelve things they were looking at and something else arrived
+  before they clicked.
+- **The file wins over the row.** If the move succeeds and the database then
+  refuses the change, the file is moved back before the error is returned. An
+  index can be rebuilt from the session sidecars beside the recordings; a
+  recording cannot be rebuilt from anything. The one state that needs a person —
+  two filesystem failures in a row, so the file could not be put back either — is
+  reported as an error naming both paths rather than logged and forgotten.
+
+### Where the trash runs
+
+Synchronously, on a thread the caller owns, and **never a capture thread**: a
+rename is a filesystem call (AGENTS.md section 20). Every database statement is a
+single one, so each is its own transaction and the database's one writer is never
+held for longer than a row update — a sweep of a hundred expired items is a
+hundred short writes rather than one long one, and a recorder with something to
+write waits for at most a row.
+
+Every path the trash logs goes through `RedactedPath`, for the reason
+[logging.md](logging.md) gives: a recording's path names the account and the
+folders somebody chose.
+
+### How the trash is tested
+
+`cargo test -p clipped-library` — no window, no GPU, no audio device, no
+installed game and no waiting. The libraries are built under the system temporary
+directory by the **real indexer** from a real session sidecar, so the rows the
+operations act on are the rows a running Clipped would have.
+
+Three properties are worth naming because they are what stop these tests being
+decorative:
+
+- **Retention is tested with controlled timestamps.** Both the moment of deletion
+  and "now" are values the test chooses, so a seven-day retention is exercised at
+  six days and at eight without a second of waiting (AGENTS.md section 25).
+- **"Byte for byte" is a real comparison.** The recordings are written with
+  pseudo-random content rather than zeroes, so two files of the same length do
+  not compare equal by accident.
+- **"It still plays" is `ffprobe`'s answer, not this code's.** One test writes a
+  real Matroska file with the pinned FFmpeg build, deletes it, restores it, and
+  hands the result to `clipped-media-validation` (AGENTS.md section 22). It skips
+  cleanly on a checkout with no `ffmpeg.exe`, and `CLIPPED_REQUIRE_MEDIA` turns
+  that skip into a failure, which is how CI is configured.
+
+The compensating move — the file being put back when the index refuses the change
+— is provoked rather than described: the test opens the database read-only, which
+answers the query and refuses the update, and then asserts that the recording is
+back where it was with the same bytes in it.

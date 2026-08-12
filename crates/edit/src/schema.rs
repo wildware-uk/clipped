@@ -68,8 +68,11 @@ use crate::error::EditDocumentError;
 
 /// The version of the edit document format.
 ///
-/// Version 1 is the first there has ever been.
-pub const SCHEMA_VERSION: u32 = 1;
+/// | Version | What changed |
+/// | --- | --- |
+/// | 1 | The first there has ever been ([issue #82](https://github.com/wildware-uk/clipped/issues/82)) |
+/// | 2 | An audio track no longer carries `soloed` ([issue #85](https://github.com/wildware-uk/clipped/issues/85)) |
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The key the version is stored under, read before anything else is trusted.
 const VERSION_KEY: &str = "schema_version";
@@ -101,19 +104,50 @@ impl core::fmt::Debug for Migration {
 }
 
 /// Every step this build knows, in no required order.
+pub(crate) const MIGRATIONS: &[Migration] = &[SOLO_IS_NOT_AN_EDIT];
+
+/// Version 1 to 2: a solo is the editor listening, not part of the clip.
 ///
-/// **Empty, and correctly so: version 1 is the first version there has ever
-/// been, so no document older than the current schema exists anywhere.**
-/// Writing a speculative migration for a version that never shipped would be
-/// inventing history.
+/// Version 1 stored `soloed` on each audio track, which made "listening to the
+/// microphone on its own" a property of the saved document — so a clip could be
+/// exported with every other track silent because the user had left a solo on,
+/// and two soloed tracks were a state the format could express and nobody had
+/// defined. [Issue #85](https://github.com/wildware-uk/clipped/issues/85) moved
+/// it out to [`Solo`](crate::Solo), which the editor holds and no document
+/// carries.
 ///
-/// What is not speculative is the machinery that will run them, which is why
-/// [`migrate`] exists now and is tested now, against migration lists the tests
-/// supply themselves — the same decision `clipped-game-detection` made for the
-/// game catalogue, and for the same reason: the first time a migration runs
-/// must not be the first time the code around it does. When version 2 arrives,
-/// the change is an entry here and a function.
-pub(crate) const MIGRATIONS: &[Migration] = &[];
+/// The conversion therefore **drops the flag**. It is the only honest one: a
+/// solo describes a moment of somebody's editing session and not the clip, so
+/// there is nothing in a version 2 document for it to become. Turning it into
+/// mutes on the other tracks would silence material the user never asked to
+/// lose, which is the opposite of AGENTS.md section 56 — and the level, the
+/// mute and the fades of every track, which *are* the edit, come through
+/// untouched.
+const SOLO_IS_NOT_AN_EDIT: Migration = Migration {
+    from: 1,
+    to: 2,
+    apply: drop_solo,
+};
+
+/// Removes `soloed` from every audio track of a version 1 document.
+///
+/// Silent about anything that is not an audio track carrying the key: a
+/// document shaped differently is refused by the deserialiser afterwards, with
+/// a message about the shape rather than one from in here.
+fn drop_solo(document: &mut Map<String, Value>) -> Result<(), String> {
+    let Some(tracks) = document
+        .get_mut("audio_tracks")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    for track in tracks {
+        if let Some(track) = track.as_object_mut() {
+            track.remove("soloed");
+        }
+    }
+    Ok(())
+}
 
 /// A document, and whether reading it converted anything.
 #[derive(Debug, Clone, PartialEq)]
@@ -267,17 +301,62 @@ mod tests {
         document().write().expect("a valid document writes")
     }
 
-    /// The same document in a hypothetical version 1 that called `title`
-    /// `name`.
+    /// The same document in a hypothetical format that called `title` `name`.
     ///
-    /// There has never been such a version — version 1 is the first — so this
-    /// is a fixture rather than history, exactly as the game catalogue's
-    /// migration tests use one. What it exercises is real: the version check,
-    /// the chain, the refusal to convert what it cannot, and the validation of
-    /// the result are the code that will run when version 2 arrives.
+    /// No shipped version has ever called it that, so this is a fixture rather
+    /// than history — exactly as the game catalogue's migration tests use one.
+    /// It is what lets the *machinery* be tested against conversions the test
+    /// owns both ends of: the chain, the refusal to convert what it cannot, the
+    /// step that would overshoot, and the validation of the result.
+    /// [`a_version_one_document_is_converted_by_the_migration_this_build_ships`]
+    /// covers the real conversion.
     fn older_text() -> String {
-        current_text().replace(r#""title""#, r#""name""#)
+        current_text().replace(r#""title""#, r#""name""#).replace(
+            &format!(r#""schema_version": {SCHEMA_VERSION}"#),
+            r#""schema_version": 1"#,
+        )
     }
+
+    /// A document as version 1 wrote one, with a solo saved into its mix.
+    ///
+    /// Written out rather than derived from what this build produces, because
+    /// the point of it is the shape this build no longer writes.
+    const VERSION_ONE: &str = r#"{
+      "schema_version": 1,
+      "title": "Ace",
+      "aspect_ratio": null,
+      "sources": [{ "id": 0, "recording": "rec-1" }],
+      "segments": [
+        {
+          "source": 0,
+          "span": { "start": 0, "end": 10000000000 },
+          "speed": { "numerator": 1, "denominator": 1 },
+          "crop": null,
+          "rotation": "none"
+        }
+      ],
+      "audio_tracks": [
+        {
+          "name": "Game",
+          "inputs": [{ "source": 0, "stream": 0 }],
+          "gain_db": -3.5,
+          "muted": false,
+          "soloed": false,
+          "fade_in": 0,
+          "fade_out": 1000000000
+        },
+        {
+          "name": "Microphone",
+          "inputs": [{ "source": 0, "stream": 1 }],
+          "gain_db": 0.0,
+          "muted": true,
+          "soloed": true,
+          "fade_in": 0,
+          "fade_out": 0
+        }
+      ],
+      "overlays": []
+    }"#;
 
     /// Renames `name` back to `title`.
     fn rename_name_to_title(document: &mut Map<String, Value>) -> Result<(), String> {
@@ -525,12 +604,95 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_migration_list_is_empty_because_version_one_is_the_first() {
-        assert!(
-            MIGRATIONS.is_empty(),
-            "a migration from a version that never shipped is invented history"
+    fn a_version_one_document_is_converted_by_the_migration_this_build_ships() {
+        // The real conversion, through the real list: a version 1 document
+        // carrying `soloed` on its tracks opens, says it was converted, and
+        // arrives with the mix it described — minus the solo, which was never
+        // part of the clip (`crate::audio`).
+        let loaded = EditDocument::read(VERSION_ONE).expect("a version 1 clip still opens");
+
+        assert_eq!(loaded.migrated, Some(Migrated { from: 1, to: 2 }));
+        assert_eq!(loaded.document.schema_version(), SCHEMA_VERSION);
+        assert_eq!(loaded.document.audio_tracks.len(), 2);
+        assert_eq!(loaded.document.audio_tracks[0].gain_db, -3.5);
+        assert_eq!(
+            loaded.document.audio_tracks[0].fade_out,
+            core::time::Duration::from_secs(1)
         );
-        assert_eq!(SCHEMA_VERSION, 1);
+        assert!(
+            loaded.document.audio_tracks[1].muted,
+            "a mute is an edit and survives the conversion"
+        );
+
+        let text = loaded
+            .document
+            .write()
+            .expect("the converted document is one this build can store");
+        assert!(
+            !text.contains("solo"),
+            "the converted document must not carry a solo anywhere: {text}"
+        );
+    }
+
+    #[test]
+    fn a_version_one_document_that_left_the_solo_out_converts_just_the_same() {
+        // `soloed` had a default, so a version 1 document need not carry it.
+        // The step has to be silent about that rather than refusing.
+        let without = VERSION_ONE
+            .replace(r#""soloed": false,"#, "")
+            .replace(r#""soloed": true,"#, "");
+
+        let loaded = EditDocument::read(&without).expect("it opens");
+        assert_eq!(loaded.migrated, Some(Migrated { from: 1, to: 2 }));
+        assert_eq!(loaded.document.audio_tracks.len(), 2);
+    }
+
+    #[test]
+    fn a_version_one_document_is_refused_without_the_step_that_converts_it() {
+        // The evidence that the assertions above are the migration's work and
+        // not `serde` shrugging at a key it does not know: with no step from 1,
+        // the same text is refused rather than read.
+        let error =
+            read(VERSION_ONE, SCHEMA_VERSION, &[]).expect_err("there is no route to version 2");
+
+        assert!(
+            matches!(
+                error,
+                EditDocumentError::MigrationMissing { from: 1, to: 2 }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn every_shipped_migration_advances_the_version_and_stops_at_this_one() {
+        for step in MIGRATIONS {
+            assert!(
+                step.to > step.from,
+                "{step:?} does not advance the version, so the walk would not end"
+            );
+            assert!(
+                step.to <= SCHEMA_VERSION,
+                "{step:?} lands past the version this build reads"
+            );
+        }
+        // Every version there has ever been needs a route to this one, or a
+        // document somebody saved is a document they cannot open. Walked
+        // rather than counted, because the chain is not assumed to be single
+        // increments anywhere else either.
+        for version in 1..SCHEMA_VERSION {
+            let mut current = version;
+            while let Some(step) = MIGRATIONS
+                .iter()
+                .find(|step| step.from == current && step.to <= SCHEMA_VERSION)
+            {
+                current = step.to;
+            }
+            assert_eq!(
+                current, SCHEMA_VERSION,
+                "a document in format {version} gets as far as {current} and no further"
+            );
+        }
     }
 
     #[test]

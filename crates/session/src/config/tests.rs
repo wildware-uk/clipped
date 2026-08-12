@@ -13,6 +13,9 @@ use clipped_encoder::{Codec, EncoderKind};
 use clipped_hotkeys::HotkeyAction;
 
 use super::*;
+use crate::settings::{
+    AudioSourceSetting, CaptureTargetSettings, RecordingSettings, UnavailableChoice,
+};
 
 /// A directory of this test's own, removed when it is dropped.
 ///
@@ -966,6 +969,130 @@ fn saving_creates_the_directory_and_replaces_the_previous_file() {
         !Path::new(&nested.with_extension("json.tmp")).exists(),
         "the temporary file must not be left behind"
     );
+}
+
+#[test]
+fn every_setting_a_game_was_given_reaches_the_recording_it_is_made_with() {
+    // A setting that resolves and is then dropped on the way to the recording
+    // is a control that silently does nothing (AGENTS.md section 27), and
+    // `apply_to` is the only place one could be lost.
+    let mut configuration = Configuration::defaults();
+    let mut preferences = Preferences::none();
+    preferences
+        .set_resolution(Some(ResolutionSetting::Fixed {
+            width: 2560,
+            height: 1440,
+        }))
+        .expect("1440p is in range");
+    preferences
+        .set_framerate(Some(120))
+        .expect("120 is in range");
+    preferences.set_codec(Some(CodecPreference::Fixed(Codec::Av1)));
+    preferences.set_encoder(Some(EncoderPreference::Fixed(EncoderKind::Nvenc)));
+    preferences
+        .set_microphone(Some(AudioDeviceSetting::Named("Yeti".to_owned())))
+        .expect("a device name in range");
+    preferences
+        .set_system_audio(Some(AudioDeviceSetting::Disabled))
+        .expect("nothing is a valid selection");
+    configuration.set_game(game("counter-strike-2"), preferences);
+
+    let recording = configuration
+        .resolve_for(&game("counter-strike-2"))
+        .apply_to(RecordingSettings::new(
+            CaptureTargetSettings::window(0x1234, 2560, 1440),
+            PathBuf::from("out.mkv"),
+        ));
+
+    assert_eq!(
+        recording.resolution(),
+        ResolutionSetting::Fixed {
+            width: 2560,
+            height: 1440
+        }
+    );
+    assert_eq!(recording.framerate(), 120);
+    assert_eq!(recording.codec(), CodecPreference::Fixed(Codec::Av1));
+    assert_eq!(
+        recording.encoder(),
+        EncoderPreference::Fixed(EncoderKind::Nvenc)
+    );
+    assert_eq!(
+        recording.microphone(),
+        &AudioSourceSetting::Named("Yeti".to_owned())
+    );
+    assert_eq!(
+        recording.system_audio(),
+        &AudioSourceSetting::Off,
+        "\"none\" must turn the source off rather than record the default endpoint"
+    );
+    assert_eq!(
+        recording.unavailable_choice(),
+        UnavailableChoice::Substitute
+    );
+}
+
+#[test]
+fn what_a_recording_asks_for_when_nothing_was_configured_is_what_it_already_did() {
+    // The promise that a user who has configured nothing sees no change. Every
+    // video setting a resolved default asks for is the one a recording already
+    // carried.
+    let base = RecordingSettings::new(
+        CaptureTargetSettings::window(0x1234, 1280, 720),
+        PathBuf::from("out.mkv"),
+    );
+    let applied = Configuration::defaults()
+        .resolve_global()
+        .apply_to(base.clone());
+
+    assert_eq!(applied.resolution(), base.resolution());
+    assert_eq!(applied.framerate(), base.framerate());
+    assert_eq!(applied.codec(), base.codec());
+    assert_eq!(applied.encoder(), base.encoder());
+    assert_eq!(applied.output(), base.output());
+    assert_eq!(applied.target(), base.target());
+
+    // The two that deliberately differ, and the difference is not a change to
+    // any product behaviour: `RecordingSettings` defaults both audio sources
+    // off so that a library caller which says nothing does not have somebody's
+    // microphone opened behind its back, while the settings — like
+    // `clipped-recorder record` and `watch`, whose `--microphone` and
+    // `--system-audio` both default to `default` — record the default
+    // endpoints unless told otherwise.
+    assert_eq!(applied.microphone(), &AudioSourceSetting::SystemDefault);
+    assert_eq!(applied.system_audio(), &AudioSourceSetting::SystemDefault);
+}
+
+#[test]
+fn the_settings_a_recording_was_made_with_read_back_in_the_words_the_file_uses() {
+    // What a log line and a session's record are written from. A second
+    // spelling of "hevc" or of a device name would make a session's record
+    // impossible to compare against the file that produced it.
+    let mut configuration = Configuration::defaults();
+    let mut preferences = Preferences::none();
+    preferences.set_codec(Some(CodecPreference::Fixed(Codec::Hevc)));
+    preferences
+        .set_resolution(Some(ResolutionSetting::Fixed {
+            width: 1920,
+            height: 1080,
+        }))
+        .expect("1080p is in range");
+    configuration.set_game(game("counter-strike-2"), preferences);
+
+    let resolved = configuration.resolve_for(&game("counter-strike-2"));
+
+    assert_eq!(resolved.written_value(SettingKey::Codec), "hevc");
+    assert_eq!(resolved.written_value(SettingKey::Resolution), "1920x1080");
+    assert_eq!(resolved.written_value(SettingKey::Framerate), "60");
+    assert_eq!(resolved.written_value(SettingKey::Microphone), "default");
+    assert_eq!(resolved.written_value(SettingKey::ReplayWindow), "300");
+
+    // And the one line the recording writes into the log carries every setting
+    // with the layer it came from, because "why was it recorded like that" is
+    // not answerable from the values alone.
+    let described = resolved.to_string();
+    assert!(described.contains("codec=hevc (game)"), "{described}");
+    assert!(described.contains("framerate=60 (default)"), "{described}");
 }
 
 #[test]
