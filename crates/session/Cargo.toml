@@ -46,6 +46,29 @@ clipped-game-detection.workspace = true
 # types only; producing events is `clipped-plugins`' and persisting them is
 # `clipped-storage`'s.
 clipped-events.workspace = true
+# What a clip *is* once a rule has decided a moment is worth one:
+# `clipped_library::VirtualClip` — an edit document plus the event that caused
+# it — and `window_around`, the one conversion from an event's moment to a
+# range of a file (`docs/highlights.md`). `src/highlights/generate.rs` is the
+# join between the two halves, and this crate is where it belongs: the layer
+# table in docs/architecture.md puts the highlight engine's *rules* here, and
+# generation is the rule about which source a clip comes from, what it is
+# called and whether it already exists. `clipped-library` is layer 1 and this
+# crate is layer 4, so the dependency points down; the reverse would put the
+# recording engine underneath the media library.
+#
+# It is a real addition to what `apps/recorder` links — the library brings the
+# SQLite binding with it — and it is the direction the recorder was going
+# anyway: indexing a session's sidecars into the library index (#56) is the
+# recorder's job, not the desktop's, which links `clipped-ipc` and nothing else
+# (ADR 0002). Nothing in generation opens a database, a file or a socket.
+clipped-library.workspace = true
+# The vocabulary a clip's range is written in: `RecordingId` and `SourceSpan`.
+# A virtual clip is an edit document, so naming one means naming the document
+# model's types; `clipped-library` does not re-export them and a wrapper here
+# would be a second name for the same thing (AGENTS.md section 55). Layer 0,
+# holds no application logic and performs no I/O.
+clipped-edit.workspace = true
 # What a hotkey binding is. `src/config` holds the hotkey layer of the
 # configuration, because a binding is a setting like any other and the ticket
 # that defines the configuration API (#108) names them; the dependency points

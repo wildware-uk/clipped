@@ -99,11 +99,22 @@
 //! has to be, and how a firefight's worth of events becomes one highlight
 //! rather than twenty overlapping ones. It resolves through the same
 //! three-layer fold [`config`] uses, so a game's rules inherit the global ones.
-//! It creates nothing: generating the clips is
-//! [issue #76](https://github.com/wildware-uk/clipped/issues/76), and the
-//! settings file does not carry the rules yet
+//! The settings file does not carry those rules yet
 //! ([issue #290](https://github.com/wildware-uk/clipped/issues/290)), so today
 //! every caller resolves the shipped defaults.
+//!
+//! And the clips themselves: [`highlights::HighlightGeneration`] turns each of
+//! those moments into a `clipped_library::VirtualClip` of the recording that
+//! holds it, titled after what happened and tagged by kind ([issue
+//! #76](https://github.com/wildware-uk/clipped/issues/76)). **It writes no
+//! file** — a highlight costs metadata rather than disk, and rendering one is an
+//! export ([issue #89](https://github.com/wildware-uk/clipped/issues/89)) — and
+//! it works from the recordings a session has *finished*, so it is never
+//! something a capture thread waits for (AGENTS.md section 20). Nothing in this
+//! workspace calls it yet: no game event reaches a session, and a clip with no
+//! file cannot be stored until the `clips` table has its migration ([issue
+//! #269](https://github.com/wildware-uk/clipped/issues/269)), so a generated
+//! highlight does not reach a user's library today.
 //!
 //! # Threading
 //!

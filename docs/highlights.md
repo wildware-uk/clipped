@@ -1,19 +1,23 @@
 # Highlights and virtual clips
 
-**Status: the virtual clip model and the highlight rules exist and are tested;
-nothing creates, stores or lists a clip yet.**
+**Status: the virtual clip model, the highlight rules and generation exist and
+are tested; nothing stores or lists a clip yet.**
 `crates/library/src/virtual_clip.rs` defines what a clip *is* before anything
-has been exported, and `crates/session/src/highlights/` decides which moments
-deserve one ([#75]). Generating them from a session's events is [#76], the two
-capture modes built on them are [#77] and [#78], and creating one by hand from
-the timeline is [#91]. This document is the specification all of them are held
-to.
+has been exported, `crates/session/src/highlights/` decides which moments
+deserve one ([#75]), and `crates/session/src/highlights/generate.rs` turns those
+moments into the clips themselves ([#76]). What is still missing is either end
+of that: nothing delivers a game event to a session and nothing can persist a
+clip that has no file ([#269]), so a generated highlight does not yet reach a
+user's library. The two capture modes built on the same rules are [#77] and
+[#78], and creating a clip by hand from the timeline is [#91]. This document is
+the specification all of them are held to.
 
 [#75]: https://github.com/wildware-uk/clipped/issues/75
 [#290]: https://github.com/wildware-uk/clipped/issues/290
 [#76]: https://github.com/wildware-uk/clipped/issues/76
 [#77]: https://github.com/wildware-uk/clipped/issues/77
 [#78]: https://github.com/wildware-uk/clipped/issues/78
+[#35]: https://github.com/wildware-uk/clipped/issues/35
 [#55]: https://github.com/wildware-uk/clipped/issues/55
 [#56]: https://github.com/wildware-uk/clipped/issues/56
 [#59]: https://github.com/wildware-uk/clipped/issues/59
@@ -128,9 +132,10 @@ The rules live in `crates/session/src/highlights/`, which is where the layer
 table in [architecture.md](architecture.md) puts the highlight engine's policy
 half: `clipped-events` is the vocabulary, `clipped-session` is what decides
 anything about it. They take a list of `GameEvent`s and produce the ranges that
-would be worth keeping. They create nothing — no clip, no file, no row, no
-title — which is why the whole of this behaviour is tested against constructed
-event streams with no game, no GPU and no recording.
+would be worth keeping. The rules themselves create nothing — no clip, no file,
+no row, no title; making the clips is `generate.rs`, below — which is why the
+whole of this behaviour is tested against constructed event streams with no
+game, no GPU and no recording.
 
 A rule set answers three questions per event kind, and two about the set:
 
@@ -235,16 +240,197 @@ from. No build has written it, so the only older shape is its absence, and
 absence means every rule is inherited — which is exactly what an unconfigured
 user gets. It carries no version of its own, because the settings file has one.
 
-## What #76 will produce
+## Generating a session's highlights
 
-For each event the rules select, generation produces exactly this and writes
-nothing:
+`clipped_session::highlights::HighlightGeneration` ([#76]) is the end of the
+detection chain: the step that turns the merged moments into clips. For each
+moment the rules chose it produces exactly this and writes nothing:
 
 ```rust
-let window = window_around(event.timing().at(), lead, trail, &recorded)?;
+let window = window_around(highlight.start(), Duration::ZERO, highlight.duration(), &recorded)?;
 let clip = VirtualClip::of_range(title, recording, window, ClipOrigin::Highlight(cause))
     .with_tag(event.kind().as_str());
 ```
+
+It takes three things and asks the library for nothing: the rules resolved for
+the game being recorded, the recordings the session has **finished**, and the
+clips the library already holds for it. Everything below follows from those
+three.
+
+### It writes no file, and automatic generation never will
+
+This is the decision the ticket turns on, and the reason is not the encoder
+time. A virtual clip costs zero bytes, so a session's twenty interesting moments
+cost twenty rows of metadata rather than twenty renders of footage the user
+already has. Writing them out would also do two things nothing asked for:
+
+- **It spends the user's disk.** The storage quota ([#93]) is the budget they
+  set for the footage they chose to keep, and automatic cleanup ([#111]) deletes
+  the oldest unprotected recordings once that budget is reached. A recorder that
+  wrote a gigabyte of highlights after every session would fill the budget with
+  copies and then delete the originals to make room for them.
+- **It renders what nobody will watch.** Nineteen of the twenty will never be
+  opened twice. Rendering is [#89]'s, at the moment somebody asks for a file and
+  at the quality they ask for; a generated highlight is already an edit
+  document, so exporting one needs no import step.
+
+`crates/session/tests/generating_highlights_writes_nothing.rs` holds it to that
+three ways: it scans `generate.rs` for any means of opening a file or waiting on
+anything, compares a directory byte for byte before and after a session's clips
+are generated in it, and measures the cost.
+
+### Which source a clip comes from
+
+**A file the session finished writing, and never the replay buffer.**
+
+A highlight is detected while the game is being played, so the material may
+still be in the rolling buffer ([#35]) rather than on disk. Taking it from there
+is not a cheaper version of this: the packets are in memory and about to be
+evicted, so keeping one means *writing a file at that moment*
+([replay-buffer.md](replay-buffer.md)) — which is the thing generation
+deliberately does not do. That save is a capture mode rather than generation:
+Highlights Only ([#77]) is the ticket whose whole purpose is that the buffer is
+all there is.
+
+So a moment no finished file of the session covers produces no clip, and the
+reason says which of the four cases it was. **And that is also the answer to
+"what if the buffer has already evicted it":** nothing is generated. By the time
+anything could ask, the memory has been overwritten; there is no file to point
+at, and pointing at one that does not contain the kill it claims would be a
+marker the user cannot check (AGENTS.md section 27). A session running the
+buffer alone reports `NothingRecorded` for every moment it heard.
+
+A merged window can reach past the end of the file it is cut from — into the gap
+before the session's next recording, or into the next recording itself. It is
+clamped to that file rather than split across two, because a clip drawing on
+several recordings is [#88]. The file chosen is the one holding the moment the
+clip is *named* after, which is the earliest event in it.
+
+**What the clip was clamped away from, it does not claim.** The title and the
+tags are made from the events inside the clip's own range and from nothing else,
+so a clip that ends before the death that followed the kill is `Kill at 1:45`
+and tagged `kill` — not `Kill, death`, which would promise footage it does not
+contain. Each event left outside is reported as `OutsideTheClip`, and is *not*
+recorded as having been clipped: when the recording that does hold it has been
+finished, that moment is still owed a clip.
+
+### When it runs, and why nothing can stall the recording
+
+After a recording has been finished, on whatever thread the caller likes, and
+never on the one that is capturing (AGENTS.md section 20). That is not a
+convention that could erode: the input is a list of `RecordedSegment`s, and a
+segment is a file *and the span it covers*, which is only known once the file
+has been closed. A session halfway through its second recording therefore
+generates the first one's highlights now and the second one's when that file
+ends — which is what "during or after a session" means here.
+
+Generation opens nothing, takes no lock and waits on nothing, so it cannot cost
+a recording a frame even if a caller runs it on the wrong thread. The test above
+asserts that against the module's source rather than against this paragraph.
+
+### Titles and tags
+
+A title is made of what the events say and nothing more: which kinds happened,
+how many of each, and **when the first of them happened**, as a position in the
+file.
+
+```text
+Kill ×3 at 20:05
+Kill ×2, assist at 1:00
+Objective taken, flag captured at 1:00
+```
+
+The timecode is the moment of the event the title names first, not the first
+frame of the clip. A clip keeps fifteen seconds before a kill, so timing the
+title from where it opens would call a kill at 10:00 `Kill at 9:45` — a time
+nothing happened at, and the wrong number to read back to somebody comparing the
+clip with a scoreboard or a demo. It is measured from the *file*, so a kill
+twenty minutes into a session that was saved from the replay buffer is ten
+seconds into the clip that holds it.
+
+The kinds are in the order things happened. A plugin's own name is namespaced —
+`acme-cs2.flag_captured` — and the namespace is how the vocabulary stays collision-free rather than
+something to show somebody, so a title uses the part after it and an underscore
+reads as a space. Nothing is inferred beyond counting: three kills close
+together is `Kill ×3` and not `Triple kill`, because Clipped does not know that
+game's word for it and inventing one would put a claim in the user's library
+that nothing checked. A title is capped at 96 characters, because an event kind
+read back from storage is whatever text was stored.
+
+The **tags** are the wire spelling of every distinct kind the clip contains —
+`kill`, `acme-cs2.flag_captured` — because a tag is what a search filters on
+rather than what a person reads, and a clip of three kills is tagged `kill`
+once.
+
+### Re-running it produces nothing
+
+Generation is idempotent against the clips a session already has: hand back what
+it produced last time and it produces nothing new, however many times it runs.
+Two rules do it, and both are needed.
+
+- **An event is clipped once.** A moment one of whose causes is already the
+  reason a generated clip exists is `AlreadyGenerated`. This is what covers an
+  event that arrives late and joins a firefight that already has a clip.
+- **Generated clips of a recording never overlap.** When the rules have changed
+  between runs and the same events now merge differently, a range covering
+  seconds an existing generated clip covers is `OverlapsAnExistingClip`. This is
+  the merge's own invariant — no two highlights overlap — extended across runs,
+  and it is what stops "regenerate" from being the way a library fills with
+  near-identical clips.
+
+Neither rule deletes or rewrites anything. A clip the user already has is
+theirs, and regenerating after changing a rule leaves it alone (AGENTS.md
+section 56); getting the new window means deleting the old clip first. A clip
+the user made **by hand** takes no part in either rule: it is not a generated
+clip, and the library filters on `ClipOrigin` for exactly this kind of question.
+
+### What is not generated is reported
+
+Every moment the rules chose either becomes a clip or appears in `withheld()`
+with the event it would have been named after and the reason there is no clip;
+so does every event a clip was clamped away from. A caller can therefore say
+"four of these five kills are on this file and the fifth happened before the
+recording started" rather than quietly producing four (AGENTS.md sections 15 and
+27). The reasons are:
+
+| Reason | What happened |
+| --- | --- |
+| `NotRecorded(…)` | No finished file of the session covers the moment — one of `NothingRecorded`, `BeforeTheFirstRecording`, `BetweenRecordings`, `AfterTheLastRecording` |
+| `AlreadyGenerated` | One of the moment's events is already the reason a generated clip exists |
+| `OverlapsAnExistingClip` | The range covers seconds a generated clip of the same recording covers |
+| `NothingToCut` | The part of the moment inside the file has no length |
+| `OutsideTheClip` | This event is part of a moment that *was* clipped, and the clip stopped at the end of the file before reaching it |
+
+Events the *rules* did not select never reach
+generation at all — `ResolvedHighlightRules::decision_for` is what says why for
+one of those, and it says it in four different ways.
+
+### What generation costs
+
+Measured on the maintainer's machine, debug build
+(`cargo test -p clipped-session --test generating_highlights_writes_nothing --
+--nocapture`), over a busy three-hour session — 720 events in bursts of four a
+minute apart, which the merge turns into 180 clips:
+
+| | |
+| --- | --- |
+| Generating 180 clips from 720 events | 2.4 ms, **13 µs each** |
+| The same run again, against those 180 clips | 0.3 ms |
+| Bytes of media written | **0** |
+| The 180 clip documents, as text | 101 kB, ~560 bytes each |
+
+The re-run is the more interesting figure, because it is the path that checks
+every moment against every clip the library holds.
+
+The test **prints** those times and does not assert on them. A wall-clock budget
+in a debug build on a shared runner measures the machine rather than the code,
+and a ceiling low enough to catch a regression would fail on a busy afternoon
+(AGENTS.md section 25). What it asserts instead is what the times are evidence
+for, in forms that do not depend on a clock: nothing appears on disk, every clip
+is under a kilobyte of metadata whatever the footage is, and `generate.rs` has
+no means of opening a file or waiting on anything.
+
+### Where the conversion lives
 
 `window_around` is the one place an event's time becomes an edit's time. They
 are the same quantity against the same zero — nanoseconds from the recording's
@@ -271,11 +457,13 @@ It is arithmetic, not policy. Which events are worth a clip, how much lead and
 trail each kind gets, and how a burst of them is merged into one clip are the
 rules above, which produce the `lead` and `trail` passed in — as
 `ResolvedHighlightRules::highlights`, whose `Highlight` carries the merged range
-and the events that caused it. #76's loop is therefore over highlights rather
-than over events, and its `cause` comes from `HighlightCause::of(highlight
-.primary())`.
+and the events that caused it. Generation's loop is therefore over highlights
+rather than over events, and its `cause` comes from
+`HighlightCause::of(highlight.primary())`; the window it passes is the merged
+one, as a lead of nothing and a trail of the whole highlight, because both ends
+have already been decided.
 
-## What it costs
+## What a clip costs
 
 Measured on the maintainer's machine, debug build
 (`cargo test -p clipped-library -- --nocapture`):
