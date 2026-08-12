@@ -63,6 +63,16 @@ rusty_ffmpeg = { version = "0.17.0", features = ["ffmpeg8_1"] }
 # two versions of every trait, so a crate takes it from here. Dual MIT/Apache-2.0.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Calendar dates and calendar arithmetic. Pinned here because two crates now
+# need the same calendar: `clipped-session` names a recording after the moment
+# it started, and `clipped-library` compares the day a `date:` term asks for
+# against the day a row belongs to (docs/search.md). Those two have to agree on
+# what a date is — a session's file name and a search for that day are the same
+# day — and they only do if there is one `time::Date` rather than two crates'
+# worth of leap-year rules. Each crate still chooses its own `features`; the
+# base entry is `default-features = false` so that a crate pays only for what it
+# names. Dual MIT/Apache-2.0.
+time = { version = "0.3", default-features = false }
 # Microsoft's generated bindings to the Windows API, pinned here for a reason
 # specific to them: more than one crate has to reach Windows — `clipped-windows`
 # enumerates windows and monitors today, and capture, audio and encoding each
@@ -106,6 +116,7 @@ clipped-plugins = { path = "crates/plugins", version = "0.1.0" }
 clipped-replay = { path = "crates/replay", version = "0.1.0" }
 clipped-session = { path = "crates/session", version = "0.1.0" }
 clipped-storage = { path = "crates/storage", version = "0.1.0" }
+clipped-waveform = { path = "crates/waveform", version = "0.1.0" }
 clipped-windows = { path = "crates/windows", version = "0.1.0" }
 
 # The media validation harness (tests/media, docs/testing.md). It is listed

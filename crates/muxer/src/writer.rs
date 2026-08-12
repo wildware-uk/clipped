@@ -40,7 +40,7 @@
 //! thread and run it on the muxing thread.
 
 use core::fmt;
-use core::ptr::{self, NonNull};
+use core::ptr;
 use core::time::Duration;
 use std::ffi::{c_int, CString};
 use std::path::{Path, PathBuf};
@@ -49,6 +49,7 @@ use clipped_logging::RedactedPath;
 use rusty_ffmpeg::ffi;
 use tracing::{debug, info, warn};
 
+use crate::av::{OutputContext, PacketSlot};
 use crate::error::{AvError, MuxError};
 use crate::linkage;
 use crate::packet::EncodedPacket;
@@ -95,142 +96,6 @@ const MATROSKA_MUXER: &core::ffi::CStr = c"matroska";
 /// running at tens of megabits does not register. `docs/muxing.md` records the
 /// commands, and what a killed recorder actually recovers with each setting.
 const CLUSTER_TIME_LIMIT_MS: i64 = 1000;
-
-/// A container context, and the file it is writing to.
-///
-/// Both are released here, in one place, so that every early return in
-/// [`MkvWriter::create`] cleans up by returning rather than by remembering to.
-struct FormatContext(NonNull<ffi::AVFormatContext>);
-
-impl FormatContext {
-    /// Allocates an output context for the Matroska muxer.
-    fn allocate_matroska() -> Result<Self, MuxError> {
-        let mut context: *mut ffi::AVFormatContext = ptr::null_mut();
-
-        // SAFETY: `avformat_alloc_output_context2` writes an allocated context
-        // through its first argument, which is a live local. The format is
-        // named by the NUL-terminated literal rather than by a filename, so the
-        // remaining two arguments are legitimately null. On failure it leaves
-        // the pointer null, which is checked below before it is used.
-        let code = unsafe {
-            ffi::avformat_alloc_output_context2(
-                &mut context,
-                ptr::null(),
-                MATROSKA_MUXER.as_ptr(),
-                ptr::null(),
-            )
-        };
-
-        match NonNull::new(context) {
-            // A negative code with a context allocated should not happen, but
-            // trusting the pointer over the code would be a leak at best.
-            Some(context) if code >= 0 => Ok(Self(context)),
-            Some(context) => {
-                // SAFETY: `context` was allocated by the call above and has not
-                // been handed to anything else, so freeing it here is the only
-                // release of it.
-                unsafe { ffi::avformat_free_context(context.as_ptr()) };
-                Err(MuxError::Ffmpeg {
-                    operation: "allocating a Matroska output context",
-                    source: AvError::new(code),
-                })
-            }
-            None => Err(MuxError::Ffmpeg {
-                operation: "allocating a Matroska output context",
-                source: AvError::new(code),
-            }),
-        }
-    }
-
-    /// The context, for passing to FFmpeg.
-    fn as_ptr(&self) -> *mut ffi::AVFormatContext {
-        self.0.as_ptr()
-    }
-
-    /// Opens `url` for writing and attaches it to the context.
-    fn open_output(&mut self, url: &str) -> Result<(), MuxError> {
-        let Ok(url) = CString::new(url) else {
-            // Only reachable from a path containing a NUL, which no filesystem
-            // permits; the caller has a byte string that is not a path.
-            return Err(MuxError::Ffmpeg {
-                operation: "opening the output file",
-                source: AvError::new(-(ffi::EINVAL as i32)),
-            });
-        };
-
-        // SAFETY: `avio_open` writes the opened context through its first
-        // argument, which points at the context's own `pb` field, and reads
-        // `url` as a NUL-terminated string that outlives the call. `pb` is null
-        // beforehand — nothing else assigns it — so nothing is overwritten and
-        // leaked. Ownership of what it writes passes to this value, which
-        // closes it in `Drop`.
-        let code = unsafe {
-            ffi::avio_open(
-                &mut (*self.as_ptr()).pb,
-                url.as_ptr(),
-                ffi::AVIO_FLAG_WRITE as c_int,
-            )
-        };
-
-        if code < 0 {
-            return Err(MuxError::Ffmpeg {
-                operation: "opening the output file",
-                source: AvError::new(code),
-            });
-        }
-        Ok(())
-    }
-}
-
-impl Drop for FormatContext {
-    fn drop(&mut self) {
-        // SAFETY: this value owns both resources and nothing else has a pointer
-        // to either. `avio_closep` flushes and closes the file and nulls the
-        // field, so a context whose output was never opened — an error between
-        // allocating and opening — skips it and frees only the context.
-        unsafe {
-            let context = self.as_ptr();
-            if !(*context).pb.is_null() {
-                ffi::avio_closep(&mut (*context).pb);
-            }
-            ffi::avformat_free_context(context);
-        }
-    }
-}
-
-/// The one packet structure a writer reuses for every packet it writes.
-///
-/// A recorder writes one of these per frame for hours, so it is allocated once
-/// (AGENTS.md section 18). It never owns a payload: the bytes belong to the
-/// caller for the length of the call, and FFmpeg takes its own reference to
-/// them, as [`MkvWriter::write_packet`] explains.
-struct PacketSlot(NonNull<ffi::AVPacket>);
-
-impl PacketSlot {
-    fn allocate() -> Result<Self, MuxError> {
-        // SAFETY: `av_packet_alloc` takes no arguments and returns either null
-        // or a packet this value then owns.
-        let packet = unsafe { ffi::av_packet_alloc() };
-        NonNull::new(packet).map(Self).ok_or(MuxError::Ffmpeg {
-            operation: "allocating a packet",
-            source: AvError::new(-(ffi::ENOMEM as i32)),
-        })
-    }
-
-    fn as_ptr(&self) -> *mut ffi::AVPacket {
-        self.0.as_ptr()
-    }
-}
-
-impl Drop for PacketSlot {
-    fn drop(&mut self) {
-        let mut packet = self.as_ptr();
-        // SAFETY: this value owns the packet and nothing else holds a pointer
-        // to it. `av_packet_free` unreferences whatever the packet holds and
-        // nulls the local pointer.
-        unsafe { ffi::av_packet_free(&mut packet) };
-    }
-}
 
 /// One track of the file being written.
 struct TrackState {
@@ -320,7 +185,7 @@ impl fmt::Display for RecordingSummary {
 /// # fn frame() -> Vec<u8> { Vec::new() }
 /// ```
 pub struct MkvWriter {
-    format: FormatContext,
+    format: OutputContext,
     packet: PacketSlot,
     tracks: Vec<TrackState>,
     audio_tracks: usize,
@@ -395,7 +260,7 @@ impl MkvWriter {
             });
         };
 
-        let mut format = FormatContext::allocate_matroska()?;
+        let mut format = OutputContext::allocate(MATROSKA_MUXER)?;
 
         let mut tracks = Vec::with_capacity(1 + layout.audio_tracks().len());
         let video_index = add_video_stream(&format, layout.video())?;
@@ -441,7 +306,7 @@ impl MkvWriter {
     /// again. `format` is taken by value so that a failure here drops it, and
     /// so closes the file, before the caller tries to delete it.
     fn write_header_and_tracks(
-        format: FormatContext,
+        format: OutputContext,
         tracks: Vec<(TrackId, c_int)>,
         path: &Path,
         layout: &RecordingLayout,
@@ -806,7 +671,7 @@ const fn audio_header_missing(codec: AudioCodec) -> &'static str {
 }
 
 /// Adds the video stream to the context, returning its index.
-fn add_video_stream(format: &FormatContext, track: &VideoTrack) -> Result<c_int, MuxError> {
+fn add_video_stream(format: &OutputContext, track: &VideoTrack) -> Result<c_int, MuxError> {
     if track.width() == 0 || track.height() == 0 {
         return Err(MuxError::InvalidTrack {
             track: TrackId::Video,
@@ -876,7 +741,7 @@ fn add_video_stream(format: &FormatContext, track: &VideoTrack) -> Result<c_int,
 
 /// Adds one audio stream to the context, returning its index.
 fn add_audio_stream(
-    format: &FormatContext,
+    format: &OutputContext,
     id: TrackId,
     track: &AudioTrack,
 ) -> Result<c_int, MuxError> {
@@ -945,7 +810,7 @@ fn add_audio_stream(
 }
 
 /// Adds a stream to the context.
-fn new_stream(format: &FormatContext, id: TrackId) -> Result<*mut ffi::AVStream, MuxError> {
+fn new_stream(format: &OutputContext, id: TrackId) -> Result<*mut ffi::AVStream, MuxError> {
     // SAFETY: the context is live and owns whatever this returns; passing a
     // null codec is the documented way to add a stream that will be described
     // by its `codecpar` rather than by an encoder.
@@ -1069,7 +934,7 @@ fn set_metadata(
 
 /// Writes the container header, with the options that decide how much a crash
 /// can cost.
-fn write_header(format: &FormatContext) -> Result<(), MuxError> {
+fn write_header(format: &OutputContext) -> Result<(), MuxError> {
     let mut options: *mut ffi::AVDictionary = ptr::null_mut();
     let cluster_limit = CString::new(CLUSTER_TIME_LIMIT_MS.to_string()).expect("a decimal number");
 
@@ -1148,20 +1013,9 @@ fn write_header(format: &FormatContext) -> Result<(), MuxError> {
     Ok(())
 }
 
-/// Reads back the time base the muxer fixed a stream at.
-fn stream_time_base(format: &FormatContext, stream_index: c_int) -> Option<TimeBase> {
-    // SAFETY: the context is live and `stream_index` came from
-    // `avformat_new_stream` on this same context, so it indexes a stream the
-    // context still owns. `nb_streams` is checked anyway, because a wrong index
-    // here would read arbitrary memory rather than fail.
-    let time_base = unsafe {
-        let context = format.as_ptr();
-        let index = usize::try_from(stream_index).ok()?;
-        if index >= (*context).nb_streams as usize {
-            return None;
-        }
-        (**(*context).streams.add(index)).time_base
-    };
-
+/// Reads back the time base the muxer fixed a stream at, as this crate's own
+/// fraction.
+fn stream_time_base(format: &OutputContext, stream_index: c_int) -> Option<TimeBase> {
+    let time_base = format.stream_time_base(stream_index)?;
     TimeBase::new(i64::from(time_base.num), i64::from(time_base.den))
 }

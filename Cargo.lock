@@ -283,11 +283,15 @@ dependencies = [
 name = "clipped-library"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "clipped-logging",
  "clipped-storage",
  "serde",
  "serde_json",
  "time",
  "tracing",
+ "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]
@@ -390,6 +394,19 @@ dependencies = [
  "clipped-capture",
  "clipped-media-validation",
  "clipped-windows",
+ "windows",
+]
+
+[[package]]
+name = "clipped-waveform"
+version = "0.1.0"
+dependencies = [
+ "clipped-ffmpeg-runtime",
+ "clipped-logging",
+ "clipped-media-validation",
+ "rusty_ffmpeg",
+ "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 
