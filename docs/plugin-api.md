@@ -1,24 +1,27 @@
 # Plugin API
 
-**Status: half built.** The *event model* — what a plugin reports, how it is
-timed, and how it stays readable for years — exists and is documented below
-([issue #68](https://github.com/wildware-uk/clipped/issues/68),
-`crates/events`). The *plugin contract* — the `HighlightProvider` interface,
-how a plugin is discovered, started, supervised and isolated — does not
-([issue #69](https://github.com/wildware-uk/clipped/issues/69)); `crates/plugins`
-is still module documentation and no code, and the second half of this document
-is the list of what will go there.
-
-That split is deliberate rather than an accident of scheduling. A plugin API is
-a compatibility surface: once it is published, third-party plugins depend on it
-and it cannot be changed casually (AGENTS.md section 43). The event model is the
-part five other issues wait on — the three game integrations
+**Status: written, and nothing uses it yet.** Both halves exist. The *event
+model* — what a plugin reports, how it is timed, and how it stays readable for
+years — is `crates/events`
+([issue #68](https://github.com/wildware-uk/clipped/issues/68)). The *plugin
+contract* — what a plugin is, how one is found, started, supervised and kept
+away from a recording — is `crates/plugins`
+([issue #69](https://github.com/wildware-uk/clipped/issues/69)). What does not
+exist is a plugin: the three game integrations
 ([#70](https://github.com/wildware-uk/clipped/issues/70),
 [#72](https://github.com/wildware-uk/clipped/issues/72),
-[#73](https://github.com/wildware-uk/clipped/issues/73)), persisting events and
-drawing them on a timeline ([#71](https://github.com/wildware-uk/clipped/issues/71)),
-and the automatic highlight rules of M10 — so it is settled first, and
-described here as it is rather than as it might be.
+[#73](https://github.com/wildware-uk/clipped/issues/73)) are written against
+this, and nothing in the recorder attaches a supervisor to a session yet. The
+worked example in this document is `crates/plugins/examples/example_plugin.rs`,
+which is a real plugin that a real supervisor runs in the crate's tests.
+
+The order was deliberate rather than an accident of scheduling. A plugin API is
+a compatibility surface: once it is published, third-party plugins depend on it
+and it cannot be changed casually (AGENTS.md section 43). The event model is the
+part five other issues wait on, so it was settled first; the contract around it
+follows, and both are described here as they are rather than as they might be.
+
+The event model:
 
 - [What the model is for](#what-the-model-is-for)
 - [The event](#the-event)
@@ -30,7 +33,22 @@ described here as it is rather than as it might be.
 - [The stored form](#the-stored-form)
 - [Compatibility policy](#compatibility-policy)
 - [How the three planned integrations map](#how-the-three-planned-integrations-map)
-- [What this document will still cover](#what-this-document-will-still-cover)
+
+The contract:
+
+- [What a plugin is](#what-a-plugin-is)
+- [The manifest](#the-manifest)
+- [Network access, consent, and what enforcement can promise](#network-access-consent-and-what-enforcement-can-promise)
+- [Discovery](#discovery)
+- [The lifecycle](#the-lifecycle)
+- [The wire](#the-wire)
+- [How long ago, not when](#how-long-ago-not-when)
+- [What a misbehaving plugin costs a recording](#what-a-misbehaving-plugin-costs-a-recording)
+- [Supervision and restart](#supervision-and-restart)
+- [Writing a plugin](#writing-a-plugin)
+- [What a plugin may not do](#what-a-plugin-may-not-do)
+- [Versioning the contract](#versioning-the-contract)
+- [What is not built](#what-is-not-built)
 
 ## What the model is for
 
@@ -391,24 +409,441 @@ replay files only. Nothing that resembles injection or memory inspection, no
 matter what it would enable. A user's game account is worth more than a
 highlight.
 
-## What this document will still cover
+## What a plugin is
 
-Written during M9 alongside the code, and treated as the reference a third-party
-plugin author works from:
+**A directory containing a manifest and an executable.** Clipped starts the
+executable when a game it declares support for is launched, tells it about the
+session on its standard input, and reads the events it prints on its standard
+output, one JSON object per line.
 
-- The `HighlightProvider` contract as implemented: its operations, its
-  lifecycle, and what a provider may assume about the session it is attached to
-  ([issue #69](https://github.com/wildware-uk/clipped/issues/69)).
-- Discovery, loading, supervision and isolation: where plugins live, what
-  happens when one crashes, hangs or floods the event channel, and why that must
-  not affect a recording.
-- The permitted integration techniques in detail, and the explicitly forbidden
-  ones (AGENTS.md section 34).
-- Network access by plugins, which must be visible and documented rather than
-  incidental (`SPEC.md` section 39).
-- Versioning of the *contract*, as distinct from the versioning of the event
-  schema settled above, and what a plugin built against an older version can
-  expect.
-- How to write and test a plugin, using the Counter-Strike 2 integration
-  ([issue #70](https://github.com/wildware-uk/clipped/issues/70)) as the worked
-  reference.
+```text
+plugins/counter-strike-2/
+    plugin.json              what it is, what it supports, and what it will do
+                             with the network
+    clipped-cs2-plugin.exe   a program that prints events
+```
+
+That is the decision issue #69 had to make, and it is worth recording what was
+rejected, because this is a compatibility surface.
+
+`SPEC.md` section 22 sketches a `HighlightProvider` interface —
+`supports(process)`, `attach(session)`, `events()`, `detach()` — which reads
+naturally as a Rust trait implemented inside the recorder. Three requirements
+rule that out:
+
+- **A crashing plugin must not touch a recording** (AGENTS.md sections 16 and
+  17). In process, a panic can be caught; an abort, a stack overflow or a
+  corrupted heap cannot, and a plugin fault takes the recorder and the recording
+  with it. Across a process boundary, a plugin crash is an exit code. This is
+  the argument [ADR 0002](adr/0002-separate-recorder-process.md) already made
+  for keeping the recorder out of the window's process, applied one level down.
+- **A hanging plugin must be reclaimable.** The recorder runs for days
+  (AGENTS.md section 59), the likeliest failure of code that talks to a game
+  over a socket is waiting for an answer that never comes, and **a hung thread
+  cannot be killed**. A hung process can. `crates/plugins` tests exactly this:
+  a plugin that says hello and then stops answering is terminated, *and the
+  thread that was reading it ends*, because that thread was blocked on a pipe
+  the dead process was holding.
+- **A network declaration must be able to mean something.**
+  [privacy.md](privacy.md) requires a plugin's network access to be declared and
+  consented to before it runs, and says plainly that an in-process native plugin
+  can never be held to such a declaration. A child process can be — not today,
+  but the mechanism exists and
+  [issue #280](https://github.com/wildware-uk/clipped/issues/280) is where it is
+  applied.
+
+So **there is no `HighlightProvider` trait**. One would be the contract for
+plugins linked into the recorder, which is the model that was rejected, and an
+abstraction with a single implementation whose only real use is the thing it is
+meant to prevent (AGENTS.md section 1). The four operations are all here, as a
+lifecycle rather than a vtable:
+
+| SPEC.md section 22 | Here | When |
+| --- | --- | --- |
+| `supports(process)` | `InstalledPlugin::supports` | Answered from the manifest, before anything runs |
+| `attach(session)` | `PluginSupervisor::attach` | Starts the process, writes `attach` to it |
+| `events()` | `EventReceiver` | A bounded queue the recording drains |
+| `detach()` | `PluginSupervisor::detach` | Writes `detach`, closes its input, kills it if it stays |
+
+The cost is paid honestly: a process per plugin, a pipe, and a line of JSON per
+event. What it buys is a contract that a plugin written in any language can
+meet, and a failure mode for every kind of misbehaviour that ends at a queue.
+
+The decision belongs in an ADR as well as here —
+[issue #279](https://github.com/wildware-uk/clipped/issues/279) — because an ADR
+is where a contributor looks before proposing in-process plugins again.
+
+## The manifest
+
+`plugin.json`, in the plugin's own directory:
+
+```json
+{
+  "contract": 1,
+  "id": "counter-strike-2",
+  "name": "Counter-Strike 2",
+  "version": "0.1.0",
+  "description": "Reports kills, deaths and rounds from Game State Integration.",
+  "executable": "clipped-cs2-plugin.exe",
+  "supports": { "executables": ["cs2.exe"] },
+  "network": [
+    {
+      "class": "loopback",
+      "direction": "listen",
+      "endpoint": "127.0.0.1:3212",
+      "purpose": "receives Counter-Strike 2 game state"
+    }
+  ]
+}
+```
+
+| Field | What it is |
+| --- | --- |
+| `contract` | Which version of *this* contract the plugin was written against. Not the event schema version; see [Versioning the contract](#versioning-the-contract). |
+| `id` | Who it is — and the `source` every event it reports is stamped with, so a mark on a timeline is traceable to the plugin that made it. The syntax is `EventSource`'s, and `clipped` is refused. |
+| `name`, `description` | What the user is shown. One line each, bounded, no control characters: a manifest is another program's data and it is rendered. |
+| `version` | The plugin's own version, for the user and for a bug report. Clipped never compares two of them, because Clipped does not update plugins. |
+| `executable` | One file name, inside the plugin's own directory. Not a path: `..\..\Windows\System32\cmd.exe` would make a plugin directory a way to run anything on the machine under a name the user consented to. |
+| `supports` | The executables this plugin has an integration for, compared without regard to case. |
+| `network` | What it will do with the network. Absent means none, which means none is permitted. |
+
+Two rules about reading it are worth stating because they are the **opposite**
+of the event model's:
+
+- **An unknown field refuses the whole manifest.** A stored event is read
+  leniently because refusing destroys something a user cannot get back. A
+  manifest is a permission document, and a build that ignored a field it had not
+  learned would run a plugin under a narrower declaration than the plugin was
+  written to — a user consenting to the part of it this build happened to
+  understand.
+- **A `contract` this build does not speak is reported as exactly that**, and
+  before anything else in the file is interpreted. A manifest written against a
+  later contract will very likely also carry an unknown field, and sending
+  somebody to look for a typo in a file that is simply newer than their Clipped
+  is the wrong error.
+
+`supports` is answered here rather than by asking the plugin, which is the one
+place this contract deviates from SPEC.md's shape in substance rather than in
+form. Starting a process to ask whether it cares about Notepad would mean every
+launch on the machine starting every installed plugin; and a question answered
+in a file is one the user can see the answer to.
+
+## Network access, consent, and what enforcement can promise
+
+[privacy.md](privacy.md)'s plugin section is the policy; this is how it is
+implemented.
+
+**Declared.** Each grant is a class (`loopback` or `outbound`), a direction
+(`listen` or `connect`), an endpoint and a one-line purpose. The class has to
+match the endpoint: a `loopback` grant naming `0.0.0.0` is refused, because
+binding a wildcard address exposes the socket to the local network and
+privacy.md calls that "outbound access wearing a disguise". An `outbound` grant
+naming `127.0.0.1` is refused too — a declaration the user learns to distrust is
+worse than none.
+
+**Rendered as sentences**, not a permissions grid. `NetworkAccess::summary`
+produces one line per grant:
+
+```text
+Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state
+```
+
+**Consented to as a value.** `ConsentToken` is the canonical text of a
+declaration, and it is what the user's consent is recorded as. An
+`InstalledPlugin` cannot be started; `InstalledPlugin::enable` takes the token
+and returns an `EnabledPlugin` only if it still matches what the plugin
+declares. So a plugin that adds outbound access in an update stops being
+startable until the user is asked again — privacy.md's "the consent lapses",
+enforced by a type rather than by a check somebody has to remember. Grants are
+sorted into the token, so reordering a manifest does not lapse consent and
+changing one does.
+
+**And what that does not promise.** A child process can call the operating
+system whatever its manifest says. `NetworkAccess::ENFORCEMENT` is the sentence
+the plugin manager shows, and it does not overstate the position:
+
+> Clipped shows what a plugin declares and refuses to start one whose
+> declaration has changed since you allowed it. It cannot yet stop a plugin from
+> using the network in ways it did not declare.
+
+Making that stronger is [issue #280](https://github.com/wildware-uk/clipped/issues/280):
+a job object or an AppContainer around the child, which is possible *because* a
+plugin is a process. When it lands, that constant and this section change
+together.
+
+## Discovery
+
+`clipped_plugins::discover` reads a plugins directory and returns two lists:
+what was installed, and what was refused **and why**. Nothing is skipped
+silently (AGENTS.md section 15) — a user who dropped a plugin into that folder
+and cannot see it needs to be told that its manifest names an executable that is
+not there.
+
+Directories are read in sorted order, so two runs of the same machine produce
+the same list. Two plugins declaring the same identifier are not both loaded:
+the first in that order keeps it and the second is refused, because every event
+either of them reported would be attributed to the same name and a user
+disabling one would have no way to tell which.
+
+## The lifecycle
+
+```text
+ recording session                     supervisor                    plugin process
+ ─────────────────                     ──────────                    ──────────────
+ attach(enabled, session) ──────────▶  spawn ─────────────────────▶  {"report":"hello"}
+                                       reader thread  ◀───────────   {"report":"event",…}
+ drain the inbox  ◀───────────────────  bounded queue
+ poll(now)        ──────────────────▶  exited? silent? flooding?
+                                       kill / replace / disable ──▶
+ detach()         ──────────────────▶  detach, then close its input
+```
+
+The session's arrow points one way. It hands over a plugin and then drains a
+queue; it never calls into a plugin and is never given the chance to.
+
+Everything time-based — a plugin that has not introduced itself, one that has
+gone quiet, one whose replacement is due — happens in `PluginSupervisor::poll`,
+which the owner calls with a clock reading, **about once a second, from a thread
+that is not the capture thread**. There is no supervision thread: a state
+machine over a clock reading the caller supplies is testable without waiting for
+anything, which is the same shape and the same reasoning as
+`clipped_session::automatic` ([sessions.md](sessions.md)). One thread per
+*running plugin* is unavoidable and is the one reading its output, because a
+pipe has no timed read.
+
+A supervisor that is not polled costs a recording nothing. Events keep arriving,
+the queue keeps bounding them; what does not happen is a hung plugin being
+reclaimed.
+
+## The wire
+
+One JSON object per line, in both directions. The host writes commands to the
+plugin's standard input; the plugin writes reports to its standard output.
+
+```text
+host  → {"command":"attach","contract":1,"session":{"session":"2026-08-11-cs2",
+         "process":{"executable":"cs2.exe","process_id":4242}}}
+plugin→ {"report":"hello","contract":1}
+plugin→ {"report":"event","kind":"kill","ago_ns":480000000,"precision_ns":100000000,
+         "confidence":1.0,"data":{"weapon":"ak47"}}
+plugin→ {"report":"alive"}
+plugin→ {"report":"problem","message":"Counter-Strike 2 has no gamestate_integration file"}
+host  → {"command":"detach"}
+```
+
+| Report | Meaning |
+| --- | --- |
+| `hello` | The first thing a plugin says, carrying the contract version it speaks. Checked against the manifest as well, because an update can replace an executable without its manifest. |
+| `event` | Something happened. The fields are the event model's, minus the two the plugin does not own. |
+| `alive` | Nothing has happened and the plugin is still there. Required more often than the silence timeout: a game can go a minute without an event, and a host that read silence as health could not tell a quiet plugin from a deadlocked one. |
+| `problem` | Something is wrong that the user can act on. Surfaced rather than logged and forgotten (AGENTS.md section 45). |
+
+**A plugin is told the session's identifier and the process, and nothing else.**
+Not the window title, not the command line, not where recordings are being
+written. A plugin needs enough to find the game's own interface; the rest is
+somebody's private machine.
+
+**There is no `source` field on the wire.** The host stamps it from the
+manifest, so a plugin cannot attribute a mark on a timeline to `clipped`, to
+another plugin, or to a game it is not integrating. That is not a check that can
+be forgotten; it is a field that does not exist.
+
+**A plugin may not claim a word in the project's vocabulary.** An event `kind`
+this build does not define and that carries no namespace is refused —
+`kill_streak` is refused, `acme-cs2.kill_streak` is accepted. This is
+deliberately the opposite of the read path, where an unrecognised kind out of a
+database is kept: a stored event cannot be told, and a running plugin can.
+Refusing costs one event; the plugin keeps running.
+
+`detach` is followed by the plugin's standard input being closed, which is the
+same message twice: a plugin that never reads a command still reads end of file,
+and so learns that the host has gone even when the host went without saying
+anything.
+
+## How long ago, not when
+
+**A plugin never reports a position on the recording's timeline.** It reports
+`ago_ns`: how long before writing the line the thing happened, measured on its
+own clock.
+
+The recording's timeline is the capture clock's, which a separate process does
+not have. The two ways to bridge that are a shared wall clock or a duration, and
+the duration wins on every count: two processes reading the same wall clock
+disagree by whatever NTP did in between, a clock step during a session moves
+every subsequent event, and a plugin on a machine whose time zone changed
+reports events an hour into the future. A duration measured inside one process
+against one clock has none of those failure modes.
+
+So the host reads its own clock when the report arrives, subtracts `ago_ns`, and
+that is the event's `at`. The same number is its `latency` — how much later than
+the moment it describes the report arrived — because that is exactly what it
+measures. One number from the plugin fills in both, and neither can be a claim
+the plugin did not make: a plugin reporting what it hears as it hears it sends
+`ago_ns: 0` and gets an event at the moment it was heard, which is honest,
+rather than an event at a moment it guessed.
+
+`precision_ns` is required and has no default, for the reason
+[Timing](#timing) gives: zero is the claim "I timed this exactly", and a plugin
+that never made that claim must not start making it by leaving a field out.
+
+`SessionTimeline` is the one place the conversion happens. It holds a reading of
+the recorder's monotonic clock taken beside the capture epoch, which is a third
+copy of the recording's timeline and is bounded exactly as `crates/events`
+bounds its own — one conversion, in one named function, until
+[issue #253](https://github.com/wildware-uk/clipped/issues/253) extracts the
+shared time crate.
+
+## What a misbehaving plugin costs a recording
+
+One sentence: **a recording never calls a plugin.** It drains a bounded queue,
+and everything else about a plugin happens on threads it does not wait for.
+
+| It | Costs a recording | Because |
+| --- | --- | --- |
+| crashes | nothing | it is another process; it is replaced, with a widening delay, a bounded number of times |
+| hangs | nothing | nothing waits on it; after the silence timeout it is killed, and the thread reading it ends with it |
+| floods | a bounded queue and a counter | delivery never blocks, a drain never returns more than one queue's worth, and the plugin is stopped |
+| prints rubbish | a counter | unreadable lines are counted against a budget, and an over-long line is discarded without being allocated |
+| is late | nothing | an event that arrives after the moment it describes has been written to disk is still placed where it belongs (`RecordedSpan`) |
+| lies about its timing | nothing it cannot be checked on | it reports how long ago, and `precision` and `latency` are separate, explicit fields |
+| claims to be something else | nothing | the host stamps the source |
+
+Two of those bounds are worth spelling out, because they are the ones that were
+wrong in the first draft and were found by breaking the tests:
+
+- **A drain returns at most one queue's worth**, rather than looping until the
+  queue is empty. A plugin delivering faster than that loop runs would otherwise
+  keep the recording inside it for as long as it kept producing — the stall a
+  bounded queue exists to prevent, reintroduced by the code that reads it.
+- **Killing a plugin does not wait for it.** It terminates it and reaps it if
+  that takes no time at all, which it does; a process that somehow outlives its
+  own termination is picked up by a later poll instead of holding the thread
+  that asked.
+
+**What is dropped is counted and reported.** `InboxStats::dropped` and
+`PluginHealth::dropped` are how a session knows its timeline is incomplete, and
+a timeline that is missing marks has to say so rather than look complete
+(AGENTS.md section 27).
+
+## Supervision and restart
+
+| Trouble | Restarted? | Why |
+| --- | --- | --- |
+| It exited on its own | yes | It may have hit something transient: a game that had not finished starting, a port briefly taken |
+| It went silent | yes | Same, and the plugin is killed first |
+| It never introduced itself | yes | Reported separately from a hang, because "it cannot start" and "it stopped answering" have different answers |
+| It flooded | **no** | A replacement floods the same queue a second later, and what is being lost is the events this subsystem exists to record |
+| Its output was unreadable | **no** | Same reasoning |
+| It speaks another contract version | **no** | It will speak the same one next time |
+
+Restarts are bounded, widen, and reset: three attempts by default at one, two
+and four seconds, and the counter resets once a plugin has run for a minute. A
+plugin that fails permanently is left stopped **and says why**, which is visible
+and leaves the user an action (AGENTS.md sections 16 and 45); a plugin that
+fails once an hour is not permanently disabled by teatime, which matters for a
+recorder that runs for days.
+
+Every reason a plugin was stopped is a `PluginTrouble`, which renders as a
+sentence: "the plugin said nothing for 10s and was stopped", "the plugin
+reported events faster than they could be recorded, and 137 were lost before it
+was stopped".
+
+## Writing a plugin
+
+`crates/plugins/examples/example_plugin.rs` is a complete plugin in one file,
+and the crate's tests install it as a real plugin and run it under a real
+supervisor. A real integration differs only in where the events come from.
+
+1. **Read the `attach` command** from standard input. It carries the session's
+   identifier and the process that started.
+2. **Say `hello`**, with the contract version you were written against.
+3. **Print an event** whenever something happens, saying how long ago it
+   happened.
+4. **Say `alive`** while nothing is happening, more often than the host's
+   silence timeout — from a thread of its own if the plugin's own work can block
+   for longer than that.
+5. **Exit when standard input closes.** That happens when the session ends, and
+   also when the host does.
+
+A plugin written in Rust can use `clipped_plugins`'s own types
+(`read_command`, `write_report`, `hello`) so that it is not hand-building JSON
+this crate is about to parse. A plugin written in anything else prints the same
+objects itself; nothing in the contract requires Rust, and the reason the wire
+is line-delimited JSON rather than something more efficient is precisely that.
+
+Install it by putting the executable and a `plugin.json` in a directory under
+the plugins folder.
+
+**Testing one.** `crates/plugins/examples/misbehaving_plugin.rs` is the other
+half of the reference: a plugin that panics, hangs, floods, prints rubbish or
+claims a contract from the future, depending on the name it is installed under.
+The supervisor's tests run it and time every turn of a simulated recording loop
+while it misbehaves. A plugin under development can be run by hand:
+
+```text
+cargo run -p clipped-plugins --example example_plugin
+{"command":"attach","contract":1,"session":{"session":"by-hand","process":{"executable":"cs2.exe","process_id":1}}}
+```
+
+## What a plugin may not do
+
+AGENTS.md section 34 is absolute, and it is a rule about a user's game account
+rather than about code quality:
+
+> **No DLL injection. No reading or writing another process's memory. No code
+> injection. Nothing that resembles an anti-cheat bypass.**
+
+Permitted: official APIs, local telemetry, game logs, Game State Integration,
+documented IPC, supported replay files, and the game's own local endpoints. A
+plugin in this repository that reaches for anything else is not merged. A plugin
+outside it that does is a plugin whose users risk a ban for a highlight, which
+is never a trade worth making — and no amount of richer detection changes that
+arithmetic.
+
+`SPEC.md` section 24 allows OCR as a last resort for games with no interface at
+all. It is not forbidden here, and it is not what any of the three planned
+integrations use.
+
+## Versioning the contract
+
+`ContractVersion` versions the contract — the manifest's shape, the wire, and
+the lifecycle — and is deliberately **not** `clipped_events::SchemaVersion`,
+which versions events. A stored event outlives every build that reads it; a
+running plugin is negotiated with once, at start-up. Tying them together would
+mean a plugin that added a wire message forcing a migration of every event in a
+user's library.
+
+Today there is one contract version. Within a version:
+
+- Adding a field to a *report* costs nothing: unknown fields on the wire are
+  ignored, as [ipc.md](ipc.md) sets out for the control protocol.
+- Adding a field to a *manifest* is a version bump, because unknown fields there
+  are refused. That asymmetry is the price of a manifest being a permission
+  document, and it is the intended cost: a build that cannot read the whole
+  declaration should refuse the plugin rather than run it on less.
+
+A plugin declaring a contract this build does not speak is not started, and the
+message says which is behind.
+
+## What is not built
+
+Stated plainly, because the gap between this document and the running
+application is the thing most likely to be misread (AGENTS.md section 7):
+
+- **Nothing attaches a supervisor to a recording session.** `clipped-session`
+  does not yet create one, so no plugin runs during a real recording. That is
+  wiring, and it belongs with the first integration
+  ([#70](https://github.com/wildware-uk/clipped/issues/70)).
+- **Nothing stores which plugins are enabled**, or the consent each was enabled
+  with ([issue #282](https://github.com/wildware-uk/clipped/issues/282)). That
+  lives in the configuration API, not here: a plugin crate with its own settings
+  file would be the second configuration store AGENTS.md section 30 warns about.
+- **Nothing shows any of it**
+  ([issue #281](https://github.com/wildware-uk/clipped/issues/281)). The
+  sentences a user reads before enabling a plugin exist and are tested; the
+  screen that shows them does not, so a user cannot yet see a plugin's network
+  declaration in the application.
+- **No sandbox** ([issue #280](https://github.com/wildware-uk/clipped/issues/280)).
+  See above; the wording the user is shown says so.
+- **No ADR** ([issue #279](https://github.com/wildware-uk/clipped/issues/279)).
+  The decision is argued here in the meantime.
