@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 
 import { ClipEditor } from './ClipEditor';
 import { readEditDocument } from './document';
+import type { EventMark } from './events';
 import { totalOutputNanos } from './timeline';
 
 /**
@@ -67,6 +68,11 @@ const MISSING: readonly Missing[] = [
     needs: 'Issues #85, #86, #87 and #88, each of which owns its own control',
   },
   {
+    does: 'Show what a plugin reported during the recording, on the timeline, filtered by kind',
+    needs:
+      'The lane and the filter are built (issue #71), and so is the arithmetic that puts an event in the right file (crates/library). Nothing supplies the events: they are rows of a database this window cannot read, and there is no command that serves them. Issues #329 and #301',
+  },
+  {
     does: 'The picture at the playhead, and a waveform under each audio track',
     needs:
       'A path from the window to the recording itself: a frame to draw, and the peaks crates/waveform computes (issue #66). Issue #306',
@@ -91,10 +97,19 @@ export interface EditorScreenProps {
    * is what the screen says when it is `null`.
    */
   readonly clip?: string | null;
+  /**
+   * The game events of the recordings the clip draws on, each already placed in
+   * one of them by `clipped_library::events` (issue #71).
+   *
+   * `null` — the only value this build can produce — means nobody has asked;
+   * an empty list means the recordings had none. The editor says which of the
+   * two it got rather than drawing the same empty lane for both.
+   */
+  readonly events?: readonly EventMark[] | null;
 }
 
 /** The Editor screen. */
-export function EditorScreen({ clip = null }: EditorScreenProps): ReactNode {
+export function EditorScreen({ clip = null, events = null }: EditorScreenProps): ReactNode {
   return (
     <>
       <h1 className="clipped-screen__title">Editor</h1>
@@ -105,7 +120,7 @@ export function EditorScreen({ clip = null }: EditorScreenProps): ReactNode {
         nothing else — no recording is modified, moved or re-encoded because you made a clip.
       </p>
 
-      {clip === null ? <NothingOpen /> : <Opened clip={clip} />}
+      {clip === null ? <NothingOpen /> : <Opened clip={clip} events={events} />}
     </>
   );
 }
@@ -161,7 +176,13 @@ function NothingOpen(): ReactNode {
  * nothing has been changed — because a document that will not load has to say
  * why rather than leaving a blank screen behind.
  */
-function Opened({ clip }: { readonly clip: string }): ReactNode {
+function Opened({
+  clip,
+  events,
+}: {
+  readonly clip: string;
+  readonly events: readonly EventMark[] | null;
+}): ReactNode {
   const read = readEditDocument(clip);
   if (!read.ok) {
     return <Refused problem={read.problem} />;
@@ -181,7 +202,7 @@ function Opened({ clip }: { readonly clip: string }): ReactNode {
     );
   }
 
-  return <ClipEditor clip={read.document} durationNanos={durationNanos} />;
+  return <ClipEditor clip={read.document} durationNanos={durationNanos} events={events} />;
 }
 
 /** Why a clip did not open, in the one place that says it. */

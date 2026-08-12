@@ -191,7 +191,10 @@ describe('the playhead', () => {
     renderWithClip();
 
     // Zoom out and Fit are both disabled at the first zoom step, so the tab
-    // order is Export, Zoom in, and then the playhead itself.
+    // order is Export, Zoom in, and then the playhead itself. This is the same
+    // order `docs/desktop-ui.md` sets out and `EditorEvents.test.tsx` asserts
+    // whole, seen on a clip with no events: the kind filters and the marks that
+    // would sit between Zoom in and the playhead are simply absent here.
     await user.tab();
     expect(document.activeElement).toHaveTextContent('Export…');
 

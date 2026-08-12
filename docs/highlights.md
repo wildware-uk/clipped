@@ -354,3 +354,112 @@ argued in one place:
 Until that lands, a clip does not survive a restart and does not appear in the
 library or in search; the library index itself is [#56] and search is [#59],
 both M6 and both open.
+
+## Where the events themselves live
+
+A `HighlightCause` is three fields and deliberately not the whole `GameEvent`,
+"because the payload … would be a second copy of a row that event persistence
+already owns". That row is [#71]'s, and this section is what it is owed —
+recorded here, beside the model that depends on it, for the same reason the
+`clips` columns above are.
+
+### Placing an event in a file
+
+`crates/library/src/events.rs` is the conversion a timeline needs, and the
+companion of `window_around`: that one turns a moment into a *range* for a clip
+to be cut from, this one turns it into a *point* for a timeline to draw. A
+session is a list of `RecordedSegment`s — a recording, and the
+`clipped_events::RecordedSpan` its file covers — and a moment is either inside
+exactly one of them or inside none:
+
+```text
+  session timeline   ├──────────────────────────────────────────────┤
+  recordings              ├── #1 ───┤        ├───── #2 ─────┤
+  events               ✕      ✓          ✕          ✓             ✕
+```
+
+All five answers are ordinary rather than errors, and they are told apart
+rather than reduced to a boolean, because they are five different things to
+tell somebody:
+
+| Where the moment is | What `place` answers |
+| --- | --- |
+| Inside a recording | `In { recording, at }`, measured **from that file** |
+| Before the first | `BeforeTheFirstRecording` — the recorder started after the game |
+| In a gap | `BetweenRecordings` — a window destroyed and recreated |
+| After the last | `AfterTheLastRecording` |
+| No file at all | `NothingRecorded` — see below |
+
+Two rules hold it to AGENTS.md section 27. **Nothing is dropped**: `marks`
+answers with every event it was given, in the order things happened, each
+carrying where it belongs or why it belongs nowhere, so a caller can say "four
+of these five are on this file and the fifth happened before it started" rather
+than quietly showing four. **Nothing is invented**: a moment no file covers is
+never pinned to the nearest frame, which is why `RecordedSpan::position_of`
+answers `None` rather than clamping.
+
+Placement never reads an event's kind. That is the property that makes a kind
+this build has never met — `EventKind::Unrecognised`, or a plugin's namespaced
+`Custom` — a mark on the timeline exactly like a kill, rather than one that
+vanishes on an older build.
+
+### A replay-buffer-only session
+
+A session with the buffer running and nothing being written to disk has no
+segments, so every event it hears places as `NothingRecorded`. The events are
+still the session's — they are what a saved replay is offered *for* — and the
+moment the hotkey writes a clip, that clip is a segment whose span starts at
+the keyframe the buffer began with, and the events inside it place in it,
+rebased onto the clip. Nothing about the model changes between the two cases;
+the list of segments does.
+
+### The table, which does not exist yet
+
+**Nothing stores a game event.** `session_events` is not it and says so: the
+`0001` migration reserves that table for the session's own vocabulary and
+records the exclusion, `docs/storage.md` repeats it under "What is deliberately
+absent", and three things make writing game events there wrong rather than
+merely untidy — its `at` is RFC 3339 text where an `EventTime` is signed
+nanoseconds on the media timeline, it has no `recording_id`, and
+`clipped_library::index::ingest` rewrites every one of a session's rows on each
+reconciliation.
+
+So M9 owes a migration, and the shape it should add is recorded here so that
+the model and the schema are argued in one place:
+
+```sql
+CREATE TABLE game_events (
+    game_event_id INTEGER PRIMARY KEY,
+    session_id    TEXT NOT NULL REFERENCES sessions (session_id) ON DELETE CASCADE,
+    recording_id  INTEGER REFERENCES recordings (recording_id) ON DELETE SET NULL,
+    at_nanos      INTEGER NOT NULL,
+    kind          TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    document      TEXT NOT NULL,
+    CHECK (kind <> '')
+) STRICT;
+```
+
+- **`document` is the authority**, and holds the whole `StoredEvent` JSON. That
+  is what makes [#68]'s forward compatibility survive storage: a field a newer
+  build added is inside it, `ReadEvent::to_json` puts it back, and an older
+  build that re-indexes a library does not delete what it could not name
+  (AGENTS.md section 56). The other columns are indexes into that text rather
+  than a second copy of the model; spreading the envelope across columns would
+  lose everything that did not fit one.
+- **`kind` carries no `CHECK`.** The vocabulary is open by design, and a
+  constraint here would refuse exactly the events that must still be drawn.
+- **`recording_id` is nullable**, because an event a replay-buffer-only session
+  heard belongs to the session and to no file, and `ON DELETE SET NULL` keeps
+  it when the recording goes.
+
+Until that migration lands, nothing writes a game event and nothing reads one
+back: `crates/library/src/events.rs` places events it is *handed*. Drawing them
+is a second gap and a separate one — the desktop window can neither read the
+library nor ask the recorder for a row of it ([#329], [#301]) — so the editor's
+event lane says "nobody asked" rather than "there were none".
+
+[#68]: https://github.com/wildware-uk/clipped/issues/68
+[#71]: https://github.com/wildware-uk/clipped/issues/71
+[#301]: https://github.com/wildware-uk/clipped/issues/301
+[#329]: https://github.com/wildware-uk/clipped/issues/329

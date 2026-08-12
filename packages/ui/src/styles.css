@@ -727,6 +727,71 @@ code {
   font-size: var(--text-xs);
 }
 
+/*
+ * The lane of game events on a recording's timeline (issue #71). It sits above
+ * the lanes rather than inside them because those are one `role="slider"` - the
+ * playhead - and a button inside a slider is not a control a keyboard or a
+ * screen reader can reach sensibly.
+ *
+ * A mark rather than a filled block: an event is a moment, not a range. Every
+ * kind is drawn identically, including one this build has never heard of, so
+ * nothing about a mark's appearance carries meaning that its label does not
+ * (AGENTS.md sections 27 and 46).
+ */
+.clipped-timeline__events {
+  position: relative;
+  height: var(--editor-lane-height);
+  margin: 0;
+  padding: 0;
+  border-bottom: var(--hairline) solid var(--color-divider);
+  background: var(--color-surface);
+  list-style: none;
+}
+
+.clipped-timeline__event {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+/* Neutral rather than accent, because the accent is the playhead: two marks in
+   one colour on one timeline would be two things saying "you are here". */
+.clipped-timeline__event-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--rule-weight);
+  margin-left: calc(var(--rule-weight) / -2);
+  padding: 0;
+  border: 0;
+  background: var(--color-neutral-900);
+  cursor: pointer;
+}
+
+/* The mark is as wide as the moment is precise, and two pixels is not a
+   pointer target. The hit area is widened either side without moving the mark,
+   so the pointer has something to hit and the timeline still says where the
+   event was (AGENTS.md section 46). */
+.clipped-timeline__event-mark::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: calc(var(--space-2) * -1);
+  bottom: 0;
+  left: calc(var(--space-2) * -1);
+}
+
+/* The row of kind toggles above the timeline. Each is an ordinary button with
+   `aria-pressed`, so the keyboard reaches it with no help from here. */
+.clipped-editor__event-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
 /* The playhead. Accent, because it is the one mark on the timeline that says
    where you are; its position is also given as a timecode in the transport and
    as the slider's own value, so it is never the only signal. */

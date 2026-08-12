@@ -43,7 +43,13 @@
  * `total_output_nanos` makes. The editor shows that as a clip it cannot draw.
  */
 
-import type { AudioTrack, EditDocument, Segment, TextOverlay } from './document';
+import {
+  recordingOf,
+  type AudioTrack,
+  type EditDocument,
+  type Segment,
+  type TextOverlay,
+} from './document';
 
 /** A thousand million: one second of the document's nanoseconds. */
 export const NANOS_PER_SECOND = 1_000_000_000;
@@ -144,6 +150,58 @@ export function locate(document: EditDocument, atNanos: number): Placement | nul
   }
 
   return null;
+}
+
+/**
+ * Where a moment in one recording lands on the edited timeline, in nanoseconds.
+ *
+ * The inverse of {@link locate}, and it answers a *list* because an edit is not
+ * a one-to-one map from a recording onto the clip:
+ *
+ * - **none**, when every segment that plays this recording was trimmed past the
+ *   moment. A kill that was cut out of the clip is not on the clip's timeline,
+ *   and drawing it at the nearest frame would be a marker for something the
+ *   footage does not contain (AGENTS.md section 27).
+ * - **more than one**, when the same seconds of a recording are used twice.
+ *   Both are the moment, and showing one of them would be picking a favourite.
+ *
+ * Half-open, `[start, end)`, like every other range here: the segment ending at
+ * twelve seconds does not claim a moment the next segment starts with. Empty
+ * when a segment cannot be read, for the reason {@link boundaries} is `null`
+ * there — a length that cannot be computed makes every position after it
+ * unknown rather than approximate.
+ */
+export function outputPositionsOf(
+  document: EditDocument,
+  recording: string,
+  sourceNanos: number,
+): readonly number[] {
+  const found: number[] = [];
+  let segmentStart = 0;
+
+  for (const segment of document.segments) {
+    const length = outputNanosOf(segment);
+    if (length === null) {
+      return [];
+    }
+    const plays =
+      recordingOf(document, segment.source) === recording &&
+      segment.span.start <= sourceNanos &&
+      sourceNanos < segment.span.end;
+    if (plays) {
+      const into = scale(
+        sourceNanos - segment.span.start,
+        segment.speed.denominator,
+        segment.speed.numerator,
+      );
+      if (into !== null) {
+        found.push(segmentStart + into);
+      }
+    }
+    segmentStart += length;
+  }
+
+  return found;
 }
 
 /** Whether anything in the document is soloed. */

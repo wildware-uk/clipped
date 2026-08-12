@@ -472,7 +472,7 @@ milliseconds.
 
 | Key | What it does |
 | --- | --- |
-| Tab | Reaches the playhead, after the zoom controls |
+| Tab | Moves through the editor's controls, in [the order below](#the-tab-order) |
 | ← / → | Steps a tenth of a second |
 | Shift + ← / → | Steps a second |
 | Home / End | The start of the clip, and its end |
@@ -487,6 +487,41 @@ End lands on the end of the clip, where the screen says nothing plays: every
 range in the model is half-open, so the last position of a clip is the
 nanosecond before its end and the end itself belongs to nothing. Saying that is
 better than silently moving the playhead somewhere the user did not ask for.
+
+### The tab order
+
+The editor is the one screen where controls from several issues share a
+component — the export dialog's button (#90) and the event filters and marks
+(#71) arrived separately, at opposite ends of the same screen. The order between
+them is decided here rather than left to whichever branch merged last:
+
+1. **Export**, in the header beside the clip's title;
+2. **Zoom in**, and Zoom out and Fit when they are enabled — all three are
+   disabled at the first zoom step, where only Zoom in is a tab stop;
+3. **the kind filters**, one per kind of event on the clip, when there are any;
+4. **the event marks**, in the order they occur on the edited timeline;
+5. **the playhead**.
+
+Two rules produce that list, and both are worth stating because the plausible
+alternative — content first, whole-document actions last — fails them:
+
+- **Focus order follows visual order.** Export is drawn first, at the top, so it
+  is reached first. Ordering by importance instead would send focus from the
+  bottom of the screen back to the top, which is exactly the mismatch WCAG 2.4.3
+  Focus Order is about; in this component it could only be built with a positive
+  `tabIndex`, which the shell uses nowhere.
+- **Outermost inwards, and the playhead last.** The controls that change how the
+  timeline is *drawn* come before the things drawn on it, and the playhead is
+  the innermost of those and the one a user stays on — the arrow keys, Home, End
+  and Page Up/Down all work from it, so it is where Tab leaves somebody who
+  wants to move about the clip.
+
+`EditorEvents.test.tsx` asserts that list **whole**, as a single comparison
+rather than a search for one element in it, so a control added to the editor
+without a decision about where it belongs fails a test instead of quietly
+reordering the screen. `EditorScreen.test.tsx` asserts the same order for a clip
+with no events, where the filters and marks are absent.
+
 ## The Settings screen
 
 SPEC.md sections 10, 12, 15, 27 and 34, and

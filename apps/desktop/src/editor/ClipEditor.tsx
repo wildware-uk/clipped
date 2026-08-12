@@ -10,6 +10,7 @@ import {
 } from 'react';
 
 import { recordingOf, type AudioTrack, type EditDocument } from './document';
+import { countByKind, describeKind, kindsPresent, type EventMark } from './events';
 import { ExportDialog } from './ExportDialog';
 import {
   anySoloed,
@@ -19,6 +20,7 @@ import {
   locate,
   nextBoundary,
   NANOS_PER_SECOND,
+  outputPositionsOf,
   overlaysAt,
   outputNanosOf,
   previousBoundary,
@@ -85,6 +87,66 @@ export interface ClipEditorProps {
   readonly clip: EditDocument;
   /** How long it lasts, in nanoseconds; the screen has already read it. */
   readonly durationNanos: number;
+  /**
+   * The game events of the recordings this clip draws on, each already placed
+   * in one of them by `clipped_library::events` (issue #71).
+   *
+   * `null` and an empty list are deliberately different answers, and the lane
+   * says which one it got. `[]` is "this recording had no events"; `null` is
+   * "nobody has been asked", which is the only answer available in this build —
+   * the window cannot read the library and there is no command that serves
+   * events. Drawing an empty lane for the second would report a quiet session
+   * where there had merely been no question (AGENTS.md section 27).
+   */
+  readonly events?: readonly EventMark[] | null;
+}
+
+/** One event mark, at the place on the edited timeline where it is drawn. */
+interface PlacedMark {
+  readonly mark: EventMark;
+  readonly atNanos: number;
+}
+
+/** Where a clip's events are on it, and how many of them are not on it at all. */
+interface ClipMarks {
+  /** Every event that lands somewhere on this clip, earliest first. */
+  readonly placed: readonly PlacedMark[];
+  /**
+   * Events the clip does not contain, because every segment that plays their
+   * recording was trimmed past the moment.
+   *
+   * Counted rather than ignored: "four kills, two of them outside this clip" is
+   * a different thing to be told from "two kills", and drawing the missing two
+   * at the nearest frame would be a marker for footage the clip does not have
+   * (AGENTS.md section 27).
+   */
+  readonly trimmedAway: number;
+}
+
+/**
+ * Where a clip's events sit on its edited timeline.
+ *
+ * An event whose seconds the clip uses twice appears twice, which is what
+ * `outputPositionsOf` answers a list for. Nothing here reads a kind: a mark
+ * this build has no name for is placed exactly as a kill is.
+ */
+function placeMarks(clip: EditDocument, events: readonly EventMark[]): ClipMarks {
+  const placed: PlacedMark[] = [];
+  let trimmedAway = 0;
+
+  for (const mark of events) {
+    const positions = outputPositionsOf(clip, mark.recording, mark.at);
+    if (positions.length === 0) {
+      trimmedAway += 1;
+      continue;
+    }
+    for (const atNanos of positions) {
+      placed.push({ mark, atNanos });
+    }
+  }
+
+  placed.sort((one, other) => one.atNanos - other.atNanos);
+  return { placed, trimmedAway };
 }
 
 /** A position on the timeline as a fraction of the clip, for drawing. */
@@ -117,9 +179,10 @@ function describeLevel(track: AudioTrack, soloed: boolean): string {
 }
 
 /** The editor. */
-export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode {
+export function ClipEditor({ clip, durationNanos, events = null }: ClipEditorProps): ReactNode {
   const [playheadNanos, setPlayheadNanos] = useState(0);
   const [zoom, setZoom] = useState(ZOOM_STEPS[0] ?? 1);
+  const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
   const [showExport, setShowExport] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
 
@@ -131,6 +194,26 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
    * this is what keeps that a screen decision rather than a crash.
    */
   const cuts = useMemo(() => boundaries(clip) ?? [0], [clip]);
+
+  /*
+   * The marks this clip can draw, and the kinds among them. Both are held
+   * because both are walks over every event, and the timeline re-renders on
+   * every arrow key.
+   */
+  const eventMarks = useMemo(
+    () => (events === null ? null : placeMarks(clip, events)),
+    [clip, events],
+  );
+  const onClip = useMemo(() => (eventMarks?.placed ?? []).map((one) => one.mark), [eventMarks]);
+  const kinds = useMemo(() => kindsPresent(onClip), [onClip]);
+  const counts = useMemo(() => countByKind(onClip), [onClip]);
+  const shown = useMemo(
+    () =>
+      eventMarks === null
+        ? null
+        : eventMarks.placed.filter((one) => !hiddenKinds.has(one.mark.kind)),
+    [eventMarks, hiddenKinds],
+  );
   const placement = locate(clip, playheadNanos);
   const soloed = anySoloed(clip);
   const interval = tickIntervalNanos(durationNanos, zoom);
@@ -143,6 +226,18 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
     },
     [durationNanos],
   );
+
+  /* Hiding a kind is the one thing that keeps a mark off the timeline, and it
+     is the user's own decision every time. */
+  const toggleKind = useCallback((kind: string) => {
+    setHiddenKinds((current) => {
+      const next = new Set(current);
+      if (!next.delete(kind)) {
+        next.add(kind);
+      }
+      return next;
+    });
+  }, []);
 
   const changeZoom = useCallback((by: number) => {
     setZoom((current) => {
@@ -242,6 +337,19 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
          * controls are here and a Split button is not. What the dialog then
          * says about exporting, including that no export can be started from
          * this window, is `ExportDialog`'s (issue #90).
+         *
+         * Export is the **first** tab stop of the editor, ahead of the zoom
+         * controls, the kind filters, the event marks and the playhead. That is
+         * not an accident of where two branches happened to meet: it is where
+         * the button is drawn — in the header, beside the clip's title — and
+         * focus order follows visual order. Putting the whole-document action
+         * last, after the timeline "content", would read well in the abstract
+         * and would mean a keyboard user's focus jumping from the bottom of the
+         * screen back to the top, which is the mismatch WCAG 2.4.3 is about and
+         * which only a positive `tabIndex` could produce. `docs/desktop-ui.md`
+         * carries the reasoning and the whole order; `EditorEvents.test.tsx`
+         * asserts every stop of it, so a control added here fails a test rather
+         * than silently reordering the editor.
          */}
         <button
           type="button"
@@ -337,6 +445,33 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
         </div>
       </div>
 
+      {eventMarks !== null && kinds.length > 0 && (
+        <div className="clipped-editor__event-filter" role="group" aria-label="Show events">
+          <span className="clipped-muted">Events</span>
+          {kinds.map((kind) => {
+            const description = describeKind(kind);
+            const isShown = !hiddenKinds.has(kind);
+            return (
+              <button
+                key={kind}
+                type="button"
+                className={`clipped-btn ${isShown ? 'clipped-btn--secondary' : 'clipped-btn--ghost'}`}
+                aria-pressed={isShown}
+                onClick={() => {
+                  toggleKind(kind);
+                }}
+              >
+                {description.label} ({counts.get(kind) ?? 0})
+                {/* Said in words as well as drawn, because a pressed state told
+                    only by a fill is a state told only by colour (AGENTS.md
+                    section 46). */}
+                {isShown ? '' : <span className="clipped-muted"> hidden</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="clipped-editor__timeline">
         {/*
          * The lanes' names sit outside the scroller, so that they are still
@@ -350,6 +485,16 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
             className="clipped-timeline__label clipped-timeline__label--ruler"
             aria-hidden="true"
           />
+          {eventMarks !== null && (
+            <li className="clipped-timeline__label">
+              <span className="clipped-timeline__track-name">Events</span>
+              <span className="clipped-muted">
+                {shown === null || shown.length === 0
+                  ? 'None on this clip'
+                  : `${shown.length} shown`}
+              </span>
+            </li>
+          )}
           <li className="clipped-timeline__label">
             <span className="clipped-timeline__track-name">Video</span>
             <span className="clipped-muted">
@@ -377,6 +522,37 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
                 </span>
               ))}
             </div>
+
+            {/*
+             * The events lane. Outside the slider below, because each mark is a
+             * button and a button inside a `role="slider"` is not something a
+             * keyboard or a screen reader can make sense of; a list, because
+             * that is what it is, and it is what gives the marks a name a
+             * screen reader announces before reading them.
+             */}
+            {shown !== null && (
+              <ul className="clipped-timeline__events" aria-label="Events on this clip">
+                {shown.map((one, index) => {
+                  const description = describeKind(one.mark.kind);
+                  return (
+                    <li
+                      className="clipped-timeline__event"
+                      key={`${one.mark.recording}-${String(one.mark.at)}-${one.mark.kind}-${String(index)}`}
+                      style={{ left: percent(fractionOf(one.atNanos, durationNanos)) }}
+                    >
+                      <button
+                        type="button"
+                        className="clipped-timeline__event-mark"
+                        aria-label={describeMark(description.label, one.atNanos, one.mark.source)}
+                        onClick={() => {
+                          seek(one.atNanos);
+                        }}
+                      />
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
 
             {/*
              * The playhead is a slider, which is what it is: a value between two
@@ -431,6 +607,8 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
         </div>
       </div>
 
+      <EventNote events={events} marks={eventMarks} />
+
       {clip.audio_tracks.length > 0 && (
         <p className="clipped-editor__note clipped-muted">
           No lane has a waveform. The peaks are computed from the recording and written beside it
@@ -449,6 +627,63 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
         />
       )}
     </section>
+  );
+}
+
+/**
+ * What a mark is called to somebody who cannot see it.
+ *
+ * The kind, where it is, and who said so. The source is in the name because a
+ * mark this build has no vocabulary for — a plugin's own word, or a kind added
+ * after this build shipped — is otherwise a label nobody can trace to anything.
+ */
+function describeMark(label: string, atNanos: number, source: string): string {
+  return `${label} at ${formatTimecode(atNanos)}, reported by ${source}`;
+}
+
+/**
+ * What the timeline says about events beyond the marks themselves.
+ *
+ * Three different statements, and the difference between the first two is the
+ * whole of AGENTS.md section 27 here: "nobody asked" is not "there were none".
+ */
+function EventNote({
+  events,
+  marks,
+}: {
+  readonly events: readonly EventMark[] | null;
+  readonly marks: ClipMarks | null;
+}): ReactNode {
+  if (events === null || marks === null) {
+    return (
+      <p className="clipped-editor__note clipped-muted">
+        The timeline has no events, and that is not the same as this recording having none: nothing
+        in this window has asked. A session’s game events are rows of the library’s database, which
+        this window can neither read nor ask the recorder for. Issues #329 and #301.
+      </p>
+    );
+  }
+
+  if (events.length === 0) {
+    return (
+      <p className="clipped-editor__note clipped-muted">
+        No events were reported during these recordings.
+      </p>
+    );
+  }
+
+  if (marks.trimmedAway === 0) {
+    return null;
+  }
+
+  return (
+    <p className="clipped-editor__note clipped-muted">
+      {marks.trimmedAway === 1
+        ? 'One event of these recordings is not on this clip'
+        : `${String(marks.trimmedAway)} events of these recordings are not on this clip`}
+      , because the seconds they happened in were trimmed out. They are not drawn at the nearest
+      cut, which would be a mark for footage this clip does not contain.
+    </p>
   );
 }
 
