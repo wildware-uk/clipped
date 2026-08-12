@@ -15,7 +15,7 @@ use core::time::Duration;
 use crate::error::{AudioError, Capture};
 use crate::format::AudioFormat;
 use crate::windows::endpoint::EndpointSource;
-use crate::windows::endpoint_capture::{CaptureStats, EndpointCapture};
+use crate::windows::endpoint_capture::{CaptureSource, CaptureStats, EndpointCapture};
 
 /// System audio, captured from the endpoint Windows is playing through.
 ///
@@ -44,7 +44,8 @@ impl SystemAudioCapture {
     /// Windows refuses something outright.
     pub fn open() -> Result<Self, AudioError> {
         let endpoint =
-            EndpointCapture::open(EndpointSource::system_audio())?.ok_or(AudioError::NoEndpoint)?;
+            EndpointCapture::open(CaptureSource::Endpoint(EndpointSource::system_audio()))?
+                .ok_or(AudioError::NoEndpoint)?;
         Ok(Self { endpoint })
     }
 

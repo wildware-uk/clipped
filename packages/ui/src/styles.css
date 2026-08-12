@@ -248,15 +248,34 @@ code {
   padding: 0;
 }
 
+/*
+ * One class for two mechanisms. The sidebar's items are anchors with addresses;
+ * a screen's own section rail (`SectionRail`) draws `role="tab"` buttons,
+ * because a section of a screen has no address of its own. They are the same
+ * thing to look at, so they are the same class rather than two that drift - the
+ * reasoning `.clipped-panel` already records.
+ *
+ * The declarations a button needs and an anchor does not are the reset ones:
+ * a button brings its own border, ground, typeface and centred text, and does
+ * not fill the box it is in.
+ */
 .clipped-nav__link {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   padding: var(--space-2) var(--space-4);
+  border: 0;
   border-left: var(--marker-weight) solid transparent;
+  background: none;
   color: var(--color-text);
+  /* Named rather than inherited: a button does not take the document's face,
+     and `inherit` would leave this rule saying nothing about what it draws. */
+  font-family: var(--font-body);
   font-size: var(--text-md);
+  text-align: left;
   text-decoration: none;
+  cursor: pointer;
 }
 
 .clipped-nav__link:hover {
@@ -272,9 +291,12 @@ code {
 /*
  * The current screen is marked three ways - the rule down its left edge, the
  * heavier weight, and `aria-current` - because colour alone is not a state
- * indicator (AGENTS.md section 46).
+ * indicator (AGENTS.md section 46). The open section of a screen's rail is
+ * marked the same three ways, with `aria-selected` as the third: a tab reports
+ * itself selected rather than current.
  */
-.clipped-nav__link[aria-current='page'] {
+.clipped-nav__link[aria-current='page'],
+.clipped-nav__link[aria-selected='true'] {
   border-left-color: var(--color-accent);
   color: var(--color-accent-text);
   font-family: var(--font-heading);
@@ -286,6 +308,21 @@ code {
 .clipped-nav--utility .clipped-nav__link {
   font-size: var(--text-sm);
   padding-block: calc(var(--space-1) * 1.5);
+}
+
+/* — a screen's section rail — */
+
+/*
+ * The rail is the sidebar's list drawn again inside a screen, so it takes the
+ * same rule down its right edge that separates the sidebar from the screen. It
+ * is a `--rule-weight` divider rather than a marker: it separates two things
+ * rather than singling one out.
+ */
+.clipped-rail {
+  display: flex;
+  flex-direction: column;
+  border-right: var(--rule-weight) solid var(--color-divider);
+  padding-right: var(--space-2);
 }
 
 /* — recorder status — */
@@ -359,6 +396,37 @@ code {
 .clipped-screen__lead {
   max-width: var(--measure);
   font-size: var(--text-md);
+}
+
+/*
+ * A screen divided into a rail of sections and the pane one of them opens
+ * (`SectionRail`). `minmax(0, 1fr)` rather than `1fr`: a grid column's minimum
+ * is its content, so a wide table in the pane would push the rail off the
+ * screen instead of scrolling.
+ */
+.clipped-screen__split {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+  margin-top: var(--space-6);
+}
+
+/* The pane. `min-width` for the same reason as the column that holds it: what
+   is in it is a table, and a table's own minimum is its widest row. */
+.clipped-screen__pane {
+  min-width: 0;
+}
+
+/*
+ * Text the user types or finds in a file: a settings key, a path, a command.
+ * Quieter than the prose around it and set in the mono face, so that the exact
+ * characters are readable and cannot be confused with the sentence they sit in.
+ */
+.clipped-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
 }
 
 /*
