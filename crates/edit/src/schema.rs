@@ -31,6 +31,24 @@
 //! silently dropping the field a newer one added the moment the user saves.
 //! Refusing to open beats opening and quietly discarding.
 //!
+//! # The other copy of this walk
+//!
+//! `crates/game-detection/src/catalogue/schema.rs` holds the same `Migration`,
+//! the same `migrate` walk and the same "read the version out of the raw
+//! document" rule, over `toml::Table` instead of `serde_json::Map`. That is a
+//! deliberate second copy rather than an oversight, and [issue
+//! #268](https://github.com/wildware-uk/clipped/issues/268) records both the
+//! reasoning and what would have to change to remove it: the shared crate would
+//! have to be visible from layer 0 and layer 1 at once, and layer 0 depends on
+//! nothing in this workspace. **Change one of the two and read the other**,
+//! because the rules they encode — follow each step's `from`, never overshoot
+//! the target, refuse rather than half-convert, and write nothing back — are
+//! meant to be the same rules.
+//!
+//! `crates/storage/src/migrations.rs` is not a third copy. It applies SQL
+//! inside a transaction against a database file it backs up first; it shares
+//! only the word.
+//!
 //! # What the caller owes a migrated document
 //!
 //! [`Loaded::migrated`] says the text on disk is now out of date. Replacing it
