@@ -1,0 +1,46 @@
+{
+  "provider": {
+    "name": "Dota 2",
+    "appid": 570,
+    "version": 47,
+    "timestamp": 1770003400
+  },
+  "map": {
+    "name": "start",
+    "matchid": "8422001188",
+    "game_time": 4,
+    "clock_time": 4,
+    "daytime": true,
+    "nightstalker_night": false,
+    "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+    "paused": false,
+    "win_team": "none",
+    "customgamename": ""
+  },
+  "player": {
+    "activity": "playing",
+    "kills": 0,
+    "deaths": 0,
+    "assists": 0,
+    "last_hits": 0,
+    "denies": 0,
+    "kill_streak": 0,
+    "team_name": "dire",
+    "gold": 625,
+    "gpm": 0,
+    "xpm": 0
+  },
+  "hero": {
+    "id": 74,
+    "name": "npc_dota_hero_invoker",
+    "level": 1,
+    "alive": true,
+    "respawn_seconds": 0,
+    "health": 620,
+    "max_health": 620,
+    "health_percent": 100,
+    "mana": 351,
+    "max_mana": 351,
+    "mana_percent": 100
+  }
+}

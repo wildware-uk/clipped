@@ -203,13 +203,14 @@ the decision is recorded rather than discovered in a diff.
 ## Register of network communication
 
 **Clipped itself — the recorder and the desktop application — performs no
-network communication of either class, and none of it is outbound.** Two bundled
-*plugins* do, and they are the two rows below.
+network communication of either class, and none of it is outbound.** Three
+bundled *plugins* do, and they are the three rows below.
 
 | Feature | Class | Destination | Default | Opt-in |
 | --- | --- | --- | --- | --- |
 | League of Legends highlight plugin | Loopback | `127.0.0.1:2999`, connect only | Off | Enabling the plugin, whose declaration is this row in the words `plugin.json` says it in |
 | Counter-Strike 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3212`. Receives Game State Integration payloads from Counter-Strike 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin does nothing until its configuration file is installed, and does not install one itself. | Running `clipped-cs2-plugin install <game folder>` by hand, which writes the one file that makes the game post at all. Enabling a plugin having read its declaration is the intended second step and there is no screen for it yet ([issue #281](https://github.com/wildware-uk/clipped/issues/281)), so today the install command is the whole of it. `clipped-cs2-plugin uninstall`, or deleting that file, ends it. |
+| Dota 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3213`. Receives Game State Integration payloads from Dota 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin is a separate executable, it does nothing unless something runs it, and nothing in the recorder starts a plugin yet. | Running the plugin, which writes the one configuration file that makes the game post at all — and says so, because Dota reads that directory at start-up. Enabling a plugin having read its declaration is the intended second step and there is no screen for it yet ([issue #281](https://github.com/wildware-uk/clipped/issues/281)), nor anything that records which plugins are enabled ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), so today running it by hand is the whole of it. Deleting `gamestate_integration_clipped.cfg` from Dota's own configuration directory ends it. |
 
 Each row is spelled out below, because a register entry that has to be decoded
 is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design).
@@ -266,6 +267,34 @@ in full, and how to remove it. Recording does not depend on any of it: with the
 plugin absent, disabled or unable to bind, Clipped records exactly as it
 otherwise would.
 
+### What the Dota 2 row means
+
+- **What is sent: nothing.** The plugin only *receives*. It writes one
+  configuration file into the game's own directory so that the game knows where
+  to post, and it opens no outbound connection of any kind.
+- **What it writes, and where the user is told.** That configuration file is
+  the one thing this plugin does to a machine that the manifest has no *typed*
+  declaration for: contract 1's declarations cover the network and nothing
+  else. Until there is a field for it
+  ([issue #343](https://github.com/wildware-uk/clipped/issues/343)) the
+  plugin's manifest `description` carries it in plain terms, because that is
+  the other thing the plugin manager shows before the user enables anything,
+  and a permission the user is never told about is a permission nobody granted.
+  The file is named for Clipped, nothing else in that directory is read or
+  touched, and it is not removed when the plugin detaches — the game reads the
+  directory at start-up, so deleting it on the way out would break the next
+  launch.
+- **What is received:** the components the plugin subscribes to — the provider,
+  the map, the player's own counters and their hero — from the game on this
+  machine. Every payload has to carry a token the plugin generated and wrote
+  into that configuration file; a payload without it is answered `403` and
+  discarded, because a socket on `127.0.0.1` is reachable by every process on
+  the machine, including a web page in a browser.
+- **When the feature is off, or the socket cannot be bound:** the plugin reports
+  the problem and exits. Recording is unaffected in either case, and it is
+  unaffected while the plugin is running too — a recording never waits on a
+  plugin (`docs/plugin-api.md`).
+
 One thing is anticipated but **not implemented**, and has no code behind it
 today. It is listed so that the shape of a future row is clear, not to imply it
 exists:
@@ -278,10 +307,11 @@ exists:
 ## Plugin network access
 
 **Status.** This section was written as **policy to be implemented in Milestone
-9 (Highlight Plugin API)**. The contract exists now, and two plugins with it:
-League of Legends ([issue #72](https://github.com/wildware-uk/clipped/issues/72))
-and Counter-Strike 2
-([issue #70](https://github.com/wildware-uk/clipped/issues/70)). Declaration and
+9 (Highlight Plugin API)**. The contract exists now, and three plugins with it:
+League of Legends ([issue #72](https://github.com/wildware-uk/clipped/issues/72)),
+Counter-Strike 2
+([issue #70](https://github.com/wildware-uk/clipped/issues/70)) and Dota 2
+([issue #73](https://github.com/wildware-uk/clipped/issues/73)). Declaration and
 consent below are implemented as types in `crates/plugins` and are covered by
 tests. **Mediation is not**, and neither is the plugin manager that would show
 you a declaration before you agreed to it
@@ -310,9 +340,9 @@ so today the only way to read a bundled plugin's declaration is its
 the network through an interface the host provides, so that requests could be
 checked against the declaration. That is not what M9 built: a plugin is a
 separate process and opens its own sockets — the League plugin connects to
-`127.0.0.1:2999` itself and the Counter-Strike 2 plugin binds `127.0.0.1:3212`
-itself — so the declaration is checked, rendered and consented to, and it is not
-a sandbox.
+`127.0.0.1:2999` itself, and the Counter-Strike 2 and Dota 2 plugins bind
+`127.0.0.1:3212` and `127.0.0.1:3213` themselves — so the declaration is
+checked, rendered and consented to, and it is not a sandbox.
 [Issue #280](https://github.com/wildware-uk/clipped/issues/280) is where an
 AppContainer or job object makes it enforceable — possible *because* a plugin is
 a process — and `NetworkAccess::ENFORCEMENT` is the sentence the user is shown

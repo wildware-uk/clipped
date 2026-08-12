@@ -85,7 +85,8 @@ const LAYERS: &[&[&str]] = &[
     ],
     // Consumers of encoded output. `clipped-muxer` writes it to a container.
     //
-    // `clipped-league-plugin` and `clipped-cs2-plugin` are game integrations
+    // `clipped-league-plugin`, `clipped-cs2-plugin` and `clipped-dota2-plugin`
+    // are game integrations
     // from `plugins/` (docs/plugin-api.md), and layering is not what governs
     // them: a plugin is a separate process the recorder starts rather than a
     // crate anything links, so both directions are asserted directly by
@@ -100,6 +101,7 @@ const LAYERS: &[&[&str]] = &[
         "clipped-muxer",
         "clipped-league-plugin",
         "clipped-cs2-plugin",
+        "clipped-dota2-plugin",
     ],
     // `clipped-replay` holds a rolling window of encoded packets in memory so
     // that a hotkey pressed after something interesting can still save it, and
@@ -336,21 +338,66 @@ fn test_only_packages_are_never_linked_into_the_product() {
 /// (docs/plugin-api.md) — so the two rules that matter about it are not
 /// "which layer", and the two tests below assert them instead of trusting a
 /// comment. Adding a plugin to the workspace means adding it here.
-const PLUGINS: &[&str] = &["clipped-league-plugin", "clipped-cs2-plugin"];
+const PLUGINS: &[&str] = &[
+    "clipped-league-plugin",
+    "clipped-cs2-plugin",
+    "clipped-dota2-plugin",
+];
 
 /// The only crates of this workspace a plugin may name.
 ///
 /// `clipped-plugins` is the contract — the wire, the manifest and the report
 /// types — and `clipped-events` is the vocabulary a plugin exists to translate
-/// its game into. Anything else is a game integration reaching into the
-/// recorder: a plugin that named `clipped-session` would be running a game's
-/// protocol inside the recording engine, which is the arrangement the process
-/// boundary exists to prevent (AGENTS.md sections 5 and 33), and one that named
-/// `clipped-capture` or `clipped-encoder` would be worse.
+/// its game into. Anything in the recording pipeline is a game integration
+/// reaching into the recorder: a plugin that named `clipped-session` would be
+/// running a game's protocol inside the recording engine, which is the
+/// arrangement the process boundary exists to prevent (AGENTS.md sections 5
+/// and 33), and one that named `clipped-capture` or `clipped-encoder` would be
+/// worse.
 ///
-/// Deliberately not "anything at a lower layer". Layering would let a plugin
-/// name any of the crates below it, which is most of the workspace.
-const PLUGINS_MAY_NAME: &[&str] = &["clipped-plugins", "clipped-events"];
+/// Two more are permitted, and both are about *where things are on this
+/// machine* rather than about recording. The list was written against
+/// `plugins/league` ([#72](https://github.com/wildware-uk/clipped/issues/72)),
+/// which needs neither — Riot answers on a fixed port and the plugin keeps no
+/// state — and `plugins/dota2`
+/// ([#73](https://github.com/wildware-uk/clipped/issues/73)) is the first
+/// integration that does:
+///
+/// - `clipped-game-detection` reads Steam's own library index to find where a
+///   game is installed. A Game State Integration plugin has to write a
+///   configuration file inside the game's directory, so it has to find that
+///   directory; the alternatives are a second Steam library parser per plugin
+///   (AGENTS.md section 55) or opening a handle to the game process to ask,
+///   which AGENTS.md section 34 rules out. It reports paths and knows nothing
+///   about a recording.
+/// - `clipped-logging` answers where Clipped's own directory is, which is where
+///   a plugin keeps state that has to outlive its process — for Dota, the auth
+///   token the game was configured with, because the game reads that file once
+///   at start-up and would refuse a freshly generated one.
+///
+/// Deliberately still not "anything at a lower layer". Layering would let a
+/// plugin name any of the crates below it, which is most of the workspace, and
+/// the two additions above are named one at a time with a reason each rather
+/// than by widening the rule into a layer.
+///
+/// **This list is a maintainer decision, argued on
+/// [#73](https://github.com/wildware-uk/clipped/issues/73) with a
+/// recommendation.** The narrower alternative is for `attach` to carry the
+/// game's directory and a per-plugin state directory, which would make the
+/// contract provide both facts and let this list go back to two entries
+/// permanently — and would be what a sandboxed plugin
+/// ([#280](https://github.com/wildware-uk/clipped/issues/280)) needs, since an
+/// AppContainer is exactly what stops a plugin reading the registry to find
+/// Steam. That is a change to `crates/plugins` and to every plugin, so it is an
+/// issue of its own:
+/// [#381](https://github.com/wildware-uk/clipped/issues/381), which is what
+/// takes this list back to two entries.
+const PLUGINS_MAY_NAME: &[&str] = &[
+    "clipped-plugins",
+    "clipped-events",
+    "clipped-game-detection",
+    "clipped-logging",
+];
 
 #[test]
 fn nothing_in_the_workspace_depends_on_a_plugin() {

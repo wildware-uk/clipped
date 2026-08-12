@@ -1,0 +1,17 @@
+{
+  "provider": {
+    "name": "Dota 2",
+    "appid": 570,
+    "version": 999,
+    "timestamp": 1770005000
+  },
+  "map": {
+    "matchid": "8422004512",
+    "state_of_the_game": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+    "victorious_team": "radiant"
+  },
+  "combatant": {
+    "eliminations": 12,
+    "casualties": 3
+  }
+}

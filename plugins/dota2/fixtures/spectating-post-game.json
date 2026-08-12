@@ -1,0 +1,70 @@
+{
+  "provider": {
+    "name": "Dota 2",
+    "appid": 570,
+    "version": 47,
+    "timestamp": 1770005900
+  },
+  "map": {
+    "name": "start",
+    "matchid": "8422004512",
+    "game_time": 3210,
+    "clock_time": 3210,
+    "daytime": true,
+    "game_state": "DOTA_GAMERULES_STATE_POST_GAME",
+    "paused": false,
+    "win_team": "radiant",
+    "customgamename": ""
+  },
+  "player": {
+    "team2": {
+      "player0": {
+        "kills": 14,
+        "deaths": 2,
+        "assists": 9,
+        "kill_streak": 6,
+        "team_name": "radiant",
+        "last_hits": 388,
+        "denies": 24
+      },
+      "player1": {
+        "kills": 3,
+        "deaths": 9,
+        "assists": 19,
+        "kill_streak": 0,
+        "team_name": "radiant",
+        "last_hits": 41,
+        "denies": 5
+      }
+    },
+    "team3": {
+      "player5": {
+        "kills": 6,
+        "deaths": 11,
+        "assists": 12,
+        "kill_streak": 0,
+        "team_name": "dire",
+        "last_hits": 154,
+        "denies": 9
+      }
+    }
+  },
+  "hero": {
+    "team2": {
+      "player0": {
+        "id": 44,
+        "name": "npc_dota_hero_phantom_assassin",
+        "level": 25,
+        "alive": true
+      }
+    },
+    "team3": {
+      "player5": {
+        "id": 8,
+        "name": "npc_dota_hero_juggernaut",
+        "level": 22,
+        "alive": false
+      }
+    }
+  }
+}

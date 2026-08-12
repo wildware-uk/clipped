@@ -98,6 +98,7 @@ apps/
     recorder/       The recording process, which runs independently of the UI
     desktop/        The Tauri desktop application (placeholder until M5)
 crates/            The Rust libraries the recorder is assembled from
+plugins/           The highlight plugins shipped with Clipped, one executable each
 packages/          TypeScript packages consumed by the desktop application
 tests/             Capture, audio, integration and performance suites
 docs/              Architecture, subsystem documentation and ADRs
@@ -126,15 +127,15 @@ without being placed in a layer.
 | --- | --- | --- |
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
-| 2 | `clipped-muxer`, `clipped-league-plugin` (plugin, see below), `clipped-cs2-plugin` (plugin, see below) | layers 0–1 |
+| 2 | `clipped-muxer`, `clipped-league-plugin`, `clipped-cs2-plugin`, `clipped-dota2-plugin` (plugins, see below) | layers 0–1 |
 | 3 | `clipped-replay`, `clipped-export` | layers 0–2 |
 | 4 | `clipped-session` | layers 0–3 |
 | 5 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–4 |
 | 6 | `clipped-video-pattern` (test application) | layers 0–5 |
 | 7 | `clipped-fullscreen-dx11` (test application) | layers 0–6 |
 
-`clipped-league-plugin` and `clipped-cs2-plugin` are in `plugins/`, not
-`crates/`: they are game integrations
+`clipped-league-plugin`, `clipped-cs2-plugin` and `clipped-dota2-plugin` are in
+`plugins/`, not `crates/`: they are game integrations
 ([docs/plugin-api.md](docs/plugin-api.md)), which are executables the recorder
 *starts* rather than crates anything links. Layering is not what governs them,
 and no layer could: whichever one they sat at, every layer above would be free
@@ -147,9 +148,13 @@ two rules that actually apply are asserted directly, by
 - **Nothing may depend on a plugin**, of any kind, including for tests. A plugin
   is reached by starting a process.
 - **A plugin may name only `clipped-plugins` and `clipped-events`** — the
-  contract and the vocabulary. A plugin that reached `clipped-session` would be
-  a game's protocol inside the recording engine, which is what the process
-  boundary exists to prevent.
+  contract and the vocabulary — plus `clipped-game-detection` and
+  `clipped-logging`, which answer *where a game is installed* and *where
+  Clipped's own directory is* and know nothing about a recording. A plugin that
+  reached `clipped-session` would be a game's protocol inside the recording
+  engine, which is what the process boundary exists to prevent. The allowlist is
+  in `workspace_layering.rs`, one entry at a time with a reason each, and is
+  deliberately not "anything at a lower layer".
 
 Their layer is therefore only what the layer table needs in order to cover
 every member, and every plugin sits on the same one so that adding the next is a

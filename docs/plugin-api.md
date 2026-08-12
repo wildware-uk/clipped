@@ -1,6 +1,7 @@
 # Plugin API
 
-**Status: two plugins exist, and nothing in the recorder starts either.** Both
+**Status: three plugins exist, and nothing in the recorder starts any of
+them.** Both
 halves of the contract exist. The *event model* — what a plugin reports, how it
 is timed, and how it stays readable for years — is `crates/events`
 ([issue #68](https://github.com/wildware-uk/clipped/issues/68)). The *plugin
@@ -9,11 +10,13 @@ away from a recording — is `crates/plugins`
 ([issue #69](https://github.com/wildware-uk/clipped/issues/69)). The
 integrations written against it are `plugins/league`
 ([issue #72](https://github.com/wildware-uk/clipped/issues/72)), described in
-[The League of Legends plugin](#the-league-of-legends-plugin), and `plugins/cs2`
+[The League of Legends plugin](#the-league-of-legends-plugin), `plugins/cs2`
 ([issue #70](https://github.com/wildware-uk/clipped/issues/70)) —
 Counter-Strike 2, through Game State Integration — described in
-[The reference plugin](#the-reference-plugin). Dota 2
-([#73](https://github.com/wildware-uk/clipped/issues/73)) does not exist yet.
+[The reference plugin](#the-reference-plugin), and `plugins/dota2`
+([issue #73](https://github.com/wildware-uk/clipped/issues/73)) — Dota 2,
+through Game State Integration as well — described in
+[The Dota 2 plugin](#the-dota-2-plugin-and-what-it-shares-with-counter-strike-2).
 
 What is still missing is the wiring: **nothing in the recorder attaches a
 supervisor to a session**, so no plugin runs during a real recording, and both
@@ -42,7 +45,7 @@ The event model:
 - [Positions in a file, and in a replay clip](#positions-in-a-file-and-in-a-replay-clip)
 - [The stored form](#the-stored-form)
 - [Compatibility policy](#compatibility-policy)
-- [How the three planned integrations map](#how-the-three-planned-integrations-map)
+- [How the three integrations map](#how-the-three-integrations-map)
 
 The contract:
 
@@ -59,16 +62,14 @@ The contract:
 - [What a plugin may not do](#what-a-plugin-may-not-do)
 - [Versioning the contract](#versioning-the-contract)
 
-The plugin:
-
-- [The reference plugin](#the-reference-plugin)
-- [Writing into somebody else's game](#writing-into-somebody-elses-game)
-- [Deriving events from state](#deriving-events-from-state)
-- [What is not built](#what-is-not-built)
-
-The plugins:
+The plugins written against it, in the order they appear below:
 
 - [The League of Legends plugin](#the-league-of-legends-plugin)
+- [The reference plugin](#the-reference-plugin) — Counter-Strike 2
+- [Writing into somebody else's game](#writing-into-somebody-elses-game)
+- [Deriving events from state](#deriving-events-from-state)
+- [The Dota 2 plugin, and what it shares with Counter-Strike 2](#the-dota-2-plugin-and-what-it-shares-with-counter-strike-2)
+- [What is not built](#what-is-not-built)
 
 ## What the model is for
 
@@ -404,31 +405,38 @@ there is nothing yet to upgrade from — and `crates/events`'s golden documents
 are keyed by version and asserted to cover `ALL`, so the first bump cannot be
 made without a version-1 document being read by the version-2 build.
 
-## How the three planned integrations map
+## How the three integrations map
 
-**Two of these exist** — Counter-Strike 2 (`plugins/cs2`) and League of Legends
-(`plugins/league`) — and Dota 2 does not. They are the three shapes the model
-was designed against, and they are recorded here because the design's only real
-test is whether it absorbs their differences without any of them reaching the
-core. The first two columns are now descriptions of code rather than plans; the
-League column turned out to be what this table said, which is the most that can
-be claimed for a prediction, and
-[The reference plugin](#the-reference-plugin) is where the parts of the
-Counter-Strike 2 column that turned out to be harder than the table suggests are
-written down.
+**All three of these now exist** — Counter-Strike 2 (`plugins/cs2`), League of
+Legends (`plugins/league`) and Dota 2 (`plugins/dota2`). They are the three
+shapes the model was designed against, and they are recorded here because the
+design's only real test is whether it absorbs their differences without any of
+them reaching the core. Every column is now a description of code rather than a
+plan. League turned out to be what this table predicted, which is the most that
+can be claimed for a prediction; Counter-Strike 2 and Dota 2 did not, and
+[The reference plugin](#the-reference-plugin) and
+[The Dota 2 plugin](#the-dota-2-plugin-and-what-it-shares-with-counter-strike-2)
+say what each does instead — which is the more useful of the two results.
 
 | | Counter-Strike 2 ([#70](https://github.com/wildware-uk/clipped/issues/70)) | League of Legends ([#72](https://github.com/wildware-uk/clipped/issues/72)) | Dota 2 ([#73](https://github.com/wildware-uk/clipped/issues/73)) |
 | --- | --- | --- | --- |
 | Native shape | Game State Integration: a JSON state blob posted to a local endpoint on change | Live Client Data: a polled local HTTPS API returning a list of events with a match-relative time | Game State Integration: a different JSON state blob, posted the same way |
 | What an event is natively | A *difference* between two state blobs — the previous round score and this one | An entry in an array, with `EventID` and `EventTime` in seconds since the match began | A difference between two state blobs, with a different shape again |
-| Becomes | `kill`, `death`, `assist`, `round_started`, `round_ended`, `match_started`, `match_ended`, `win` | the same set, from a different derivation | the same set again |
-| `at` | when the state changed, which is bounded by how often the game posts | the match clock in the same payload, minus the event's match-relative time: how long ago it happened, which is what the wire carries | as CS2 |
-| `precision` | the posting interval the plugin configured | the request's measured round trip, plus an assumed bound on how precisely the two times are reported | as CS2 |
+| Becomes | `kill`, `death`, `assist`, `round_started`, `round_ended`, `match_started`, `match_ended`, `win` | the same set, from a different derivation | `kill`, `death`, `assist`, `match_started`, `match_ended`, `win`, `loss` — **and no rounds**, because Dota has none — plus `dota-2.kill_streak` |
+| `at` | when the state changed, which is bounded by how often the game posts | the match clock in the same payload, minus the event's match-relative time: how long ago it happened, which is what the wire carries | the middle of the interval between the payload that changed and the one before it |
+| `precision` | the posting interval the plugin configured | the request's measured round trip, plus an assumed bound on how precisely the two times are reported | half that interval, **measured rather than configured**: a game that has been paused posts when it posts |
 | `latency` | transport and parse | how long ago it happened, which for an event from an earlier poll is longer than the poll interval | transport and parse |
-| `data` | `weapon`, `headshot`, and the rest of the game's own words | `KillerName`, `VictimName`, … | Dota's own words |
+| `data` | `weapon`, `headshot`, and the rest of the game's own words | `KillerName`, `VictimName`, … | `match_id`, `clock_time`, `hero`, and the running total the event came from |
 
-The third row is the point: three unrelated derivations produce the same seven
-kinds, and the differences that survive are two integers and an opaque object.
+The third row is the point, and the two integrations that exist have now tested
+it: three unrelated derivations produce overlapping subsets of the same closed
+vocabulary,
+and the differences that survive are two integers and an opaque object. The
+subsets are *not* identical, which is the more useful half of the result — Dota
+has no rounds, and the answer to that was to report no rounds rather than to
+find something round-shaped to map onto them. A vocabulary a game only partly
+uses is working; a vocabulary every game fills in completely would be one whose
+kinds had stopped meaning anything in particular.
 
 Whatever the technique, AGENTS.md section 34 is absolute: official APIs, local
 telemetry, game logs, Game State Integration, documented IPC and supported
@@ -1231,6 +1239,76 @@ changing, the window widens to the game's heartbeat interval and the precision
 widens with it. That is the correct number rather than a flattering one, and a
 highlight rule padding a clip by `precision` is the reason it matters.
 
+## The Dota 2 plugin, and what it shares with Counter-Strike 2
+
+`plugins/dota2` ([#73](https://github.com/wildware-uk/clipped/issues/73)) is the
+third plugin written against this contract and the **second** over Game State
+Integration. Its own README says what it reports and what it does to the
+machine; this section is the part that is about **the next** plugin rather than
+about Dota.
+
+Dota 2 and Counter-Strike 2 use the same mechanism. A KeyValues file in the
+game's own directory names a local address, a set of components and a token; the
+game POSTs a JSON state to that address whenever it changes. Everything in that
+sentence except *what is in the JSON* is identical for the two games — so
+`plugins/cs2` and `plugins/dota2` now hold **two independent implementations of
+the same plumbing**: a KeyValues writer, a hand-rolled loopback listener with its
+request bounds, a shared secret generated and checked on every payload, and the
+install of one `gamestate_integration_*.cfg`. That is the duplication AGENTS.md
+section 55 exists to prevent, and it is written down here rather than left to be
+discovered.
+
+**It is deliberately not extracted by this change.** Lifting a module out from
+under two branches that were both open would have conflicted with whichever
+merged second, and the extraction is worth doing once, against both callers, by
+somebody who can see what the two actually have in common rather than what one
+of them guessed. Where it belongs is argued on
+[#69](https://github.com/wildware-uk/clipped/issues/69) with a recommendation —
+`crates/gsi`, linked by plugin binaries and not by the recorder — and that
+issue is where the move happens. It could **not** live in `crates/plugins`: that
+crate is the host side and is linked into the recorder, and a listening socket
+and a writer of files inside a game's installation are two things ADR 0002 keeps
+out of the process that is recording.
+
+Each plugin is split so that the extraction stays a move rather than a rewrite.
+In `plugins/dota2` the boundary is drawn where the games actually differ:
+
+| Half | Knows about | Would a second Valve integration reuse it? |
+| --- | --- | --- |
+| `plugins/dota2/src/gsi` | The socket, the configuration file, the auth token, and how often payloads arrive | **All of it.** It names no Dota type and reads no Dota field |
+| `plugins/dota2/src/dota` | What `DOTA_GAMERULES_STATE_POST_GAME` means, and which counter is a kill | **None of it**, and it should not try |
+
+The second row is the honest half. A “configurable state differ” that both games
+could point at would be a small language for describing state machines, written
+so that two files of rules could avoid being two files of Rust — which is the
+over-engineering AGENTS.md section 1 warns about, arriving in the disguise of
+reuse. Dota's game rules states and Counter-Strike's rounds and phases are
+different *concepts*, not different *values*.
+
+**Two properties of Game State Integration that any plugin over it inherits**,
+both of which cost a user something and neither of which is a bug to be fixed:
+
+- **The configuration file is read when the game starts.** A plugin that writes
+  it during a session has configured the *next* session. The Dota plugin says so
+  in a `problem` — “Restart Dota 2 for it to take effect — this recording will
+  not have any” — rather than leaving the user watching a timeline that never
+  gains a mark (AGENTS.md section 45).
+- **The token has to outlive the plugin process.** The game holds whatever token
+  the file had when it started, so a plugin that generated a new one on every
+  attach would refuse every payload of the match in progress. It is generated
+  once and kept in Clipped's own directory.
+
+**Where the two plugins answer the same question differently, and it is not
+settled.** [Writing into somebody else's game](#writing-into-somebody-elses-game)
+states installation as a rule — never a side effect — and `plugins/cs2` follows
+it: nothing is written until the user runs `clipped-cs2-plugin install`.
+`plugins/dota2` writes its file when the host attaches it, and reports that the
+game has to be restarted for it to matter. Both are defensible, and one of them
+is wrong for a project that ships both:
+[#382](https://github.com/wildware-uk/clipped/issues/382) is where they are made
+to agree, with a recommendation on it. It is recorded here rather than settled
+by the change that found it, because settling it changes a plugin's behaviour.
+
 ## What is not built
 
 Stated plainly, because the gap between this document and the running
@@ -1238,14 +1316,15 @@ application is the thing most likely to be misread (AGENTS.md section 7):
 
 - **Nothing attaches a supervisor to a recording session**
   ([issue #338](https://github.com/wildware-uk/clipped/issues/338)).
-  `clipped-session` does not create one, so `plugins/league` and `plugins/cs2`
-  run when they are started by hand and are never started by Clipped. This
+  `clipped-session` does not create one, so `plugins/league`, `plugins/cs2` and
+  `plugins/dota2` run when they are started by hand and are never started by
+  Clipped. This
   document previously said the wiring belonged with the first integration; it
   did not — an integration is a plugin and the wiring is in `crates/session`,
   and putting them in one change would have meant neither being reviewed
   properly.
-- **Nothing installs a plugin.** `plugins/league` and `plugins/cs2` each build
-  an executable and have a `plugin.json` beside it; putting the two in a
+- **Nothing installs a plugin.** `plugins/league`, `plugins/cs2` and
+  `plugins/dota2` each build an executable and have a `plugin.json` beside it; putting the two in a
   directory under the plugins folder is a manual step, and there is no packaging
   step that does it.
 - **The reference plugin's fixtures are constructed, not captured.**
@@ -1256,6 +1335,13 @@ application is the thing most likely to be misread (AGENTS.md section 7):
   outstanding half of
   [#70](https://github.com/wildware-uk/clipped/issues/70)'s first acceptance
   criterion. The directory's README says how to take a real capture.
+- **Neither Game State Integration plugin has been verified against the game it
+  integrates.** `plugins/dota2`'s tests run against constructed sample payloads
+  too, because nobody who has worked on it has Dota 2 installed
+  ([#73](https://github.com/wildware-uk/clipped/issues/73) records what that
+  does and does not prove, and `plugins/dota2/fixtures/README.md` says how to
+  take a real capture). A plugin can be shown to parse, diff, bound and report
+  correctly without the game; it cannot be shown to be reading the right fields.
 - **Nothing stores which plugins are enabled**, or the consent each was enabled
   with ([issue #282](https://github.com/wildware-uk/clipped/issues/282)). That
   lives in the configuration API, not here: a plugin crate with its own settings
