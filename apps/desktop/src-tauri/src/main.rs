@@ -77,6 +77,7 @@
 mod foreground;
 mod notification_policy;
 mod notifications;
+mod this_application;
 mod toast;
 mod tray;
 mod tray_icon;

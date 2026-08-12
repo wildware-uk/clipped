@@ -23,8 +23,19 @@
 //!
 //! Two things, and both are exclusions rather than a guess at what a game is:
 //!
-//! - **This process's own windows.** Recording Clipped's window would be absurd,
-//!   and clicking the tray is a foreground change to this process.
+//! - **Clipped's own windows**, which is not the same as this process's own
+//!   windows and is why [`this_application`](crate::this_application) exists.
+//!   Recording Clipped would be absurd, and clicking the tray is a foreground
+//!   change to this process — but the interface *inside* the window is drawn by
+//!   WebView2, in `msedgewebview2.exe` processes this one starts, and those have
+//!   windows of their own. The developer tools are a top-level, visible window
+//!   belonging to the webview host, so raising them used to leave the record
+//!   control offering `msedgewebview2.exe`
+//!   ([issue #390](https://github.com/wildware-uk/clipped/issues/390)). The
+//!   exclusion is therefore "this process, or a process it started", asked of
+//!   the process table rather than of an executable's name: another
+//!   application that happens to host a webview is recordable like anything
+//!   else.
 //! - **The shell's own surfaces**, by window class: the taskbar, the notification
 //!   overflow, Start, Search and the desktop. Opening the tray menu raises the
 //!   taskbar, so without this the answer would be `explorer.exe` every time.
@@ -34,6 +45,20 @@
 //!
 //! Everything else is remembered as it comes. Nothing here decides what is worth
 //! recording; the user does, by having been in it.
+//!
+//! # Looking, then deciding
+//!
+//! ```text
+//! look_at(window)  ── needs Windows ──▶  SeenWindow
+//!                                             │
+//!                        worth_offering(&seen)  ── pure, and where the rules live
+//! ```
+//!
+//! The split is the same one `clipped_windows` makes between enumerating
+//! windows and resolving one, and for the same reason: "what is this window?"
+//! can only be answered by Windows and has no judgement in it, while "may this
+//! one be offered?" is all judgement and needs no desktop — so it is a function
+//! over written-down windows and is tested as one (AGENTS.md section 25).
 //!
 //! # Threading
 //!
@@ -56,6 +81,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
     EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
+
+use crate::this_application;
 
 /// The window classes of the shell's own surfaces.
 ///
@@ -189,15 +216,47 @@ fn remember(window: HWND) {
 
 /// What a window is, or [`None`] if it is not one to offer recording.
 fn describe(window: HWND) -> Option<ForegroundWindow> {
+    let seen = look_at(window)?;
+    if !worth_offering(&seen) {
+        return None;
+    }
+
+    Some(ForegroundWindow {
+        process_id: seen.process_id,
+        process_name: process_name(seen.process_id)?,
+    })
+}
+
+/// What Windows says about a window a foreground change named.
+///
+/// Gathered before anything is decided, so that [`worth_offering`] is a
+/// function of a flag, a string and a number rather than of a desktop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SeenWindow {
+    /// Whether it is on screen at all.
+    visible: bool,
+    /// Its window class, which is how the shell's own surfaces are told apart
+    /// from applications.
+    class: String,
+    /// The process that owns it, or zero if Windows has none for it.
+    process_id: u32,
+    /// Whether that process is Clipped: this process, or one it started.
+    ///
+    /// Two processes rather than one, and the second is the point. Clipped's
+    /// interface is drawn by WebView2, in `msedgewebview2.exe`, which this
+    /// process starts and which has top-level windows of its own — the
+    /// developer tools among them
+    /// ([issue #390](https://github.com/wildware-uk/clipped/issues/390)).
+    this_application: bool,
+}
+
+/// Reads what Windows knows about `window`.
+///
+/// Everything that needs a desktop is here, and no rule is: a window this
+/// module will refuse is described just the same, and refused by
+/// [`worth_offering`].
+fn look_at(window: HWND) -> Option<SeenWindow> {
     if window.is_invalid() {
-        return None;
-    }
-    // SAFETY: `window` is a handle Windows gave us; an invalid one returns
-    // false rather than faulting.
-    if !unsafe { IsWindowVisible(window) }.as_bool() {
-        return None;
-    }
-    if SHELL_WINDOW_CLASSES.contains(&class_name(window)?.as_str()) {
         return None;
     }
 
@@ -205,14 +264,29 @@ fn describe(window: HWND) -> Option<ForegroundWindow> {
     // SAFETY: `process_id` is a real, writable `u32`, which is the whole of what
     // this call requires of the caller.
     unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
-    if process_id == 0 || process_id == std::process::id() {
-        return None;
-    }
 
-    Some(ForegroundWindow {
+    Some(SeenWindow {
+        // SAFETY: `window` is a handle Windows gave us; an invalid one returns
+        // false rather than faulting.
+        visible: unsafe { IsWindowVisible(window) }.as_bool(),
+        class: class_name(window)?,
         process_id,
-        process_name: process_name(process_id)?,
+        this_application: this_application::includes(process_id),
     })
+}
+
+/// Whether a window is one to offer for recording.
+///
+/// Every rule is here, which is what makes each of them testable: a window that
+/// is not on screen, one of the shell's own surfaces, one Windows has no
+/// process for, and — the exclusion
+/// [issue #390](https://github.com/wildware-uk/clipped/issues/390) is about —
+/// any window belonging to Clipped itself, whichever of its processes drew it.
+fn worth_offering(seen: &SeenWindow) -> bool {
+    seen.visible
+        && seen.process_id != 0
+        && !seen.this_application
+        && !SHELL_WINDOW_CLASSES.contains(&seen.class.as_str())
 }
 
 /// A window's class name, or [`None`] if Windows would not say.
@@ -268,4 +342,163 @@ fn process_name(process_id: u32) -> Option<String> {
             .filter(|name| !name.is_empty())?
             .to_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+    use super::*;
+
+    /// A window of another application, on screen, owned by a process that is
+    /// nothing to do with Clipped.
+    fn a_game() -> SeenWindow {
+        SeenWindow {
+            visible: true,
+            class: "SDL_app".to_owned(),
+            process_id: 4_242,
+            this_application: false,
+        }
+    }
+
+    #[test]
+    fn an_application_window_is_offered() {
+        assert!(worth_offering(&a_game()));
+    }
+
+    #[test]
+    fn clippeds_own_webview_is_not_offered() {
+        // Issue #390. The developer tools are a top-level, visible window with
+        // a class of their own, belonging to `msedgewebview2.exe` — a process
+        // this one started, which is the only thing about it that says Clipped.
+        // Raising them used to leave the record button reading "Start recording
+        // msedgewebview2.exe", and pressing it recorded Clipped.
+        let devtools = SeenWindow {
+            class: "Chrome_WidgetWin_1".to_owned(),
+            process_id: 53_008,
+            this_application: true,
+            ..a_game()
+        };
+
+        assert!(!worth_offering(&devtools));
+    }
+
+    #[test]
+    fn another_applications_webview_is_still_offered() {
+        // The same window class, the same executable, and a different
+        // application: Teams, the widgets board, somebody else's Tauri
+        // application. An exclusion by name would have taken these with it, and
+        // a user may legitimately want to record one.
+        let theirs = SeenWindow {
+            class: "Chrome_WidgetWin_1".to_owned(),
+            process_id: 28_844,
+            this_application: false,
+            ..a_game()
+        };
+
+        assert!(worth_offering(&theirs));
+    }
+
+    #[test]
+    fn clippeds_own_window_is_not_offered() {
+        // The window this process draws itself. Clicking the tray is a
+        // foreground change to it.
+        let ours = SeenWindow {
+            class: "Tauri Window".to_owned(),
+            this_application: true,
+            ..a_game()
+        };
+
+        assert!(!worth_offering(&ours));
+    }
+
+    #[test]
+    fn the_shells_own_surfaces_are_not_offered() {
+        // Opening the tray menu raises the taskbar, so without this the answer
+        // would be `explorer.exe` every time the menu was used.
+        for class in SHELL_WINDOW_CLASSES {
+            let surface = SeenWindow {
+                class: (*class).to_owned(),
+                ..a_game()
+            };
+
+            assert!(!worth_offering(&surface), "{class} was offered");
+        }
+    }
+
+    #[test]
+    fn a_file_explorer_window_is_offered() {
+        // The list above is of shell *surfaces*, not of Explorer. A File
+        // Explorer window is an ordinary window somebody may want to record.
+        let explorer = SeenWindow {
+            class: "CabinetWClass".to_owned(),
+            ..a_game()
+        };
+
+        assert!(worth_offering(&explorer));
+    }
+
+    #[test]
+    fn a_window_that_is_not_on_screen_is_not_offered() {
+        let hidden = SeenWindow {
+            visible: false,
+            ..a_game()
+        };
+
+        assert!(!worth_offering(&hidden));
+    }
+
+    #[test]
+    fn a_window_windows_has_no_process_for_is_not_offered() {
+        // `start_recording` takes a process identifier, and zero names nothing.
+        let orphan = SeenWindow {
+            process_id: 0,
+            ..a_game()
+        };
+
+        assert!(!worth_offering(&orphan));
+    }
+
+    #[test]
+    fn a_window_this_application_did_not_draw_is_read_as_somebody_elses_and_offered() {
+        // The one line none of the rules above reaches: `look_at` asking
+        // `this_application::includes` about *the window's* process. Nothing
+        // in this file would notice a miswiring there, and the consequence is
+        // not a cosmetic one — a constant `true`, a negation, or this process's
+        // identifier passed in place of the window's marks every window as
+        // Clipped's own, `worth_offering` then refuses all of them, and the
+        // record control has nothing to offer for anything the user does. It
+        // is the primary control on the Home screen, so it would be dead in
+        // the shipped application while the whole suite and clippy stayed
+        // green.
+        //
+        // The desktop window stands in for "a window Clipped did not draw",
+        // and it is the one window that can be asked for without opening one:
+        // it exists in every session, needs no display, and belongs to a system
+        // process started at boot — which is neither this process nor anything
+        // this process could have started.
+        //
+        // SAFETY: takes nothing, and the handle it returns is only ever passed
+        // back to Windows.
+        let desktop = unsafe { GetDesktopWindow() };
+        let seen = look_at(desktop).expect("Windows describes the desktop window");
+
+        assert_ne!(
+            seen.process_id, 0,
+            "the desktop window has an owning process, which is what makes this a real question"
+        );
+        assert_ne!(
+            seen.process_id,
+            std::process::id(),
+            "and it is not this process, so the answer below is about the window's process"
+        );
+        assert!(
+            !seen.this_application,
+            "a window belonging to a system process is not Clipped"
+        );
+        assert!(
+            worth_offering(&seen),
+            "so the record control is still able to offer something"
+        );
+    }
 }

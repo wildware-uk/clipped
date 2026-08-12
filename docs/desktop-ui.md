@@ -926,6 +926,7 @@ Left-clicking the icon raises the window; right-clicking opens the menu.
 | `src-tauri/src/tray.rs` | The menu, the redraws, and turning a click into a command on the recorder. |
 | `src-tauri/src/tray_icon.rs` | The four marks, drawn in code. |
 | `src-tauri/src/foreground.rs` | Which application the user was last in, which is what Start Recording records. |
+| `src-tauri/src/this_application.rs` | Which processes are Clipped — this one and the WebView2 host it starts — so that the record control never offers to record Clipped itself (issue #390). |
 
 ### Four marks, and why they are shapes
 
@@ -1012,12 +1013,64 @@ event hook, which costs nothing until a foreground window changes — the same
 non-polling choice `clipped-game-detection` made for process starts (issue #41),
 for the same reason, because this process runs beside a game.
 
-Two things are deliberately not remembered: this process's own windows, and the
+Two things are deliberately not remembered: **Clipped's own windows**, and the
 shell's own surfaces by window class — the taskbar, the notification overflow,
 Start, Search and the desktop. Opening the tray menu raises the taskbar, so
 without that exclusion the answer would be `explorer.exe` every time. A File
 Explorer *window* is `CabinetWClass` and is remembered like anything else,
 because somebody may want to record one.
+
+The record button on the Home screen reads the same answer, through
+`record_target`, so both controls name the same application and neither can name
+something the other would not (issue #389).
+
+#### Clipped is more than one process
+
+"Clipped's own windows" is not the same as "this process's windows", and the
+difference was [issue #390](https://github.com/wildware-uk/clipped/issues/390).
+The window is this process; the interface *inside* it is drawn by WebView2, in
+`msedgewebview2.exe` processes this one starts, and those have windows of their
+own — the developer tools are a top-level, visible window belonging to the
+webview host. Raising them left the record control reading **"Start recording
+msedgewebview2.exe"**, and pressing it recorded Clipped.
+
+So the exclusion is *this process, or a process it started*, which
+`this_application.rs` answers from the process table. Two things it deliberately
+is not:
+
+- **not the executable's name.** `msedgewebview2.exe` is the runtime any
+  application may host a webview in — Teams, the widgets board, another Tauri
+  application — and all of those are recordable. What identifies *this*
+  application's webview host is that this process started it, not what it is
+  called.
+- **not an identifier remembered once**, such as `ICoreWebView2::BrowserProcessId`.
+  WebView2 recreates its browser process after a crash and Windows reuses
+  process identifiers, so a remembered number can come to mean somebody's game.
+
+The table's parent identifiers are not trusted alone, for the same reason: a
+process whose creator has exited goes on naming a number Windows may since have
+given to Clipped, or to something Clipped started. So every link of the chain —
+not only the process being asked about — is held against the two processes'
+creation times, which Windows guarantees are ordered: a process must have
+started no earlier than the parent the table gives it, and no later than the
+moment the table was read.
+
+Per link matters. The walk passes through strangers' identifiers on its way up,
+and one stale link anywhere in the chain would hang a whole third-party subtree
+beneath Clipped, making every process under it silently unrecordable — the same
+bug as issue #390, pointed at somebody else's application. Checking the
+candidate alone cannot see it: a process younger than Clipped passes that check
+and is then claimed through a reused parent identifier two links further up.
+
+Those are the two comparisons `clipped_windows::ProcessTree` makes about the
+same hazard, and they are made again here rather than shared for an architectural
+reason rather than an oversight: `tests/integration/tests/workspace_layering.rs`
+allows the desktop crate exactly one member of the recorder's workspace,
+`clipped-ipc`, so that closing the window can never reach capture or encoding
+(ADR 0002). The one difference is what an unknown creation time means. That tree
+refuses a candidate it cannot time, because refusing costs an interval of a
+game's audio and is retried a moment later; here refusing means offering to
+record Clipped's own webview, so an unanswered link is left to the table.
 
 The recorder is then asked for a `pid`, and resolves the window itself. One set
 of rules about what a recordable window is, in the recorder (AGENTS.md section
@@ -2043,3 +2096,25 @@ a pointer. That half is verified by hand and recorded on the issue: the icon
 appearing, its tooltip following a real recording, surviving an Explorer restart,
 and the four things the menu items do driven through the same `RecorderLink`
 calls the handlers make.
+
+The same line runs through what decides *what* Start Recording would record.
+`foreground.rs` gathers what Windows says about a window and then decides
+separately, so every rule — an invisible window, a shell surface, a window with
+no process, and a window belonging to Clipped itself — is a function of
+written-down windows and is tested as one; `this_application.rs`'s membership
+rules are tested against written-down process trees, and its one Windows-facing
+claim is tested by spawning a child process and reading the real process table.
+
+The wire between the two — `look_at` asking `this_application::includes` about
+the window's process — is tested against the desktop window, which exists in
+every session and belongs to a system process. That is the direction with the
+severe failure: a constant `true`, a negation, or this process's identifier
+passed in place of the window's would mark every window as Clipped's, and the
+record control would then be unable to offer anything at all. The other
+direction, a constant `false`, would restore issue #390 rather than disable the
+control, and no test reaches it: it needs a window belonging to Clipped's own
+webview host, which cannot be raised without opening a window.
+
+That, and the hook delivering a real window handle, are verified by hand against
+the case that produced issue #390: open the developer tools, return to the
+window, and read what the button offers.
