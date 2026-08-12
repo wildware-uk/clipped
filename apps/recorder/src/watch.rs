@@ -364,8 +364,9 @@ pub fn load_configuration(path: Option<&Path>) -> Configuration {
 /// - the console, by `command_line.rs`'s
 ///   `watch_says_on_the_console_that_a_settings_file_it_cannot_read_was_left_alone`,
 ///   which starts the built `watch` over an unreadable file and reads its
-///   standard error. Nothing in this process can see an `eprintln!`, so until
-///   that test existed this line could be deleted with every test still green.
+///   standard error. No subscriber can see an `eprintln!`, however well the
+///   first test is written, so until the second existed the line below could be
+///   deleted with every test on the branch still green.
 fn report_unreadable_settings(error: &ConfigurationError) {
     let sentence = unreadable_settings_sentence(error);
     tracing::warn!(
