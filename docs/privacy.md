@@ -203,15 +203,18 @@ the decision is recorded rather than discovered in a diff.
 ## Register of network communication
 
 **Clipped itself — the recorder and the desktop application — performs no
-network communication of either class.** One bundled *plugin* does, and it is
-the row below.
+network communication of either class, and none of it is outbound.** Two bundled
+*plugins* do, and they are the two rows below.
 
 | Feature | Class | Destination | Default | Opt-in |
 | --- | --- | --- | --- | --- |
 | League of Legends highlight plugin | Loopback | `127.0.0.1:2999`, connect only | Off | Enabling the plugin, whose declaration is this row in the words `plugin.json` says it in |
+| Counter-Strike 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3212`. Receives Game State Integration payloads from Counter-Strike 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin does nothing until its configuration file is installed, and does not install one itself. | Two deliberate steps: enabling the plugin, having seen its declaration, and running `clipped-cs2-plugin install <game folder>`, which writes the one file that makes the game post at all. `clipped-cs2-plugin uninstall`, or deleting that file, ends it. |
 
-What that row means, in full, because a register entry that has to be decoded
-is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design):
+Each row is spelled out below, because a register entry that has to be decoded
+is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design).
+
+### What the League of Legends row means
 
 - **What is sent:** an HTTP `GET` of `/liveclientdata/allgamedata`, with no
   body, no cookie and no authorisation header. Nothing about the machine, the
@@ -240,6 +243,21 @@ is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design):
   could have made this loopback row untrue. A test asserts the second listener
   is never reached.
 
+### What the Counter-Strike 2 row means
+
+What the plugin receives is a snapshot of your Counter-Strike match — the map,
+the round, the score and your own kill, death and assist counts — and it stays
+on the machine: it becomes marks on a recording's timeline in the local
+database. Nothing about it is transmitted anywhere. The listener requires the
+token from the configuration file on every payload and refuses anything else,
+because a loopback port is reachable by every other process on this machine
+(see [above](#loopback-and-outbound-are-treated-differently)), and it binds
+`127.0.0.1` explicitly and never `0.0.0.0`.
+[plugins/cs2/README.md](../plugins/cs2/README.md) documents the file it writes,
+in full, and how to remove it. Recording does not depend on any of it: with the
+plugin absent, disabled or unable to bind, Clipped records exactly as it
+otherwise would.
+
 One thing is anticipated but **not implemented**, and has no code behind it
 today. It is listed so that the shape of a future row is clear, not to imply it
 exists:
@@ -251,9 +269,18 @@ exists:
 
 ## Plugin network access
 
-This section was written as **policy to be implemented in Milestone 9
-(Highlight Plugin API)**. Two parts of it are now implemented and one is not,
-so the state of each is stated where it appears rather than left to be inferred
+**Status.** This section was written as **policy to be implemented in Milestone
+9 (Highlight Plugin API)**. The contract exists now, and two plugins with it:
+League of Legends ([issue #72](https://github.com/wildware-uk/clipped/issues/72))
+and Counter-Strike 2
+([issue #70](https://github.com/wildware-uk/clipped/issues/70)). Declaration and
+consent below are implemented as types in `crates/plugins` and are covered by
+tests. **Mediation is not**, and neither is the plugin manager that would show
+you a declaration before you agreed to it
+([issue #281](https://github.com/wildware-uk/clipped/issues/281)); nor does
+anything in the recorder start a plugin during a recording yet
+([issue #338](https://github.com/wildware-uk/clipped/issues/338)). The state of
+each part is stated where it appears rather than left to be inferred
 ([docs/plugin-api.md](plugin-api.md) is how, and `crates/plugins` is where).
 
 **Declaration** — *implemented*. A plugin declares its network access in its
@@ -274,8 +301,10 @@ so today the only way to read a bundled plugin's declaration is its
 **Mediation** — **not implemented**. This paragraph described plugins reaching
 the network through an interface the host provides, so that requests could be
 checked against the declaration. That is not what M9 built: a plugin is a
-separate process and opens its own sockets, so the declaration is checked,
-rendered and consented to, and it is not a sandbox.
+separate process and opens its own sockets — the League plugin connects to
+`127.0.0.1:2999` itself and the Counter-Strike 2 plugin binds `127.0.0.1:3212`
+itself — so the declaration is checked, rendered and consented to, and it is not
+a sandbox.
 [Issue #280](https://github.com/wildware-uk/clipped/issues/280) is where an
 AppContainer or job object makes it enforceable — possible *because* a plugin is
 a process — and `NetworkAccess::ENFORCEMENT` is the sentence the user is shown
@@ -293,8 +322,15 @@ in-process native plugin could call the operating system directly and could
 never be held to a declaration — and it is the reason the promise above can
 one day be kept. It is not kept today: nothing yet confines the child, and the
 plugin manager must state the guarantee the user is actually getting rather
-than implying the stronger one. The decision is argued in
-[plugin-api.md](plugin-api.md) and belongs in an ADR
+than implying the stronger one:
+
+> Clipped shows what a plugin declares and refuses to start one whose
+> declaration has changed since you allowed it. It cannot yet stop a plugin from
+> using the network in ways it did not declare.
+
+It lives in the code as `clipped_plugins::NetworkAccess::ENFORCEMENT`, so that
+the day the guarantee changes, the wording the user reads changes with it. The
+decision is argued in [plugin-api.md](plugin-api.md) and belongs in an ADR
 ([issue #279](https://github.com/wildware-uk/clipped/issues/279)).
 
 **No exemptions.** Plugins shipped with Clipped declare their network access on

@@ -1,0 +1,63 @@
+[package]
+name = "clipped-cs2-plugin"
+description = "Counter-Strike 2 highlight plugin: derives events from Game State Integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# A plugin is installed as a directory containing an executable and a
+# `plugin.json`, not as a crate anybody depends on (docs/plugin-api.md).
+publish = false
+
+# The library exists so that the derivation, the payload types, the
+# configuration file and the HTTP reader can be tested without starting a
+# process, and the binary is a thin shell around it. Everything interesting is
+# a pure function over a payload and a clock reading the caller supplies.
+[lib]
+name = "clipped_cs2_plugin"
+path = "src/lib.rs"
+
+# The name the manifest declares. Cargo appends `.exe` on Windows, which is
+# what `plugin.json` names, and `manifest_names_the_binary_cargo_builds`
+# asserts the two agree rather than leaving it to a reader to notice.
+[[bin]]
+name = "clipped-cs2-plugin"
+path = "src/main.rs"
+
+[dependencies]
+# The event vocabulary this plugin reports through (issue #68). A kill here
+# becomes `clipped_events::EventKind::Kill` and nothing above the plugin can
+# tell that Counter-Strike produced it (AGENTS.md section 33).
+clipped-events = { workspace = true }
+# The plugin contract (issue #69): the wire, the reports and the manifest types.
+# A plugin written in Rust uses them rather than hand-building the JSON the host
+# is about to parse (docs/plugin-api.md, "Writing a plugin").
+clipped-plugins = { workspace = true }
+# The command-line parser every executable in this workspace shares, so that
+# `clipped-cs2-plugin install --help` reads like `clipped-recorder`'s does.
+# Dual MIT/Apache-2.0.
+clap = { workspace = true }
+# Game State Integration is JSON, the wire is JSON, and the record of where the
+# configuration file was installed is JSON. Dual MIT/Apache-2.0.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# One call: `BCryptGenRandom`, for the Game State Integration authentication
+# token. `docs/privacy.md` requires a listening socket to authenticate what it
+# accepts, and a token anybody can predict is not authentication — a web page
+# in a browser can POST to a loopback port. Windows' own CSPRNG is the correct
+# source, and this is the crate the rest of the workspace already reaches
+# Windows through, so the plugin does not add a second copy of the COM plumbing
+# to the graph.
+#
+# - Win32_Foundation             NTSTATUS, which is what the call answers with
+# - Win32_Security_Cryptography  BCryptGenRandom
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
+
+[lints]
+workspace = true
