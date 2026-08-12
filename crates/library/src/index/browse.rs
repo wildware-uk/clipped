@@ -76,13 +76,19 @@ use super::error::IndexError;
 /// How many sessions a page holds when the caller does not say.
 pub const DEFAULT_PAGE_LIMIT: usize = 50;
 
-/// The most a page will hold, whatever is asked for.
+/// The most sessions a page will hold, whatever is asked for.
 ///
-/// A page is one protocol frame, and a frame has a ceiling
-/// (`clipped_ipc::MAX_FRAME_BYTES`). Two hundred sessions with their recordings
-/// is comfortably inside it; a caller that asks for ten thousand is asking for a
-/// frame that cannot be sent, and clamping is a better answer than a refusal
-/// nobody could have predicted.
+/// A bound on how much this module will *read* in one go — a caller that asks
+/// for ten thousand is asking for a query that walks the library, and clamping
+/// is a better answer than a refusal nobody could have predicted.
+///
+/// It is deliberately **not** the bound on how large the answer may be, because
+/// a count of sessions cannot be one: a session holds any number of recordings
+/// and clips, so two hundred sessions is anywhere between a hundred kilobytes
+/// and several megabytes. Whatever carries these across a process boundary has
+/// to bound its own payload in bytes, which is what
+/// `apps/recorder/src/library.rs` does against `clipped_ipc::MAX_FRAME_BYTES`.
+/// This crate knows nothing about frames.
 pub const MAX_PAGE_LIMIT: usize = 200;
 
 /// How many sessions a search reads per statement.
@@ -293,7 +299,15 @@ fn batch_size(limit: usize, query: Option<&Query>) -> usize {
 }
 
 /// The cursor that continues after this session.
-fn cursor_of(session: &IndexedSession) -> String {
+///
+/// Public because a caller may answer with fewer sessions than it was given —
+/// the recorder truncates a page to what one protocol frame can carry
+/// (`apps/recorder/src/library.rs`) — and the cursor it hands out then has to be
+/// the one *this* module would read back. A second place formatting a cursor is
+/// two definitions of where a page continues, and the two drifting would skip or
+/// repeat sessions in a way nothing would notice.
+#[must_use]
+pub fn cursor_of(session: &IndexedSession) -> String {
     format!("{}|{}", session.started_at, session.session_id)
 }
 

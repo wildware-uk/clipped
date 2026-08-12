@@ -44,11 +44,11 @@ use std::sync::Mutex;
 
 use clipped_ipc::{
     ErrorCode, LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage,
-    LibrarySessions, ProtocolError,
+    LibrarySessions, ProtocolError, MAX_FRAME_BYTES,
 };
 use clipped_library::index::{
-    game_summaries, list_sessions, GameSummary, IndexedClip, IndexedRecording, IndexedSession,
-    SessionListing,
+    cursor_of, game_summaries, list_sessions, GameSummary, IndexedClip, IndexedRecording,
+    IndexedSession, SessionListing,
 };
 use clipped_library::search::Query;
 use clipped_storage::Database;
@@ -123,10 +123,7 @@ impl LibraryReader {
             )
             .map_err(unavailable)?;
 
-            Ok(LibrarySessionPage {
-                sessions: page.sessions.iter().map(session).collect(),
-                next_cursor: page.next,
-            })
+            Ok(within_one_frame(&page.sessions, page.next))
         })
     }
 
@@ -204,6 +201,67 @@ fn unavailable(error: clipped_library::index::IndexError) -> ProtocolError {
         ErrorCode::LibraryUnavailable,
         format!("the recording library could not be read: {error}"),
     )
+}
+
+/// How many bytes of one frame a page of sessions may fill.
+///
+/// [`clipped_ipc::MAX_FRAME_BYTES`] is a bound on damage rather than a budget to
+/// spend, and a frame over it is **not** a failed request: the reader closes the
+/// connection rather than resynchronising (`crates/ipc/src/frame.rs`). So a page
+/// that overran it would drop the window's control connection, and would do it
+/// again on every retry, with nothing on screen to explain why.
+///
+/// Half a frame, because this measures the sessions alone and the response
+/// envelope, the reply tag and the cursor are carried around them.
+///
+/// A count of sessions cannot be this bound, which is the thing worth knowing
+/// here: a session holds any number of recordings and clips, so two hundred of
+/// them — `clipped_library::index::MAX_PAGE_LIMIT` — is 135 KB with one
+/// recording each and over 3 MB with thirty. Measured, not guessed:
+/// `a_page_is_bounded_by_what_a_frame_can_carry_rather_than_by_a_count_of_sessions`
+/// builds both.
+const PAGE_BUDGET_BYTES: usize = MAX_FRAME_BYTES as usize / 2;
+
+/// As many of these sittings as one frame can carry, and where to continue.
+///
+/// `beyond` is the cursor the index offered for the page it answered. It is kept
+/// when every session fits; when the page is cut short, the cursor becomes that
+/// of the last session actually carried, so the next page starts with the first
+/// one left out rather than skipping it.
+///
+/// **At least one session is always carried, whatever it costs.** A page that
+/// could come back empty because its first session was too large would page for
+/// ever and never show it, which is worse than one oversized frame — and the
+/// frame reader's ceiling is an order of magnitude above any single sitting.
+fn within_one_frame(sessions: &[IndexedSession], beyond: Option<String>) -> LibrarySessionPage {
+    let mut carried = Vec::with_capacity(sessions.len());
+    let mut remaining = PAGE_BUDGET_BYTES;
+
+    for indexed in sessions {
+        let wire = session(indexed);
+        // A session that cannot be measured is treated as the whole budget
+        // rather than as free: the alternative is a page that grows without
+        // bound because nothing could size it.
+        let cost = serde_json::to_vec(&wire).map_or(PAGE_BUDGET_BYTES, |bytes| bytes.len());
+
+        if !carried.is_empty() && cost > remaining {
+            // `carried` is non-empty, so it has a last session, and it is the
+            // one the cursor has to name.
+            let last = &sessions[carried.len() - 1];
+            return LibrarySessionPage {
+                sessions: carried,
+                next_cursor: Some(cursor_of(last)),
+            };
+        }
+
+        remaining = remaining.saturating_sub(cost);
+        carried.push(wire);
+    }
+
+    LibrarySessionPage {
+        sessions: carried,
+        next_cursor: beyond,
+    }
 }
 
 /// One sitting, on the wire.
@@ -472,6 +530,97 @@ mod tests {
             .expect("a blank query is not a bad one");
 
         assert_eq!(page.sessions.len(), 1);
+    }
+
+    /// A sitting with `recordings` recordings, sized like a real one.
+    fn bulky_session(index: usize, recordings: usize) -> IndexedSession {
+        IndexedSession {
+            session_id: format!("counter-strike-2-2026081{index}-201400"),
+            game_id: Some("counter-strike-2".to_owned()),
+            game_name: Some("Counter-Strike 2".to_owned()),
+            started_at: format!("2026-08-{:02}T20:14:00+01:00", (index % 28) + 1),
+            ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+            end_reason: Some("game-exited".to_owned()),
+            favourite: true,
+            recordings: (0..recordings)
+                .map(|n| IndexedRecording {
+                    recording_id: n as i64,
+                    session_index: n as i64 + 1,
+                    path: format!(
+                        r"D:\Recordings\Counter-Strike 2\clipped-cs2-2026081{index}-201400-{n}.mkv"
+                    ),
+                    started_at: "2026-08-11T20:14:00+01:00".to_owned(),
+                    ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
+                    outcome: Some("recorded".to_owned()),
+                    end_reason: Some("target-lost".to_owned()),
+                    duration_seconds: Some(6_540.0),
+                    width: Some(2560),
+                    height: Some(1440),
+                    size_bytes: Some(9_812_009_112),
+                    missing_since: None,
+                    favourite: true,
+                    tags: vec!["clutch".to_owned(), "ace".to_owned(), "ranked".to_owned()],
+                })
+                .collect(),
+            clips: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_page_is_bounded_by_what_a_frame_can_carry_rather_than_by_a_count_of_sessions() {
+        // The defect this exists for is not hypothetical: the index will hand
+        // over `MAX_PAGE_LIMIT` — two hundred — sessions, and two hundred
+        // sessions is 135 KB with one recording each and over 3 MB with thirty.
+        // A frame over `MAX_FRAME_BYTES` is not a failed request; the reader
+        // closes the connection (`crates/ipc/src/frame.rs`), so a busy library
+        // would drop the window's control connection on every attempt.
+        let bulky: Vec<IndexedSession> = (0..200).map(|i| bulky_session(i, 30)).collect();
+
+        let page = within_one_frame(&bulky, Some("the index's own cursor".to_owned()));
+        let bytes = serde_json::to_vec(&page).expect("a page serialises").len();
+
+        assert!(
+            bytes < MAX_FRAME_BYTES as usize,
+            "a page has to fit in a frame, and this one is {bytes} bytes"
+        );
+        assert!(
+            page.sessions.len() < bulky.len(),
+            "this page could only fit by being cut short, and it was not"
+        );
+
+        // Cut short, so the cursor must name the last session *carried* — not
+        // the one the index offered, which is past every session left out. That
+        // cursor is what the next request continues after, so getting it wrong
+        // silently loses every session between the two.
+        let last = &bulky[page.sessions.len() - 1];
+        assert_eq!(page.next_cursor.as_deref(), Some(cursor_of(last).as_str()));
+    }
+
+    #[test]
+    fn a_page_that_fits_keeps_the_cursor_the_index_gave_it() {
+        // The other half: truncation must not fire when it is not needed, or
+        // every page would end early and paging would take more round trips
+        // than there are sessions.
+        let small: Vec<IndexedSession> = (0..25).map(|i| bulky_session(i, 1)).collect();
+
+        let page = within_one_frame(&small, Some("the index's own cursor".to_owned()));
+
+        assert_eq!(page.sessions.len(), 25);
+        assert_eq!(page.next_cursor.as_deref(), Some("the index's own cursor"));
+    }
+
+    #[test]
+    fn a_single_session_too_large_for_the_budget_is_still_answered() {
+        // Otherwise a page comes back empty, the caller reads "nothing here",
+        // and the session can never be reached however many times it pages.
+        // One oversized frame is the lesser evil, and the frame reader's own
+        // ceiling is well above any one sitting.
+        let enormous = vec![bulky_session(0, 4_000)];
+
+        let page = within_one_frame(&enormous, None);
+
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(page.next_cursor, None);
     }
 
     #[test]

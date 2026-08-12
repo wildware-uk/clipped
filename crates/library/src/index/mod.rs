@@ -92,8 +92,8 @@ use clipped_storage::Database;
 use tracing::{debug, info, warn};
 
 pub use browse::{
-    list_sessions, IndexedClip, IndexedRecording, IndexedSession, SessionListing, SessionPage,
-    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    cursor_of, list_sessions, IndexedClip, IndexedRecording, IndexedSession, SessionListing,
+    SessionPage, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
 };
 pub use error::{IndexError, IndexProblem};
 pub use scan::UnavailableRoot;

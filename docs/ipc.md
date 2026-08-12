@@ -589,7 +589,7 @@ the database answers for it.
 
 | Parameter | Meaning |
 | --- | --- |
-| `limit` | How many sittings. Absent means the recorder's own page size (50); anything larger than 200 is clamped rather than refused, so that a reply always fits one frame. |
+| `limit` | How many sittings. Absent means the recorder's own page size (50); anything larger than 200 is clamped rather than refused. **A page may still come back shorter than asked for** — see below. |
 | `after` | Continue after the sitting this cursor names. It comes from `next_cursor` and is **opaque** — the only thing to do with one is send it back. |
 | `query` | A search query in the language of [search.md](search.md). Absent or blank means the whole library. |
 
@@ -636,6 +636,18 @@ sitting.
 A cursor the recorder cannot read starts at the newest sitting rather than being
 refused, because it is a string a window may have kept across a restart, and
 refusing to draw a library over one would be the least useful possible answer.
+
+**A page is bounded in bytes, not in sittings, so it may be shorter than `limit`
+asked for.** A count cannot be the bound: a sitting holds any number of
+recordings and clips, so two hundred of them is 135 KB with one recording each
+and over 3 MB with thirty — and [`MAX_FRAME_BYTES`](#framing) is a ceiling the
+reader *closes the connection* over rather than a request it fails. The recorder
+therefore fills a page up to half a frame and then stops, and `next_cursor` names
+the last sitting it actually carried, so the next page begins with the first one
+left out. A caller must page until `next_cursor` is absent rather than until a
+page is shorter than it asked for. One sitting is always carried even if it
+alone exceeds the budget, because a page that came back empty could never be
+paged past.
 
 Refused with `invalid_parameters`, naming the command and the position, for a
 `query` the search language will not parse — a search box has to be able to say

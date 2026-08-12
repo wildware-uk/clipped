@@ -249,11 +249,19 @@ neither open `library.db` nor link this crate
 ([ADR 0002](adr/0002-separate-recorder-process.md), [ipc.md](ipc.md)).
 
 **Everything is a page.** There is no function here that returns the whole
-library. A `SessionListing` takes a limit — defaulting to 50, clamped to 200 so
-that a reply always fits one protocol frame — and a cursor, and answers a
-`SessionPage` carrying `next` when a further session was actually found. The
-cursor is offered only when there is one, so a caller stops on `next: None`
-rather than on an empty page.
+library. A `SessionListing` takes a limit — defaulting to 50, clamped to 200 —
+and a cursor, and answers a `SessionPage` carrying `next` when a further session
+was actually found. The cursor is offered only when there is one, so a caller
+stops on `next: None` rather than on an empty page.
+
+That limit bounds how much is **read**, and deliberately not how large the answer
+is, because a count of sessions cannot bound that: a session holds any number of
+recordings and clips, so two hundred of them is 135 KB with one recording each
+and over 3 MB with thirty. Whatever carries a page across a process boundary has
+to bound its own payload in bytes, and `apps/recorder/src/library.rs` does —
+against `clipped_ipc::MAX_FRAME_BYTES`, cutting a page short and moving the
+cursor back to the last session it carried. This crate knows nothing about
+frames, which is why the bound is not here.
 
 **The cursor is a keyset, not an offset.** It names the last session on the page
 — `started_at|session_id` — and the next page is everything ordered after it.
