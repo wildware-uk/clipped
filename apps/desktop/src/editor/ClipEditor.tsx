@@ -372,7 +372,7 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
               onKeyDown={onKeyDown}
               onClick={onClick}
             >
-              <div className="clipped-timeline__lane clipped-timeline__lane--video">
+              <div className="clipped-timeline__lane">
                 {clip.segments.map((segment, index) => {
                   const length = outputNanosOf(segment) ?? 0;
                   const start = cuts[index] ?? 0;
@@ -406,11 +406,13 @@ export function ClipEditor({ clip, durationNanos }: ClipEditorProps): ReactNode 
         </div>
       </div>
 
-      <p className="clipped-editor__note clipped-muted">
-        No lane has a waveform. The peaks are computed from the recording and written beside it
-        (issue #66); this window cannot read a file, so a lane is drawn empty rather than as a flat
-        line, which would be indistinguishable from silence. Issue #306.
-      </p>
+      {clip.audio_tracks.length > 0 && (
+        <p className="clipped-editor__note clipped-muted">
+          No lane has a waveform. The peaks are computed from the recording and written beside it
+          (issue #66); this window cannot read a file, so a lane is drawn empty rather than as a
+          flat line, which would be indistinguishable from silence. Issue #306.
+        </p>
+      )}
     </section>
   );
 }

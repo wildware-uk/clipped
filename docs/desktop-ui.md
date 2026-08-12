@@ -44,13 +44,18 @@ block in the sidebar shows what the link reports and nothing else — one wordin
 for each of the link's four states, and one for "this is not the Clipped window",
 which is what `npm run dev:web` and the tests see.
 
-**The controls are in the notification area, not in the window** — see
-[The tray](#the-tray). No screen has a control of any kind: six of the seven are
-not built, and the seventh, Games, deliberately draws none because nothing it
-would drive can be reached from here. A button with nothing behind it is exactly
-what AGENTS.md section 27 forbids. A "Try again" control for a link that has
-given up is
+**The controls that drive the recorder are in the notification area, not in the
+window** — see [The tray](#the-tray). No screen has one: five of the seven are
+not built, Games deliberately draws none because nothing it would drive can be
+reached from here, and the Editor draws none of the editing controls for the
+same reason — the operations exist in `crates/edit` and this window cannot reach
+them. A button with nothing behind it is exactly what AGENTS.md section 27
+forbids. A "Try again" control for a link that has given up is
 [issue #221](https://github.com/wildware-uk/clipped/issues/221).
+
+The one exception is the Editor's three zoom controls, which change how the
+timeline is drawn and nothing else — this window's own state, and therefore
+something it can actually perform.
 
 ## What the shell is
 
@@ -81,12 +86,13 @@ separately.
 
 Both navigation lists and every route are derived from one array, `SCREENS` in
 `@clipped/shared`, so a navigation item cannot point at a route that does not
-exist. **One of the seven screens has been written**, and it is Games — see
-[The Games screen](#the-games-screen). The other six each lead to a panel saying
-so and naming the issue that builds it — #60 for Home and Library, #83 for
-Editor, #51 for Settings, #94 for Trash, #101 for Diagnostics. Building one
-replaces its placeholder route with the real screen, in `elementFor` in
-`Shell.tsx`, which is the one place that knows a screen from a placeholder.
+exist. **Two of the seven screens have been written**: Games — see
+[The Games screen](#the-games-screen) — and Editor, see
+[The Editor screen](#the-editor-screen). The other five each lead to a panel
+saying so and naming the issue that builds it — #60 for Home and Library, #51
+for Settings, #94 for Trash, #101 for Diagnostics. Building one replaces its
+placeholder route with the real screen, in `elementFor` in `Shell.tsx`, which is
+the one place that knows a screen from a placeholder.
 
 ## The Games screen
 
@@ -168,6 +174,139 @@ Which is also why this screen built nothing for
 and the selectable chips are for the per-game detail view the deck draws behind
 this list, and there is no list to open one from. #215 asks for them at the point
 a screen needs them, and this one does not.
+
+## The Editor screen
+
+SPEC.md section 19, `docs/editing.md`, and issue #83. The editor is
+deliberately lightweight — "this is not Premiere" — and this is its shell: the
+layout, a timeline with a ruler and a playhead, one lane per audio track, zoom,
+and the wiring that shows a document.
+
+```text
+┌──────────────────────────────┬───────────────────────────┐
+│                              │ Playhead   00:08.000 …    │
+│   the frame at the playhead  │ Recording  rec-…-cs2      │
+│   (there is none — #306)     │ Source     01:32.000      │
+│                              │ Segment    2 of 3 …       │
+├──────────────────────────────┴───────────────────────────┤
+│ 00:08.000 of 00:24.000            Zoom 2×  − + Fit       │
+├──────────┬───────────────────────────────────────────────┤
+│          │ 00:00      00:05      00:10      00:15        │
+│ Video    │ ├─ seg 0 ──┼───── seg 1 ─────┼── seg 2 ──┤    │
+│ Game     │ No waveform         ▮                         │
+│ −3.0 dB  │                     playhead                  │
+│ Micro…   │ No waveform                                   │
+│ Muted    │                                               │
+└──────────┴───────────────────────────────────────────────┘
+```
+
+### What an edit is, and what the screen may do to one
+
+A clip is not a copy of a recording with the boring parts cut out. It is a
+document naming which recordings to play, which parts of them, in which order,
+how loud each track is and what text to draw over the picture — and **making,
+changing or exporting one never modifies, moves, truncates or re-encodes the
+recording it refers to** (AGENTS.md sections 56 and 57).
+
+Here that is an inability rather than care taken at each call site, the same way
+`crates/edit` implements it: this window has no file-system permission at all,
+and nothing on this screen writes anything. The playhead and the zoom are the
+component's own state.
+
+### Two kinds of time, which is the whole reason this screen is hard
+
+A timeline draws **output** time — measured from the start of the clip — while
+the media it points at is in **source** time, measured from the first frame of
+one recording. `docs/editing.md` argues the model; what matters here is that the
+screen shows both, side by side, at the playhead: eight seconds into the fixture
+clip is one minute thirty-two into the recording, because a cut removed
+everything between.
+
+`EditDocument::locate` is "what both the preview and the exporter must use, so
+that they cannot disagree", and `crates/edit`'s own documentation names this
+screen as one of its two callers. **This window cannot call it** —
+`workspace_layering.rs` permits `apps/desktop/src-tauri` exactly one crate of
+the workspace, the protocol — so `src/editor/timeline.ts` writes the same
+formulae out, in `BigInt` for the reason the crate uses 128 bits, and
+`timeline.test.ts` holds them to the figures `crates/edit`'s own tests use. A
+test written from the port's own output would prove only that it agrees with
+itself.
+
+The document is read from the same JSON `crates/edit` writes, because
+`docs/editing.md` settles that a document crosses the boundary as that text
+rather than as a second representation. `src/editor/document.ts` is the reader,
+and it follows that document's compatibility table: a newer document is refused
+by *version* rather than misread, one with no version is refused rather than
+guessed at, and one carrying an unknown field is refused rather than opened with
+the field silently dropped.
+
+### Nothing is drawn that this window cannot get
+
+**No clip can be opened at all.** An edit document is stored as text in the
+library's database (#55), and this window can neither read that database nor ask
+the recorder for a row of it: the control protocol has no command about a
+library, and the window has no file-system permission. So the screen says so and
+names the work — **issue #306** for a clip's document, a frame and its
+waveforms; **#301** for the library index behind it — rather than drawing an
+empty timeline with a dead playhead, which is indistinguishable from a broken
+editor (AGENTS.md section 27).
+
+The screen takes the document as a prop, so the day something can supply one,
+one line of `Shell.tsx` changes.
+
+Given a document, two things are still absent rather than drawn:
+
+| | Why | Drawn as |
+| --- | --- | --- |
+| The picture at the playhead | A frame is inside a recording this window cannot open | The sentence saying so, on the ground a frame would be drawn on |
+| A waveform under each lane | `crates/waveform` computes the peaks (#66) beside the recording; the window cannot read a file | "No waveform" in the lane. **Never a flat line** — `docs/waveforms.md` is explicit that a flat line is indistinguishable from silence |
+
+What the screen *does* show is all real, computed from the document: the
+recording under the playhead, its source time, which segment of how many and
+where that segment starts, the speed if it is not the recording's own, the text
+on screen at that moment, and each track's name and what it contributes once
+mute and solo are resolved.
+
+### No editing controls, and why
+
+There are none — not a Split, not a volume slider. The four operations that cut
+a clip up are **built and tested**, in `crates/edit` with undo and redo (#84),
+and a button here could not reach them any more than it could open a clip. The
+mix is #85, framing and speed #86, overlays #87, combining recordings #88 and
+export #89, and each owns its own control.
+
+The three zoom controls are the exception, because zoom is this component's own
+state and they do exactly what they say. Each is disabled at the end of the
+scale where it would do nothing.
+
+### The keyboard
+
+This matters more here than anywhere else in Clipped. AGENTS.md section 46 asks
+that core workflows do not require precise mouse interaction, and a timeline is
+the control that most tempts a designer to break that: every operation #84 built
+is aimed at a boundary, and nobody can drag to a nanosecond.
+
+The playhead is a real `slider` — the platform's own role, so it reaches a
+screen reader — with `aria-valuetext` reading a timecode rather than a number of
+milliseconds.
+
+| Key | What it does |
+| --- | --- |
+| Tab | Reaches the playhead, after the zoom controls |
+| ← / → | Steps a tenth of a second |
+| Shift + ← / → | Steps a second |
+| Home / End | The start of the clip, and its end |
+| Page Up / Page Down | The previous or next **cut** — exactly, whatever the zoom |
+| `+` / `-` | Zooms in and out |
+| `0` | Back to fitting the whole clip |
+
+Clicking the timeline seeks to where it was clicked. That is an alternative to
+the keys above and never the only way to do anything.
+
+End lands on the end of the clip, where the screen says nothing plays: every
+range in the model is half-open, so the last position of a clip is the
+nanosecond before its end and the end itself belongs to nothing. Saying that is
+better than silently moving the playhead somewhere the user did not ask for.
 
 ## The tray
 
@@ -850,12 +989,35 @@ draws with. They are not from the reference pages, which have no screen in them:
 | --- | --- |
 | `.clipped-screen__title`, `.clipped-screen__heading` | A screen's own two levels of heading |
 | `.clipped-screen__lead` | Running prose at the measure |
-| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet" and by the Games screen's detection state, which are the same thing to look at |
+| `.clipped-panel` + `__heading`, `__body` | The marked panel: an accent rule down the left of the one paragraph that has to be read. Drawn by an unbuilt screen's "Not built yet", by the Games screen's detection state and by the Editor's "No clip is open", which are the same thing to look at |
+| `.clipped-editor__*`, `.clipped-timeline__*` | The Editor's timeline — see below |
 
-**The Games screen is the only consumer of the component layer so far** — its
-`.clipped-table` and `.clipped-muted`. The classes exist ahead of that so that
-#60, #83, #51, #94 and #101 do not each invent their own styling, which is the
-reason issue #79 followed the shell.
+**Two screens consume the component layer so far**: Games, with
+`.clipped-table` and `.clipped-muted`, and the Editor, which adds the same table
+and the secondary button. The classes exist ahead of that so that #60, #51, #94
+and #101 do not each invent their own styling, which is the reason issue #79
+followed the shell.
+
+### The Editor's timeline is screen classes, not components
+
+The component layer is the set the design system's reference pages draw and the
+deck builds screens from; a timeline is not one of them. So the Editor's classes
+sit in `styles.css` beside the shell's own — which is what keeps them inside the
+same two gates, because `stylesheet.test.ts` and `contrast.test.ts` read that
+file. A parallel stylesheet in `apps/desktop` would have been outside both.
+
+Two things follow from a timeline that are worth knowing before adding to it:
+
+- **Every distance _along_ the timeline is a percentage**, written by the
+  component rather than by the stylesheet, because a position is a proportion of
+  the clip. Percentages are deliberately outside `stylesheet.test.ts`'s gate for
+  exactly this reason: there is nothing for a token to hold. What is fixed —
+  how tall a lane is, how tall the ruler is, how wide the label column is — is
+  three tokens in `tokens.css`, each with the reason it is not on a scale.
+- **A segment is bounded rather than filled.** Where one segment ends and the
+  next begins *is* the cut, so the edge identifies something rather than
+  separating two paragraphs: it takes `--color-control-edge` and is measured
+  against WCAG 1.4.11's 3:1, as is the playhead, on both grounds it crosses.
 
 ### Where it departs from the system, and why
 
@@ -927,7 +1089,11 @@ retrofitted:
 
 - **Keyboard.** Navigation items are real anchors in a real list, so Tab reaches
   them and Enter activates them. The first stop in the tab order is a "Skip to
-  content" button. Nothing in the chrome is reachable by mouse alone.
+  content" button. Nothing in the chrome is reachable by mouse alone. The
+  Editor's timeline is the one place where that rule needed real design rather
+  than markup, and [its own table](#the-keyboard) says what every key does:
+  Page Up and Page Down land exactly on a cut, which is the thing a pointer
+  cannot do at all.
 - **Focus.** `:focus-visible` draws a `--rule-weight` accent outline, and
   `:focus { outline: none }` is the only place a ring is ever suppressed —
   `stylesheet.test.ts` fails if a second one appears. Two components have to
@@ -971,12 +1137,14 @@ retrofitted:
 
   |                                     | Ratio   |
   | ----------------------------------- | ------- |
+  | A segment's recording name          | 15.21:1 |
   | Body text on the window ground      | 14.86:1 |
   | A button's label, unfilled          | 14.86:1 |
   | Body text on a card                 | 13.70:1 |
   | A field's own text                  | 13.70:1 |
   | A dialog's title                    | 13.70:1 |
   | The title strip                     | 11.45:1 |
+  | The editor frame's "no picture"     | 11.45:1 |
   | The primary button, pressed         | 13.01:1 |
   | The primary button, hovered         | 9.59:1  |
   | The accent tag                      | 9.80:1  |
@@ -992,6 +1160,9 @@ retrofitted:
   | Secondary text on the window ground | 5.81:1  |
   | A field's label                     | 5.81:1  |
   | A table's header                    | 5.81:1  |
+  | A fact's term at the playhead       | 5.81:1  |
+  | A ruler mark's label                | 5.81:1  |
+  | A lane's "No waveform"              | 5.59:1  |
   | A card's body                       | 5.59:1  |
   | A card's meta row                   | 5.59:1  |
   | A dialog's body                     | 5.59:1  |
@@ -1009,6 +1180,7 @@ retrofitted:
   | --------------------------------------------------------- | ------ |
   | The segmented option's focus halo, on the selected option | 6.41:1 |
   | A field's edge on the window ground                       | 3.85:1 |
+  | The playhead over a segment                               | 3.85:1 |
   | A secondary button's edge                                 | 3.85:1 |
   | A radio's ring                                            | 3.85:1 |
   | The segmented control's edge                              | 3.85:1 |
@@ -1017,6 +1189,8 @@ retrofitted:
   | The segmented option's focus ring, against its halo       | 3.76:1 |
   | A field's edge against its own fill                       | 3.55:1 |
   | A field's edge on a card                                  | 3.55:1 |
+  | A segment's edge, which is where the cut is               | 3.55:1 |
+  | The playhead on a lane                                    | 3.47:1 |
   | The focus ring on a card or a dialog                      | 3.47:1 |
   | A focused field's accent border, against its own fill     | 3.47:1 |
   | The focus ring in the sidebar                             | 3.42:1 |
@@ -1096,6 +1270,28 @@ application, opens Games, and then moves the link underneath it with a
 beside itself. The other cases are about absence: no button, no link, no field,
 no checkbox and no radio anywhere in `<main>`, and a table whose column headers
 are what is missing rather than Game / Recording / Last played.
+
+The Editor's three files are tested at the level each is about, and the split is
+deliberate:
+
+- `document.test.ts` is about **refusing**. Every row of `docs/editing.md`'s
+  compatibility table has a case, and the unknown-field sweep pushes a key this
+  build does not know into each object of a fully populated document in turn —
+  the same sweep `crates/edit`'s round-trip test does, so a structure added to
+  the model later is covered without anybody adding it to a list.
+- `timeline.test.ts` is about **agreeing with the crate**. Its assertions are
+  the ones `crates/edit`'s `timeline.rs` makes, against the same clip: eight
+  seconds in is ninety-two seconds into the recording, the material a cut
+  removed is unreachable, a half-speed segment lasts twice as long and runs
+  through its material half as fast, and the end of the clip is past its end.
+  One case is about the port rather than the model: at the top of the range a
+  document may hold, `BigInt` and a double give answers a nanosecond apart, and
+  the test asserts both.
+- `EditorScreen.test.tsx` drives **real keys at the real element** and asserts
+  the timecode the screen shows, so a key that moved a variable nothing draws
+  would fail. It also asserts the absences: no timeline at all when no clip is
+  open, "No waveform" in every lane, no picture, and that the only controls on
+  the screen are the three zoom buttons.
 
 `useWindowTitle.test.ts` stands up a `__TAURI_INTERNALS__` so the branch that
 only runs inside the window is reached — jsdom is a browser, so without it the
