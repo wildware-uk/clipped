@@ -389,6 +389,7 @@ contributor working in it needs.
 | [game-detection.md](game-detection.md) | The game catalogue and how a process is matched against it; watching for processes starting and stopping, why the source is a subscription rather than a poll, how a launcher and the game it starts become one launch, and what detection costs while nothing is happening | M4 |
 | [sessions.md](sessions.md) | What a session is; how a launch becomes a recording; what happens on a crash, a fast restart, a second game and a suspend; the one capture mode this build has; and where a session is written down before M6's database exists | M4 |
 | [search.md](search.md) | The local search language: its syntax, what each term means, every message a malformed query produces, the limits of its text matching, and how a database-backed executor consumes the parsed query | M6 |
+| [waveforms.md](waveforms.md) | Per-track audio peaks for the timeline and the clip editor: what is stored and at what resolutions, the sidecar cache and its invalidation and cleanup rules, and where generation runs so that it cannot compete with a recording | M8 |
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 | [ipc.md](ipc.md) | The recorder control protocol: transport, framing, the handshake, the compatibility policy, the commands and events, and the security a local endpoint does and does not promise | M5 |
 | [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
@@ -398,7 +399,7 @@ All but [capture-pipeline.md](capture-pipeline.md),
 [encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md),
 [av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md), [ipc.md](ipc.md),
 [game-detection.md](game-detection.md), [sessions.md](sessions.md),
-[editing.md](editing.md) and [search.md](search.md)
+[editing.md](editing.md), [search.md](search.md) and [waveforms.md](waveforms.md)
 are stubs today, stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
@@ -432,7 +433,12 @@ is the same shape again: the query language, its parser and its matcher exist in
 `clipped-library`, so the syntax, every error message and the measured cost of
 matching are written down, and the document is explicit that nothing indexes a
 real library yet — that is M6's issues #55 and #56, and the document says what
-they have to consume. The rest stay stubs on purpose: describing a capture pipeline that has not been written
+they have to consume. `waveforms.md` covers the peak generator, which is written, and is explicit that
+nothing draws its output and nothing hosts its background worker yet — the
+timeline and the clip editor are the consumers, and neither exists. The rest
+stay stubs on purpose: describing a capture pipeline that has not been written
+
+The rest stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 
 Supporting documents that are not subsystems:

@@ -1,0 +1,75 @@
+[package]
+name = "clipped-waveform"
+description = "Per-track audio peak data for the timeline and the clip editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tracing.workspace = true
+# A recording's path contains the account name and the folders somebody chose,
+# so this crate logs the reduced form rather than the path (docs/logging.md,
+# "Privacy"), and it finds its cache directory through the one function that
+# knows where Clipped's per-user directory is rather than resolving
+# `%LOCALAPPDATA%` for a fourth time (issue #228). clipped-logging is layer 0
+# and this crate is layer 1, so this follows the dependency direction.
+clipped-logging.workspace = true
+
+# The raw FFmpeg FFI. Reading a finished recording means demuxing a container
+# and decoding whichever audio codec is in it, and there is no lower-layer route
+# to that: `clipped-muxer` owns the safe wrappers over the container API and is
+# layer 2, so depending on it would invert the dependency direction the
+# workspace asserts (README, "Dependency direction").
+#
+# `docs/adr/0004-ffmpeg-dependency-strategy.md` permits exactly this, in the
+# amendment issue #155 added: a crate with no lower-layer route to what it needs
+# may name the binding. `crates/encoder` is the other one, for `libopenh264`.
+#
+# WHAT THIS COSTS. Every executable that depends on this crate imports
+# `avformat-62.dll`, `avcodec-62.dll` and `avutil-60.dll`, and Windows resolves
+# imports before `main` runs. The DLLs are placed beside the binaries by the
+# build script; the shipped application already distributes them (ADR 0004).
+rusty_ffmpeg.workspace = true
+
+# Thread priority, and nothing else. Generating waveforms for a library must not
+# take CPU or disk bandwidth from a game that is being recorded (AGENTS.md
+# section 18), and on Windows the mechanism for that is
+# `THREAD_MODE_BACKGROUND_BEGIN` — which lowers I/O priority as well as CPU
+# priority, and this work is as much disk as CPU. Isolated in `src/windows`
+# (AGENTS.md section 5); everything above it is platform-neutral and compiles
+# and tests anywhere.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    # `GetCurrentThread`, `SetThreadPriority`, `GetThreadPriority` and the
+    # `THREAD_MODE_BACKGROUND_BEGIN`/`THREAD_PRIORITY_LOWEST` constants.
+    "Win32_System_Threading",
+]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+# This crate links FFmpeg, so it needs the runtime DLLs beside its own test
+# executables. It is not a dependent of clipped-muxer, which is why it cannot
+# rely on the muxer's build script having run (issue #158).
+clipped-ffmpeg-runtime.workspace = true
+
+[dev-dependencies]
+# The end-to-end tests need a container with more than one audio track in it,
+# and this is the workspace's one place that knows where the pinned build's
+# `ffmpeg.exe` is and how to skip cleanly when a checkout has none
+# (tests/media, docs/testing.md). Its `TemporaryDirectory` is also what the
+# cache tests write into, rather than a fifth copy of "a directory that deletes
+# itself".
+clipped-media-validation.workspace = true
+
+# `tests/privacy.rs` renders this crate's own log lines through a real
+# subscriber and asserts that no directory component reaches them. The claim in
+# the `clipped-logging` note above is about hand-written call sites, which
+# `crates/logging/tests/privacy.rs` explicitly does not cover, so it has to be
+# held to here. Same version as that crate's dev-dependency.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
