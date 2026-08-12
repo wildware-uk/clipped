@@ -1,11 +1,14 @@
 # Editing
 
-**Status: the document model exists and is tested; nothing edits or renders one
-yet.** `crates/edit` defines what an edit *is*, reads and writes it, converts an
-older one, and answers the question an exporter asks — "what is on screen at
-this moment, and where does it come from?". The editor itself is
-[issue #83](https://github.com/wildware-uk/clipped/issues/83), the operations
-are [#84](https://github.com/wildware-uk/clipped/issues/84) to
+**Status: the document model and the operations that cut a clip up exist and are
+tested; nothing renders one yet.** `crates/edit` defines what an edit *is*,
+reads and writes it, converts an older one, answers the question an exporter
+asks — "what is on screen at this moment, and where does it come from?" — and
+performs the four edits that change what material a clip plays: trim start, trim
+end, split and delete section, with undo and redo
+([#84](https://github.com/wildware-uk/clipped/issues/84)). The editor itself is
+[issue #83](https://github.com/wildware-uk/clipped/issues/83), the remaining
+operations are [#85](https://github.com/wildware-uk/clipped/issues/85) to
 [#88](https://github.com/wildware-uk/clipped/issues/88), and the export engine
 is [#89](https://github.com/wildware-uk/clipped/issues/89). This document is the
 specification all of them are held to.
@@ -175,6 +178,130 @@ That is deliberate — rounding up produces a boundary one nanosecond past the e
 of the material it came from — and it is far below the frame the exporter will
 snap to anyway.
 
+## Editing it
+
+Four operations change what material a clip plays, and every one of them is
+about the distinction above: the user points at a moment of **output** time, and
+what changes is which **source** material the document names and where it lands
+in the output afterwards.
+
+| | What it does | Source time | Output time |
+| --- | --- | --- | --- |
+| **Trim start** | Drops everything before the playhead | Unchanged | Everything kept moves earlier by the trim |
+| **Trim end** | Drops everything from the playhead on | Unchanged | Unchanged |
+| **Split** | Turns one segment into two | Unchanged | Unchanged |
+| **Delete section** | Removes a selected range and joins what is left | Unchanged | Everything after the cut moves earlier by the length of the cut |
+
+Deleting eight seconds out of the middle does not move a frame in any recording.
+It moves every frame after the cut eight seconds earlier in the export, while
+they stay exactly where they were in the file they come from. That row of the
+table is the one an export bug is usually really about.
+
+### All four are one piece of arithmetic
+
+Put a boundary at an output time — splitting the segment that covers it, in
+source time, at its own speed — and then keep some of what is either side:
+
+```text
+  before   ├──── segment 0 ────┼──── segment 1 ────┤
+                      ▲ at
+  divide   ├── 0a ────┼─ 0b ───┼──── segment 1 ────┤
+
+  split         keep everything             →  0a 0b 1
+  trim start    keep from the boundary      →  0b 1
+  trim end      keep up to the boundary     →  0a
+  delete        divide twice, drop the middle
+```
+
+There is one such division in the crate, and it is the same
+`Speed::source_nanos` the exporter's `locate` uses, so a cut lands exactly where
+the frame the user is looking at comes from.
+
+A boundary that already exists is **found, not inserted**. Splitting where a
+segment already begins returns the document unchanged rather than adding an
+empty piece, which is what makes the operations order-independent: two splits in
+either order, a split and a deletion of an earlier range in either order, and
+two deletions in either order all produce the same document. That property is
+the whole reason a cut is [stored as its result](#a-cut-is-stored-as-its-result-not-as-an-instruction),
+and it is tested rather than asserted.
+
+### Frames, and what happens at a keyframe
+
+A boundary in the document is a time, and the arithmetic that produces it is
+exact: the cut a user asked for at 12.5 seconds is stored as the source
+nanosecond that output moment comes from, with **no tolerance at all**. The one
+place a fraction is lost is the truncating division a non-integer speed does,
+which is under a nanosecond — five orders of magnitude below a frame at 60fps.
+
+Frames arrive at export. A cut almost never lands exactly on a frame boundary,
+and never on a keyframe, so
+[#89](https://github.com/wildware-uk/clipped/issues/89) has to decide what to do
+about both. The rules it is held to are:
+
+- **Snap outwards from the document, never inwards.** Ranges are half-open, so a
+  segment's first exported frame is the first whose presentation time is at or
+  after `span.start`, and its last is the last strictly before `span.end`. A
+  frame therefore belongs to exactly one side of a cut: none is duplicated at a
+  join and none is dropped.
+- **A keyframe is a re-encode decision, not a timing one.** Stream-copying a
+  segment can only begin at a keyframe, so a copy would have to move the cut back
+  to the previous one — up to a whole group of pictures of material the user
+  deleted. That is a visible difference from the preview, so it is not something
+  an exporter may do quietly: the boundary in the document is what the output
+  must show, and a segment whose start is not a keyframe is re-encoded from the
+  cut. `Segment::is_untransformed` is the model's half of that question and
+  answers only about the segment's own transformations; whether a copy is
+  possible at all needs the file, and is #89's to answer.
+
+The frame tolerance an *export* is measured against therefore belongs in that
+ticket, with a measurement behind it. Nothing in this build writes a file, so
+there is nothing here to measure and no number is claimed.
+
+### What happens to everything else in the document
+
+- **Overlays** are timed in output time, so both ends of an overlay's range go
+  through the same mapping the material did. One that was only ever over deleted
+  or trimmed material disappears with it; one that straddles a cut keeps the part
+  that survived, and one that spans a deleted section is shortened by the length
+  of the section so that it still covers the same frames either side of the join.
+- **Fades** are lengths at the ends of the clip, so a clip that got shorter can
+  be left with fades that no longer fit, which validation refuses. They are
+  shortened rather than the edit being refused — a user who has faded a clip must
+  still be able to trim it. The fade *in* is kept in preference to the fade out.
+- **Sources stay declared** even when nothing plays them any more. An unused
+  source breaks nothing, dropping one would silently break any audio track fed
+  from it, and undo has to be able to put the material back.
+- **Segments keep their presentation.** Both halves of a split carry the speed,
+  crop and rotation the segment had.
+
+### What is refused
+
+An operation returns either a new document or a refusal; the original is never
+modified, so there is no half-applied state. Refused are: a time past the end of
+the clip; a trim that would keep nothing, because trimming says which range is
+*kept* and a kept range that ends where it starts is not a range; and — as a last
+line of defence rather than an expected outcome — any result that would not
+validate, since an operation checks its own output before returning it.
+
+Deleting *all* of a clip is allowed, and leaves the valid empty document
+described under [what a document may not say](#what-a-document-may-not-say): a
+user who selected everything and pressed delete has an empty clip, and undo is
+one keystroke away.
+
+### Undo and redo
+
+`EditHistory` holds the document and the states it has been in, up to
+`MAX_UNDO_STEPS` of them, oldest dropped first. Whole documents rather than
+inverse operations: an inverse has to reproduce what its operation destroyed —
+the overlay a deletion dropped, the fade a trim shortened — which is a second
+implementation of every operation that has to stay in step with the first, and
+the failure when it does not is a user pressing Ctrl+Z and getting *nearly*
+their clip back. A document is a few hundred bytes; "restore exact prior state"
+is worth more than the copy.
+
+An operation with nothing to do — splitting where a boundary already is —
+records no step, so undo never restores an identical document.
+
 ## Combining recordings
 
 A document holds a *list* of sources, from the first version. Making that
@@ -337,7 +464,8 @@ everything has an empty clip, not a corrupt one.
 The rule for the operations built on this model is that they keep the document
 valid: trimming the end of a clip that has an overlay running past the new end
 is [#84](https://github.com/wildware-uk/clipped/issues/84)'s problem to clamp,
-not the model's to tolerate.
+not the model's to tolerate. Every operation validates its result before
+returning it, so an edit can refuse but cannot produce something unwritable.
 
 ## Testing it
 
@@ -347,13 +475,23 @@ cargo test -p clipped-edit
 
 No hardware, no files, no fixtures on disk. The suite covers the timeline
 arithmetic at and either side of every boundary, the mute/solo matrix, every
-validation refusal, and the version and migration behaviour above. Two
-whole-model tests carry the acceptance criteria of
-[#82](https://github.com/wildware-uk/clipped/issues/82):
+validation refusal, the version and migration behaviour above, and each
+operation at a boundary, across a boundary, over a whole segment, at the ends of
+the clip and where it would leave nothing. Three whole-model tests carry the
+acceptance criteria of [#82](https://github.com/wildware-uk/clipped/issues/82)
+and [#84](https://github.com/wildware-uk/clipped/issues/84):
 
 - `tests/sources_are_never_touched.rs` — a checksummed file before and after
-  everything the crate can do to a document that names it, and a check that the
-  crate's source contains no file access at all.
+  everything the crate can do to a document that names it, **including trimming,
+  splitting, deleting, undoing and redoing**, and a check that the crate's source
+  contains no file access at all.
+- `tests/an_edited_clip_plays_what_is_left.rs` — the clip is kept a second way,
+  as a plain list of the moments of the original timeline that survived each
+  operation, and every position of the edited clip must play what the
+  corresponding element of that list played. The list knows nothing about
+  segments or spans, so it cannot agree with the implementation by construction
+  the way an assertion about segment spans does. The same file walks undo and
+  redo across four operations and compares the *stored text* at every step.
 - `tests/round_trip_is_identical_playback.rs` — the clip is *read* at
   one-tenth-second steps from before its start to past its end, recording which
   recording is on screen, which frame of it, which text is over it and what each
