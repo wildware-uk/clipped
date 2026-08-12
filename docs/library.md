@@ -278,7 +278,10 @@ the disk described above, and check the outcome against a real SQLite database.
 
 - **Search.** The query language is [#59]; this crate's `search` module is where
   it lives.
-- **Thumbnails and waveforms.** [#57] and #66. Nothing here opens a media file.
+- **Thumbnails and waveforms.** Thumbnails are [#57] and landed as
+  `clipped_library::thumbnail` ([thumbnails.md](thumbnails.md)); waveforms are
+  #66 and live in `clipped-waveform`. Nothing in *this* module — indexing —
+  opens a media file, and the thumbnail module never writes to one.
 - **Quotas, retention and the trash.** [#93] and [#94]. Nothing here deletes
   anything, and nothing here can.
 - **A second walk of the disk.** Storage accounting ([#93]) walks the same

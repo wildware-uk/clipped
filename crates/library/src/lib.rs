@@ -8,15 +8,18 @@
 //!
 //! - Indexing games, sessions, recordings and clips.
 //! - Search, favourites and tags.
-//! - Thumbnail and waveform bookkeeping.
+//! - Thumbnails, and waveform bookkeeping.
 //! - Storage accounting and the limits configured against it:
 //!   [`accounting`].
 //!
 //! # Not responsible for
 //!
-//! Storage primitives (see `clipped-storage`) or generating media. Nothing here
-//! deletes a file — measuring what is on disk and removing something from it are
-//! deliberately different modules in different tickets (AGENTS.md section 56).
+//! Storage primitives (see `clipped-storage`), capture, encoding or muxing.
+//! Nothing here deletes a *recording* — measuring what is on disk and removing
+//! something from it are deliberately different modules in different tickets
+//! (AGENTS.md section 56). [`thumbnail`] is the one module that writes files of
+//! its own, and everything it writes is a disposable copy of something the
+//! recording still holds.
 //!
 //! # Position in the architecture
 //!
@@ -41,9 +44,16 @@
 //! writes, the media files beside them, and the SQLite index. It is the only
 //! thing that writes library rows, and `docs/library.md` is its prose.
 //!
+//! [`thumbnail`]: the picture every screen that lists a recording shows for it
+//! (SPEC.md section 22, `docs/thumbnails.md`). It decodes a frame through
+//! FFmpeg, keeps the result in a documented sidecar cache rather than in the
+//! database, and runs on a background thread that a recording suspends. It is
+//! the one part of this crate that opens a media file.
+//!
 //! Nothing else in this crate is built yet.
 
 pub mod accounting;
 pub mod index;
 pub mod search;
+pub mod thumbnail;
 pub mod virtual_clip;
