@@ -186,12 +186,35 @@ impl GameStateListener {
     /// binaries link (`super`).
     #[must_use]
     pub fn serve(self, reported_as: &'static str) -> Receiver<Payload> {
+        self.serve_reporting_to(reported_as, io::stderr())
+    }
+
+    /// [`Self::serve`] with the sink its diagnostics go to named.
+    ///
+    /// The only sink in the product is the process's standard error, which is
+    /// what `serve` passes. It is a parameter so that the rule this module
+    /// exists to keep — *one line per run of the plugin, however many requests
+    /// are refused* — can be asserted against **this loop's own output** under
+    /// a flood of real refused connections, rather than against
+    /// [`Complaints`]'s internal state. A test over the helper alone passes
+    /// just as happily when the loop below ignores the helper and prints per
+    /// request, which is the defect the helper exists to prevent.
+    fn serve_reporting_to(
+        self,
+        reported_as: &'static str,
+        mut diagnostics: impl Write + Send + 'static,
+    ) -> Receiver<Payload> {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_DEPTH);
-        thread::spawn(move || self.accept_until_closed(&sender, reported_as));
+        thread::spawn(move || self.accept_until_closed(&sender, reported_as, &mut diagnostics));
         receiver
     }
 
-    fn accept_until_closed(self, sender: &SyncSender<Payload>, reported_as: &str) {
+    fn accept_until_closed(
+        self,
+        sender: &SyncSender<Payload>,
+        reported_as: &str,
+        diagnostics: &mut dyn Write,
+    ) {
         let mut complaints = Complaints::default();
         for connection in self.listener.incoming() {
             let stream = match connection {
@@ -202,6 +225,7 @@ impl GameStateListener {
                 // immediately, and `incoming` ends.
                 Err(error) => {
                     complain(
+                        diagnostics,
                         reported_as,
                         complaints
                             .unacceptable(&format!("a connection could not be accepted: {error}")),
@@ -218,10 +242,12 @@ impl GameStateListener {
                     }
                 }
                 Ok(Err(refusal)) => complain(
+                    diagnostics,
                     reported_as,
                     complaints.refused(&format!("a payload was refused: {refusal}")),
                 ),
                 Err(error) => complain(
+                    diagnostics,
                     reported_as,
                     complaints.unreadable(&format!("a connection ended early: {error}")),
                 ),
@@ -310,10 +336,15 @@ impl Complaints {
 /// after it is a policy rather than the problem having gone away.
 const ONLY_ONCE: &str = " (further occurrences of this on this socket are not reported)";
 
-/// Prints one of [`Complaints`]' lines, if there is one to print.
-fn complain(reported_as: &str, line: Option<String>) {
+/// Writes one of [`Complaints`]' lines to `diagnostics`, if there is one.
+///
+/// A failed write is dropped rather than reported: the sink *is* where a
+/// problem would be reported, and a plugin whose standard error has gone has
+/// nowhere left to say so (AGENTS.md section 15 — the failure is intentionally
+/// irrelevant, and this is the documentation of that).
+fn complain(diagnostics: &mut dyn Write, reported_as: &str, line: Option<String>) {
     if let Some(line) = line {
-        eprintln!("{reported_as}: {line}");
+        let _ = writeln!(diagnostics, "{reported_as}: {line}");
     }
 }
 
@@ -527,6 +558,7 @@ fn write_reply(stream: &mut TcpStream, status: u16) -> io::Result<()> {
 mod tests {
     use std::io::Cursor;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::{Arc, Mutex};
 
     use serde_json::json;
 
@@ -655,26 +687,98 @@ mod tests {
         );
     }
 
+    /// A [`Write`] that keeps what was written where a test can read it.
+    ///
+    /// The listener writes its diagnostics from the thread it serves on, so the
+    /// buffer is shared rather than owned.
+    #[derive(Clone, Default)]
+    struct RecordedDiagnostics(Arc<Mutex<Vec<u8>>>);
+
+    impl RecordedDiagnostics {
+        fn lines(&self) -> Vec<String> {
+            let written = self
+                .0
+                .lock()
+                .expect("the diagnostics buffer is not poisoned");
+            String::from_utf8(written.clone())
+                .expect("diagnostics are text")
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    impl Write for RecordedDiagnostics {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the diagnostics buffer is not poisoned")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn a_local_process_cannot_fill_the_hosts_log_by_being_refused() {
-        // `Refusal`'s own documentation is what this holds to: a refusal is
-        // answered on the socket and counted nowhere. A plugin's standard error
-        // is inherited by the host (`clipped_plugins::process`), so one line
-        // per refused request would be a log file any process on this machine
-        // could fill through a port it is allowed to reach.
-        let mut complaints = Complaints::default();
-        let lines: Vec<String> = (0..10_000)
-            .filter_map(|_| complaints.refused("a payload was refused: it was not a POST"))
-            .collect();
+        // The rule, from `Refusal`'s own documentation: a refusal is answered on
+        // the socket and counted nowhere. A plugin's standard error is inherited
+        // by the host (`clipped_plugins::process`), so one line per refused
+        // request would be a log file any process on this machine could fill
+        // through a port it is allowed to reach.
+        //
+        // Asserted against what the *listener* wrote while refusing real
+        // connections, not against `Complaints` on its own. A test that only
+        // drove the helper passes whether or not this loop uses it, which is
+        // the entire defect the helper was added to prevent.
+        let listener = GameStateListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), token())
+            .expect("loopback binds");
+        let address = listener.address().expect("an address");
+        let diagnostics = RecordedDiagnostics::default();
+        let payloads = listener.serve_reporting_to("game state listener test", diagnostics.clone());
 
+        // Two hundred rather than ten thousand: the assertion is *one line*, so
+        // any number that a per-request printer would turn into a pile will do,
+        // and ten thousand loopback connections in a test spend a Windows
+        // machine's ephemeral ports on making the same point.
+        let flood = 200;
+        for _ in 0..flood {
+            post(
+                address,
+                &json!({"auth": {"token": "not-the-token"}, "map": {}}).to_string(),
+            );
+        }
+
+        // Connections are served one at a time and in order (`serve`), so a
+        // payload accepted after the flood is proof the flood has been dealt
+        // with. No sleeping, and nothing to be flaky about.
+        post(
+            address,
+            &json!({"auth": {"token": "abcdefghijklmnopqrstuvwx"}, "map": {"matchid": "77"}})
+                .to_string(),
+        );
+        let payload = payloads
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the authenticated payload arrives after the flood");
+        assert_eq!(payload.state(), &json!({"map": {"matchid": "77"}}));
+
+        let lines = diagnostics.lines();
         assert_eq!(
             lines.len(),
             1,
-            "ten thousand refusals are worth one line, and this was worth {}",
+            "{flood} refused payloads are worth one line, and this listener wrote {}: {lines:#?}",
             lines.len()
         );
         assert!(
-            lines[0].contains("it was not a POST"),
+            lines[0].contains("game state listener test"),
+            "the line says which plugin is speaking: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("did not carry the token"),
             "the one line still says what happened: {}",
             lines[0]
         );
@@ -683,9 +787,17 @@ mod tests {
             "and says that the silence after it is a policy: {}",
             lines[0]
         );
+    }
 
-        // One flag per kind, so a connection that could not be accepted does
-        // not use up the line a refused payload would have had.
+    #[test]
+    fn one_kind_of_complaint_does_not_use_up_another_kinds_line() {
+        // The helper's own property, named as such. What the listener does with
+        // it is the test above.
+        //
+        // Three flags rather than one, so that the line a refused payload is
+        // worth is not spent by an unrelated accept failure having happened
+        // first — the two are debugged by different people looking for
+        // different things.
         let mut complaints = Complaints::default();
         assert!(complaints.unacceptable("could not accept").is_some());
         assert!(complaints.refused("refused").is_some());
