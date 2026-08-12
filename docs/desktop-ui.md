@@ -2077,3 +2077,15 @@ a pointer. That half is verified by hand and recorded on the issue: the icon
 appearing, its tooltip following a real recording, surviving an Explorer restart,
 and the four things the menu items do driven through the same `RecorderLink`
 calls the handlers make.
+
+The same line runs through what decides *what* Start Recording would record.
+`foreground.rs` gathers what Windows says about a window and then decides
+separately, so every rule — an invisible window, a shell surface, a window with
+no process, and a window belonging to Clipped itself — is a function of
+written-down windows and is tested as one; `this_application.rs`'s membership
+rules are tested against written-down process trees, and its one Windows-facing
+claim is tested by spawning a child process and reading the real process table.
+What no test reaches is the hook delivering a real window handle, because that
+needs a desktop with windows on it. That is verified by hand, against the case
+that produced issue #390: open the developer tools, return to the window, and
+read what the button offers.
