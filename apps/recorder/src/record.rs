@@ -243,10 +243,14 @@ pub(crate) fn resolve_window(target: &CaptureTarget) -> Result<WindowInfo, Recor
 /// desktop a test constructed — which is what `clipped_windows::WindowInfo::new`
 /// is public for.
 ///
+/// `crate::watch` applies the same rules to each desktop it enumerates while it
+/// waits for a game's window to appear, which is why this is reachable from
+/// there rather than private to this module.
+///
 /// # Errors
 ///
 /// As [`resolve_window`], less the enumeration.
-fn choose_window(
+pub(crate) fn choose_window(
     windows: &[WindowInfo],
     target: &CaptureTarget,
 ) -> Result<WindowInfo, RecordError> {
@@ -637,6 +641,29 @@ mod tests {
         assert_eq!(settings.resolution(), ResolutionSetting::Source);
         assert_eq!(settings.codec(), CodecPreference::Automatic);
         assert_eq!(settings.encoder(), EncoderPreference::Automatic);
+    }
+
+    #[test]
+    fn a_minimised_window_reaches_the_session_marked_minimised() {
+        // `record`, `start_recording` and `watch` all refuse a minimised window
+        // before they reach here, so this flag is for the caller that did not.
+        // `clipped-session` declines a minimised target itself — that is the
+        // invariant every caller of the crate gets, including the automatic
+        // session manager — and this is the only thing that tells it. Dropped
+        // here, the second refusal has nothing to act on and the recording is
+        // an empty file again (issue #383).
+        assert_eq!(
+            *settings_for(&config(), &minimised_window()).target(),
+            CaptureTargetSettings::window(0x0001_04ac, 2560, 1440).minimised(true)
+        );
+
+        // The other direction. Without it a pass-through hardcoded to `true`
+        // would satisfy the assertion above and refuse every recording there
+        // is.
+        assert_eq!(
+            *settings_for(&config(), &window()).target(),
+            CaptureTargetSettings::window(0x0001_04ac, 2560, 1440)
+        );
     }
 
     #[test]

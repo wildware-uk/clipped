@@ -1504,4 +1504,46 @@ mod tests {
         // does not advertise them is one whose tray never offers the item.
         assert!(features_of_this_build().contains(&clipped_ipc::features::BOOKMARKS.to_owned()));
     }
+
+    #[test]
+    fn a_minimised_window_is_refused_over_ipc_as_a_target_that_cannot_be_captured() {
+        // The code is what the desktop application branches on, and it has to
+        // be this one: `internal` is "the recorder has a bug", which a window
+        // the user minimised is not, and `target_not_found` would be a lie —
+        // the window was found. `target_not_capturable` is the code that means
+        // "change the window", and the sentence naming the window is carried
+        // through verbatim because only this process knows what it is called
+        // (issue #383).
+        let refusal = unrecordable_target(crate::record::RecordError::TargetMinimised {
+            window: "Clipped video pattern (video-pattern.exe)".to_owned(),
+        });
+
+        assert_eq!(
+            refusal.code,
+            ErrorCode::TargetNotCapturable,
+            "the desktop cannot tell the user to restore a window it was given \
+             {:?} for",
+            refusal.code
+        );
+        assert!(
+            refusal
+                .message
+                .contains("Clipped video pattern (video-pattern.exe)"),
+            "the refusal must name the window: {}",
+            refusal.message
+        );
+    }
+
+    #[test]
+    fn a_recording_that_failed_for_some_other_reason_is_still_an_internal_refusal() {
+        // The other direction, and what makes the test above mean something:
+        // without it a mapping that answered `target_not_capturable` to
+        // everything would pass just as well, and the desktop would tell
+        // somebody whose disk filled up to restore their window.
+        let refusal = unrecordable_target(crate::record::RecordError::Session(
+            clipped_session::SessionError::NoFrames,
+        ));
+
+        assert_eq!(refusal.code, ErrorCode::Internal);
+    }
 }

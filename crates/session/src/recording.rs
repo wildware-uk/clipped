@@ -1168,13 +1168,18 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
 
-    use clipped_capture::{CaptureTarget, FrameSize, PixelFormat};
+    use clipped_capture::{
+        CaptureTarget, CaptureTimestamp, FrameSize, FrameTexture, PixelFormat, SourceClock,
+        TextureKind,
+    };
     use clipped_encoder::{
         BitRate, EncodeError, EncodedPacket, EncoderConfig, EncoderKind, FrameRate, PictureKind,
         RateControl,
     };
     use clipped_muxer::{MuxError, TrackId};
     use clipped_replay::ReplayConfig;
+    use windows::core::Interface as _;
+    use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
     use super::*;
 
@@ -1183,6 +1188,12 @@ mod tests {
     enum Step {
         /// Nothing drew.
         Nothing,
+        /// The window drew, so a frame is handed over.
+        ///
+        /// Only usable on a backend given a texture by
+        /// [`ScriptedBackend::drawing`], because a frame is a texture and there
+        /// is nothing honest to put there otherwise.
+        Drew,
         /// The window is minimised, so nothing will draw until it is restored.
         Minimised,
         /// The target changed shape, which is what a window being dragged by
@@ -1190,17 +1201,36 @@ mod tests {
         Resized(u32, u32),
     }
 
-    /// A capture backend that replays a script and never produces a frame.
+    /// A capture backend that replays a script.
     ///
-    /// A real frame would need a real Direct3D texture and therefore a GPU, and
-    /// the behaviour under test is what happens to the *format* on the way to
-    /// the first frame — which the script can drive without one.
+    /// Without a texture it never produces a frame, which is all the tests of
+    /// the wait for the first frame need: what they are about is what happens
+    /// to the *format* on the way to one. Given a texture by
+    /// [`drawing`](Self::drawing) it hands over real frames on that texture, and
+    /// the whole recording loop runs against it — an encoder opened on the
+    /// texture's own device, a real file, and a script that can put a minimised
+    /// stretch in the middle of a recording, which no test can do to a real
+    /// compositor without a window to minimise.
     #[derive(Debug)]
     struct ScriptedBackend {
         steps: VecDeque<Step>,
         format: FrameFormat,
         resizes: u32,
+        /// The texture every [`Step::Drew`] hands over, owned for the whole of
+        /// this backend's life and never recycled — which is exactly the
+        /// promise [`FrameTexture`] is documented to need.
+        texture: Option<ID3D11Texture2D>,
+        /// How many frames have been handed over, which is what spaces their
+        /// timestamps.
+        drawn: u64,
     }
+
+    /// How far apart the frames a scripted backend draws are, in nanoseconds.
+    ///
+    /// A tenth of a second: far enough inside the 60 frames a second the gate
+    /// admits that every frame the script draws reaches the encoder, so a test
+    /// counting frames is counting the script rather than the pacing rule.
+    const SCRIPTED_FRAME_INTERVAL_NANOS: u64 = 100_000_000;
 
     impl ScriptedBackend {
         fn new(format: FrameFormat, steps: impl IntoIterator<Item = Step>) -> Self {
@@ -1208,7 +1238,15 @@ mod tests {
                 steps: steps.into_iter().collect(),
                 format,
                 resizes: 0,
+                texture: None,
+                drawn: 0,
             }
+        }
+
+        /// The same backend, handing over `texture` for every [`Step::Drew`].
+        fn drawing(mut self, texture: ID3D11Texture2D) -> Self {
+            self.texture = Some(texture);
+            self
         }
     }
 
@@ -1227,6 +1265,29 @@ mod tests {
 
         fn acquire(&mut self, _timeout: Duration) -> Result<Acquisition<'_>, CaptureError> {
             match self.steps.pop_front() {
+                Some(Step::Drew) => {
+                    let handle = self
+                        .texture
+                        .as_ref()
+                        .expect("a script that draws was given a texture to draw on")
+                        .as_raw();
+                    self.drawn += 1;
+
+                    // SAFETY: `handle` is an `ID3D11Texture2D` this backend owns
+                    // for the whole of its life and never recycles, and the
+                    // frame borrows the backend mutably, so nothing derived from
+                    // it can outlive the texture.
+                    let texture = unsafe { FrameTexture::new(TextureKind::D3d11Texture2D, handle) };
+
+                    Ok(Acquisition::Frame(CapturedFrame::new(
+                        texture,
+                        self.format,
+                        CaptureTimestamp::from_source(
+                            SourceClock::PerformanceCounter,
+                            self.drawn * SCRIPTED_FRAME_INTERVAL_NANOS,
+                        ),
+                    )))
+                }
                 Some(Step::Resized(width, height)) => Ok(Acquisition::SizeChanged(
                     FrameSize::new(width, height).expect("a real size"),
                 )),
@@ -1924,5 +1985,263 @@ mod tests {
         }
 
         panic!("the writer thread did not stop after refusing a packet");
+    }
+
+    // ---- the capture loop, against real frames ------------------------------
+    //
+    // Everything above stops short of `record_frames`, because the loop cannot
+    // be entered without a frame and a frame is a Direct3D texture. These tests
+    // create one — on the graphics hardware, or on WARP, which is part of
+    // Windows and is what makes this run on a hosted CI runner — and drive the
+    // whole of `record_frames` with it: the encoder is opened against the
+    // texture's own device, the file is a real Matroska file, and the report
+    // that comes back is the one a recording produces.
+    //
+    // That is the only way to test what a *minimised window mid-recording* does,
+    // short of a window to minimise. The behaviour is a rule about acquisitions
+    // and it lives in the loop; a test of the counter or of the report's
+    // sentence would leave the wiring between them free (issue #383).
+
+    /// A Direct3D 11 device, on the graphics hardware or failing that on WARP.
+    ///
+    /// [`None`] only on a machine that has neither, which no supported Windows
+    /// install is: WARP ships with the operating system. The fallback is what
+    /// lets these tests cover the loop on a runner with no usable GPU, and it is
+    /// the arrangement `crates/encoder`'s software encoder tests already use.
+    fn test_device() -> Option<windows::Win32::Graphics::Direct3D11::ID3D11Device> {
+        use windows::Win32::Graphics::Direct3D::{
+            D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
+        };
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        };
+
+        for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+            let mut device: Option<ID3D11Device> = None;
+            // SAFETY: no adapter is named, which is what these driver types
+            // require; the module handle is unused for them; the feature level
+            // list and the out-parameter are live locals; and
+            // `D3D11_SDK_VERSION` is the constant the header requires. On
+            // success `device` holds one reference, released on drop.
+            let created = unsafe {
+                D3D11CreateDevice(
+                    None,
+                    driver,
+                    windows::Win32::Foundation::HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )
+            };
+            if created.is_ok() {
+                if let Some(device) = device {
+                    return Some(device);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// A BGRA texture on `device`, filled with a flat grey.
+    ///
+    /// The picture does not matter here — what is under test is which
+    /// acquisitions are counted as what, not what the encoder made of them — but
+    /// the *format* does: `PixelFormat::Bgra8Unorm` is what the scripted format
+    /// declares, and the software encoder checks the two agree before it copies
+    /// anything (`crates/encoder/src/software/readback.rs`).
+    fn test_texture(
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        width: u32,
+        height: u32,
+    ) -> ID3D11Texture2D {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_DEFAULT,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let pixels = vec![0x40u8; (width as usize) * (height as usize) * 4];
+        let initial = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: width * 4,
+            SysMemSlicePitch: 0,
+        };
+
+        let mut texture: Option<ID3D11Texture2D> = None;
+        // SAFETY: the description and the initial data both describe the
+        // `pixels` buffer, which is live for the whole call and is not retained
+        // — Direct3D copies it into the texture — and the out-parameter is a
+        // live local. On success it holds one reference, released on drop.
+        unsafe { device.CreateTexture2D(&description, Some(&initial), Some(&mut texture)) }
+            .expect("a texture can be created on a device that was just created");
+        texture.expect("CreateTexture2D reported success without returning a texture")
+    }
+
+    /// Settings for a recording of the scripted backend into `recording`.
+    ///
+    /// The encoder is named rather than left automatic so that the recording is
+    /// made the same way on every machine — the software encoder needs no
+    /// encoding hardware, which is what lets this run where NVENC is not — and
+    /// the disk guard is turned off because what is under test is not the disk.
+    fn loop_settings(recording: &TemporaryRecording) -> RecordingSettings {
+        RecordingSettings::new(
+            crate::settings::CaptureTargetSettings::window(0x1234, TEST_SIZE.0, TEST_SIZE.1),
+            recording.path().to_path_buf(),
+        )
+        .with_minimum_free_space(0)
+        .with_codec(crate::settings::CodecPreference::Fixed(Codec::H264))
+        .with_encoder(crate::settings::EncoderPreference::Fixed(
+            EncoderKind::Software,
+        ))
+    }
+
+    /// Runs the whole recording loop over `steps` and returns what it reported.
+    fn recording_of(purpose: &str, steps: impl IntoIterator<Item = Step>) -> RecordingReport {
+        // Not a skip. WARP ships with Windows, so a machine that cannot create
+        // a device here is a broken one and this is a failure worth seeing —
+        // a test that quietly does nothing is worse than no test (AGENTS.md
+        // section 54).
+        let device =
+            test_device().expect("no Direct3D 11 device could be created, on hardware or on WARP");
+        let texture = test_texture(&device, TEST_SIZE.0, TEST_SIZE.1);
+
+        let format = format_of(TEST_SIZE.0, TEST_SIZE.1);
+        let recording = TemporaryRecording::new(purpose);
+        let settings = loop_settings(&recording);
+        let mut backend = ScriptedBackend::new(format, steps).drawing(texture);
+        // Far beyond the script, so the loop ends because it was asked to and
+        // not because the script ran out: the steps after the last one are
+        // ordinary timeouts, which is what an idle source looks like.
+        let stop = StopAfter::polls(40);
+
+        record_frames(
+            &settings,
+            &stop,
+            &mut backend,
+            format,
+            CaptureMethod::WindowsGraphicsCapture,
+            &crate::RecordingOutputs::default(),
+        )
+        .expect("a recording with frames in it is a recording")
+    }
+
+    #[test]
+    fn a_window_minimised_during_a_recording_is_counted_in_the_report_the_recording_produces() {
+        // Issue #383's second half, and the one that is invisible when it goes
+        // wrong: the recording carries on — alt-tabbing out of a fullscreen game
+        // minimises it, and ending the session there would cost somebody the
+        // rest of their game — but it must not carry on *in silence*. The count
+        // in the report is what the log line, the summary sentence and the
+        // desktop all read, and if the loop stops producing it the recording
+        // goes back to writing nothing and saying nothing about it.
+        //
+        // The first frame is the one the recording releases rather than encodes:
+        // it exists to say which device the textures are on.
+        let report = recording_of(
+            "minimised-mid-recording",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Drew,
+                Step::Drew,
+            ],
+        );
+
+        assert_eq!(
+            report.times_target_minimised(),
+            1,
+            "the stretch the window was minimised for reached nothing the user can see"
+        );
+        assert_eq!(
+            report.frames_captured(),
+            4,
+            "the recording must keep the frames either side of the minimise, on one timeline"
+        );
+        assert_eq!(
+            report.end_reason(),
+            EndReason::Stopped,
+            "a minimised window must not end the recording"
+        );
+        assert!(
+            report.frames_encoded() > 0,
+            "the frames either side of the minimise were captured and never encoded"
+        );
+    }
+
+    #[test]
+    fn a_recording_the_window_kept_drawing_through_reports_no_minimised_stretch() {
+        // The other direction, and what makes the test above mean something:
+        // without it a loop that counted every acquisition as a minimise, or
+        // reported a fixed 1, would pass just as well — and every ordinary
+        // recording would end with a sentence about a window nobody minimised.
+        let report = recording_of(
+            "never-minimised",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Nothing,
+                Step::Drew,
+            ],
+        );
+
+        assert_eq!(report.times_target_minimised(), 0);
+        assert_eq!(report.frames_captured(), 3);
+    }
+
+    #[test]
+    fn two_stretches_minimised_are_two_and_ten_acquisitions_of_one_are_still_one() {
+        // What the count is *of*. A window minimised for a minute produces ten
+        // acquisitions a second and is one thing that happened; a window
+        // minimised, restored and minimised again is two. Counting acquisitions
+        // would report a number about the acquisition timeout, and counting
+        // without noticing the frames in between would report one stretch for a
+        // whole session.
+        let report = recording_of(
+            "two-stretches",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Drew,
+            ],
+        );
+
+        assert_eq!(
+            report.times_target_minimised(),
+            2,
+            "five acquisitions in two stretches is two stretches"
+        );
+        assert_eq!(report.frames_captured(), 3);
     }
 }

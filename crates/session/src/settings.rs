@@ -527,6 +527,33 @@ mod tests {
     }
 
     #[test]
+    fn a_window_the_caller_measured_as_minimised_reaches_backend_selection_as_minimised() {
+        // The one thing `minimised` is for. A window minimised after it was
+        // measured still reports the size it had — `resolve` records the
+        // restored geometry — so the zero-size refusal above does not catch it,
+        // and this flag is the whole of what tells `select` that no backend can
+        // produce a frame for this target (issue #383). Dropped here, the
+        // invariant every caller of this crate relies on is silently gone and
+        // the recording becomes an empty file.
+        let minimised = CaptureTargetSettings::window(0x1234, 1280, 720)
+            .minimised(true)
+            .properties()
+            .expect("a window with pixels has properties");
+        assert!(
+            minimised.is_minimised(),
+            "backend selection was told nothing about a minimised window"
+        );
+
+        // The other direction, without which the assertion above would pass
+        // just as well against a target that always claimed to be minimised —
+        // which would refuse every recording there is.
+        let drawing = CaptureTargetSettings::window(0x1234, 1280, 720)
+            .properties()
+            .expect("a window with pixels has properties");
+        assert!(!drawing.is_minimised());
+    }
+
+    #[test]
     fn source_resolution_follows_whatever_capture_produced() {
         let settings = RecordingSettings::new(
             CaptureTargetSettings::window(1, 1280, 720),

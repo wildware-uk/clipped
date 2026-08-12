@@ -176,6 +176,32 @@ path = "../plugins/examples/misbehaving_plugin.rs"
 name = "example_plugin"
 path = "../plugins/examples/example_plugin.rs"
 
+# Creating a device and a texture is a test concern, and only a test concern.
+# The recording engine is handed both by the capture backend and asks a texture
+# which device it belongs to; nothing it ships creates either. What needs the
+# rest of Direct3D is `src/recording.rs`'s test of the capture loop, which drives
+# the loop against a scripted backend that has to hand over a frame that is a
+# real frame — a texture the encoder can be opened against and a device
+# `FrameDevice::of` can answer for. WARP is what lets that run on a machine with
+# no usable GPU, which is every hosted CI runner.
+#
+# Declaring these here rather than widening the dependency above means the
+# shipped recorder does not compile a line of device creation on account of this
+# crate, which is the arrangement `crates/encoder` already uses for the same
+# reason.
+[target.'cfg(windows)'.dev-dependencies.windows]
+workspace = true
+features = [
+    # `D3D11CreateDevice` and the texture description the test fills in.
+    "Win32_Graphics_Direct3D11",
+    # `D3D_DRIVER_TYPE_HARDWARE`, `D3D_DRIVER_TYPE_WARP` and the feature level,
+    # which `D3D11CreateDevice` takes.
+    "Win32_Graphics_Direct3D",
+    # `DXGI_FORMAT_B8G8R8A8_UNORM` and `DXGI_SAMPLE_DESC`, which the texture is
+    # described in — the format `PixelFormat::Bgra8Unorm` names.
+    "Win32_Graphics_Dxgi_Common",
+]
+
 [dev-dependencies]
 # `examples/replay_probe.rs` takes command-line arguments, and every executable
 # in this workspace presents the same argument syntax and the same usage errors
