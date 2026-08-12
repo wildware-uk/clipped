@@ -434,7 +434,7 @@ fn a_key_this_build_does_not_understand_is_refused_wherever_it_appears() {
     let mut pointers = Vec::new();
     object_pointers(&document, String::new(), &mut pointers);
     assert!(
-        pointers.len() > 10,
+        pointers.len() > 20,
         "a fully populated document is more than a handful of objects: {pointers:?}"
     );
 
