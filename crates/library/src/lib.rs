@@ -21,5 +21,23 @@
 //! # Position in the architecture
 //!
 //! Sits above `clipped-storage` and below `clipped-session`.
+//!
+//! # What exists today
+//!
+//! [`search`]: the query language a user types into the search box, its parser
+//! and a matcher for it (SPEC.md section 30, `docs/search.md`). It is a
+//! language and its meaning, and it deliberately touches no database — the
+//! index that will run it over a real library is
+//! [issue #56](https://github.com/wildware-uk/clipped/issues/56), and the
+//! database under that is
+//! [issue #55](https://github.com/wildware-uk/clipped/issues/55).
+//!
+//! [`accounting`]: what Clipped has put on disk and what a quota permits
+//! (SPEC.md section 27, `docs/storage-management.md`). It measures and reports;
+//! removing anything is
+//! [issue #111](https://github.com/wildware-uk/clipped/issues/111).
+//!
+//! Nothing else in this crate is built yet.
 
 pub mod accounting;
+pub mod search;
