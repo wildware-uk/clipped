@@ -141,17 +141,36 @@ pub(crate) fn includes(process_id: u32) -> bool {
 
     let this_process = std::process::id();
 
-    match process_parentage() {
+    // `process_parentage` is called here rather than inside, so that neither of
+    // the two answers above pays for a read of the process table.
+    includes_given_the_process_table(
+        process_id,
+        this_process,
+        process_parentage(),
+        started_at_asking_windows,
+    )
+}
+
+/// Whether `application` started `process`, given whatever Windows made of the
+/// process table.
+///
+/// Split from [`includes`] for the arm that cannot be reached any other way: a
+/// machine that will not produce its process table at all is not a state a test
+/// can put Windows into, and what is answered for it is a decision rather than
+/// an oversight — see [`includes`]. Written this way, both arms are a function
+/// of arguments a test can write down.
+///
+/// Reads no clock and takes no snapshot of its own: the rule that pairs the two
+/// lives in [`process_parentage`], and this is handed the result of it.
+fn includes_given_the_process_table(
+    process: u32,
+    application: u32,
+    process_table: Result<(u64, Vec<Parentage>), windows::core::Error>,
+    started_at: impl Fn(u32) -> Option<u64>,
+) -> bool {
+    match process_table {
         Ok((table_read_at, table)) => {
-            started_by(&table, process_id, this_process, table_read_at, |of| {
-                if of == this_process {
-                    // A value that cannot change, and this is the one process
-                    // on the chain that is asked about on every single call.
-                    this_process_started_at()
-                } else {
-                    started_at(of)
-                }
-            })
+            started_by(&table, process, application, table_read_at, started_at)
         }
         Err(error) => {
             report_once(&format!(
@@ -160,6 +179,26 @@ pub(crate) fn includes(process_id: u32) -> bool {
             ));
             false
         }
+    }
+}
+
+/// The creation times the real call site judges the process table by: Windows'
+/// answer for any process, and the remembered one for this process.
+///
+/// A named function rather than a closure inside [`includes`] because it is the
+/// one place where the per-link identifier-reuse defence is wired to the
+/// machine, and it needs a test of its own. Every written-down tree in this
+/// module supplies its own times, so a version of this that answered [`None`]
+/// for anything but this process would leave all of them passing while turning
+/// that defence off on a real machine entirely — an unknown time leaves the link
+/// to the table, which is the whole of what [`consistent_with`] does with one.
+fn started_at_asking_windows(process_id: u32) -> Option<u64> {
+    if process_id == std::process::id() {
+        // A value that cannot change, and this is the one process on the chain
+        // that is asked about on every single call.
+        this_process_started_at()
+    } else {
+        started_at(process_id)
     }
 }
 
@@ -191,7 +230,8 @@ struct Parentage {
 /// process trees rather than against whatever the machine happens to be running
 /// (AGENTS.md section 25). `started_at` is a function rather than a pair of
 /// times for the same reason: a test writes the tree's creation times down
-/// beside its parentage, and [`includes`] passes the one that asks Windows.
+/// beside its parentage, and the real call site passes
+/// [`started_at_asking_windows`].
 fn started_by(
     table: &[Parentage],
     process: u32,
@@ -267,14 +307,18 @@ fn consistent_with(process: Option<u64>, parent: Option<u64>, table_read_at: u64
 /// Every process running now, by identifier and creator, and the moment just
 /// before they were read.
 ///
-/// The two are returned together because the order they are produced in is a
-/// rule and not a detail. The moment is read *first*, and creation times are
-/// read against it afterwards, so that a process wearing an identifier only
-/// since the table was copied is refused and looked at again on the next
-/// foreground change. The other order would quietly admit exactly that
-/// identifier, and no test can see which order two adjacent statements are in —
-/// so the clock is read here, beside the table, rather than by a caller who
-/// could put it anywhere.
+/// The order the two are produced in is a rule and not a detail. The moment is
+/// read *first*, and creation times are read against it afterwards, so that a
+/// process wearing an identifier only since the table was copied is refused and
+/// looked at again on the next foreground change. The other order would quietly
+/// admit exactly that identifier.
+///
+/// Returning them together does not enforce that: swapping the two statements
+/// below compiles, passes every test in this module, and is wrong, because no
+/// test can see which order two adjacent statements are in. What it does is
+/// keep both reads in one short function with the rule written beside them,
+/// instead of leaving each caller to read a clock whenever it liked — which is
+/// a smaller claim than structure, and is the one that is true.
 ///
 /// # Errors
 ///
@@ -431,6 +475,7 @@ fn report_once(what: &str) {
 mod tests {
     use std::os::windows::process::CommandExt as _;
 
+    use windows::Win32::Foundation::E_FAIL;
     use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
     use super::*;
@@ -467,6 +512,27 @@ mod tests {
                     .map_or(THIS_STARTED + 5_000_000, |(_, at)| *at),
             )
         }
+    }
+
+    /// A live process this one started, for the tests that need a real one
+    /// rather than a written-down tree.
+    ///
+    /// It stands in for the WebView2 host, which a test has no way to start.
+    /// `cmd /C pause` waits for a keystroke on standard input, which is a pipe
+    /// nothing writes to, so it stays alive until it is killed; `CREATE_NO_WINDOW`
+    /// is what keeps a console application from opening a console of its own.
+    ///
+    /// The caller kills it, and must: a `cmd.exe` left behind waits for a
+    /// keystroke for as long as the machine is up.
+    fn a_process_this_one_started() -> std::process::Child {
+        std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .spawn()
+            .expect("cmd.exe is on every Windows installation")
     }
 
     /// Whether `process` is one this application started, with every creation
@@ -661,21 +727,11 @@ mod tests {
         // The half of `includes` that the written-down tables above cannot
         // reach: that the real process table is read, that the identifiers in
         // it are this machine's, and that the walk runs in the direction the
-        // exclusion needs. A child stands in for the WebView2 host, which a
-        // test has no way to start.
+        // exclusion needs.
         //
-        // `cmd /C pause` waits for a keystroke on standard input, which is a
-        // pipe nothing writes to, so it stays alive until it is killed;
-        // `CREATE_NO_WINDOW` is what keeps a console application from opening
-        // a console of its own.
-        let mut child = std::process::Command::new("cmd")
-            .args(["/C", "pause"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW.0)
-            .spawn()
-            .expect("cmd.exe is on every Windows installation");
+        // Membership only: this says nothing about the creation times the walk
+        // was given, which is what the test below is for.
+        let mut child = a_process_this_one_started();
 
         let child_is_ours = includes(child.id());
         let creator = process_parentage()
@@ -695,5 +751,108 @@ mod tests {
             "a process this one started is part of this application"
         );
         assert!(!creator_is_ours, "the process that started this one is not");
+    }
+
+    #[test]
+    fn the_times_the_real_call_site_judges_the_table_by_are_the_ones_windows_gives() {
+        // The wiring, rather than the rule. Every tree above writes its own
+        // creation times down, so all of them go on passing if the times the
+        // real call site supplies stop being real — and an unknown time leaves
+        // its link to the table (`consistent_with`), so a
+        // `started_at_asking_windows` that answered `None` for every process
+        // but this one would switch the whole per-link identifier-reuse
+        // defence off on a real machine, silently, which is the defect issue
+        // #390's fix exists to prevent.
+        let mut child = a_process_this_one_started();
+        let child_started = started_at_asking_windows(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let this_started = started_at_asking_windows(std::process::id());
+
+        assert!(
+            child_started.is_some(),
+            "a process this one started is timed by asking Windows about it"
+        );
+        assert!(
+            this_process_started_at().is_some(),
+            "and Windows always times the process doing the asking"
+        );
+        assert_eq!(
+            this_started,
+            this_process_started_at(),
+            "which this process is answered from, being the one asked about every time"
+        );
+        assert!(
+            child_started >= this_started,
+            "the times are the processes' own, and a child cannot have started before its parent"
+        );
+    }
+
+    #[test]
+    fn a_file_time_is_the_one_number_its_two_halves_make() {
+        // Two file times read in one run of a test share a high half, so a
+        // `ticks` that dropped it is invisible for the 429 seconds it takes
+        // the low half to wrap — and then wrong by seven minutes, in a
+        // comparison that decides whether a stranger's application is
+        // recordable.
+        assert_eq!(
+            ticks(FILETIME {
+                dwHighDateTime: 1,
+                dwLowDateTime: 0,
+            }),
+            1 << 32,
+            "the high half is the top thirty-two bits of the number"
+        );
+        assert_eq!(
+            ticks(FILETIME {
+                dwHighDateTime: 0,
+                dwLowDateTime: u32::MAX,
+            }),
+            u64::from(u32::MAX),
+            "and the low half is the bottom thirty-two, unshifted"
+        );
+        assert_eq!(
+            ticks(FILETIME {
+                dwHighDateTime: 0x01DB_4E3A,
+                dwLowDateTime: 0x9C4F_1200,
+            }),
+            0x01DB_4E3A_9C4F_1200,
+            "which together are one number, of the size a file time in this century is"
+        );
+    }
+
+    #[test]
+    fn a_process_table_windows_will_not_produce_leaves_the_window_recordable() {
+        // The failure the machine has to be in trouble for, and the one arm no
+        // written-down tree reaches. Refusing everything instead would leave
+        // the record control unable to record anything at all, so the
+        // deliberate answer is the other way: everything stays recordable,
+        // including — for as long as the table cannot be read — Clipped's own
+        // webview.
+        //
+        // Same process, same times, same application: only whether the table
+        // could be read differs, and the answers differ with it. This is the
+        // one test that prints the report `includes` documents, once.
+        let times = started(&[(THIS, THIS_STARTED)]);
+
+        assert!(
+            includes_given_the_process_table(
+                53_008,
+                THIS,
+                Ok((TABLE_READ_AT, vec![row(THIS, 900), row(53_008, THIS)])),
+                &times,
+            ),
+            "the webview host is this application's when the table can be read"
+        );
+        assert!(
+            !includes_given_the_process_table(
+                53_008,
+                THIS,
+                Err(windows::core::Error::from_hresult(E_FAIL)),
+                &times,
+            ),
+            "and is left recordable when it cannot, rather than every window being refused"
+        );
     }
 }
