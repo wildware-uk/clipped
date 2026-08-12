@@ -28,6 +28,7 @@
 //! `clipped-session`, which owns both sides, converts.
 
 use core::fmt;
+use core::time::Duration;
 
 use rusty_ffmpeg::ffi;
 
@@ -318,6 +319,23 @@ impl FrameRate {
         Self::new(frames, 1)
     }
 
+    /// How long one frame occupies at this rate.
+    ///
+    /// The number a caller needs for
+    /// [`EncodedPacket::with_duration`](crate::EncodedPacket::with_duration),
+    /// which decides the duration of the *last* block of a track and so whether
+    /// a finished file reads as ending one frame early. Exposed rather than left
+    /// to each caller to divide out, because a rate is a fraction — 60000/1001
+    /// is not 59 frames a second — and a second arithmetic for it is a second
+    /// place for that to go wrong (AGENTS.md section 55).
+    ///
+    /// Rounded down to the nanosecond, which is the resolution every timestamp
+    /// in this crate is carried at.
+    #[must_use]
+    pub const fn frame_interval(self) -> Duration {
+        Duration::from_nanos(1_000_000_000 * self.denominator as u64 / self.numerator as u64)
+    }
+
     /// The fraction, as FFmpeg's rational.
     pub(crate) const fn as_rational(self) -> ffi::AVRational {
         ffi::AVRational {
@@ -600,6 +618,31 @@ impl RecordingLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frames_duration_comes_from_the_whole_fraction_and_not_the_rounded_rate() {
+        // 59.94 fps is 60000/1001, and a caller that rounded it to 60 would give
+        // the last block of every clip a duration 0.1 % short. The fraction is
+        // why this is one function rather than a division at each call site.
+        assert_eq!(
+            FrameRate::per_second(60)
+                .expect("a real rate")
+                .frame_interval(),
+            Duration::from_nanos(16_666_666)
+        );
+        assert_eq!(
+            FrameRate::new(60_000, 1001)
+                .expect("a real rate")
+                .frame_interval(),
+            Duration::from_nanos(16_683_333)
+        );
+        assert_eq!(
+            FrameRate::per_second(1)
+                .expect("a real rate")
+                .frame_interval(),
+            Duration::from_secs(1)
+        );
+    }
 
     #[test]
     fn a_track_is_named_in_a_message_the_way_a_person_would_name_it() {

@@ -530,13 +530,14 @@ mod tests {
         let outcome = dispatcher.press(press(HotkeyAction::SaveReplay));
 
         let PressOutcome::Unhandled(unhandled) = outcome else {
-            panic!("nothing saves a replay in this build, so this must be Unhandled: {outcome}");
+            panic!("no build runs a recording with a replay buffer, so this must be Unhandled: {outcome}");
         };
         assert_eq!(unhandled.action(), HotkeyAction::SaveReplay);
         let message = unhandled.to_string();
         assert!(message.contains("Save replay"), "{message}");
         assert!(message.contains("M3"), "{message}");
-        assert!(message.contains("#37"), "{message}");
+        // #38, not #37: #37 built the buffer's save, and nothing runs it yet.
+        assert!(message.contains("#38"), "{message}");
 
         let reported = drain(&events);
         assert_eq!(reported.len(), 1, "the caller is told, not only the log");

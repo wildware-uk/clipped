@@ -737,10 +737,10 @@
             "detail": {
               "detail": "not_implemented",
               "milestone": "M3",
-              "subsystem": "the replay buffer",
-              "tracking_issue": 37
+              "subsystem": "a recording with a replay buffer",
+              "tracking_issue": 38
             },
-            "message": "the replay buffer is not in this build"
+            "message": "a recording with a replay buffer is not in this build"
           }
         },
         "type": "response"

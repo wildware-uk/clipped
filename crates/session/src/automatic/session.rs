@@ -11,8 +11,10 @@
 //!
 //! # What this build models, and what it does not
 //!
-//! Recordings and events, because those are the two that exist. Clips are
-//! [issue #37](https://github.com/wildware-uk/clipped/issues/37) and bookmarks
+//! Recordings and events, because those are the two that exist. Clips wait on
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38) — writing one
+//! exists ([issue #37](https://github.com/wildware-uk/clipped/issues/37)) but
+//! no build runs a recording with a buffer to write from — and bookmarks
 //! are M8; nothing in this build can create one, so there is no type for one
 //! here and nothing pretends otherwise (AGENTS.md section 27). Both are
 //! reserved in the sidecar schema — see [`super::sidecar`] — so that adding

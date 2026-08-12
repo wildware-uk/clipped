@@ -126,16 +126,27 @@ without being placed in a layer.
 | --- | --- | --- |
 | 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
-| 2 | `clipped-muxer`, `clipped-replay` | layers 0–1 |
-| 3 | `clipped-session` | layers 0–2 |
-| 4 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–3 |
-| 5 | `clipped-video-pattern` (test application) | layers 0–4 |
-| 6 | `clipped-fullscreen-dx11` (test application) | layers 0–5 |
+| 2 | `clipped-muxer` | layers 0–1 |
+| 3 | `clipped-replay` | layers 0–2 |
+| 4 | `clipped-session` | layers 0–3 |
+| 5 | `clipped-recorder` (binary), `clipped-workspace-tests` | layers 0–4 |
+| 6 | `clipped-video-pattern` (test application) | layers 0–5 |
+| 7 | `clipped-fullscreen-dx11` (test application) | layers 0–6 |
 
-Layers 5 and 6 are the controlled test applications in `test-apps/`, which
+Layers 6 and 7 are the controlled test applications in `test-apps/`, which
 capture tests point at instead of an installed game
 ([docs/testing.md](docs/testing.md)). They are at the top of the stack because
 nothing in the product may depend on one.
+
+`clipped-replay` sits above `clipped-muxer` rather than beside it, which is a
+change made by [issue #37](https://github.com/wildware-uk/clipped/issues/37) and
+worth stating plainly. A replay buffer exists to produce a clip, a clip is a
+file, and the muxer is what writes files — so `clipped_replay::save_clip` drives
+`MkvWriter` over the packets a lease holds rather than containing a second
+Matroska implementation, and rather than leaving every caller to write the same
+loop (AGENTS.md section 55). The dependency points one way only: the muxer still
+knows nothing about a buffer, and a recording is written by exactly the code a
+clip is.
 
 `clipped-ipc` sits at layer 0 for a reason worth stating: it is the protocol
 the desktop application drives the recorder through

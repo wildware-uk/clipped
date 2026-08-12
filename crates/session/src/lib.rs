@@ -49,9 +49,11 @@
 //! well, so that a rolling window of the last few minutes is available to save
 //! from. That is one encoder and two consumers, not two encodes
 //! (`docs/replay-buffer.md`). Turning a buffered window into a clip is
-//! [issue #37](https://github.com/wildware-uk/clipped/issues/37) and the
-//! command that would drive it is
-//! [issue #38](https://github.com/wildware-uk/clipped/issues/38).
+//! `clipped_replay::save_clip`
+//! ([issue #37](https://github.com/wildware-uk/clipped/issues/37)); the command
+//! that would drive it is still
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38), so nothing in
+//! this workspace calls it outside its own tests.
 //!
 //! Per-game settings are modelled but not yet applied. [`config`] is the
 //! configuration API — global settings, per-game overrides that inherit from
@@ -199,11 +201,13 @@ pub fn record(
 /// [`ReplayBuffer::lease`](clipped_replay::ReplayBuffer::lease) is what holds
 /// the segments it reads against the eviction happening underneath it.
 ///
-/// Nothing in this workspace saves from one yet — building the clip is
-/// [issue #37](https://github.com/wildware-uk/clipped/issues/37) and the
-/// `recorder replay` command that would drive it is
-/// [issue #38](https://github.com/wildware-uk/clipped/issues/38) — so today
-/// this fills a buffer and reports what it holds at the end.
+/// Building the clip is `clipped_replay::save_clip`
+/// ([issue #37](https://github.com/wildware-uk/clipped/issues/37)), which a
+/// caller can hand a lease taken from `replay`. Nothing in this workspace does
+/// so outside that crate's own tests: the `recorder replay` command that would
+/// drive it is
+/// [issue #38](https://github.com/wildware-uk/clipped/issues/38), so today this
+/// fills a buffer and reports what it holds at the end.
 ///
 /// # Errors
 ///

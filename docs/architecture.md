@@ -221,9 +221,11 @@ large:
   to the thread that writes the file — which is what keeps the capture thread
   off the filesystem (AGENTS.md section 20). `record_with_replay` additionally
   copies each packet into a `clipped-replay` buffer, so a rolling window of the
-  last few minutes is there to save from; nothing saves from one yet
-  ([#37](https://github.com/wildware-uk/clipped/issues/37)) and no command turns
-  one on ([#38](https://github.com/wildware-uk/clipped/issues/38)). It also owns
+  last few minutes is there to save from; `clipped_replay::save_clip` turns a
+  window of it into a file
+  ([#37](https://github.com/wildware-uk/clipped/issues/37)), and no command
+  turns a buffer on or asks for a clip yet
+  ([#38](https://github.com/wildware-uk/clipped/issues/38)). It also owns
   the **session manager**: `clipped_session::automatic` joins
   `clipped-game-detection`'s watcher and catalogue to that recording loop, and is
   the policy that decides when a session starts, when it stops, what a fast

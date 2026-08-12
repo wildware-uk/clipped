@@ -1054,8 +1054,12 @@ fn exemplar_response() -> Response {
 }
 
 /// A refusal carrying a detail.
+///
+/// Taken from [`UnbuiltCommand`] rather than typed out, so the example in the
+/// schema is a refusal the recorder really sends and cannot drift from one as
+/// the subsystems behind these commands are built.
 fn exemplar_error() -> ProtocolError {
-    ProtocolError::not_implemented("the replay buffer", "M3", 37)
+    UnbuiltCommand::SaveReplay.refusal()
 }
 
 /// Every `start_recording` option at once.
@@ -1266,9 +1270,9 @@ fn every_error_detail() -> Vec<ErrorDetail> {
             recorder_version: "0.1.0".to_owned(),
         },
         ErrorDetail::NotImplemented {
-            subsystem: "the replay buffer".to_owned(),
-            milestone: "M3".to_owned(),
-            tracking_issue: 37,
+            subsystem: UnbuiltCommand::SaveReplay.subsystem().to_owned(),
+            milestone: UnbuiltCommand::SaveReplay.milestone().to_owned(),
+            tracking_issue: UnbuiltCommand::SaveReplay.tracking_issue(),
         },
     ];
     for detail in &details {

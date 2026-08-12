@@ -131,10 +131,24 @@ impl HotkeyAction {
     /// has written. Starting a recording and muting a microphone are both
     /// things this build can do; whether *this* process was given a handler for
     /// them is a separate question, and [`crate::Unhandled`] is what answers it.
+    ///
+    /// Saving a replay is the one to read carefully. The buffer and the save
+    /// exist — [issue #37](https://github.com/wildware-uk/clipped/issues/37)
+    /// wrote `clipped_replay::save_clip`, and `clipped_session` can fill a
+    /// buffer while it records. What no build has is a *recording that is
+    /// running one*: nothing starts a buffered session and nothing carries a
+    /// save request to it, which is [issue
+    /// #38](https://github.com/wildware-uk/clipped/issues/38). So this stays
+    /// [`Some`] and names what is genuinely absent, rather than naming a buffer
+    /// that has been built.
     #[must_use]
     pub const fn planned_subsystem(self) -> Option<PlannedSubsystem> {
         match self {
-            Self::SaveReplay => Some(PlannedSubsystem::new("the replay buffer", "M3", 37)),
+            Self::SaveReplay => Some(PlannedSubsystem::new(
+                "a recording with a replay buffer",
+                "M3",
+                38,
+            )),
             Self::AddBookmark => Some(PlannedSubsystem::new("bookmarks", "M8", 64)),
             Self::TakeScreenshot => Some(PlannedSubsystem::new("screenshot capture", "M8", 67)),
             Self::OpenOverlay => Some(PlannedSubsystem::new("the in-game overlay", "M5", 53)),
@@ -156,7 +170,7 @@ impl fmt::Display for HotkeyAction {
 ///
 /// The shape is deliberately the one `clipped-ipc` refuses an unbuilt command
 /// with (`ProtocolError::not_implemented`, `docs/ipc.md`): a UI that can say
-/// "Save replay — not in this build (M3, issue #37)" is telling the truth,
+/// "Save replay — not in this build (M3, issue #38)" is telling the truth,
 /// where a key that silently does nothing is not (AGENTS.md sections 27 and
 /// 54). This crate does not depend on `clipped-ipc` to say it — both sit at the
 /// bottom of the stack and neither may name the other.
@@ -257,17 +271,24 @@ mod tests {
         assert_eq!(count, names.len(), "two actions share a name: {names:?}");
     }
 
+    /// The sentence a user is shown, held to what the build can actually do.
+    ///
+    /// It names issue #38 and not #37 deliberately. #37 built the replay buffer
+    /// and its save; what is still missing is a recording running one and a
+    /// route from this key to it, and that is #38. Naming the finished issue
+    /// would tell a user that a shipped feature is unbuilt (AGENTS.md sections
+    /// 27 and 54).
     #[test]
     fn an_unbuilt_action_says_which_milestone_and_issue_builds_it() {
         let planned = HotkeyAction::SaveReplay
             .planned_subsystem()
-            .expect("nothing saves a replay in this build");
+            .expect("no build runs a recording with a replay buffer yet");
 
         assert_eq!(planned.milestone(), "M3");
-        assert_eq!(planned.tracking_issue(), 37);
+        assert_eq!(planned.tracking_issue(), 38);
         assert_eq!(
             planned.to_string(),
-            "the replay buffer arrives in M3 (issue #37)"
+            "a recording with a replay buffer arrives in M3 (issue #38)"
         );
     }
 

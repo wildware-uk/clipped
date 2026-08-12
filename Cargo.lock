@@ -340,6 +340,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clipped-encoder",
+ "clipped-logging",
+ "clipped-media-validation",
+ "clipped-muxer",
  "tracing",
  "windows",
 ]

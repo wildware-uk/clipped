@@ -11,6 +11,7 @@ they start and finalises the recording when they stop
 issue that builds it.
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
+[#38]: https://github.com/wildware-uk/clipped/issues/38
 [#41]: https://github.com/wildware-uk/clipped/issues/41
 [#42]: https://github.com/wildware-uk/clipped/issues/42
 [#46]: https://github.com/wildware-uk/clipped/issues/46
@@ -37,9 +38,10 @@ encoder, so each of those produces a new file — and the session is what says t
 files belong together.
 
 A session groups **recordings, clips, bookmarks and events**. Recordings and
-events exist and are modelled. Clips are [#37] and bookmarks are M8; nothing in
-this build can create either, so there is no Rust type for one and no invented
-data (AGENTS.md section 27). Both are reserved in the file format below so that
+events exist and are modelled. Clips wait on [#38] — one can be *written*
+([#37]) but no build runs a recording with a buffer to write from — and
+bookmarks are M8; nothing in this build can create either, so there is no Rust
+type for one and no invented data (AGENTS.md section 27). Both are reserved in the file format below so that
 adding them is an addition rather than a format change.
 
 ## Where the pieces are
@@ -74,9 +76,10 @@ keep everything (SPEC.md section 7).
 The other three modes are not offered rather than offered and doing nothing.
 Match Recording needs an integration that can say when a match begins, which is
 the highlight provider API in M9. Highlights Only and Manual/Replay Buffer need a
-replay buffer a clip can be *saved* from: the buffer exists and fills from the
-same encoder (`docs/replay-buffer.md`), and turning a window of it into a file is
-[#37].
+replay buffer a clip can be *saved* from: the buffer exists, fills from the same
+encoder and can be written out as a clip (`docs/replay-buffer.md`, [#37]). What
+is still missing is anything that asks for one — a command ([#38]) or a hotkey
+that reaches the recorder.
 
 ## How a launch becomes a recording
 
@@ -315,7 +318,7 @@ one sitting, one file — produces a file named after the session and nothing el
 
 `clips` and `bookmarks` are **always empty in this build**. They are written so
 that a reader can tell "no clips" from "a file that predates clips", and so that
-[#37] and M8 add to the file rather than change its shape (AGENTS.md section 43).
+[#38] and M8 add to the file rather than change its shape (AGENTS.md section 43).
 Their presence is not a claim that the features exist.
 
 An ambiguous session writes its candidates instead of a name it did not earn:

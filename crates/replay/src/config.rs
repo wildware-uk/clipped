@@ -45,10 +45,12 @@
 //! keyframe so that it can be decoded on its own, so the buffer cannot start a
 //! segment anywhere the encoder did not put one: the real granularity is the
 //! larger of [`ReplayConfig::segment_duration`] and the encoder's keyframe
-//! interval. A save therefore keeps up to one segment of extra material before
-//! the requested start and up to one after the requested end;
-//! [`SegmentLease`](crate::SegmentLease) reports both as slack, and trimming
-//! them off is [issue #37](https://github.com/wildware-uk/clipped/issues/37).
+//! interval. A lease therefore holds up to one segment of extra material before
+//! the requested start and up to one after the requested end, and
+//! [`SegmentLease`](crate::SegmentLease) reports both as slack. A saved clip
+//! keeps the first — it has to begin on a keyframe to be decodable — and is
+//! trimmed to the request at the second, so **this length is the amount by
+//! which a clip can be longer than what was asked for** (`crate::save`).
 //!
 //! Shorter segments cost compression — every keyframe is several times the size
 //! of a predicted picture — and buy precision. Two seconds is the default here

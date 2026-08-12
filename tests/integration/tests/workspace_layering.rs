@@ -76,13 +76,20 @@ const LAYERS: &[&[&str]] = &[
         "clipped-game-detection",
         "clipped-plugins",
     ],
-    // Consumers of encoded output. `clipped-muxer` writes it to a container;
-    // `clipped-replay` holds a rolling window of it in memory so that a hotkey
-    // pressed after something interesting can still save it
-    // (docs/replay-buffer.md). They are peers rather than a stack: a replay
-    // buffer keeps packets and does not write files, and the muxer does not
-    // know a buffer exists.
-    &["clipped-muxer", "clipped-replay"],
+    // Consumers of encoded output. `clipped-muxer` writes it to a container.
+    &["clipped-muxer"],
+    // `clipped-replay` holds a rolling window of encoded packets in memory so
+    // that a hotkey pressed after something interesting can still save it, and
+    // then writes that clip out (docs/replay-buffer.md).
+    //
+    // It was a peer of `clipped-muxer` until issue #37 gave it the save. A clip
+    // is a file, the muxer is what writes files, and the packets a buffer holds
+    // are the packets a writer takes — so `save_clip` drives `MkvWriter` rather
+    // than being a second Matroska implementation, or a loop every caller
+    // repeats (AGENTS.md section 55). The dependency points one way: nothing in
+    // `clipped-muxer` knows a replay buffer exists, which is what keeps a
+    // recording and a clip written by the same code.
+    &["clipped-replay"],
     // Application logic that coordinates every subsystem above.
     &["clipped-session"],
     // Executables and test-only packages.

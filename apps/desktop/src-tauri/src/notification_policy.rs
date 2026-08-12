@@ -28,7 +28,8 @@
 //! [`RecorderLinkEvent`] and the four of [`RecorderLinkState`], and there are no
 //! others. "Replay saved", "bookmark added" and "screenshot taken" are in issue
 //! #110's scope and are **not** here, because no such event exists — the replay
-//! buffer's save is issue #37, and notifying about something no subsystem
+//! buffer's save is written (issue #37) but no build runs a recording with a
+//! buffer to save from (issue #38), and notifying about something no subsystem
 //! reports would be the invented state AGENTS.md section 27 forbids.
 //!
 //! Issue #110 also asks for non-critical notifications to be suppressed during

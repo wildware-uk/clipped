@@ -34,8 +34,9 @@
 //! ```
 //!
 //! `clips` and `bookmarks` are reserved and are **always empty in this build**.
-//! Nothing here can create either — saving a clip is
-//! [issue #37](https://github.com/wildware-uk/clipped/issues/37) and bookmarks
+//! Nothing here can create either — a clip needs a recording running a replay
+//! buffer to save from, which is
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38), and bookmarks
 //! are M8 — and they are named now so that adding them later is an addition to
 //! the file rather than a change to its shape (AGENTS.md section 43). A reader
 //! must not infer from their presence that the features exist; `docs/sessions.md`
