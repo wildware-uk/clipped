@@ -8,5 +8,25 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The event vocabulary a plugin reports through (issue #68). This crate
+# translates a plugin's report into `clipped_events::GameEvent` and nothing
+# above it can tell which game produced one, which is the whole point of the
+# plugin boundary (AGENTS.md section 33).
+clipped-events = { workspace = true }
+# A manifest, a wire report and a host command are all `serde` types: the same
+# definitions are what a plugin author writes by hand in `plugin.json`, what a
+# plugin binary prints on its standard output and what this crate reads back.
+# Dual MIT/Apache-2.0.
+serde = { workspace = true }
+# JSON is the manifest format and the wire format, and `serde_json::Map` is what
+# an event payload is. Dual MIT/Apache-2.0.
+serde_json = { workspace = true }
+# The logging facade every crate calls directly (docs/logging.md). A plugin is
+# another program's output, so what it did wrong — a line this build could not
+# read, a process that would not stop — has to be diagnosable from a log file
+# without a debugger attached. MIT.
+tracing = { workspace = true }
+
 [lints]
 workspace = true
