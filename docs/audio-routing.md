@@ -13,9 +13,19 @@ the end that describe it are still unwritten because describing behaviour before
 it is built produces a page that is wrong from the day it is committed
 (AGENTS.md section 7).
 
-So this document describes two captures: what they do, the two problems they
-exist to solve, what they convert, what happens when the user changes their
-audio device mid-recording, and how to check any of it for yourself. Most of it
+One piece of M2 is built and is described here in full: **which processes a game
+consists of**, which is what "the game's audio" has to mean before anything can
+capture it ([issue #25](https://github.com/wildware-uk/clipped/issues/25)). No
+capture uses it yet — that is
+[issue #26](https://github.com/wildware-uk/clipped/issues/26) for the game's own
+track and [issue #27](https://github.com/wildware-uk/clipped/issues/27) for
+everything else — so [The game's process tree](#the-games-process-tree) below
+describes a facility with no consumer, deliberately said out loud.
+
+So this document describes two captures and one process tree: what the captures
+do, the two problems they exist to solve, what they convert, what happens when
+the user changes their audio device mid-recording, how a game's process tree is
+resolved and kept current, and how to check any of it for yourself. Most of it
 is written about system audio because that is where the machinery was built and
 where it is easiest to describe; the [Microphone](#microphone) section says what
 is different about the other one, and everything not listed there is the same
@@ -292,6 +302,199 @@ a second or two at a time and assert on frame counts, timestamps and whether
 silence is zero. None of them keeps a sample, writes one, or looks at what was
 said.
 
+## The game's process tree
+
+A game is not one process. Steam starts a launcher, the launcher starts the
+game, an anti-cheat wrapper may sit between them, some titles re-execute
+themselves once, and the process that renders the audio is often not the one
+whose window is being captured. So "capture the game's audio" means capturing a
+*set* of processes — and because "other system audio" is defined as the
+complement of that set, a process missed from it does not merely lose its audio:
+it puts game audio into the system track, where nobody notices until they open
+the file in an editor days later
+([ADR 0003](adr/0003-process-specific-audio-capture.md)).
+
+The set lives in `clipped_windows::ProcessTree`, one layer below this crate.
+That is where it belongs rather than a convenience: it holds no audio concept at
+all — it opens process handles, reads the process table and compares creation
+times — and the same facility is what a session needs to know a game is really
+gone. `crates/windows/src/process_tree.rs` is the code, and this section is what
+it is for.
+
+### It is not the detection walk
+
+`clipped-game-detection` also follows parent chains, for
+[issue #41](https://github.com/wildware-uk/clipped/issues/41)'s launch debounce,
+and the two are asking different questions. Detection asks **did a game start**:
+it collects a burst of process starts into one launch, reports it, and stops
+caring. This asks **which processes are it, right now** — membership with a
+lifetime, maintained for the whole of a recording, answered as a list of
+identifiers that goes to `ActivateAudioInterfaceAsync`. Neither answer is
+derivable from the other, and the second one has to survive things the first
+never sees: a helper started an hour in, and a launcher that exits while the
+game it started carries on.
+
+### A member is a handle, not a number
+
+Windows reuses process identifiers, often within seconds on a busy machine. A
+tree that remembered numbers would, over a long session, eventually scope a
+game's audio to whatever inherited a dead helper's identifier.
+
+So a tree holds an **open handle to every member**. The kernel keeps an
+identifier reserved for as long as any handle to the process object exists —
+even after the process has exited — so an identifier this tree is holding cannot
+come to mean anything else. That one decision pays for three things at once:
+
+- **Exits cost nothing to notice.** A wait of zero on a handle already held says
+  whether the process has gone. No search of the process table, and no
+  comparison of two lists.
+- **A launcher can exit without taking its children out.** Windows does not
+  re-parent orphans; it leaves them naming a process that no longer exists. A
+  fresh walk from the root would lose them. Membership here is *sticky* and the
+  dead parent's identifier is still pinned, so its orphans are still reachable —
+  the exited member is kept as a ghost until nothing living descends from it,
+  and only then is its handle released.
+- **Adoption can be verified.** See below.
+
+The handle is opened with `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` and
+nothing more, which is the least Windows will answer both questions for.
+
+### Identifier reuse, and the two comparisons that defeat it
+
+Pinning protects identifiers the tree already holds. What is left is *adoption*:
+the process table says process C's creator is member P, but the table is a copy,
+and by the time C is opened it may be a different process wearing the same
+number — or C's real creator may be a long-dead process that held P's number
+before P did. The table records a creator's identifier and never says whether it
+still means anything.
+
+Both are settled by creation times, which Windows guarantees are ordered:
+
+| Rule | Rejects |
+| --- | --- |
+| C started no later than the moment the process table was read | a process that took C's identifier after the table was copied |
+| C started no earlier than the parent it claims | a process whose real creator held the parent's identifier before the parent did |
+
+The moment is read *before* the table rather than after, which is the safe
+direction: a process created while the table was being copied is refused and
+looked at again next time, whereas the other order would admit an identifier
+recycled during the copy. No rejection is permanent — nothing remembers a
+refusal — so the cost of being wrong is one interval of one process's audio in
+the wrong track rather than an answer that stays wrong. That matters because
+creation times are on the system clock rather than a monotonic one; a clock
+adjustment mid-session costs one interval, not a misattribution.
+
+### What the catalogue's `child_processes` means here: nothing
+
+The game catalogue carries a list of executable names a game is known to spawn,
+and deliberately does not match on it
+([game-detection.md](game-detection.md)). It is not a membership key here
+either, and for a stronger reason. A name cannot say *which* process it means:
+admitting every process called `anticheat-service.exe` would put a service
+shared by several games — or anything a user renamed — into one game's audio
+track, which is precisely the silent misattribution the comparisons above exist
+to prevent. Membership is kernel parentage, verified, or it is nothing.
+
+Where the list *is* useful is the session layer, which already uses it for what
+it is good for: keeping a session open while a game's known helper is still
+running ([sessions.md](sessions.md)). If a game turns out to produce audio from
+a process genuinely not descended from it, the answer is a second tree rooted at
+that process deliberately, not a name match.
+
+### The tree is rooted at the game, not at the launch
+
+`clipped-game-detection` reports a launcher, any wrapper and the game as one
+group. A tree takes one root, and it should be the game: the launcher is the
+game's *parent*, and rooting there would put Steam's notification chime and a
+launcher's autoplaying video into the track labelled with the game's name.
+
+### How a change is noticed, and how quickly
+
+There is no thread. `ProcessTree::refresh` does its work on the calling thread
+and is the only thing that changes membership, so nothing can scan behind a
+caller's back, and a caller may hold the tree wherever it holds the capture.
+
+A call reads the process table at most once per **rescan interval**, one second
+by default; a call inside that window does nothing and costs about 25 ns. So a
+caller can refresh as often as it likes — an audio thread waking every few
+milliseconds may simply call it on every packet — and membership is at most one
+interval stale in both directions. **One second is the documented pickup
+latency**: a helper started mid-recording is in the tree within a second of
+appearing, and a member's exit is noticed within a second of happening.
+
+Do not refresh from a video capture thread. A scan is milliseconds, not
+microseconds (below), which is several frames at 60 fps; an audio thread working
+against a 200 ms buffer can absorb one, a frame loop cannot (AGENTS.md section
+20).
+
+### What it costs
+
+| | |
+| --- | --- |
+| Machine | AMD Ryzen 9 9950X3D, 16 cores / 32 logical processors, Windows 11 Pro build 26200 |
+| Processes running | 412 |
+| Build | `--release` |
+| Method | `examples/process_tree_probe.rs`: `Instant` around each scan, `GetProcessTimes` for the probe's own processor time over the run |
+| Machine state | in ordinary use, with other work running — which is why the maxima are far from the medians |
+
+| Rescan interval | Scan: min / median / max | Processor time, % of one core |
+| --- | --- | --- |
+| 500 ms | 8.6 / 11.9 / 51.4 ms | 2.81 |
+| **1 s (the default)** | **8.3 / 12.4 / 33.5 ms** | **1.26** |
+| 2 s | 8.5 / 13.0 / 40.0 ms | 0.77 |
+
+30-second runs, except the default, which is 60 seconds.
+
+**Almost all of a scan is `CreateToolhelp32Snapshot`.** Two processes were
+opened in the whole of each run — the tree gains its two extra members half way
+through — so twelve milliseconds is the cost of asking Windows for a list of 412
+processes, not the cost of deciding anything about them.
+
+**At the default that is 1.26% of one core.** On the machine above that is 0.04%
+of it; on a four-core machine it is nearer 0.3%, spent for the whole length of
+every recording, against SPEC.md section 38's 3% budget for the entire recorder.
+That is affordable and it is not nothing, and the honest reading is that the
+mechanism is more expensive than the job: reading a 412-row list should not take
+twelve milliseconds.
+[Issue #288](https://github.com/wildware-uk/clipped/issues/288) is the way out —
+measuring `NtQuerySystemInformation` against the snapshot call — rather than
+tuning the interval, because halving the cost by doubling the interval doubles
+how long a helper's audio spends in the wrong track.
+
+The numbers are not exactly inverse in the interval, and the machine being busy
+is why: the two-second run should be about 0.6% and measured 0.77%. Read the
+column as *roughly one per cent of one core at the default, give or take a
+quarter*.
+
+Taking the measurements again:
+
+```text
+cargo run --release -p clipped-windows --example process_tree_probe -- 60
+cargo run --release -p clipped-windows --example process_tree_probe -- 30 500
+```
+
+The first argument is how long to run for in seconds, the second the rescan
+interval in milliseconds. The probe starts a three-process chain of its own, so
+it needs no game and measures a tree that gains members rather than one that
+never changes.
+
+### What it does not cover
+
+- **A process Windows will not let Clipped open is not a member.** It cannot be
+  pinned, and an unpinned identifier is not one to scope a capture to. In
+  practice this is a game's anti-cheat or crash-reporting *service*, which runs
+  as the system account and plays nothing; `TreeChange::refused` names them so
+  that a case where it is plainly part of the game can be reported rather than
+  guessed at. Nothing logs those names yet, because nothing yet consumes a tree.
+- **Where audio that belongs to no tree ends up** is not decided here. It is a
+  question about the complement capture, and it belongs to
+  [issue #27](https://github.com/wildware-uk/clipped/issues/27) with an
+  observation behind it (ADR 0003's last consequence).
+- **Nothing has been tried against a real game.** The behaviour is asserted
+  against a chain of processes the tests start themselves. Anti-cheat wrappers
+  and launchers do things test fixtures do not, and the first real capture
+  (#26) is where that meets a game.
+
 ## Threading
 
 **One capture, one thread, and this crate does not create it.**
@@ -365,8 +568,17 @@ so endpoint changes appear as they will in a session, and prints a line a
 second: frames captured, seconds of audio, how much of it was synthesised
 silence, endpoint changes, discontinuities, peak level and the device name.
 
-It is the tool for the two behaviours no automated test can reach on an
-ordinary machine, because they need a hand on a cable:
+The process tree has a probe of its own, which measures rather than watches:
+
+```text
+cargo run --release -p clipped-windows --example process_tree_probe -- 60
+```
+
+See [What it costs](#what-it-costs) for what it reports and what the numbers
+were on the machine this was written on.
+
+The loopback probe is the tool for the two behaviours no automated test can
+reach on an ordinary machine, because they need a hand on a cable:
 
 - **Unplug or switch off the output device.** The frame count must keep rising,
   `silence` must start growing, and `endpoint` must become `<none>`. Plug it
@@ -488,6 +700,37 @@ cargo test -p clipped-audio
   It belongs there rather than here because it needs both
   ([av-sync.md](av-sync.md)).
 
+The process tree is tested in its own crate, and split the same way:
+
+```text
+cargo test -p clipped-windows
+```
+
+- **The membership rules**, in `crates/windows/src/process_tree.rs`: who is a
+  candidate and who is a stranger; the two creation-time comparisons that refuse
+  a recycled identifier, each shown refusing and then accepting either side of
+  the boundary; a ghost kept while an orphan of it lives and released once none
+  does; a process adopted after it had already exited never being announced
+  either way. These are functions of numbers and are tested against process
+  trees written down in the test.
+- **The tree against real processes**, in `crates/windows/tests/process_tree.rs`:
+  a chain of three processes the test starts, which spawns its descendants only
+  when told to, so that "a game spawns a helper an hour in" happens in a second.
+  A child started after the tree was built joins it and so does its own child; a
+  root that is killed leaves its two descendants in the tree, orphaned, which is
+  the launcher case; an unrelated process started by the same test is not a
+  member; a refresh inside the rescan interval reads nothing and reports
+  nothing, while the same tree told it may look again finds exactly the exit it
+  had been holding back; and the tree empties when the chain does. None of it
+  needs audio hardware, a game or a GPU.
+
+  What no test covers is a process Windows refuses to open, which needs a
+  process at a higher integrity level and cannot be arranged from a test running
+  as the user. The classification that decides it — access denied means "never",
+  anything else means "it exited a moment ago" — is unit tested against both
+  error codes; that Windows returns the first one for an anti-cheat service is
+  not.
+
 Everything that touches an endpoint skips, loudly, on a machine without one —
 which is why these are not in the pull-request CI job, since a GitHub Windows
 runner has no audio device. Setting `CLIPPED_REQUIRE_AUDIO` turns those skips
@@ -501,6 +744,10 @@ into failures on a machine that is supposed to have one.
   clock in the same units. `src/time.rs` asserts the conversion.
 - Shared mode only. Exclusive mode would lock other applications out of the
   user's sound card, which a background recorder must never do.
+- A process identifier stays reserved for as long as a handle to the process is
+  open, and a process created later has a later creation time. Those two
+  properties of Windows are what makes the game's process tree trustworthy; if
+  either stopped holding, audio would be scoped by guesswork.
 - The console role is what is recorded, on both sides. The communications role
   — which a headset may hold while speakers and a desk microphone hold the
   console role — is the one a chat application picks, and following it would
@@ -517,9 +764,9 @@ Written during M2, alongside the code:
   process tree, and excluding it to obtain everything else
   ([issue #26](https://github.com/wildware-uk/clipped/issues/26),
   [issue #27](https://github.com/wildware-uk/clipped/issues/27)).
-- How a game's process tree is resolved and kept current as children start and
-  exit ([issue #25](https://github.com/wildware-uk/clipped/issues/25)), and what
-  happens to audio that cannot be attributed to a tree.
+- What happens to audio that cannot be attributed to a process tree, once there
+  is a capture to observe it with. How the tree itself is resolved and kept
+  current is written above.
 - The optional preservation of a raw pre-processing microphone track beside the
   processed one (SPEC.md section 14,
   [issue #32](https://github.com/wildware-uk/clipped/issues/32)).
