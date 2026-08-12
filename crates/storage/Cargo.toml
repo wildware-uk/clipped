@@ -8,5 +8,52 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# SQLite, and the only new dependency this crate needs. SPEC.md section 4 names
+# SQLite as the database, so the decision being made here is not *whether* but
+# *which binding* and *which build of SQLite* (AGENTS.md section 10).
+#
+# `rusqlite` because it is the binding the Rust ecosystem has standardised on,
+# it is a thin safe layer over the C API rather than an ORM — this crate owns a
+# schema and callers write SQL against it (docs/storage.md) — and its
+# transaction and savepoint types make "apply this migration atomically or not
+# at all" a property of the types rather than of remembering to write COMMIT.
+#
+# `bundled` compiles the SQLite amalgamation from source with the same MSVC
+# toolchain as the rest of the workspace, rather than linking the
+# `winsqlite3.dll` that ships with Windows. That costs about half a minute of
+# build time once, and buys the thing this crate exists to provide: a database
+# whose behaviour does not depend on which Windows build a user is running.
+# Migrations must be deterministic (AGENTS.md section 31), and a migration that
+# runs against SQLite 3.35 on one machine and 3.50 on another is not. The schema
+# uses STRICT tables, which need 3.37, so this is also what makes the schema
+# expressible at all.
+#
+# `default-features = false` drops `ffi-sqlite-wasm-rs`, a default feature that
+# exists to build against a WebAssembly SQLite. Clipped is a Windows desktop
+# application (SPEC.md section 3) and pulling a wasm runtime's FFI into the
+# dependency graph to not use it is a licence and advisory surface for nothing.
+#
+# MIT, as is `libsqlite3-sys`. SQLite itself is public domain.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+
+# The logging facade. Diagnostics go through `tracing`; `clipped-logging` only
+# decides where they end up (docs/logging.md). This crate logs the two things a
+# user may need to hear about after the fact — which migrations ran, and where
+# the backup taken before them was written. MIT.
+tracing.workspace = true
+
+[dev-dependencies]
+# The same SQLite with one extra feature. `hooks` exposes `sqlite3_commit_hook`,
+# which is how the write-batching test counts commits *with SQLite's own
+# counter* rather than with the writer's bookkeeping — a measurement of the
+# number of transactions that is not made by the code under test (AGENTS.md
+# section 19). Cargo unifies features per crate within a build, so this is
+# enabled for test builds and not for the library the recorder links.
+rusqlite = { version = "0.40", default-features = false, features = [
+    "bundled",
+    "hooks",
+] }
+
 [lints]
 workspace = true
