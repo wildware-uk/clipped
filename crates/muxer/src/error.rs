@@ -82,6 +82,24 @@ pub enum MuxError {
         track: TrackId,
     },
 
+    /// Captured samples did not hold a whole number of audio frames.
+    ///
+    /// A programming error in the caller, and one worth catching rather than
+    /// rounding away: interleaved samples are read `channels` at a time, so a
+    /// slice that does not divide by the track's channel count means the caller
+    /// and the container disagree about the shape of the audio. Writing it
+    /// anyway swaps the channels of every frame after the first short one, which
+    /// is a recording whose stereo image wanders and whose surround channels are
+    /// in the wrong speakers.
+    PartialAudioFrame {
+        /// The track the samples were for.
+        track: TrackId,
+        /// How many samples were handed over.
+        samples: usize,
+        /// How many the track has per frame.
+        channels: u16,
+    },
+
     /// A packet was larger than a container block can be.
     ///
     /// FFmpeg counts a packet's bytes in a signed 32-bit integer, so two
@@ -145,6 +163,15 @@ impl fmt::Display for MuxError {
             Self::EmptyPacket { track } => {
                 write!(formatter, "the {track} produced a packet with no data")
             }
+            Self::PartialAudioFrame {
+                track,
+                samples,
+                channels,
+            } => write!(
+                formatter,
+                "the {track} was given {samples} samples, which is not a whole number of \
+                 frames for a track with {channels} channels"
+            ),
             Self::PacketTooLarge { track, bytes } => write!(
                 formatter,
                 "the {track} produced a packet of {bytes} bytes, which is more than a \
@@ -167,6 +194,7 @@ impl Error for MuxError {
             | Self::InvalidTrack { .. }
             | Self::UnknownTrack { .. }
             | Self::EmptyPacket { .. }
+            | Self::PartialAudioFrame { .. }
             | Self::PacketTooLarge { .. } => None,
         }
     }

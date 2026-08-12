@@ -16,24 +16,32 @@ that implements it, and [ffmpeg.md](ffmpeg.md) how to build against it.
   file.
 - One video track and any number of named audio tracks, with language tags and
   a default-track flag.
+- `AudioSource` — the track model: what each audio track is called, what order
+  the tracks are in, and which one a player selects on its own. See
+  [The audio tracks](#the-audio-tracks).
+- `AudioTrackWriter` — the path from a capture's interleaved `f32` samples to
+  packets on one of those tracks.
 - H.264, HEVC and AV1 video; PCM, AAC and Opus audio.
 - `remux_to_mp4` — copies a finished recording into MP4 without decoding it, and
   `Mp4Plan::inspect`, which says what that copy would cost before it is made.
 
-Nothing in the recorder is wired to the muxer yet — capture, encoding and the
-session that joins them are separate M1 issues — so the writer is exercised by
-its own tests rather than by `clipped-recorder`. Nothing calls `remux_to_mp4`
-yet either: the setting that offers it (SPEC.md section 15, "Allow automatic
-remux") and the retention policy for the MKV it was made from belong to the
-session and library work, and are not in this crate.
+The recorder writes video through this crate; **audio is not wired to a
+recording session yet**, which is
+[issue #180](https://github.com/wildware-uk/clipped/issues/180). What is here is
+the container side of it: the tracks, their order and their metadata, and the
+conversion from captured samples to packets, exercised by this crate's own tests
+against real files. Nothing calls `remux_to_mp4` yet either: the setting that
+offers it (SPEC.md section 15, "Allow automatic remux") and the retention policy
+for the MKV it was made from belong to the session and library work, and are not
+in this crate.
 
 ## Writing a recording
 
 ```rust
 use std::path::Path;
 use clipped_muxer::{
-    AudioCodec, AudioTrack, EncodedPacket, FrameRate, MkvWriter, PacketTimestamp,
-    RecordingLayout, TrackId, VideoCodec, VideoTrack,
+    AudioSource, AudioTrack, AudioTrackWriter, EncodedPacket, FrameRate, MkvWriter,
+    PacketTimestamp, RecordingLayout, TrackId, VideoCodec, VideoTrack,
 };
 
 let layout = RecordingLayout::new(
@@ -41,12 +49,9 @@ let layout = RecordingLayout::new(
         .with_codec_private(sequence_header)      // SPS and PPS from the encoder
         .with_frame_rate(FrameRate::per_second(60).unwrap()),
 )
-.with_audio_track(
-    AudioTrack::new(AudioCodec::PcmS16Le, 48_000, 2)
-        .with_name("Compatibility Mix")
-        .as_default(),
-)
-.with_audio_track(AudioTrack::new(AudioCodec::PcmS16Le, 48_000, 2).with_name("Game"));
+.with_audio_track(AudioTrack::for_source(AudioSource::CompatibilityMix, 48_000, 2))
+.with_audio_track(AudioTrack::for_source(AudioSource::Game, 48_000, 2))
+.with_audio_track(AudioTrack::for_source(AudioSource::Microphone, 48_000, 1));
 
 let mut writer = MkvWriter::create(Path::new("recording.mkv"), &layout)?;
 writer.write_packet(
@@ -54,6 +59,12 @@ writer.write_packet(
         .with_keyframe(true)
         .with_duration(frame_interval),
 )?;
+
+// Audio arrives as samples rather than as coded packets; see below.
+let microphone = layout.audio_track_for(&AudioSource::Microphone).unwrap();
+let mut track = AudioTrackWriter::new(microphone, &layout.audio_tracks()[3])?;
+track.write_samples(&mut writer, PacketTimestamp::from_nanos(t), &samples)?;
+
 let summary = writer.finish()?;
 ```
 
@@ -66,15 +77,131 @@ that decision belongs to `clipped-session`.
 
 **Audio is a list, not three fields.** How many audio tracks a recording has is
 decided at run time from the user's routing (SPEC.md sections 11 and 44).
-Multi-track routing itself is
-[issue #28](https://github.com/wildware-uk/clipped/issues/28); nothing here
-assumes the list has one entry, and the tests write three.
+Nothing here assumes the list has one entry.
 
 **Every track carries its name and language.** That is most of why the
 container is Matroska: an editor opening the file sees `Microphone` rather than
-`Audio 3`, with no sidecar. The first audio track is normally the compatibility
-mix (SPEC.md section 13), and `as_default()` marks it as the one a player should
-select on its own.
+`Audio 3`, with no sidecar.
+
+## The audio tracks
+
+Multi-track audio is the product (SPEC.md section 11), and the rule the design
+answers to is AGENTS.md section 21: **sources the user expects to stay separate
+are never silently combined**. This section is what that means in a file.
+
+### What the tracks are called, and what order they come in
+
+`AudioSource` is the closed set of things a track can be, and it — not the
+caller — supplies the name written into the container, so that two recordings
+made on two machines with two sets of settings call the microphone track the same
+thing. `AudioTrack::for_source` describes a track from one, and
+`RecordingLayout::with_audio_track` puts it in the position the model gives it,
+whatever order the tracks are declared in:
+
+| Order | Source | Name in the file | Default track |
+| --- | --- | --- | --- |
+| 1 | `CompatibilityMix` | `Compatibility Mix` | yes |
+| 2 | `Game` | `Game` | no |
+| 3 | `OtherSystemAudio` | `Other System Audio` | no |
+| 4 | `Microphone` | `Microphone` | no |
+| 5 | `VoiceChat` | `Voice Chat` | no |
+| 6+ | `Application { name }` | the application's name, as the user knows it | no |
+
+Several application tracks keep the order they were configured in, because
+nothing else distinguishes them and reordering them because somebody edited a
+name would move tracks in a file.
+
+The order is fixed here rather than left to the caller because the file is what
+has to be predictable. A container fixes its track list in the header, an editor
+project refers to tracks by index, and a recording whose microphone is track 3 on
+one machine and track 2 on another is a recording nobody can write an instruction
+about. A caller addresses its packets with
+`RecordingLayout::audio_track_for(&source)` rather than by counting the order it
+declared things in, which is the arithmetic that puts the microphone's audio on
+the game's track.
+
+**The compatibility mix leads and carries Matroska's `FlagDefault`** (SPEC.md
+section 13). Some players pick one audio track from a multi-track file
+arbitrarily, so the track a naive player lands on has to be the one that sounds
+right. What goes *into* that mix is not this crate's decision — it is
+[issue #29](https://github.com/wildware-uk/clipped/issues/29) — and neither is
+which sources a recording has, which is routing configuration
+([issue #33](https://github.com/wildware-uk/clipped/issues/33)). The muxer is
+handed a set of tracks and told what to put in each.
+
+**A language is not guessed.** Every track is written with Matroska's `und`
+unless the caller states otherwise. Game audio has no language; a microphone's is
+a fact about the person speaking, and inferring one from the operating system's
+locale would put a wrong tag in a file nobody can rewrite. `with_language` is
+there for a caller that knows.
+
+**A blank name is refused.** `MkvWriter::create` rejects an audio track whose
+name is empty or whitespace — reachable through an application track configured
+with an empty name — rather than writing an empty `Name` element into a recording
+that cannot be corrected afterwards.
+
+### What the audio is stored as
+
+**Uncompressed 16-bit PCM** (`RECORDING_AUDIO_CODEC`), at whatever rate and
+channel count the capture produced. Three reasons, in order of weight:
+
+1. **Nothing in this workspace encodes audio.** There is no Opus or AAC encoder
+   in Clipped, and the pinned LGPL FFmpeg build is not used as one — this crate
+   writes packets, it does not make them (`docs/ffmpeg.md`). Declaring a codec
+   the recorder cannot produce would be a setting that does nothing.
+2. **The recording is the archival copy** (ADR 0001). It is what an editor opens
+   and what every clip is cut from, and putting a lossy encoder in front of it
+   costs quality that no later step can recover.
+3. **It is small beside the video.** One 48 kHz stereo track is 1,536,000 bit/s —
+   1.54 Mbit/s, 11.5 MB a minute — which `ffprobe` reports directly. Four tracks
+   are 6.1 Mbit/s; against a 1440p60 recording at 40 Mbit/s that is about 13% of
+   the file.
+
+The cost is stated plainly: a four-track recording spends about 46 MB a minute on
+sound, and a long session on a small drive notices. Compressing the tracks that
+are not the archival ones — Opus at 128 kbit/s is a twelfth of the size — is a
+real option once something in Clipped can encode audio, and the container and
+this crate already carry Opus and AAC for the day it can. That is not this
+ticket, and it is not implied by anything here.
+
+Because the storage format is a *decision* rather than a parameter,
+`AudioTrackWriter` refuses a track declared in any other codec: uncompressed
+samples cannot be dressed as Opus, and a file whose header says Opus and whose
+blocks are PCM opens, looks healthy, and decodes to noise.
+
+### From captured samples to packets
+
+`clipped-audio` produces interleaved `f32` in `[-1.0, 1.0]` with a timestamp on
+the recording's clock (`docs/audio-routing.md`); a container wants packets of
+bytes. `AudioTrackWriter` is that conversion, in one place rather than in every
+caller that has audio to write:
+
+| | What it does | Why |
+| --- | --- | --- |
+| Packet length | at most 20 ms; a shorter buffer is written as it stands | 20 ms is what Windows loopback delivers. Holding a short buffer back to fill a packet would leave sound waiting in this process, and what waits in memory is what a killed recorder loses. |
+| Timestamps | each packet is timed from its own frame offset within the buffer | Rounding once per packet rather than adding to the packet before it, so a rate whose packet length is not a whole number of nanoseconds cannot accumulate an error over a session. |
+| Sample scale | `clamp(-1.0, 1.0) * 32767`, rounded | Full scale is representable in both directions, and a sample that wrapped would turn the loudest instant of a recording into a full-scale click of the opposite sign. |
+| Channel count | taken from the declared track, and a buffer that is not a whole number of frames is refused | The alternative swaps the channels of every frame after a short one, which is a stereo image that wanders and surround channels in the wrong speakers. |
+
+### When a source produces nothing
+
+The track is **declared and empty**. Matroska fixes the track list in the header,
+so the track is in the file whatever the source does afterwards; nothing is
+invented to fill it.
+
+That is a decision rather than an omission. A capture is the only thing that
+knows the difference between "the device produced silence" and "there was no
+device", and `clipped-audio` already synthesises silence to keep a track the
+length of its recording (`docs/audio-routing.md`). A muxer that manufactured more
+would be writing audio nobody captured.
+
+What it does instead is **say so**: `RecordingSummary::audio_tracks_without_packets`
+counts the tracks that took nothing, `MkvWriter::packets_written` answers for one
+track, and `finish` logs one `warn` naming them. An empty track is the visible
+symptom of a microphone Windows had muted, a device that never opened, or routing
+pointed at an application that was not running — and the session above this crate
+is the layer that can turn that into something a user can act on (AGENTS.md
+section 45).
 
 **Codec headers are required, and come from the encoder.** Matroska's track
 entry carries a mandatory `CodecPrivate` for H.264, HEVC, AV1, AAC and Opus —
@@ -470,6 +597,7 @@ install.
 | Test | What it proves |
 | --- | --- |
 | `tests/mkv_writing.rs` | Track names, languages, default flags, channel counts and codec metadata land in the file; packets go to the track they were addressed to; out-of-order and unrebased timestamps come out monotonic and from zero; an existing file is never overwritten. |
+| `tests/multi_track_audio.rs` | Each source is *audible* on its own track and on no other, by Goertzel filter over the decoded samples; the compatibility mix carries all of them; the tracks are named, ordered and flagged as the model says; a source that produced nothing leaves a declared, empty track that the summary and the log name; a blank track name and a buffer that is not a whole number of frames are refused; and the video's timestamps are identical in a one-track recording and a five-track one. |
 | `tests/synthetic_recording.rs` | A whole recording — real H.264 and two PCM tracks — opens, decodes frame by frame, has a plausible duration, carries the right codec metadata, and has tracks that start and end together. |
 | `tests/abrupt_termination.rs` | A killed recorder leaves a playable file, reaching to within the bound above. |
 | `tests/mp4_remux.rs` | An MP4 made from a recording holds the same tracks, the same names, languages and default flags, decodes the same pictures, keeps the offset between tracks that do not start together and the composition offsets of a stream that reorders — and holds the source's coded bytes, packet for packet. A track MP4 cannot carry is refused before anything is created, an existing MP4 is never overwritten, and the recording is unchanged afterwards on every path. |
@@ -477,18 +605,27 @@ install.
 
 The packets come from `crates/muxer/examples/synthetic_recording.rs`, which
 encodes a moving test pattern with the pinned build's own software encoder
-(`libopenh264`) and generates tones as PCM. It is an example rather than a test
-helper because two of those tests need it as a *process*: a Rust panic unwinds
-and runs destructors, and destructors are exactly what a killed recorder does not
-get.
+(`libopenh264`) and generates tones through `AudioTrackWriter` — the same path a
+session takes. Its audio tracks are the model's, in the model's order, and each
+carries a frequency of its own: 440 Hz for the game, 880 Hz for other system
+audio and 1320 Hz for the microphone, which are AGENTS.md section 26's own
+tones, with the compatibility mix carrying all of them at once. Identical tracks
+would hide a writer that sent the same packets to every stream.
 
-Two of its options exist only so that a test can fail. `--audio-offset-ms` starts
-the audio later than the video, because a remux that rebased each track onto its
-own first packet passes every other assertion. `--default-audio-track` marks a
-track other than the first as the one to play, because FFmpeg's MP4 muxer enables
-the first track of each kind whether or not it was told to — so a recording whose
-default track *is* the first one produces an identical MP4 with the flag copied
-and with the copy deleted.
+It is an example rather than a test helper because two of those tests need it as
+a *process*: a Rust panic unwinds and runs destructors, and destructors are
+exactly what a killed recorder does not get.
+
+Three of its options exist only so that a test can fail. `--audio-offset-ms`
+starts the audio later than the video, because a remux that rebased each track
+onto its own first packet passes every other assertion. `--default-audio-track`
+marks a track other than the first as the one to play, because FFmpeg's MP4 muxer
+enables the first track of each kind whether or not it was told to — so a
+recording whose default track *is* the first one produces an identical MP4 with
+the flag copied and with the copy deleted. `--audio-language` states a language
+the track model deliberately does not invent, because Matroska omits the element
+for an unknown language and MP4 writes `und`, so a recording that stated nothing
+would prove nothing about whether the tag survived a remux.
 
 Sources that Clipped's own writer cannot produce — a stream with B-frames, a
 codec MP4 refuses — are built in the test with the pinned build's `ffmpeg`, the
@@ -509,6 +646,16 @@ Stated rather than left to be discovered (AGENTS.md section 54):
   AAC and Opus are mapped and declared, and the container is told about them
   correctly, but no encoder in this workspace produces them yet, so no file has
   been made in them.
+- **No recording here has been opened in an editor.** The claim that a
+  multi-track file arrives in an NLE with separately selectable, correctly named
+  tracks is tested against `ffprobe` — names, order, default flags, and what is
+  audible on each track — and against nothing else. No editor is installed on the
+  machine this was written on, and issue #28's second criterion asks for exactly
+  that check, so it remains unmet and unclaimed.
+- **The audio a recording carries is not a capture's yet.** The samples that have
+  been through `AudioTrackWriter` are generated tones, not WASAPI's; joining
+  `clipped-audio` to a session is
+  [issue #180](https://github.com/wildware-uk/clipped/issues/180).
 - **No packet has come from a hardware encoder.** NVENC is
   [issue #15](https://github.com/wildware-uk/clipped/issues/15) and is not on
   this branch. The Annex B handling is what a Windows hardware encoder produces
