@@ -85,8 +85,9 @@ use windows::Win32::Graphics::Gdi::{
     ClientToScreen, MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::System::Performance::QueryPerformanceFrequency;
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic, IsWindow};
+use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
 
+use super::client_size;
 use crate::{
     Acquisition, Availability, BackendCapabilities, BackendDeclaration, CaptureBackend,
     CaptureBackendFactory, CaptureConfig, CaptureError, CaptureMethod, CaptureTarget,
@@ -182,6 +183,19 @@ impl BackendDeclaration for DesktopDuplication {
                 reason: "the target has excluded itself from capture with \
                          SetWindowDisplayAffinity, so it would be recorded as a black \
                          rectangle or omitted from the frame entirely",
+            });
+        }
+
+        if target.is_minimised() {
+            // This backend reaches a window by cropping the display it is on,
+            // and Windows parks a minimised window at around (-32000, -32000):
+            // it is on no display at all, so there is nothing to crop until it
+            // is restored. Declining agrees with the other backend, which means
+            // `select` refuses the recording rather than falling through to this
+            // one and producing the same empty file (issue #383).
+            return Availability::Unavailable(Unavailable::UnsupportedTarget {
+                reason: "the window is minimised, so it is not on any display and there \
+                         would be nothing to crop out of one",
             });
         }
 
@@ -544,8 +558,13 @@ impl Running {
             match self.check_target()? {
                 TargetState::Ready => {}
                 TargetState::Idle => {
+                    // Reported as a minimised target rather than as an ordinary
+                    // timeout once the caller's whole wait has been spent, so
+                    // that a session can say why its recording is accumulating
+                    // nothing (issue #383). The pacing is unchanged: the sleeps
+                    // and the deadline are the ones that were already here.
                     if !sleep_until(REBUILD_RETRY_INTERVAL, deadline) {
-                        return Ok(Acquisition::Timeout);
+                        return Ok(Acquisition::TargetMinimised);
                     }
                     continue;
                 }
@@ -1391,13 +1410,6 @@ struct DesktopRect {
     height: u32,
 }
 
-impl DesktopRect {
-    /// The size, or [`None`] if either dimension is zero.
-    fn size(self) -> Option<FrameSize> {
-        FrameSize::new(self.width, self.height)
-    }
-}
-
 /// Where a window's client area sits inside one output's duplicated image.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Placement {
@@ -1772,20 +1784,6 @@ fn client_rect_in_desktop(window: HWND) -> Option<DesktopRect> {
     })
 }
 
-/// A window's client area size.
-///
-/// [`None`] for a window that has gone, and for one whose client area has a zero
-/// dimension — which is what a window collapsed to its title bar reports, and
-/// what [`FrameSize`] refuses to represent.
-fn client_size(window: HWND) -> Option<FrameSize> {
-    let mut rect = RECT::default();
-    // SAFETY: `rect` is a live local for the duration of the call, which is all
-    // `GetClientRect` requires of the pointer; a handle that has stopped being a
-    // window is reported through the return value.
-    unsafe { GetClientRect(window, &raw mut rect) }.ok()?;
-    rect_to_desktop(rect).size()
-}
-
 /// A Windows `RECT` as a [`DesktopRect`].
 fn rect_to_desktop(rect: RECT) -> DesktopRect {
     DesktopRect {
@@ -1843,10 +1841,10 @@ mod tests {
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-        RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, MSG, PM_REMOVE, SWP_NOACTIVATE,
-        SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
-        WS_POPUP, WS_VISIBLE,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+        PeekMessageW, RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, MSG, PM_REMOVE,
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WNDCLASSW, WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
     };
 
     use super::*;
@@ -2247,6 +2245,60 @@ mod tests {
             }
             other => panic!("a protected window must be declined, not accepted: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_minimised_window_is_declined_before_a_recording_is_started_for_it() {
+        // Both backends have to decline it, or `select` under `Automatic` falls
+        // past the one that said no and lands on this one — which would then
+        // crop the corner of the desktop Windows parks a minimised window in and
+        // produce exactly the empty recording issue #383 is about, with a
+        // different backend's name on it.
+        let size = FrameSize::new(1320, 900).expect("1320x900 is a valid size");
+        let minimised = TargetProperties::new(TargetKind::Window, size).with_minimised(true);
+
+        match DesktopDuplication.availability(&minimised) {
+            Availability::Unavailable(Unavailable::UnsupportedTarget { reason }) => assert!(
+                reason.contains("minimised"),
+                "the reason has to name the thing the user can put right: {reason}"
+            ),
+            other => panic!("a minimised window must be declined, not accepted: {other:?}"),
+        }
+
+        // Not a backend that declines everything: the same window restored, and
+        // a whole display, are both this backend's ordinary business.
+        assert!(matches!(
+            DesktopDuplication.availability(&TargetProperties::new(TargetKind::Window, size)),
+            Availability::Available
+        ));
+        assert!(matches!(
+            DesktopDuplication.availability(&TargetProperties::new(TargetKind::Monitor, size)),
+            Availability::Available
+        ));
+    }
+
+    #[test]
+    fn nothing_can_capture_a_minimised_window_so_selection_refuses_it_outright() {
+        // The end the two declarations exist for, reached through the real
+        // selection policy and the real registry: a session asks `select` before
+        // it opens an encoder or creates a file, so this refusal is the one that
+        // means no empty recording is left behind (issue #383).
+        let size = FrameSize::new(1320, 900).expect("1320x900 is a valid size");
+        let minimised = TargetProperties::new(TargetKind::Window, size).with_minimised(true);
+
+        let error = crate::select(
+            &crate::registered_declarations(),
+            &minimised,
+            CaptureMethodSetting::Automatic,
+        )
+        .expect_err("no backend can produce a frame for a window nothing is drawing");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("minimised"),
+            "the refusal has to say why, or a recording that was refused is a mystery: \
+             {message}"
+        );
     }
 
     #[test]
@@ -2759,6 +2811,10 @@ mod tests {
                         }
                     }
                     Ok(Acquisition::Timeout) => {}
+                    Ok(Acquisition::TargetMinimised) => panic!(
+                        "the test window is not minimised, so reporting it as one is a backend bug \
+                         rather than something this test provoked"
+                    ),
                     Ok(Acquisition::SizeChanged(new_size)) => {
                         backend
                             .resize(new_size)
@@ -2872,6 +2928,10 @@ mod tests {
                         }
                     }
                     Ok(Acquisition::Timeout) => {}
+                    Ok(Acquisition::TargetMinimised) => panic!(
+                        "the test window is not minimised, so reporting it as one is a backend bug \
+                         rather than something this test provoked"
+                    ),
                     Ok(Acquisition::SizeChanged(new_size)) => {
                         panic!("the window was not resized, but {new_size} was reported")
                     }
@@ -2967,6 +3027,10 @@ mod tests {
                         }
                     }
                     Ok(Acquisition::Timeout) => {}
+                    Ok(Acquisition::TargetMinimised) => panic!(
+                        "the test window is not minimised, so reporting it as one is a backend bug \
+                         rather than something this test provoked"
+                    ),
                     Ok(Acquisition::SizeChanged(new_size)) => {
                         panic!("the window was not resized, but {new_size} was reported")
                     }
@@ -3057,6 +3121,10 @@ mod tests {
                         .expect("Desktop Duplication always knows how many it missed"),
                 ),
                 Ok(Acquisition::Timeout) => {}
+                Ok(Acquisition::TargetMinimised) => panic!(
+                    "the test window is not minimised, so reporting it as one is a backend bug \
+                     rather than something this test provoked"
+                ),
                 Ok(Acquisition::SizeChanged(new_size)) => {
                     backend
                         .resize(new_size)
@@ -3122,6 +3190,10 @@ mod tests {
                 match backend.acquire(Duration::from_millis(250)) {
                     Ok(Acquisition::Frame(_)) => count += 1,
                     Ok(Acquisition::Timeout) => {}
+                    Ok(Acquisition::TargetMinimised) => panic!(
+                        "the test window is not minimised, so reporting it as one is a backend bug \
+                         rather than something this test provoked"
+                    ),
                     Ok(Acquisition::SizeChanged(new_size)) => {
                         backend
                             .resize(new_size)
@@ -3244,6 +3316,10 @@ mod tests {
                     frames += 1;
                 }
                 Ok(Acquisition::Timeout) => {}
+                Ok(Acquisition::TargetMinimised) => panic!(
+                    "the test window is not minimised, so reporting it as one is a backend bug \
+                     rather than something this test provoked"
+                ),
                 Ok(Acquisition::SizeChanged(new_size)) => {
                     backend
                         .resize(new_size)
@@ -3398,6 +3474,10 @@ mod tests {
                 match backend.acquire(Duration::from_millis(200)) {
                     Ok(Acquisition::Frame(_)) => frames += 1,
                     Ok(Acquisition::Timeout) => {}
+                    Ok(Acquisition::TargetMinimised) => panic!(
+                        "the test window is not minimised, so reporting it as one is a backend bug \
+                         rather than something this test provoked"
+                    ),
                     Ok(Acquisition::SizeChanged(new_size)) => {
                         note(&format!("the display changed mode to {new_size}"));
                         backend

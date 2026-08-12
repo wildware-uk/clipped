@@ -956,6 +956,14 @@ fn wait_for_window(
         let refusal = match resolve_window(target) {
             Ok(window) => return Ok(window),
             Err(RecordError::Resolution(error)) => error.to_string(),
+            // Waited out for the same reason a window that has not appeared yet
+            // is: a game that starts minimised, or one somebody minimised while
+            // it was loading, is a window that is about to be recordable. Giving
+            // up at the first look would refuse a recording that the next second
+            // could have made, and carrying on regardless would record nothing
+            // at all (issue #383). If it is still minimised when the timeout
+            // runs out, this reason is what the console line says.
+            Err(minimised @ RecordError::TargetMinimised { .. }) => minimised.to_string(),
             Err(other) => return Err(other.to_string()),
         };
 

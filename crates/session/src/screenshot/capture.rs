@@ -149,7 +149,15 @@ fn one_frame(
                 return Ok(copier.finish()?);
             }
             // The window has not drawn since capture started. Ask again.
-            Ok(Acquisition::Timeout) => {}
+            //
+            // A minimised window is the same answer here and not a separate
+            // one: a screenshot has nothing to preserve, so there is no
+            // recording to keep going and nothing a stretch of silence has to be
+            // explained against. Waiting it out and reporting `NoFrame` — which
+            // already says "a window that is not drawing produces none" — is the
+            // whole of what this can usefully do (issue #383 changes what a
+            // *recording* does about it, which has footage to lose).
+            Ok(Acquisition::Timeout | Acquisition::TargetMinimised) => {}
             // The target changed size between being measured and being
             // captured. The next acquisition carries the new one; there is
             // nothing to reconfigure, because nothing has been encoded.

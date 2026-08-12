@@ -407,12 +407,7 @@ impl RecordingState {
     fn start(self: &Arc<Self>, request: &StartRecording) -> Result<Reply, ProtocolError> {
         let args = record_args(request)?;
         let config = RecordingConfig::resolve(&args).map_err(invalid_parameters)?;
-        let window = resolve_window(&config.target).map_err(|error| match error {
-            crate::record::RecordError::Resolution(resolution) => {
-                ProtocolError::new(ErrorCode::TargetNotFound, resolution.to_string())
-            }
-            other => ProtocolError::new(ErrorCode::Internal, other.to_string()),
-        })?;
+        let window = resolve_window(&config.target).map_err(unrecordable_target)?;
         let settings = settings_for(&config, &window);
 
         let mut current = self.lock()?;
@@ -1033,18 +1028,41 @@ fn screenshot_target(request: &TakeScreenshot) -> Result<CaptureTargetSettings, 
         request.pid,
     )
     .map_err(invalid_parameters)?;
-    let window = resolve_window(&target).map_err(|error| match error {
-        crate::record::RecordError::Resolution(resolution) => {
-            ProtocolError::new(ErrorCode::TargetNotFound, resolution.to_string())
-        }
-        other => ProtocolError::new(ErrorCode::Internal, other.to_string()),
-    })?;
+    let window = resolve_window(&target).map_err(unrecordable_target)?;
 
     let size = window.geometry().client_size();
     Ok(
         CaptureTargetSettings::window(window.handle().as_u64(), size.width(), size.height())
-            .content_protected(window.is_content_protected()),
+            .content_protected(window.is_content_protected())
+            .minimised(window.is_minimised()),
     )
+}
+
+/// The refusal for a target that cannot be recorded or photographed.
+///
+/// Shared by `start_recording` and `take_screenshot` so that the two answer the
+/// same question the same way, and so that the desktop application can branch on
+/// the code rather than on the sentence:
+///
+/// - [`ErrorCode::TargetNotFound`] — nothing matched, or several things did.
+///   Choose something else.
+/// - [`ErrorCode::TargetNotCapturable`] — one window matched and cannot be
+///   recorded as it is. Change the window; the message names it and says how
+///   ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+///
+/// The message is the error's own words, carried through verbatim, because the
+/// window this refusal is about is the window the user is looking at and only
+/// this process knows what it is called.
+fn unrecordable_target(error: crate::record::RecordError) -> ProtocolError {
+    match error {
+        crate::record::RecordError::Resolution(resolution) => {
+            ProtocolError::new(ErrorCode::TargetNotFound, resolution.to_string())
+        }
+        minimised @ crate::record::RecordError::TargetMinimised { .. } => {
+            ProtocolError::new(ErrorCode::TargetNotCapturable, minimised.to_string())
+        }
+        other => ProtocolError::new(ErrorCode::Internal, other.to_string()),
+    }
 }
 
 /// The refusal for a screenshot that could not be taken or saved.

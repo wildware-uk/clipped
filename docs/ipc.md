@@ -570,8 +570,10 @@ is why the target parameters exist at all.
 Refused with `invalid_parameters` for a format this build cannot write -
 lossless WebP needs a `libwebp` the FFmpeg build may not carry - or when nothing
 is being recorded and no target was named; with `target_not_found` when the
-window named does not exist or has stopped drawing; and with `internal`, naming
-the file, when the picture was taken and the disk refused it.
+window named does not exist or has stopped drawing; with `target_not_capturable`
+when the window named is minimised, which is a picture Windows would not produce
+either; and with `internal`, naming the file, when the picture was taken and the
+disk refused it.
 
 ### `library_sessions`
 
@@ -886,6 +888,7 @@ person reads, written to AGENTS.md section 28.
 | `already_recording` | A recording is running. For `start_recording`, because this recorder runs one at a time; for `shutdown`, because the request did not say it could finish one. |
 | `not_recording` | There is nothing to stop, or the named recording is not the one running. |
 | `target_not_found` | No window matched what was asked for. |
+| `target_not_capturable` | A window matched and cannot be recorded as it is — it is minimised, so Windows draws it for nobody and the recording would be empty ([#383](https://github.com/wildware-uk/clipped/issues/383)). The message names the window; the thing to change is the window, not the request. |
 | `recording_failed` | Capture, encoding or muxing refused. Whatever was written before the failure is still a finished file. |
 | `too_many_connections` | The recorder is serving as many connections as it will. |
 | `shutting_down` | The recorder has accepted a [`shutdown`](#shutdown) and will not start a recording. |

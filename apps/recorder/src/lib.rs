@@ -111,6 +111,13 @@ impl RunError {
             // mistake as a rejected argument: the command line is what has to
             // change, and the message already lists the candidates.
             Self::Record(record::RecordError::Resolution(_)) => EXIT_USAGE,
+            // A window that is minimised is *not* `EXIT_USAGE`: the command line
+            // named the right window and there is nothing in it to change. What
+            // has to change is the window, which the message says
+            // ([issue #383](https://github.com/wildware-uk/clipped/issues/383)),
+            // and a script that retries after restoring it should see the same
+            // code it would for any other refusal to record.
+            Self::Record(record::RecordError::TargetMinimised { .. }) => EXIT_FAILURE,
             // And a `--microphone` that named no device, or several, is the
             // same mistake again: the message says how many matched, and the
             // command line is what has to change.

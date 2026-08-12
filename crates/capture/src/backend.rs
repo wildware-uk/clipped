@@ -264,11 +264,22 @@ impl CaptureConfig {
 
 /// The outcome of asking a backend for a frame.
 ///
-/// Not every acquisition produces a frame, and the two things that happen
-/// instead are ordinary rather than exceptional: a game that is not rendering
-/// produces nothing, and a window that has been resized produces a different
-/// shape. Neither is an error, so neither is a
+/// Not every acquisition produces a frame, and the things that happen instead
+/// are ordinary rather than exceptional: a game that is not rendering produces
+/// nothing, a window that has been resized produces a different shape, and a
+/// window that has been minimised produces nothing until somebody restores it.
+/// None of them is an error, so none of them is a
 /// [`CaptureError`](crate::CaptureError).
+///
+/// [`Timeout`](Self::Timeout) and [`TargetMinimised`](Self::TargetMinimised) are
+/// deliberately separate even though a backend does the same thing for both —
+/// wait, and try again. The difference is what the *caller* can say about them:
+/// a timeout means the source had nothing new, and a recording of it is a
+/// recording of a still picture, while a minimised target means the recording is
+/// accumulating nothing at all and will go on doing so until the user acts. A
+/// session that cannot tell them apart writes an empty file and reports it as an
+/// idle source, which is what
+/// [issue #383](https://github.com/wildware-uk/clipped/issues/383) is about.
 #[derive(Debug)]
 pub enum Acquisition<'frame> {
     /// A frame, borrowed from the backend until it is dropped.
@@ -288,6 +299,28 @@ pub enum Acquisition<'frame> {
     /// the caller has an encoder configured for the old size and every frame
     /// after a silent resize would be wrong.
     SizeChanged(FrameSize),
+    /// The window being captured is minimised, so there will be no frames at
+    /// all until it is restored.
+    ///
+    /// Reported once per acquisition that would otherwise have been a
+    /// [`Timeout`](Self::Timeout), for as long as it lasts, and the whole of the
+    /// caller's timeout is still spent waiting first — so a loop that treats it
+    /// exactly like a timeout keeps the pacing it had. **The backend does not
+    /// act on it.** A minimised window is not a lost one, the handle stays
+    /// valid, and every backend here goes on waiting for it to come back
+    /// (`docs/capture-pipeline.md`).
+    ///
+    /// What a caller does with it is a policy decision, and the recorder's is in
+    /// `clipped_session`: the recording continues, because a game minimises
+    /// itself whenever somebody alt-tabs out of exclusive fullscreen and ending
+    /// the session over that would cost far more than the silent stretch does.
+    /// What it must not do is *nothing*: a recording that spends its life here
+    /// produces an empty file, and reporting it as an ordinary idle source is
+    /// how that became [issue #383](https://github.com/wildware-uk/clipped/issues/383).
+    ///
+    /// Only ever reported for a window. A display cannot be minimised, and a
+    /// display that has gone is [`CaptureError::TargetLost`](crate::CaptureError::TargetLost).
+    TargetMinimised,
 }
 
 /// A live capture of one target.
@@ -385,7 +418,9 @@ pub trait CaptureBackend: fmt::Debug + Send {
     ///                 // thread, and let the frame drop before looping.
     ///                 let _ = frame.timestamp();
     ///             }
-    ///             Acquisition::Timeout => continue,
+    ///             // Nothing new to record, for two different reasons the
+    ///             // caller is expected to tell a user apart.
+    ///             Acquisition::Timeout | Acquisition::TargetMinimised => continue,
     ///             Acquisition::SizeChanged(size) => {
     ///                 backend.resize(size)?;
     ///             }

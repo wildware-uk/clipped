@@ -126,6 +126,16 @@ pub enum ErrorCode {
     NotRecording,
     /// `target_not_found` — no window matched what was asked for.
     TargetNotFound,
+    /// `target_not_capturable` — a window matched and cannot be recorded as it
+    /// is.
+    ///
+    /// Deliberately not [`TargetNotFound`](Self::TargetNotFound): the window was
+    /// found, it is named in the message, and the thing to do about it is to
+    /// change the window rather than to choose a different one. A minimised
+    /// window is the case this was added for — Windows draws it for nobody, so a
+    /// recording of it would be an empty file
+    /// ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+    TargetNotCapturable,
     /// `recording_failed` — capture, encoding or muxing refused. Whatever had
     /// been written before the failure is still a finished file.
     RecordingFailed,
@@ -177,6 +187,7 @@ impl ErrorCode {
             Self::AlreadyRecording => "already_recording",
             Self::NotRecording => "not_recording",
             Self::TargetNotFound => "target_not_found",
+            Self::TargetNotCapturable => "target_not_capturable",
             Self::RecordingFailed => "recording_failed",
             Self::TooManyConnections => "too_many_connections",
             Self::ShuttingDown => "shutting_down",
@@ -205,6 +216,7 @@ impl From<String> for ErrorCode {
             "already_recording" => Self::AlreadyRecording,
             "not_recording" => Self::NotRecording,
             "target_not_found" => Self::TargetNotFound,
+            "target_not_capturable" => Self::TargetNotCapturable,
             "recording_failed" => Self::RecordingFailed,
             "too_many_connections" => Self::TooManyConnections,
             "shutting_down" => Self::ShuttingDown,
@@ -288,6 +300,7 @@ mod tests {
             ErrorCode::AlreadyRecording,
             ErrorCode::NotRecording,
             ErrorCode::TargetNotFound,
+            ErrorCode::TargetNotCapturable,
             ErrorCode::RecordingFailed,
             ErrorCode::TooManyConnections,
             ErrorCode::Internal,

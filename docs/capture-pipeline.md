@@ -396,7 +396,8 @@ Two things it does not do, stated rather than glossed:
 | What happens | What the backend does |
 | --- | --- |
 | The window is resized | A frame arrives whose `ContentSize` differs from the pool's. It is discarded, `Acquisition::SizeChanged` is reported, and the backend goes idle until `resize` calls `Direct3D11CaptureFramePool::Recreate` — which keeps the session, the item and both event registrations, so frames composed during the change are not all lost. |
-| The window is minimised | It stops composing, so acquisitions report `Acquisition::Timeout` — and go on reporting it until the window comes back, rather than deciding the window has gone. A frame that arrives with a zero dimension — which is what a minimised client area reports — is discarded rather than turned into a `FrameSize`, because `FrameSize` refuses to represent it and an encoder configured for it would fail on its first frame. The silence is not counted as dropped frames. `a_minimised_window_is_waited_out_rather_than_reported_as_a_size_or_a_loss` minimises a real window mid-capture and asserts all three. |
+| The window is minimised | It stops composing, so acquisitions report `Acquisition::TargetMinimised` — and go on reporting it until the window comes back, rather than deciding the window has gone. `IsIconic` is asked on the same path `IsWindow` is, so it costs a handful of calls a second and never one per frame. The silence is not counted as dropped frames. |
+| The window is restored | Frames resume, and **no size change is reported**. This needs saying because the obvious implementation gets it wrong: measured on Windows 11 build 26200, restoring a minimised 1280x720 window makes the compositor produce one frame whose `ContentSize` is **160x28** — the legacy shape a minimised window is reduced to — and it arrives *after* `IsIconic` has gone false again. Reported as a `SizeChanged` it finishes the recording of a window that is back on screen at the size it always was. It is told apart by asking the window: `GetClientRect` answers 0x0 while a window is minimised or part way through being restored, and a window that has genuinely been resized has a client area. This one is verified end to end rather than in a unit test, and the test says why: the crate's own test window is a `STATIC` window whose thread is inside `acquire`, so its restore never completes and it *really is* 146x28 — asserting on it would be asserting on the test's own artefact. The evidence is on the issue: `test-apps/video-pattern` minimised for five seconds mid-recording produced one 823-frame file that ended only when the window closed. |
 | Something is drawn over the window | Nothing. The compositor is asked for the item's own content. |
 | The window closes | Reported as `CaptureError::TargetLost`. |
 
@@ -879,7 +880,7 @@ refused every time until it is rotated back
 | The cursor | Never appears. Desktop Duplication does not draw the pointer into the desktop image; it reports the position and shape separately for an application to composite. So `CaptureConfig::capture_cursor` cannot be honoured in either direction, `BackendCapabilities::is_cursor_optional` is false, and asking for a cursor logs that there will not be one. |
 | Occlusion | Anything drawn over the target is in the recording, because this is a duplicate of the screen. `is_occlusion_independent` is false, and this is the main reason SPEC.md section 8 ranks the method below Windows Graphics Capture. |
 | A rotated display | Refused, with `CaptureError::UnsupportedTarget`. DXGI hands over a rotated display's image *unrotated*, so a portrait display would record sideways, and a window cropped out of it would be cropped from the wrong pixels entirely. [Issue #138](https://github.com/wildware-uk/clipped/issues/138) owns rotation. |
-| A minimised window | Waited out, like the other backend: acquisitions report `Acquisition::Timeout` until it comes back, rather than cropping the rectangle at (-32000, -32000) where Windows parks it. |
+| A minimised window | Waited out, like the other backend: acquisitions report `Acquisition::TargetMinimised` until it comes back, rather than cropping the rectangle at (-32000, -32000) where Windows parks it. |
 | A protected window | Declined at `availability`, like the other backend. `WDA_MONITOR` renders the window black and `WDA_EXCLUDEFROMCAPTURE` leaves whatever is behind it in the frame; neither is the recording anybody asked for. |
 | A machine with no display output | Declined at `initialise` with `UnsupportedTarget`, naming the case: a remote session, a headless server or a virtual machine with no display. A basic display driver that has outputs but cannot duplicate them is declined the same way, naming that instead. |
 | Two captures of one display in one process | Not possible. DXGI gives a process **one duplication per output**; a second `DuplicateOutput` for a display this process is already duplicating fails with `E_INVALIDARG` (`0x80070057`), which the backend classifies and reports as an `UnsupportedTarget` naming the limit rather than as an unexplained backend failure. One target per session is already an assumption of this pipeline, but it is a hard limit here rather than a design choice, and it is why the tests that duplicate a display take a mutex. |
@@ -1113,6 +1114,14 @@ screen; nothing else happens. This is a deliberate narrowing of the issue's
 source is idle" rather than "no frame arrived", which neither Windows API
 offers.
 
+One case *is* now distinguishable, and it is the one that mattered:
+`Acquisition::TargetMinimised` says the target cannot produce a frame at all
+until somebody restores it, which "no frame arrived" never did. That does not
+change the fallback policy — a minimised window is still not a backend failure
+and is still not fallen back from — but it is what lets the layer above tell a
+paused game from an empty recording. See "A minimised window, from end to end"
+below.
+
 ### What the user and the diagnostics see
 
 `CaptureStatus` is the whole of it, and the two lines SPEC.md section 8 asks for
@@ -1150,6 +1159,78 @@ over.
   no screen shows it yet
   ([issue #101](https://github.com/wildware-uk/clipped/issues/101) owns
   diagnostics).
+
+## A window nothing is drawing: minimised, occluded, or on a display that has gone
+
+Three situations look alike from the outside — the window is not in front of the
+user — and the pipeline's answer is different for each. They are set out together
+because guessing wrong about any of them produces the same thing: a file with
+nothing in it and nobody told
+([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+
+| | Windows Graphics Capture | Desktop Duplication | What a recording does |
+| --- | --- | --- | --- |
+| **Minimised** | The compositor stops composing the window, so no frame is produced at all. `availability` declines the target and `acquire` reports `Acquisition::TargetMinimised`. | The window is parked at around (-32000, -32000) and is on no display, so there is nothing to crop. `availability` declines it and `check_target` reports it, which `pump` turns into `Acquisition::TargetMinimised`. | Refused before a file exists. Mid-recording, the session keeps recording and says so; see below. |
+| **Occluded** | **Nothing happens.** The compositor is asked for the *item's* content, not for what is on screen where the item is, so a notification, an overlay or another window over the target does not appear in the capture and does not interrupt it. This is the reason SPEC.md section 8 prefers this method, and it is what `BackendCapabilities::is_occlusion_independent` declares. | The covering window **is in the recording**: this is a duplicate of the screen. `is_occlusion_independent` is false, which is what a settings screen reads to say so. Frames keep arriving at the usual rate. | Nothing. Frames arrive throughout, so there is no silence to explain and nothing to refuse. Occlusion costs picture quality on one backend and costs nothing on the other; neither produces an empty file. |
+| **On a display that is disconnected** | The window survives — Windows moves it to a remaining display — and so does the capture, because a `GraphicsCaptureItem` for a window follows the window rather than the display. Only a *monitor* target is lost, and that is `CaptureError::TargetLost`. | Access to the duplication is lost and the duplication is rebuilt. `reinitialise` re-reads `MonitorFromWindow` rather than trusting the remembered display, precisely so that a window relocated by the disconnection is found on its new one; the recording carries on. A monitor target waits out a five-second grace and then reports `TargetLost`. | Nothing for a window: frames resume within the rebuild. A monitor recording ends and is finalised, which is the right answer — the thing being recorded really has gone. |
+
+So **only minimisation produces an unbounded silence with a live target behind
+it**, and only minimisation is refused up front and reported per acquisition. The
+other two were checked rather than assumed, and the answer for both is that they
+were already handled: occlusion by the choice of backend, disconnection by the
+rebuild path and the five-second grace. Neither needed a change.
+
+### A minimised window, from end to end
+
+**Before a recording starts, it is refused, and the refusal names the window.**
+`clipped_windows` already reports `WindowInfo::is_minimised`, and it reaches
+`TargetProperties::with_minimised` through
+`clipped_session::CaptureTargetSettings::minimised`, so `select` refuses with
+both backends' reasons attached — for every caller of `clipped-session`,
+including the automatic session manager. The recorder refuses one step earlier,
+in `apps/recorder`'s `choose_window`, so that the sentence a user reads names the
+window: *"Counter-Strike 2 (cs2.exe) is minimised, so there would be nothing to
+record… Restore it and start again"*. That refusal reaches the desktop
+application verbatim as `target_not_capturable` (`docs/ipc.md`) and reaches
+`watch` as a reason to keep waiting for the window rather than to give up on the
+game.
+
+Why refuse rather than start and wait for it to come back? Because the wait is
+already bounded and already ends in a failure: `first_frame_device` gives capture
+ten seconds to produce its first frame and then reports `NoFrames`. Refusing up
+front turns that into the same answer given immediately, before an encoder
+session is opened and a container header written, and — the part that matters —
+with the window named in it. `watch` is the caller that genuinely should wait,
+and it does: it treats the refusal as a reason to keep looking for a window,
+which is exactly what it already does for a game that has not drawn one yet.
+
+**During a recording, it does not end the recording.** Alt-tabbing out of an
+exclusive fullscreen game minimises it, and a recorder that stopped on that would
+cost somebody the rest of their session for pressing two keys. So the file stays
+open, the frozen stretch is what the source actually did, and everything after
+the window is restored is in the same file on the same timeline. What the session
+does instead of stopping is *say so*: one `warn` on the way in, one `info` on the
+way out, and `RecordingReport::times_target_minimised` in the summary the user
+reads — because a ten-minute recording that spent nine minutes minimised is
+otherwise indistinguishable from a recording of a very still game.
+
+Making that true took the second half of the backend change above. Before it,
+the recording did survive being minimised and was then finished the instant the
+window came back, at 160x28, by a size change that was not one — so "the
+recording continues" was a claim the measurement did not support. It does now:
+recording the test pattern through a five-second minimise produced one file of
+823 frames, `times_target_minimised=1`, ending only when the window closed.
+
+**A recording no video ever reached leaves no file.** That is the last line of
+defence, and it is the one that closes the original report: capture hands over
+the single frame the encoder is opened against, the container header is written,
+the window is never restored, and what is left on disk is 791 bytes that the
+media library would index and draw as a tile that cannot be played. So
+`clipped_session`'s `conclude` removes it and reports `SessionError::NoFrames`,
+whose `FootageKept::Nothing` sentence — "Nothing had been recorded, so no file
+was left" — is thereby true rather than aspirational. A recording that failed for
+some other reason keeps its file: that file is evidence for the failure being
+reported with it.
 
 ## How platform-neutral this is
 

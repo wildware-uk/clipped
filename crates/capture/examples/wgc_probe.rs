@@ -663,6 +663,19 @@ fn capture(options: Options, window_handle: &AtomicIsize) -> Result<Outcome, Str
                     in_a_gap = true;
                 }
             }
+            // The same silence as a timeout, and named: the backend can now say
+            // that the window is minimised rather than only that nothing
+            // arrived, which is what `Contamination` below is watching for and
+            // what `--mode lifecycle` provokes on purpose.
+            Ok(Acquisition::TargetMinimised) => {
+                measurements.timeouts += 1;
+                if !in_a_gap {
+                    measurements
+                        .events
+                        .push((started.elapsed(), "the window is minimised".to_owned()));
+                    in_a_gap = true;
+                }
+            }
             Ok(Acquisition::SizeChanged(new_size)) => {
                 measurements.size_changes += 1;
                 let new_format = backend

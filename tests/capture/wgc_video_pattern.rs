@@ -455,6 +455,13 @@ fn capture_and_decode(app: &TestApp) -> Accounting {
                 }
             }
             Ok(Acquisition::Timeout) => accounting.timeouts += 1,
+            // The pattern window stays on screen for the whole run. One that
+            // did not would make every frame count below a count of Alt-Tab.
+            Ok(Acquisition::TargetMinimised) => panic!(
+                "the pattern window was minimised during the run, so the accounting below \
+                 describes a minimised window rather than capture; run it again \
+                 with the desktop left alone"
+            ),
             Ok(Acquisition::SizeChanged(size)) => {
                 // Nothing in this test resizes the window, so a size change is
                 // worth failing on rather than absorbing: it would mean the

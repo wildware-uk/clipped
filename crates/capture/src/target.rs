@@ -72,17 +72,19 @@ pub struct TargetProperties {
     kind: TargetKind,
     size: FrameSize,
     content_protected: bool,
+    minimised: bool,
 }
 
 impl TargetProperties {
     /// Describes a target of `kind` currently `size` pixels, whose content is
-    /// not protected.
+    /// not protected and which is not minimised.
     #[must_use]
     pub const fn new(kind: TargetKind, size: FrameSize) -> Self {
         Self {
             kind,
             size,
             content_protected: false,
+            minimised: false,
         }
     }
 
@@ -118,10 +120,38 @@ impl TargetProperties {
         self.size
     }
 
+    /// Marks a window that is minimised.
+    ///
+    /// A minimised window is still a window and its handle stays valid, but
+    /// nothing draws it: Windows Graphics Capture asks the compositor for
+    /// content that is not being composed, and Desktop Duplication would crop
+    /// the rectangle at around (-32000, -32000) where Windows parks the window.
+    /// Both therefore produce no frames for as long as it stays minimised, so
+    /// both decline it at [`BackendDeclaration::availability`](crate::BackendDeclaration::availability)
+    /// and [`select`](crate::select) refuses the recording before a file is
+    /// created ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+    ///
+    /// The property is about the *start* of a recording only. A window
+    /// minimised part way through one is not a refusal — the caller has footage
+    /// already and the window is coming back — and is reported frame by frame as
+    /// [`Acquisition::TargetMinimised`](crate::Acquisition::TargetMinimised)
+    /// instead.
+    #[must_use]
+    pub const fn with_minimised(mut self, minimised: bool) -> Self {
+        self.minimised = minimised;
+        self
+    }
+
     /// Whether the system refuses to let this target be captured.
     #[must_use]
     pub const fn is_content_protected(&self) -> bool {
         self.content_protected
+    }
+
+    /// Whether the target was minimised when it was enumerated.
+    #[must_use]
+    pub const fn is_minimised(&self) -> bool {
+        self.minimised
     }
 }
 

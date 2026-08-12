@@ -364,6 +364,7 @@ pub struct RecordingReport {
     pub(crate) frames_skipped_for_rate: u64,
     pub(crate) frames_dropped_writer_behind: u64,
     pub(crate) frames_missed_by_source: u64,
+    pub(crate) times_target_minimised: u64,
     pub(crate) packets_written: u64,
     pub(crate) timestamps_corrected: u64,
     pub(crate) duration: Duration,
@@ -457,6 +458,23 @@ impl RecordingReport {
         self.frames_missed_by_source
     }
 
+    /// How many separate stretches of this recording the window was minimised
+    /// for.
+    ///
+    /// Zero for almost every recording. Anything above it is a stretch during
+    /// which capture produced nothing at all and the file accumulated a frozen
+    /// picture — ordinary when somebody alt-tabs out of an exclusive fullscreen
+    /// game, which minimises it — and it is reported rather than left to be
+    /// deduced from a duration that does not match the wall clock
+    /// ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+    ///
+    /// Stretches, not acquisitions: a window minimised for a minute is one
+    /// thing that happened.
+    #[must_use]
+    pub const fn times_target_minimised(&self) -> u64 {
+        self.times_target_minimised
+    }
+
     /// Packets the muxer wrote.
     #[must_use]
     pub const fn packets_written(&self) -> u64 {
@@ -538,7 +556,24 @@ impl fmt::Display for RecordingReport {
                 .map_or_else(|| "no rate".to_owned(), |rate| format!("{rate:.1} fps")),
             dropped = self.frames_dropped_writer_behind,
             reason = self.end_reason,
-        )
+        )?;
+
+        // Said here rather than only in the log because it is the answer to the
+        // question this line otherwise provokes — "why is a ten-minute recording
+        // ninety seconds long?" — and because a recording nobody was watching is
+        // exactly the one this happens to (issue #383).
+        if self.times_target_minimised > 0 {
+            write!(
+                formatter,
+                " The window was minimised {times} during the recording, and nothing was \
+                 recorded while it was.",
+                times = match self.times_target_minimised {
+                    1 => "once".to_owned(),
+                    times => format!("{times} times"),
+                },
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -560,6 +595,7 @@ mod tests {
             frames_skipped_for_rate: 19,
             frames_dropped_writer_behind: 0,
             frames_missed_by_source: 2,
+            times_target_minimised: 0,
             packets_written: 181,
             timestamps_corrected: 0,
             duration: Duration::from_millis(6_000),
@@ -680,6 +716,36 @@ mod tests {
             .sustained_framerate()
             .expect("six seconds of frames has a rate");
         assert!((rate - 30.0).abs() < 1e-9, "{rate}");
+    }
+
+    #[test]
+    fn a_recording_the_window_was_minimised_during_says_so_in_the_line_the_user_reads() {
+        // The stretch is invisible in every other figure: the frame counts are
+        // simply lower and the duration still covers the silence, so a
+        // ten-minute session that spent nine of them minimised reads as a
+        // recording of a very still game. Alt-tabbing out of an exclusive
+        // fullscreen game minimises it, so this is not a rare shape (issue
+        // #383).
+        let mut report = report();
+        report.times_target_minimised = 1;
+        let once = report.to_string();
+        assert!(
+            once.contains("The window was minimised once during the recording"),
+            "{once}"
+        );
+        assert!(
+            once.contains("nothing was recorded while it was"),
+            "saying it happened without saying what it cost is half an answer: {once}"
+        );
+
+        report.times_target_minimised = 3;
+        assert!(report.to_string().contains("minimised 3 times"), "{report}");
+    }
+
+    #[test]
+    fn a_recording_nobody_minimised_says_nothing_about_minimising() {
+        // The common case, and what keeps the sentence above worth reading.
+        assert!(!report().to_string().contains("minimised"), "{}", report());
     }
 
     #[test]

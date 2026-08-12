@@ -166,6 +166,7 @@ export const ERROR_CODES = [
   'already_recording',
   'not_recording',
   'target_not_found',
+  'target_not_capturable',
   'recording_failed',
   'too_many_connections',
   'shutting_down',
