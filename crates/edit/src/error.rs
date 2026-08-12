@@ -350,6 +350,18 @@ pub enum OperationRefused {
         /// How long the clip is, in nanoseconds.
         clip_nanos: u64,
     },
+    /// The mix was changed on a track the clip does not have.
+    ///
+    /// A caller's index rather than a user's mistake: the editor shows one
+    /// slider per track. It is reported rather than ignored so that a desktop
+    /// build one release out of step with a document cannot silently move the
+    /// wrong slider (AGENTS.md section 27).
+    NoSuchTrack {
+        /// The index asked for.
+        track: usize,
+        /// How many audio tracks the clip has.
+        tracks: usize,
+    },
     /// A trim was asked to keep nothing at all.
     ///
     /// Trimming says where the material that is *kept* begins or ends, and a
@@ -379,6 +391,10 @@ impl fmt::Display for OperationRefused {
                 formatter,
                 "that is at {at_nanos} ns, which is past the end of a clip that lasts \
                  {clip_nanos} ns"
+            ),
+            Self::NoSuchTrack { track, tracks } => write!(
+                formatter,
+                "this clip has no audio track {track}; it has {tracks}"
             ),
             Self::NothingWouldRemain => {
                 formatter.write_str("trimming there would leave nothing of the clip")

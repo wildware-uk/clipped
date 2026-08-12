@@ -90,8 +90,7 @@ pub enum MixReason {
     SeveralInputs,
     /// The track plays at something other than the level it was recorded at.
     Level,
-    /// The track is silent — muted, or something else is soloed — and silence
-    /// has to be produced rather than copied.
+    /// The track is muted, and silence has to be produced rather than copied.
     Silenced,
     /// The track fades in or out, which changes every sample it covers.
     Fades,
@@ -1142,15 +1141,21 @@ mod tests {
     }
 
     #[test]
-    fn a_track_silenced_by_another_ones_solo_is_a_mix_rather_than_a_missing_track() {
-        // Solo is exclusive, so the un-soloed track is silent — and silence has
-        // to be produced. Dropping the track instead would write a file with
-        // fewer tracks than the clip has, which is not the same thing.
+    fn a_silenced_track_is_a_mix_rather_than_a_missing_track() {
+        // A muted track is silent, and silence has to be produced. Dropping the
+        // track instead would write a file with fewer tracks than the clip has,
+        // which is not the same thing — so the track beside it is still planned
+        // and only the silent one blocks the copy.
+        //
+        // Muting is the only way a track is silent in an export: soloing moved
+        // out of the document in [issue
+        // #85](https://github.com/wildware-uk/clipped/issues/85), so an export
+        // is never handed one.
         let source = SourceId::new(0);
         let document = copyable()
             .with_audio_track(AudioTrack::new("Game", vec![TrackInput::new(source, 0)]))
             .with_audio_track(
-                AudioTrack::new("Microphone", vec![TrackInput::new(source, 1)]).soloed(),
+                AudioTrack::new("Microphone", vec![TrackInput::new(source, 1)]).muted(),
             );
 
         let plan = plan(&document);
@@ -1158,8 +1163,15 @@ mod tests {
         assert_eq!(
             plan.blockers(),
             [CopyBlocker::TrackNeedsMixing {
-                name: "Game".to_owned(),
+                name: "Microphone".to_owned(),
                 reason: MixReason::Silenced,
+            }]
+        );
+        assert_eq!(
+            plan.audio_tracks(),
+            [PlannedAudioTrack {
+                name: Some("Game".to_owned()),
+                stream: 0
             }]
         );
     }

@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::{self, AudioTrack, TrackOutput};
+use crate::audio::{self, AudioTrack, Solo, TrackOutput};
 use crate::error::{DocumentProblem, EditDocumentError};
 use crate::framing::AspectRatio;
 use crate::overlay::TextOverlay;
@@ -173,22 +173,61 @@ impl EditDocument {
         timeline::segment_start_nanos(&self.segments, segment).map(OutputTime::from_nanos)
     }
 
-    /// Whether any track is soloed, which changes what every other one does.
-    #[must_use]
-    pub fn any_soloed(&self) -> bool {
-        self.audio_tracks.iter().any(|track| track.soloed)
-    }
-
-    /// What audio track `index` contributes, once mute and solo are resolved.
+    /// What audio track `index` contributes to the **export**.
     ///
-    /// `None` when there is no such track. The rules are documented on
-    /// [`crate::audio`].
+    /// Mute and the track's level, which are the parts of the mix the document
+    /// carries. `None` when there is no such track.
+    ///
+    /// This is deliberately not given a [`Solo`]: soloing is how a user listens
+    /// while editing, and an export that honoured one would write a file with
+    /// most of its tracks silent because somebody forgot to unsolo. The preview
+    /// asks [`monitored_output`](Self::monitored_output) instead, and the two
+    /// agree whenever nothing is soloed.
     #[must_use]
     pub fn track_output(&self, index: usize) -> Option<TrackOutput> {
-        let any_soloed = self.any_soloed();
+        self.audio_tracks.get(index).map(audio::resolve)
+    }
+
+    /// What audio track `index` contributes to the **preview**, given `solo`.
+    ///
+    /// The same answer as [`track_output`](Self::track_output) with the
+    /// editor's solo applied on top. The rules mute and solo follow together
+    /// are documented on [`crate::audio`].
+    #[must_use]
+    pub fn monitored_output(&self, index: usize, solo: Solo) -> Option<TrackOutput> {
         self.audio_tracks
             .get(index)
-            .map(|track| audio::resolve(track, any_soloed))
+            .map(|track| audio::monitor(track, index, solo))
+    }
+
+    /// How loud audio track `index` is at `at`, as a multiplier on the samples.
+    ///
+    /// The whole mix for one track at one moment: its level, its mute and its
+    /// fades, resolved into the number an exporter multiplies by. `0.0` is
+    /// silence, `1.0` is the audio exactly as recorded.
+    ///
+    /// `None` when there is no such track, or when the document's timeline
+    /// cannot be measured — which validation refuses, so anything from
+    /// [`read`](Self::read) answers.
+    #[must_use]
+    pub fn track_amplitude_at(&self, index: usize, at: OutputTime) -> Option<f64> {
+        self.amplitude_at(self.track_output(index)?, index, at)
+    }
+
+    /// How loud audio track `index` is at `at` in the **preview**.
+    ///
+    /// [`track_amplitude_at`](Self::track_amplitude_at) with the editor's solo
+    /// applied, and the number the editor's meters and playback use.
+    #[must_use]
+    pub fn monitored_amplitude_at(&self, index: usize, at: OutputTime, solo: Solo) -> Option<f64> {
+        self.amplitude_at(self.monitored_output(index, solo)?, index, at)
+    }
+
+    /// Folds a track's fade envelope into an already-resolved level.
+    fn amplitude_at(&self, output: TrackOutput, index: usize, at: OutputTime) -> Option<f64> {
+        let track = self.audio_tracks.get(index)?;
+        let clip_nanos = self.output_duration_nanos()?;
+        Some(output.amplitude() * audio::fade_amplitude(track, at.as_nanos(), clip_nanos))
     }
 
     /// The overlays on screen at `at`.
@@ -334,14 +373,16 @@ impl EditDocument {
                 });
             }
 
-            let fades = u64::try_from(track.fade_in.as_nanos())
-                .ok()
-                .and_then(|fade_in| {
-                    u64::try_from(track.fade_out.as_nanos())
-                        .ok()
-                        .and_then(|fade_out| fade_in.checked_add(fade_out))
-                });
-            if fades.is_none_or(|fades| fades > clip_nanos) {
+            // Fades that add up to more than the clip would overlap, and a
+            // section of a clip that is fading in and out at the same time is
+            // not something a user can have asked for. `clipped-edit`'s
+            // operations shorten them rather than refusing an edit
+            // (`crate::operations`), so reaching here means a document said it
+            // directly.
+            if track
+                .total_fade_nanos()
+                .is_none_or(|fades| fades > clip_nanos)
+            {
                 return Err(DocumentProblem::FadesLongerThanTheClip {
                     name: track.name.clone(),
                 });
@@ -748,24 +789,117 @@ mod tests {
         assert!(at(5_000_000_000).is_empty());
     }
 
-    #[test]
-    fn the_mix_resolves_solo_across_the_whole_document() {
-        let document = simple()
+    /// A ten-second clip with a quiet track, a muted one and a faded one.
+    fn mixed() -> EditDocument {
+        simple()
             .with_audio_track(
                 AudioTrack::new("Game", vec![TrackInput::new(SourceId::new(0), 0)])
                     .at_gain_db(-4.0),
             )
             .with_audio_track(
-                AudioTrack::new("Discord", vec![TrackInput::new(SourceId::new(0), 1)]).soloed(),
-            );
+                AudioTrack::new("Microphone", vec![TrackInput::new(SourceId::new(0), 1)]).muted(),
+            )
+            .with_audio_track(
+                AudioTrack::new("Discord", vec![TrackInput::new(SourceId::new(0), 2)])
+                    .with_fades(Duration::from_secs(2), Duration::from_secs(2)),
+            )
+    }
 
-        assert!(document.any_soloed());
-        assert_eq!(document.track_output(0), Some(TrackOutput::Silent));
+    #[test]
+    fn the_export_reads_the_mix_as_the_document_holds_it() {
+        let document = mixed();
+
         assert_eq!(
-            document.track_output(1),
+            document.track_output(0),
+            Some(TrackOutput::Audible { gain_db: -4.0 })
+        );
+        assert_eq!(document.track_output(1), Some(TrackOutput::Silent));
+        assert_eq!(
+            document.track_output(2),
             Some(TrackOutput::Audible { gain_db: 0.0 })
         );
-        assert_eq!(document.track_output(2), None);
+        assert_eq!(document.track_output(3), None);
+    }
+
+    #[test]
+    fn a_solo_changes_the_preview_and_leaves_the_export_alone() {
+        // The decision #85 asks to be made deliberately: solo is the editor
+        // listening, not an edit. A clip exported while the user happened to be
+        // soloing Discord must still contain the game audio.
+        let document = mixed();
+        let solo = Solo::on(2);
+
+        assert_eq!(
+            document.monitored_output(0, solo),
+            Some(TrackOutput::Silent)
+        );
+        assert_eq!(
+            document.monitored_output(2, solo),
+            Some(TrackOutput::Audible { gain_db: 0.0 })
+        );
+        assert_eq!(
+            document.track_output(0),
+            Some(TrackOutput::Audible { gain_db: -4.0 }),
+            "the export is not given the solo at all"
+        );
+
+        assert_eq!(
+            document.monitored_output(1, Solo::on(1)),
+            Some(TrackOutput::Silent),
+            "and soloing a muted track does not unmute it"
+        );
+        for index in 0..document.audio_tracks.len() {
+            assert_eq!(
+                document.monitored_output(index, Solo::NONE),
+                document.track_output(index),
+                "with nothing soloed the preview and the export agree exactly"
+            );
+        }
+        assert_eq!(document.monitored_output(3, solo), None);
+    }
+
+    #[test]
+    fn the_level_of_a_track_at_a_moment_is_its_gain_its_mute_and_its_fades_together() {
+        let document = mixed();
+        let at = |index, nanos| document.track_amplitude_at(index, OutputTime::from_nanos(nanos));
+
+        // -4 dB, no fades: the same multiplier everywhere inside the clip.
+        let quiet = at(0, 0).expect("the track is in the document");
+        assert!((quiet - 0.630_957_344_480_193_5).abs() < 1e-12, "{quiet}");
+        assert_eq!(at(0, 5_000_000_000), Some(quiet));
+        assert_eq!(at(0, 10_000_000_000), Some(0.0), "the clip has ended");
+
+        // Muted, whatever the fades would have said.
+        assert_eq!(at(1, 3_000_000_000), Some(0.0));
+
+        // Recorded level, two-second fades either end of a ten-second clip.
+        assert_eq!(at(2, 0), Some(0.0));
+        assert_eq!(at(2, 1_000_000_000), Some(0.5));
+        assert_eq!(at(2, 5_000_000_000), Some(1.0));
+        assert_eq!(at(2, 9_000_000_000), Some(0.5));
+        assert_eq!(at(3, 0), None, "there is no fourth track");
+    }
+
+    #[test]
+    fn a_soloed_preview_is_still_faded() {
+        // The preview plays the fade the export will write; the solo only
+        // decides which tracks it plays it for.
+        let document = mixed();
+        let at = OutputTime::from_nanos(1_000_000_000);
+
+        assert_eq!(
+            document.monitored_amplitude_at(2, at, Solo::on(2)),
+            Some(0.5)
+        );
+        assert_eq!(
+            document.monitored_amplitude_at(0, at, Solo::on(2)),
+            Some(0.0),
+            "and a track the solo silences is silent for the whole clip"
+        );
+        assert_eq!(
+            document.monitored_amplitude_at(2, at, Solo::NONE),
+            document.track_amplitude_at(2, at)
+        );
     }
 
     #[test]

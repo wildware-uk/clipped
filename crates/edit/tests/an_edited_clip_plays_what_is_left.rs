@@ -211,6 +211,18 @@ fn undo_restores_the_exact_text_that_would_have_been_stored() {
         EditOperation::TrimEnd {
             at: OutputTime::from_nanos(12 * SECOND),
         },
+        // A change to the mix is an edit like any other, so it has to undo like
+        // any other: the level the user dragged away from must come back
+        // exactly, and not as the level a fresh document would have had.
+        EditOperation::SetTrackGain {
+            track: 0,
+            gain_db: -11.5,
+        },
+        EditOperation::SetTrackFades {
+            track: 1,
+            fade_in: core::time::Duration::from_secs(1),
+            fade_out: core::time::Duration::from_secs(2),
+        },
     ] {
         assert!(
             history.apply(operation).expect("the operation applies"),
