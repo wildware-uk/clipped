@@ -1304,10 +1304,10 @@ states installation as a rule — never a side effect — and `plugins/cs2` foll
 it: nothing is written until the user runs `clipped-cs2-plugin install`.
 `plugins/dota2` writes its file when the host attaches it, and reports that the
 game has to be restarted for it to matter. Both are defensible, and one of them
-is wrong for a project that ships both: the decision is recorded on
-[#73](https://github.com/wildware-uk/clipped/issues/73) with a recommendation
-rather than settled here, because changing it changes a plugin's behaviour and
-that is not what this change is for.
+is wrong for a project that ships both:
+[#382](https://github.com/wildware-uk/clipped/issues/382) is where they are made
+to agree, with a recommendation on it. It is recorded here rather than settled
+by the change that found it, because settling it changes a plugin's behaviour.
 
 ## What is not built
 

@@ -388,8 +388,10 @@ const PLUGINS: &[&str] = &[
 /// permanently — and would be what a sandboxed plugin
 /// ([#280](https://github.com/wildware-uk/clipped/issues/280)) needs, since an
 /// AppContainer is exactly what stops a plugin reading the registry to find
-/// Steam. That is a change to `crates/plugins` and to every plugin, so it
-/// belongs in an issue of its own rather than in this one.
+/// Steam. That is a change to `crates/plugins` and to every plugin, so it is an
+/// issue of its own:
+/// [#381](https://github.com/wildware-uk/clipped/issues/381), which is what
+/// takes this list back to two entries.
 const PLUGINS_MAY_NAME: &[&str] = &[
     "clipped-plugins",
     "clipped-events",
