@@ -7,6 +7,8 @@ import { ClipPlaybackScreen } from './ClipPlaybackScreen';
 import { CLIP_ROUTE, clipPath, isClipPath } from './clipPlayback';
 import { DiagnosticsScreen } from './DiagnosticsScreen';
 import { GamesScreen } from './GamesScreen';
+import { HomeScreen } from './HomeScreen';
+import { LibraryScreen } from './LibraryScreen';
 import { SettingsScreen } from './SettingsScreen';
 import { UnknownScreen } from './UnknownScreen';
 import {
@@ -46,13 +48,18 @@ function titleFor(pathname: string, screen: Screen | undefined): string {
  *
  * Every route still comes from `SCREENS`, so the sidebar and the router cannot
  * disagree about what the application contains; this is only the question of
- * which element sits behind one. Four of the seven are still the placeholder
- * that names the issue building them. Games is written (issue #107), Settings is
- * (issue #51) and Diagnostics is (issue #101), and the change that builds another
- * screen adds it here.
+ * which element sits behind one. Five of the seven are written — Home and Library
+ * (issue #60), Games (issue #107), Settings (issue #51) and Diagnostics
+ * (issue #101) — and the other two are still the placeholder that names the issue
+ * building them. The change that builds another screen adds it here, which is the
+ * one place that knows a screen from a placeholder.
  */
 function elementFor(screen: Screen, view: RecorderLinkView, notice: string | undefined): ReactNode {
   switch (screen.id) {
+    case 'home':
+      return <HomeScreen link={view.link} />;
+    case 'library':
+      return <LibraryScreen />;
     case 'games':
       return <GamesScreen link={view.link} />;
     case 'settings':

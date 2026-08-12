@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 
 import { describeGameDetection, WHAT_WORKS_TODAY } from './gameDetection';
 import type { RecorderLinkState } from './useRecorderLink';
+import { WaitingOn, type Waiting } from './WaitingOn';
 
 /**
  * The Games screen (issue #107).
@@ -37,14 +38,6 @@ import type { RecorderLinkState } from './useRecorderLink';
  * whole of what this screen claims.
  */
 
-/** One thing the screen will show, and the work that has to land before it can. */
-interface Missing {
-  /** What the Games screen will draw. */
-  readonly shows: string;
-  /** What has to exist before it can, ending in the issue that builds it. */
-  readonly needs: string;
-}
-
 /**
  * Everything SPEC.md sections 6 and 17 ask of this screen, against what each
  * one is waiting for.
@@ -53,8 +46,12 @@ interface Missing {
  * empty table headed Game / Recording / Last played is indistinguishable from a
  * machine that has played nothing, and this screen would be claiming to have
  * looked. It has not, because it cannot.
+ *
+ * The table itself is `WaitingOn`, shared with Home and Library (issue #60),
+ * which draw one for the same reason. The rows below stay here: they are this
+ * screen's promise, not the component's.
  */
-const MISSING: readonly Missing[] = [
+const MISSING: readonly Waiting[] = [
   {
     shows: 'Every game Clipped knows, with the executable and launcher it is recognised by',
     needs:
@@ -120,22 +117,7 @@ export function GamesScreen({ link }: GamesScreenProps): ReactNode {
         that supplies it.
       </p>
 
-      <table className="clipped-table">
-        <thead>
-          <tr>
-            <th scope="col">What the Games screen will show</th>
-            <th scope="col">What has to exist first</th>
-          </tr>
-        </thead>
-        <tbody>
-          {MISSING.map((entry) => (
-            <tr key={entry.shows}>
-              <td>{entry.shows}</td>
-              <td className="clipped-muted">{entry.needs}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <WaitingOn heading="What the Games screen will show" rows={MISSING} />
     </>
   );
 }
