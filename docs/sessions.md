@@ -347,6 +347,164 @@ A sidecar that cannot be written is a warning and nothing else. The video is wha
 cannot be made again, and a metadata failure must not cost a recording
 (AGENTS.md section 17).
 
+## When part of the pipeline fails
+
+SPEC.md section 35 and AGENTS.md sections 16 and 17. The rule behind every row
+below is one sentence: **the recording is the thing that cannot be made again**,
+so the pipeline gives it up last and always says what became of it.
+
+Three mechanisms carry most of it, and none of them is new to this section:
+
+- **The container.** MKV with `AVFMT_FLAG_FLUSH_PACKETS` and a one-second
+  cluster limit, so a recording killed mid-write is a playable recording of
+  everything up to the kill ([ADR 0001](adr/0001-mkv-archival-container.md),
+  [muxing.md](muxing.md), which measures exactly what is lost).
+- **Finalisation on every path out.** `clipped_session::record` flushes the
+  encoder and writes the trailer on a stop request, a closed window, an encoder
+  failure, a full disk and a panic — the muxing thread finalises from `Drop` as
+  well as from `finish`.
+- **The disk guard.** A recording watches how much room is left where it is
+  being written and stops itself *before* the drive fills, so that there is
+  still room to finish the file properly. See below.
+
+| What fails | What is kept | What the user is told | What they can do |
+| --- | --- | --- | --- |
+| The game crashes | Everything. The window goes first, so the recording has usually finished already | `end_reason=target-lost`, and the session ends after its restart grace | Nothing; a fast restart rejoins the same session |
+| The disk fills | Everything. The recording is stopped at the reserve, with room to write the trailer | `end_reason=disk-space-low`, and a warning four times the reserve earlier | Free up space, or record to another drive |
+| The output drive is unplugged | Whatever reached the drive before it went | `end_reason=output-unavailable` | Reconnect the drive; record to an internal one if it recurs |
+| The GPU driver resets | Everything up to the reset, finalised | `graphics-device-lost`, naming the driver reset rather than "encoding stopped" | Record again — a new encoder opens on the recovered device |
+| The encoder session table is full | Nothing was recorded; it failed to open | `encoder-unavailable`, naming the encoder | Close other recording or streaming applications; pick another encoder |
+| The recorder process is killed | Everything up to the last closed cluster | Nothing at the time. `clipped-recorder recover` finds it on the next launch | Keep it or discard it — see below |
+| The window changes size | Everything up to the change | `end_reason=target-resized`; a second recording follows in the same session | Nothing |
+| The machine sleeps | Everything up to the suspend | `system-resumed` in the session's events; a second recording follows | Nothing |
+| A metadata write fails | The video, always | A warning; the session is in memory until the next change | Nothing |
+
+Three of the failures SPEC.md section 35 lists are **not** covered here, and are
+not claimed to be: an audio device removed, a microphone changed and an HDR
+change. A recording has no audio track at all yet
+([#180](https://github.com/wildware-uk/clipped/issues/180)), so there is no
+device to lose; a high dynamic range capture is refused before it starts with a
+message naming [#99](https://github.com/wildware-uk/clipped/issues/99). Capture
+failures — a display disconnected, a backend that stops producing frames —
+surface as `capture-lost` with whatever `clipped-capture` said, and fallback
+between backends is [#97](https://github.com/wildware-uk/clipped/issues/97).
+
+### The disk guard
+
+The most likely real-world failure, and the one where doing nothing is actively
+destructive. A recorder that simply writes until the disk is full does not end
+with a slightly shorter recording: the writes start failing, and then the
+*trailer* write fails too, so the file loses its segment length, its duration and
+its cue index.
+
+So a recording holds itself to a floor and stops before it gets there.
+
+```text
+free space          verdict     what happens
+──────────          ───────     ────────────
+> 4 × reserve       ample       nothing
+> reserve           low         one warning, and the recording carries on
+≤ reserve           exhausted   the recording is finished, cleanly, now
+unreadable          —           the drive has gone; the recording is closed
+```
+
+The reserve defaults to **1 GiB**, which is about four minutes of 1080p60 at the
+bit rate a recording is given — long enough for somebody who is told mid-game to
+finish what they are doing, small enough not to make a half-full drive unusable.
+`RecordingSettings::with_minimum_free_space` moves it, and **zero turns the guard
+off** for a caller that would rather fill the disk than lose the tail of a
+recording.
+
+The same floor refuses a recording *before* it starts, because a recording that
+opens and is stopped four seconds later by the same floor looks like a bug rather
+than a full disk. A volume whose free space cannot be read is not refused: the
+recording is about to try to create a file on it, and that failure says something
+far more specific.
+
+Where the measurement happens matters. Reading a volume's free space is a
+filesystem call and the capture thread may not make one (AGENTS.md section 20),
+so the **writer thread** — which already owns the file — asks at most once every
+two seconds and publishes the answer as one atomic byte that the capture loop
+reads between frames. A recording with the guard turned off makes no extra
+filesystem call at all.
+
+### What a failure says
+
+Every failure a recording can have is turned into the same shape by
+`clipped_session::failure` (AGENTS.md section 45): a headline with no error codes
+in it, a sentence saying what became of the footage, at least one action, and the
+technical words kept but demoted.
+
+```text
+D: filled up while recording
+Everything recorded before this was finished and plays: D:\clips\clipped-…​.mkv
+  - Free up space on D:
+  - Record to a drive with more room
+  FFmpeg failed while writing a packet: No space left on device (-28)
+```
+
+Two conditions that arrive as the *same* error are deliberately told apart there,
+by the error number FFmpeg returned: `ENOSPC` is a full disk and `ENODEV` is an
+unplugged drive, and they want opposite advice. Offering both for either is how
+recovery advice becomes noise nobody reads.
+
+### Recovering what a killed recorder left
+
+A recorder that is killed — the process ended, the machine lost power — leaves
+two things: a file that plays as far as the last cluster it closed, and a session
+record whose entry for that recording says it began and never says it ended. The
+footage is not lost. Nothing knows about it.
+
+`clipped-recorder recover` is where somebody decides:
+
+```text
+clipped-recorder recover                                  list, and change nothing
+clipped-recorder recover --adopt                          keep them
+clipped-recorder recover --discard --session <ID>         delete one, and say so
+```
+
+`watch` says the same thing at start-up, once, and does nothing about it —
+start-up is also the only moment at which the question is unambiguous, because a
+recording that is *running* looks exactly like one that was interrupted and there
+is no lock file to tell them apart.
+
+Adopting writes an `ended_at` and the `interrupted` outcome onto the entry and
+appends a `recording-ended` event. **It does not touch the file**, and it does
+not rewrite it: a recording without a trailer plays from the start and is
+seekable only by scanning, and putting the index back means rewriting the
+container, which `clipped-muxer` cannot do yet
+([#283](https://github.com/wildware-uk/clipped/issues/283)). What adopting buys
+is that the footage is *known* — named, sized, attributed, and indexed like any
+other recording rather than looking like one still being written.
+
+Discarding deletes the file and writes the `discarded` outcome. It names one
+session, always: this is footage that cannot be made again, so there is
+deliberately no way to throw away everything at once (AGENTS.md section 56). The
+entry stays either way, because the record that a recording existed and was
+thrown away is worth more than a gap.
+
+Both are read-modify-write over the sidecar as JSON rather than through a typed
+mirror of the schema, so a file written by a newer Clipped keeps its newer fields
+when an older one recovers it (AGENTS.md sections 43 and 56).
+
+### The words
+
+The tokens the failure paths add to the vocabulary above, all of them written
+into the sidecar and into logs:
+
+| Field | Word | Means |
+| --- | --- | --- |
+| `recordings[].end_reason` | `disk-space-low` | Stopped deliberately at the reserve; the file is complete |
+| `recordings[].end_reason` | `output-unavailable` | The output drive stopped answering |
+| `recordings[].outcome` | `interrupted` | The recorder was killed; the footage was adopted afterwards |
+| `recordings[].outcome` | `discarded` | The same, and the file was deliberately deleted |
+
+`clipped-library`'s indexer does not know these four yet. It degrades gracefully
+— an unknown word becomes `NULL` and a reported `IndexProblem` — and teaching it
+is [#278](https://github.com/wildware-uk/clipped/issues/278). The IPC protocol
+carries the two end reasons as `EndReason::Other` for the same reason, and
+[#284](https://github.com/wildware-uk/clipped/issues/284) promotes them.
+
 ## How to run it
 
 ```text
@@ -376,6 +534,32 @@ afterwards, a deferred game's helper exiting before that game is promoted, a tie
 in the catalogue, a suspend during a recording and during a grace period, the
 recording cap, and shutting down — including shutting down while a recording is
 already being stopped for another reason.
+
+The failure paths are the same shape — thresholds and classification are pure
+functions, and the one filesystem call is asked of a real volume:
+
+```text
+cargo test -p clipped-session disk failure recovery muxing
+cargo test -p clipped-recorder --test recover_command
+```
+
+Those cover every band of the disk guard including a floor of zero and a floor
+near `u64::MAX`; the pre-flight refusal against a real drive in both directions;
+the guard's probe against a real volume and against one that is not there;
+telling a full disk from an unplugged drive by FFmpeg's error number; every
+`SessionError` having an action attached and keeping its technical detail; and
+recovery — finding an interrupted recording and not a finished one, adopting it
+without touching the file, discarding one and recording that it happened, a
+damaged sidecar not hiding the recoverable footage beside it, and a field a newer
+Clipped wrote surviving the rewrite.
+
+What is **not** covered automatically is a drive genuinely filling underneath a
+live recording. Doing that needs a small volume to fill and several seconds of
+real capture, so it is a manual reproduction: create a VHD of a few gigabytes,
+mount it, `clipped-recorder record --window <TITLE> --output <VHD>:\test.mkv`,
+and copy files onto it until the reserve is crossed. The recording should stop by
+itself with `Stopped because the drive was nearly full`, and `ffprobe` should
+report a duration and a seekable file rather than a truncation.
 
 The end-to-end tests need a GPU, an encoder and a desktop session, so they are
 `#[ignore]`d:

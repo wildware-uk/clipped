@@ -25,11 +25,12 @@
 
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
 use clipped_logging::RedactedPath;
 use clipped_session::{
-    record, CaptureTargetSettings, CodecPreference, EncoderPreference, RecordingReport,
-    RecordingSettings, ResolutionSetting, SessionError,
+    record, CaptureTargetSettings, CodecPreference, EncoderPreference, RecordingFailure,
+    RecordingReport, RecordingSettings, ResolutionSetting, SessionError,
 };
 use clipped_windows::{
     enumerate_windows, resolve, DpiAwareness, ResolveError, TargetSelector, WindowInfo,
@@ -153,7 +154,7 @@ pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
     crate::shutdown::allow_ctrl_c();
     tracing::debug!("Ctrl+C will stop the recording at the next frame boundary");
 
-    let report = run_until_shutdown(
+    let outcome = run_until_shutdown(
         &signal,
         |signal| record(&settings, signal),
         |reason| {
@@ -167,10 +168,43 @@ pub fn run(args: &RecordArgs) -> Result<(), RecordError> {
                 "the recording was finalised and the finalisation hook ran"
             );
         },
-    )?;
+    );
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(error) => {
+            report_failure(&error, &config.output);
+            return Err(RecordError::Session(error));
+        }
+    };
 
     report_completion(&report);
     Ok(())
+}
+
+/// Says what went wrong in the terms of somebody who was recording.
+///
+/// The error itself still reaches `main`, which prints it the way clap prints
+/// its own; this is the block above it, and it is where the recording's fate
+/// and the thing to do next are said. AGENTS.md section 45: a failure with no
+/// action attached is an error code with a sentence around it, and "the drive
+/// filled up, everything before that plays, free up space on D:" is what
+/// somebody actually needs.
+fn report_failure(error: &SessionError, output: &Path) {
+    let failure = RecordingFailure::of(error, output);
+
+    tracing::error!(
+        failure = failure.kind().token(),
+        output = %RedactedPath::new(output),
+        detail = failure.detail(),
+        "the recording failed"
+    );
+
+    eprintln!("{}", failure.headline());
+    eprintln!("{}", failure.footage_sentence(output));
+    for action in failure.actions() {
+        eprintln!("  - {action}");
+    }
 }
 
 /// Enumerates the desktop and finds the one window the target names.

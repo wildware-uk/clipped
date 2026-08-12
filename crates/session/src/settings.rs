@@ -174,6 +174,7 @@ pub struct RecordingSettings {
     capture_cursor: bool,
     audio_requested: bool,
     overwrite: bool,
+    minimum_free_space: u64,
 }
 
 impl RecordingSettings {
@@ -191,7 +192,20 @@ impl RecordingSettings {
             capture_cursor: false,
             audio_requested: false,
             overwrite: false,
+            minimum_free_space: crate::disk::DEFAULT_MINIMUM_FREE_SPACE,
         }
+    }
+
+    /// Sets how much of the output drive the recording refuses to consume.
+    ///
+    /// The recording is refused before it starts, and stopped cleanly if it is
+    /// already running, when the volume it writes to has this much left
+    /// (`crate::disk`). Zero turns the guard off, which is the caller saying it
+    /// would rather fill the disk than lose the end of the recording.
+    #[must_use]
+    pub const fn with_minimum_free_space(mut self, bytes: u64) -> Self {
+        self.minimum_free_space = bytes;
+        self
     }
 
     /// Sets the size to encode at.
@@ -305,6 +319,12 @@ impl RecordingSettings {
     #[must_use]
     pub const fn overwrite(&self) -> bool {
         self.overwrite
+    }
+
+    /// How much of the output drive the recording refuses to consume.
+    #[must_use]
+    pub const fn minimum_free_space(&self) -> u64 {
+        self.minimum_free_space
     }
 
     /// The size the encoder will be configured for, given what capture is
@@ -426,5 +446,22 @@ mod tests {
         assert_eq!(settings.encoder(), EncoderPreference::Automatic);
         assert!(!settings.capture_cursor());
         assert!(!settings.audio_requested());
+        assert_eq!(
+            settings.minimum_free_space(),
+            crate::disk::DEFAULT_MINIMUM_FREE_SPACE,
+            "a caller that says nothing must still get the disk guard"
+        );
+    }
+
+    #[test]
+    fn a_caller_that_would_rather_fill_the_disk_can_turn_the_guard_off() {
+        // Zero has to survive the builder: a setting that is silently replaced
+        // by the default is a control that does nothing (AGENTS.md section 27).
+        let settings = RecordingSettings::new(
+            CaptureTargetSettings::window(1, 1280, 720),
+            PathBuf::from("out.mkv"),
+        )
+        .with_minimum_free_space(0);
+        assert_eq!(settings.minimum_free_space(), 0);
     }
 }

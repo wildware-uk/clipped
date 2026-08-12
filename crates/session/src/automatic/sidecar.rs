@@ -242,15 +242,12 @@ impl<'a> SidecarRecording<'a> {
 
 /// The token a recording's end reason is written as.
 ///
-/// The same words `clipped-ipc` uses for the same thing, so a support request
-/// carrying `end_reason=target-lost` means one thing whichever file it came
-/// from.
+/// [`EndReason::token`](crate::report::EndReason::token) is where the words
+/// live, so that the sidecar, the IPC protocol and the log all name a reason
+/// the same way and a reason added later cannot be given a second spelling
+/// here (AGENTS.md section 55).
 fn end_reason_token(reason: crate::report::EndReason) -> &'static str {
-    match reason {
-        crate::report::EndReason::Stopped => "stopped",
-        crate::report::EndReason::TargetLost => "target-lost",
-        crate::report::EndReason::TargetResized => "target-resized",
-    }
+    reason.token()
 }
 
 /// One thing that happened during the session.

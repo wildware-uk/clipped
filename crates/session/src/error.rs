@@ -54,6 +54,18 @@ pub enum SessionError {
         /// What the filesystem said.
         source: std::io::Error,
     },
+    /// The drive the recording would go to is too nearly full to start one.
+    ///
+    /// Refused before anything is created rather than discovered four minutes
+    /// in. A recording is stopped, deliberately, when the volume reaches the
+    /// same floor (`crate::disk`), so starting one below it would produce a
+    /// file that ends almost immediately.
+    NotEnoughDiskSpace {
+        /// How many bytes are free on the volume.
+        free: u64,
+        /// The floor the recording holds itself to.
+        minimum: u64,
+    },
     /// The machine could not be asked what it can encode with.
     Detection(ProbeError),
     /// Capture is producing frames in a layout no encoder here accepts.
@@ -120,6 +132,14 @@ impl fmt::Display for SessionError {
                 formatter,
                 "the recording could not be created where it was asked for: {source}"
             ),
+            Self::NotEnoughDiskSpace { free, minimum } => write!(
+                formatter,
+                "there is not enough room where the recording would go: {} is free, and a \
+                 recording keeps {} in reserve so that it can always be finished properly. \
+                 Free up space or record to another drive",
+                crate::disk::describe_bytes(*free),
+                crate::disk::describe_bytes(*minimum)
+            ),
             Self::Detection(error) => write!(
                 formatter,
                 "the graphics adapters could not be enumerated, so no encoder could be \
@@ -177,6 +197,7 @@ impl Error for SessionError {
             | Self::NoGraphicsDevice
             | Self::NoEncoder { .. }
             | Self::NoFrames
+            | Self::NotEnoughDiskSpace { .. }
             | Self::WriterLost => None,
         }
     }

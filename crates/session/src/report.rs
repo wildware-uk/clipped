@@ -21,6 +21,7 @@ use clipped_encoder::{Codec, EncoderKind};
 
 /// Why a recording ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EndReason {
     /// The stop signal was raised — Ctrl+C, or the desktop application asking.
     Stopped,
@@ -34,6 +35,18 @@ pub enum EndReason {
     /// into the same file. The recording is finished where it is rather than
     /// filled with frames the track does not describe.
     TargetResized,
+    /// The drive being recorded to was nearly full, so the recording was
+    /// finished while there was still room to finish it properly.
+    ///
+    /// Deliberate, and not a failure: the alternative is writes that fail one
+    /// after another until the *trailer* write fails too, which costs the file
+    /// its duration and its cue index (`crate::disk`, AGENTS.md section 17).
+    DiskSpaceLow,
+    /// The drive being recorded to stopped answering — unplugged, or offline.
+    ///
+    /// Nothing further could be written, so the recording was closed where it
+    /// was. Whether the close itself reached the drive depends on when it went.
+    OutputUnavailable,
 }
 
 impl fmt::Display for EndReason {
@@ -44,7 +57,32 @@ impl fmt::Display for EndReason {
             Self::TargetResized => {
                 "Stopped because the recorded window changed size, which one file cannot follow."
             }
+            Self::DiskSpaceLow => {
+                "Stopped because the drive was nearly full, while there was still room to \
+                 finish the file properly."
+            }
+            Self::OutputUnavailable => {
+                "Stopped because the drive being recorded to stopped answering."
+            }
         })
+    }
+}
+
+impl EndReason {
+    /// The token this reason is written as, in a session's record and in logs.
+    ///
+    /// The same words `clipped-ipc` and `clipped-library` use for the same
+    /// thing, so `end_reason=target-lost` in a support bundle means one thing
+    /// whichever file it came from (`docs/sessions.md`).
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::TargetLost => "target-lost",
+            Self::TargetResized => "target-resized",
+            Self::DiskSpaceLow => "disk-space-low",
+            Self::OutputUnavailable => "output-unavailable",
+        }
     }
 }
 
@@ -284,6 +322,42 @@ mod tests {
         report.duration = Duration::ZERO;
         assert_eq!(report.sustained_framerate(), None);
         assert!(report.to_string().contains("no rate"), "{report}");
+    }
+
+    #[test]
+    fn a_recording_stopped_by_the_disk_guard_says_the_file_was_finished_properly() {
+        // The distinction the sentence has to carry: this is a recording that
+        // ended deliberately and completely, not one that was truncated. A user
+        // who reads it as a failure will go looking for a broken file.
+        let mut report = report();
+        report.end_reason = EndReason::DiskSpaceLow;
+        let line = report.to_string();
+        assert!(line.contains("nearly full"), "{line}");
+        assert!(
+            line.contains("finish the file properly"),
+            "the message must say the file is whole: {line}"
+        );
+    }
+
+    #[test]
+    fn every_end_reason_has_a_token_and_no_two_share_one() {
+        // The tokens are what a session's record, the IPC protocol and the
+        // library index are joined by, so two reasons sharing a word would make
+        // a support bundle unreadable and a reason with no word would index as
+        // nothing.
+        let reasons = [
+            EndReason::Stopped,
+            EndReason::TargetLost,
+            EndReason::TargetResized,
+            EndReason::DiskSpaceLow,
+            EndReason::OutputUnavailable,
+        ];
+        let mut tokens: Vec<&str> = reasons.iter().map(|reason| reason.token()).collect();
+        tokens.sort_unstable();
+        let count = tokens.len();
+        tokens.dedup();
+        assert_eq!(tokens.len(), count, "two end reasons share a token");
+        assert!(tokens.iter().all(|token| !token.is_empty()));
     }
 
     #[test]
