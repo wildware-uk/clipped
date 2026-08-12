@@ -363,3 +363,20 @@ whole-model tests carry the acceptance criteria of
 Comparing two documents with `==` would have been the easy version of the
 second, and would prove less: two documents can be equal and still be read
 differently if the reading depends on anything outside them.
+
+A round trip is also only worth what its fixture covers, which is a trap this
+one fell into: the first version of it left `aspect_ratio` and `soloed` at their
+defaults, so a build that discarded both on every save passed. The fixture now
+holds a value other than the default for every field of every structure this
+crate writes, and a second test enforces that by comparing it against a baseline
+document built from the plain constructors, over the serialised text, field by
+field. A field added to the model later arrives at that baseline's value on both
+sides, compares equal, and is named in the failure — so extending the model
+means extending the fixture, rather than quietly shipping a field nothing checks
+survives a save.
+
+The same file sweeps `deny_unknown_fields`: a key this build does not
+understand is pushed into every object of a fully populated document in turn —
+a segment, a span, a speed, a crop, a track, an input, an overlay, a position,
+the aspect ratio and the document itself — and each must be refused by name. A
+structure added later is swept without anybody adding it to a list.

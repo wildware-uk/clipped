@@ -129,7 +129,7 @@ surrounding responsibility.
 | Event/Highlight Engine | `clipped-events` (vocabulary), `clipped-session` (rules) | M8–M10 |
 | Media Library | `clipped-library` | M6 |
 | Storage Manager | `clipped-storage` (persistence); policy undecided | M6, M12 |
-| Export Engine | not yet created; `clipped-muxer` for remux | M11 |
+| Export Engine | not yet created; `clipped-edit` is the edit document it renders, `clipped-muxer` for remux | M11 |
 | Plugin Manager | `clipped-plugins` | M9 |
 | Game/Screen Capture | `clipped-capture` | M1 |
 | Audio Capture | `clipped-audio` | M1–M2 |
@@ -148,7 +148,13 @@ because `clipped-session` is the top layer — nothing else could reuse it there
 The Export
 Engine has no crate yet because nothing exports; creating an empty crate for it
 now would be speculative structure, and the M11 issues that build it will place
-it. Storage policy — quotas, retention, favourite protection — is listed as
+it. What does exist is the thing it will render: `clipped-edit` is the
+non-destructive edit document — which recordings to play, which parts of them,
+in which order, how loud each track is and what text goes over the picture
+([editing.md](editing.md)) — and it holds no exporter, no editor and no edit
+operation. It sits at layer 0 beside `clipped-ipc` because both ends of the
+application read a document, and it performs no file or database access at all,
+so a clip cannot damage the recording it refers to. Storage policy — quotas, retention, favourite protection — is listed as
 undecided for the same reason: the mechanism (SQLite, on-disk layout) is clearly
 `clipped-storage`, but no crate's documented remit claims the policy, and
 `clipped-library` explicitly claims indexing, search, favourites and tags
@@ -180,8 +186,10 @@ problem.
 Being blunt about it, because the gap between this section and the ones above is
 large:
 
-- The workspace, the eleven `clipped-*` crates, the recorder binary, the desktop
-  application's shell, and the four test suites exist.
+- The workspace, the `clipped-*` crates listed in README.md's layer table, the
+  recorder binary, the desktop application's shell, and the four test suites
+  exist. (The count was written down here once and went stale; the layer table
+  is the one place it is kept.)
 - Most crates under `crates/` contain **module documentation only**: no types,
   no functions and no capture code. Three are further on. `clipped-logging` has
   the subscriber setup and the typed logging context. `clipped-capture` has the
@@ -376,11 +384,13 @@ contributor working in it needs.
 | [plugin-api.md](plugin-api.md) | The `HighlightProvider` contract, plugin discovery and supervision, event translation | M9 |
 | [ipc.md](ipc.md) | The recorder control protocol: transport, framing, the handshake, the compatibility policy, the commands and events, and the security a local endpoint does and does not promise | M5 |
 | [desktop-ui.md](desktop-ui.md) | The window: the Tauri and React shell, its layout and navigation, the design tokens, the accessibility baseline, and why the Tauri crate is its own Cargo workspace | M5 |
+| [editing.md](editing.md) | What an edit is and what it deliberately is not: the document model, the two kinds of time it is written in, why a cut is stored as its result, where a document lives, and how one written by an older build is read | M11 |
 
 All but [capture-pipeline.md](capture-pipeline.md),
 [encoder-capabilities.md](encoder-capabilities.md), [muxing.md](muxing.md),
 [av-sync.md](av-sync.md), [desktop-ui.md](desktop-ui.md), [ipc.md](ipc.md),
-[game-detection.md](game-detection.md) and [sessions.md](sessions.md)
+[game-detection.md](game-detection.md), [sessions.md](sessions.md) and
+[editing.md](editing.md)
 are stubs today, stating what they will cover and which
 milestone writes them. `capture-pipeline.md` is
 written as far as the code goes: the capture backend interface and the selection
@@ -406,7 +416,10 @@ the reason for
 `sessions.md` covers what joins them: the session manager, every rule it applies,
 and the sidecar a session is written to until M6's database exists. Both are
 explicit about what is not built, which for sessions is three of the four capture
-modes and every per-game setting. The rest
+modes and every per-game setting. `editing.md` is a specification rather than a
+description, as `ipc.md` is: the document model exists in `clipped-edit` and is
+the shape the ten remaining M11 tickets are held to, but no editor, no export
+engine and no edit operation is written, and the document says so. The rest
 stay stubs on purpose: describing a capture pipeline that has not been written
 produces documentation that is wrong on the day it is committed.
 

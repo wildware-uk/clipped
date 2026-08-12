@@ -124,7 +124,7 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins` | layer 0 |
 | 2 | `clipped-muxer`, `clipped-replay` | layers 0–1 |
 | 3 | `clipped-session` | layers 0–2 |
@@ -151,6 +151,16 @@ key combination plus a handler the *caller* supplies
 process that owns a recording session registers a handler, and a hotkey crate
 that reached back into the session could be linked by neither the recorder nor
 the desktop application.
+
+`clipped-edit` sits at layer 0 for the reason `clipped-ipc` does: an edit
+document is read by *both* ends of the application
+([docs/editing.md](docs/editing.md)). The editor in the desktop process shows
+one, the recorder process exports it, and `clipped-storage` keeps it as text
+without understanding it — so a document model that reached into the recording
+engine could not be linked by the half of the system that only wants to draw a
+timeline. It holds no application logic and performs no file or database access
+at all, which is also the cheapest guarantee that editing cannot damage a
+recording: a crate that cannot open a file cannot rewrite one.
 
 `clipped-media-validation` (`tests/media`) is a test-only package too, but it
 sits at the *bottom* rather than the top, and deliberately: it is what every
@@ -212,9 +222,10 @@ is not responsible for, and where it sits in this stack.
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 | [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |
 | [docs/game-detection.md](docs/game-detection.md) | The game catalogue, its matching rules and how to add a game |
+| [docs/editing.md](docs/editing.md) | What an edit is, the two kinds of time it is written in, where it is stored and how a document from an older build is read |
 
-The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49 and #42
-and are listed here so those tickets do not each have to edit this table.
+The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49, #42 and
+#82 and are listed here so those tickets do not each have to edit this table.
 
 ## Contributing
 
