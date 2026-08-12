@@ -96,7 +96,16 @@ const LAYERS: &[&[&str]] = &[
     // repeats (AGENTS.md section 55). The dependency points one way: nothing in
     // `clipped-muxer` knows a replay buffer exists, which is what keeps a
     // recording and a clip written by the same code.
-    &["clipped-replay"],
+    //
+    // `clipped-export` is beside it and not above it: the two have nothing to
+    // do with each other — a replay is a window of packets held in memory, an
+    // export is a document rendered from files on disk — and both are here for
+    // the same reason, which is that they drive `clipped-muxer` to write a
+    // file rather than containing a second Matroska implementation. An export
+    // also *reads* containers, which nothing below layer 2 exposes, so it names
+    // `rusty_ffmpeg` directly under the amendment issue #155 made to ADR 0004,
+    // exactly as `clipped-waveform` does.
+    &["clipped-replay", "clipped-export"],
     // Application logic that coordinates every subsystem above.
     &["clipped-session"],
     // Executables and test-only packages.

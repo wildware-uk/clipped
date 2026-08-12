@@ -235,6 +235,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-export"
+version = "0.1.0"
+dependencies = [
+ "clipped-edit",
+ "clipped-ffmpeg-runtime",
+ "clipped-logging",
+ "clipped-media-validation",
+ "clipped-muxer",
+ "rusty_ffmpeg",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "clipped-ffmpeg-runtime"
 version = "0.1.0"
 
