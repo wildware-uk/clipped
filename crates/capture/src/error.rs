@@ -25,10 +25,12 @@ use crate::{CaptureMethod, TargetKind};
 ///   carry on.
 /// - [`Backend`](Self::Backend) is everything a backend could not classify.
 ///
-/// That split is the seam automatic fallback needs
-/// ([issue #97](https://github.com/wildware-uk/clipped/issues/97), milestone
-/// M13): deciding *whether* to fall back is reading these variants, and no
-/// runtime fallback exists yet.
+/// That split is what automatic fallback reads: [`response_to`](crate::response_to)
+/// turns these variants into "the recording is over", "restart this backend" or
+/// "try the next one", and [`CaptureFallback`](crate::CaptureFallback) acts on
+/// the answer ([issue #97](https://github.com/wildware-uk/clipped/issues/97)).
+/// A new variant here therefore has to decide which of those three it is, and
+/// the exhaustive `match` in `response_to` will not compile until it has.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum CaptureError {

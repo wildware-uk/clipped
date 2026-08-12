@@ -19,8 +19,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clipped_edit::{
-    AudioTrack, CropRect, EditDocument, OutputSpan, OutputTime, OverlayPosition, RecordingId,
-    Rotation, Segment, Source, SourceId, SourceSpan, SourceTime, Speed, TextOverlay, TrackInput,
+    AudioTrack, CropRect, EditDocument, EditHistory, EditOperation, OutputSpan, OutputTime,
+    OverlayPosition, RecordingId, Rotation, Segment, Source, SourceId, SourceSpan, SourceTime,
+    Speed, TextOverlay, TrackInput,
 };
 
 /// A directory of this test's own, removed when it is dropped.
@@ -151,6 +152,42 @@ fn editing_a_recording_leaves_the_recording_byte_for_byte_identical() {
         let _ = loaded.document.overlays_at(at).count();
     }
     let _ = loaded.document.write().expect("it saves again");
+
+    // Including editing it. Trimming, splitting and deleting are what a user
+    // would call "cutting the recording up", and they are the operations most
+    // likely to be assumed to touch it: cut eighteen of this clip's twenty-two
+    // seconds away, undo all of it, redo all of it, and save each result.
+    let mut history = EditHistory::new(loaded.document);
+    for operation in [
+        EditOperation::Split {
+            at: OutputTime::from_nanos(4_000_000_000),
+        },
+        EditOperation::DeleteSection {
+            range: OutputSpan::new(
+                OutputTime::from_nanos(6_000_000_000),
+                OutputTime::from_nanos(14_000_000_000),
+            )
+            .expect("the range ends after it starts"),
+        },
+        EditOperation::TrimStart {
+            at: OutputTime::from_nanos(2_000_000_000),
+        },
+        EditOperation::TrimEnd {
+            at: OutputTime::from_nanos(4_000_000_000),
+        },
+    ] {
+        assert!(
+            history.apply(operation).expect("the operation applies"),
+            "{operation:?} should have changed the document"
+        );
+        let _ = history.document().write().expect("an edited clip saves");
+    }
+    while history.undo() {
+        let _ = history.document().write().expect("it saves");
+    }
+    while history.redo() {
+        let _ = history.document().write().expect("it saves");
+    }
 
     let after = fs::read(&recording).expect("the recording is still there");
     assert_eq!(

@@ -5,9 +5,15 @@
 //! pipeline are separate pieces of work
 //! ([issue #15](https://github.com/wildware-uk/clipped/issues/15) onwards). So
 //! this example makes its own: a moving test pattern encoded to H.264 with the
-//! pinned FFmpeg build's own software encoder, and two tones as uncompressed
-//! PCM, written through the public API of `clipped_muxer` exactly as a session
-//! would write them.
+//! pinned FFmpeg build's own software encoder, and a tone per audio source as
+//! interleaved `f32` samples, written through the public API of `clipped_muxer`
+//! exactly as a session would write them.
+//!
+//! The audio tracks are the product's own — the compatibility mix, game, other
+//! system audio, microphone (`clipped_muxer::AudioSource`) — each carrying a
+//! different frequency, with the mix carrying all of them at once. That is what
+//! lets `tests/multi_track_audio.rs` prove the sources stayed apart by
+//! listening, rather than by counting streams.
 //!
 //! It is an example rather than a test because two of the muxer's tests need it
 //! as a *process*:
@@ -37,8 +43,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use clipped_muxer::{
-    AudioCodec, AudioTrack, EncodedPacket, FrameRate, Language, MkvWriter, PacketTimestamp,
-    RecordingLayout, TrackId, VideoCodec, VideoTrack,
+    AudioSource, AudioTrack, AudioTrackWriter, EncodedPacket, FrameRate, Language, MkvWriter,
+    PacketTimestamp, RecordingLayout, TrackId, VideoCodec, VideoTrack,
 };
 use rusty_ffmpeg::ffi;
 
@@ -105,19 +111,35 @@ struct Arguments {
     frame_rate: u32,
 
     /// How many audio tracks to write, each carrying a different tone.
+    ///
+    /// They are the product's own tracks, in the product's own order: the
+    /// compatibility mix, then game, other system audio, microphone, and
+    /// application tracks after that (SPEC.md sections 11 and 13).
     #[arg(long, default_value_t = 2)]
     audio_tracks: u16,
 
     /// Which audio track a player should choose on its own.
     ///
     /// Zero — the compatibility mix — is what a real recording marks (SPEC.md
-    /// section 13). Any other value is worth being able to write because a
-    /// container that simply enables the *first* track of each kind produces the
-    /// same file as one that carried the flag, so a test of the flag needs a
-    /// recording whose default track is not the first one
-    /// (`crates/muxer/tests/mp4_remux.rs`).
+    /// section 13) and what the track model produces on its own. Any other value
+    /// is worth being able to write because a container that simply enables the
+    /// *first* track of each kind produces the same file as one that carried the
+    /// flag, so a test of the flag needs a recording whose default track is not
+    /// the first one (`crates/muxer/tests/mp4_remux.rs`).
     #[arg(long, default_value_t = 0)]
     default_audio_track: u16,
+
+    /// A language tag to put on every audio track, as `eng`.
+    ///
+    /// Left off by default, because the track model does not guess one: game
+    /// audio has no language and a microphone's is a fact about the person
+    /// speaking (`clipped_muxer::AudioTrack::for_source`). It can be set because
+    /// a language only survives a change of container *visibly* when there is
+    /// one — Matroska omits the element for an unknown language and MP4 writes
+    /// `und`, so a recording that stated nothing proves nothing about whether
+    /// the tag was carried (`crates/muxer/tests/mp4_remux.rs`).
+    #[arg(long)]
+    audio_language: Option<String>,
 
     /// How far into the recording the audio starts, in milliseconds.
     ///
@@ -173,27 +195,29 @@ fn record(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
         .with_codec_private(encoder.codec_private())
         .with_name("Gameplay");
 
+    let language = arguments
+        .audio_language
+        .as_deref()
+        .map(Language::new)
+        .transpose()?;
+
     let mut layout = RecordingLayout::new(video);
     for index in 0..arguments.audio_tracks {
-        // The names the product uses (SPEC.md sections 11 and 13). The first
-        // track is the one a player should pick on its own.
-        let name = match index {
-            0 => "Compatibility Mix",
-            1 => "Game",
-            2 => "Other System Audio",
-            _ => "Microphone",
-        };
-        let mut track = AudioTrack::new(AudioCodec::PcmS16Le, SAMPLE_RATE, 2)
-            .with_name(name)
-            .with_language(Language::ENGLISH);
-        if index == arguments.default_audio_track {
-            track = track.as_default();
+        // Named, ordered and flagged by the track model rather than here
+        // (`clipped_muxer::audio`), which is the point: this example writes the
+        // tracks a real recording writes. The declarations go in in order only
+        // because that is easiest to read — the layout would put them in the
+        // same order whatever order they arrived in.
+        let mut track = AudioTrack::for_source(source_for(index), SAMPLE_RATE, CHANNELS)
+            .with_default_flag(index == arguments.default_audio_track);
+        if let Some(language) = language {
+            track = track.with_language(language);
         }
         layout = layout.with_audio_track(track);
     }
 
     let mut writer = MkvWriter::create(&arguments.output, &layout)?;
-    let mut audio = ToneGenerator::new(arguments.audio_tracks);
+    let mut audio = ToneGenerator::new(&layout)?;
 
     let frame_interval = Duration::from_secs(1) / arguments.frame_rate;
     // Counted rather than compared against a running total, so that
@@ -260,25 +284,76 @@ fn record(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
 /// runs at.
 const SAMPLE_RATE: u32 = 48_000;
 
-/// Generates a different tone for each audio track.
+/// Stereo, as every Windows output endpoint mixes at.
+const CHANNELS: u16 = 2;
+
+/// How loud each source's tone is, well below full scale so that the
+/// compatibility mix — which is the sum of them — does not clip.
+const AMPLITUDE: f32 = 0.4;
+
+/// Which source track `index` carries.
 ///
-/// Different frequencies rather than the same one on every track, because a
-/// test that proves the tracks are separate has to be able to tell them apart
-/// (AGENTS.md section 21), and because identical tracks would hide a muxer that
-/// wrote the same packets to every stream.
+/// The first four are the model's own (SPEC.md section 11); anything beyond them
+/// is an application track, which is what the model has any number of.
+fn source_for(index: u16) -> AudioSource {
+    match index {
+        0 => AudioSource::CompatibilityMix,
+        1 => AudioSource::Game,
+        2 => AudioSource::OtherSystemAudio,
+        3 => AudioSource::Microphone,
+        other => AudioSource::application(format!("Application {other}")),
+    }
+}
+
+/// The tone one track carries, in hertz, or [`None`] for the compatibility mix.
+///
+/// 440 Hz for the game, 880 Hz for other system audio and 1320 Hz for the
+/// microphone, which are AGENTS.md section 26's own frequencies: a test that
+/// proves the tracks stayed separate has to be able to tell them apart by
+/// listening, and identical tracks would hide a writer that sent the same
+/// packets to every stream.
+fn tone_for(index: u16) -> Option<f64> {
+    (index > 0).then(|| 440.0 * f64::from(index))
+}
+
+/// Generates a different tone for each audio track, and their mix for the first.
+///
+/// Not a generator so much as a stand-in for a set of captures: it produces
+/// interleaved `f32` samples exactly as `clipped-audio` does
+/// (`docs/audio-routing.md`) and hands them to the muxer's own
+/// [`AudioTrackWriter`], so the path this example exercises is the path a
+/// recording session takes.
 struct ToneGenerator {
-    tracks: u16,
+    tracks: Vec<TrackTone>,
     /// Reused between packets, so the generator is not the thing that makes
     /// this example slow.
-    bytes: Vec<u8>,
+    samples: Vec<f32>,
+}
+
+/// One track, and what it is playing.
+struct TrackTone {
+    writer: AudioTrackWriter,
+    /// The frequency this track carries, or [`None`] for the compatibility mix,
+    /// which carries every other track's tone at once.
+    frequency: Option<f64>,
 }
 
 impl ToneGenerator {
-    fn new(tracks: u16) -> Self {
-        Self {
-            tracks,
-            bytes: Vec::new(),
+    /// Prepares a writer for every audio track `layout` declares.
+    fn new(layout: &RecordingLayout) -> Result<Self, Box<dyn Error>> {
+        let mut tracks = Vec::new();
+        for (index, declared) in layout.audio_tracks().iter().enumerate() {
+            let index = u16::try_from(index)?;
+            tracks.push(TrackTone {
+                writer: AudioTrackWriter::new(TrackId::Audio(index), declared)?,
+                frequency: tone_for(index),
+            });
         }
+
+        Ok(Self {
+            tracks,
+            samples: Vec::new(),
+        })
     }
 
     /// Writes packet `index` of every track, `offset` into the recording.
@@ -298,30 +373,52 @@ impl ToneGenerator {
                 + i64::try_from(offset.as_nanos())?,
         );
 
-        for track in 0..self.tracks {
-            // 440 Hz on the first track, 660 Hz on the second, and so on.
-            let frequency = 440.0 * (1.0 + f64::from(track) * 0.5);
-            self.bytes.clear();
+        // The mix carries every other track's tone, averaged so that the sum
+        // stays inside full scale. That is what makes a recording written here
+        // worth asserting isolation against: the tones are all present in the
+        // file, and every other track has to hold exactly one of them.
+        let voices: Vec<f64> = self
+            .tracks
+            .iter()
+            .filter_map(|track| track.frequency)
+            .collect();
+
+        for track in &mut self.tracks {
+            self.samples.clear();
             for frame in 0..frames_per_packet {
                 let seconds = (first_frame + frame) as f64 / f64::from(SAMPLE_RATE);
-                let amplitude =
-                    (seconds * frequency * std::f64::consts::TAU).sin() * f64::from(i16::MAX) * 0.4;
-                // Stereo, both channels the same.
-                let sample = (amplitude as i16).to_le_bytes();
-                self.bytes.extend_from_slice(&sample);
-                self.bytes.extend_from_slice(&sample);
+                let amplitude = match track.frequency {
+                    Some(frequency) => sine(seconds, frequency),
+                    None if voices.is_empty() => 0.0,
+                    // A one-track recording has nothing to mix, so the mix is
+                    // silent rather than invented.
+                    None => {
+                        voices
+                            .iter()
+                            .map(|voice| sine(seconds, *voice))
+                            .sum::<f32>()
+                            / voices.len() as f32
+                    }
+                };
+                // Both channels the same: what is being tested here is which
+                // track the sound is on, not where it sits in the stereo image.
+                for _ in 0..CHANNELS {
+                    self.samples.push(amplitude);
+                }
             }
 
-            writer.write_packet(
-                &EncodedPacket::new(TrackId::Audio(track), timestamp, &self.bytes)
-                    .with_duration(AUDIO_PACKET)
-                    // Every PCM packet is independently decodable.
-                    .with_keyframe(true),
-            )?;
+            track
+                .writer
+                .write_samples(writer, timestamp, &self.samples)?;
         }
 
         Ok(())
     }
+}
+
+/// One sample of a sine at `frequency`, `seconds` into the recording.
+fn sine(seconds: f64, frequency: f64) -> f32 {
+    (seconds * frequency * std::f64::consts::TAU).sin() as f32 * AMPLITUDE
 }
 
 /// The pinned build's software H.264 encoder, wrapped just enough to produce

@@ -2,7 +2,8 @@
 //!
 //! [`select`](crate::select) is deliberately a pure function over a candidate
 //! list it is handed, so that it can be tested without a display and so that
-//! runtime fallback is "call it again with one fewer candidate"
+//! runtime fallback is "call it again with one fewer candidate", which is what
+//! [`CaptureFallback`](crate::CaptureFallback) does
 //! ([issue #97](https://github.com/wildware-uk/clipped/issues/97)). Something
 //! still has to say what the list *is* for a real recording, and this is it —
 //! one place, so that "does this build have a Windows Graphics Capture backend?"

@@ -141,7 +141,16 @@ fn a_remuxed_recording_holds_every_track_the_source_did_and_decodes_the_same_pic
     // Three audio tracks, because a recording has several (SPEC.md section 11)
     // and "retains every audio track" is the first acceptance criterion. A
     // remuxer that carried only the first would pass every other check here.
-    let source = record(&directory, "recording.mkv", &["--audio-tracks", "3"]);
+    // With a language stated on the audio tracks, which the track model does not
+    // invent (`clipped_muxer::AudioTrack::for_source`): the assertions below
+    // include the language surviving the change of container, and Matroska omits
+    // the element for an unknown language while MP4 writes `und`, so a recording
+    // that stated nothing would satisfy them whether or not the tag was carried.
+    let source = record(
+        &directory,
+        "recording.mkv",
+        &["--audio-tracks", "3", "--audio-language", "eng"],
+    );
     let destination = directory.file("recording.mp4");
 
     let summary = remux_to_mp4(&source, &destination).expect("the recording remuxes");

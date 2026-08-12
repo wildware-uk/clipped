@@ -35,6 +35,13 @@
 //! audio tracks — into Matroska as the packets arrive, and [`linkage`] reports
 //! and probes the FFmpeg actually loaded.
 //!
+//! [`AudioSource`] is the track model those audio tracks are described from:
+//! what each track is called, what order they are in — the compatibility mix
+//! first — and which one a player selects on its own (SPEC.md sections 11 and
+//! 13). [`AudioTrackWriter`] is the path from a capture's interleaved samples to
+//! packets on one of them, and the reason a recording's sources cannot end up
+//! sharing a track by accident (AGENTS.md section 21).
+//!
 //! [`remux_to_mp4`] copies a finished recording into MP4 without decoding it, so
 //! that a recording can be uploaded somewhere that will not take Matroska
 //! without waiting for a re-encode or losing quality to one (ADR 0001).
@@ -57,7 +64,7 @@
 //! ```no_run
 //! use std::path::Path;
 //! use clipped_muxer::{
-//!     AudioCodec, AudioTrack, EncodedPacket, MkvWriter, PacketTimestamp, RecordingLayout,
+//!     AudioSource, AudioTrack, EncodedPacket, MkvWriter, PacketTimestamp, RecordingLayout,
 //!     TrackId, VideoCodec, VideoTrack,
 //! };
 //!
@@ -67,12 +74,11 @@
 //! let layout = RecordingLayout::new(
 //!     VideoTrack::new(VideoCodec::H264, 2560, 1440).with_codec_private(sequence_header),
 //! )
-//! .with_audio_track(
-//!     AudioTrack::new(AudioCodec::PcmS16Le, 48_000, 2)
-//!         .with_name("Compatibility Mix")
-//!         .as_default(),
-//! )
-//! .with_audio_track(AudioTrack::new(AudioCodec::PcmS16Le, 48_000, 2).with_name("Game"));
+//! .with_audio_track(AudioTrack::for_source(AudioSource::Game, 48_000, 2))
+//! .with_audio_track(AudioTrack::for_source(AudioSource::Microphone, 48_000, 1))
+//! // Declared last and written first: the track order is the model's, not the
+//! // caller's.
+//! .with_audio_track(AudioTrack::for_source(AudioSource::CompatibilityMix, 48_000, 2));
 //!
 //! let mut writer = MkvWriter::create(Path::new("recording.mkv"), &layout)?;
 //! writer.write_packet(
@@ -84,6 +90,7 @@
 //! # }
 //! ```
 
+pub mod audio;
 mod av;
 pub mod error;
 pub mod linkage;
@@ -93,6 +100,7 @@ mod timeline;
 pub mod track;
 pub mod writer;
 
+pub use crate::audio::{AudioSource, AudioTrackWriter, RECORDING_AUDIO_CODEC};
 pub use crate::error::{AvError, MuxError};
 pub use crate::packet::{EncodedPacket, PacketTimestamp};
 pub use crate::remux::{

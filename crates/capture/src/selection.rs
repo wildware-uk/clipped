@@ -226,13 +226,13 @@ impl Error for SelectionError {}
 /// rather than a mystery, and it is testable on a build machine with no
 /// display — which the tests in this module do.
 ///
-/// It is also the seam for automatic fallback after a mid-recording failure
-/// ([issue #97](https://github.com/wildware-uk/clipped/issues/97), milestone
-/// M13). That is out of scope here and no part of it is built, but because
-/// selection is a pure function of the candidate list, falling back needs no
-/// new interface: call this again with the failed method removed from the
-/// slice. What M13 has to add is the part that is genuinely missing — deciding
-/// *when* a backend has failed, and remembering the answer per game.
+/// It is also the seam automatic fallback is built on
+/// ([issue #97](https://github.com/wildware-uk/clipped/issues/97)): because
+/// selection is a pure function of the candidate list, falling back needed no
+/// new interface here. [`CaptureFallback`](crate::CaptureFallback) calls this
+/// again with the failed method removed from the slice, and adds the parts that
+/// were genuinely missing — deciding *when* a backend has failed, and what a
+/// replacement has to produce before it is allowed to take over.
 ///
 /// # Errors
 ///
@@ -785,10 +785,9 @@ mod tests {
 
     #[test]
     fn re_selecting_without_a_failed_method_is_the_fallback_seam() {
-        // Runtime fallback belongs to issue #97 and is not built. This test
-        // records the property that lets it be built without changing this
-        // interface: selection is a pure function of the candidate list, so
-        // "fall back" is "ask again without that candidate".
+        // The property `CaptureFallback` (issue #97) is built on, asserted here
+        // rather than only relied on there: selection is a pure function of the
+        // candidate list, so "fall back" is "ask again without that candidate".
         let wgc = FakeDeclaration::available(CaptureMethod::WindowsGraphicsCapture);
         let duplication = FakeDeclaration::available(CaptureMethod::DesktopDuplication);
         let registry: [&dyn BackendDeclaration; 2] = [&wgc, &duplication];
