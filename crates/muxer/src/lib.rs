@@ -35,7 +35,15 @@
 //! audio tracks — into Matroska as the packets arrive, and [`linkage`] reports
 //! and probes the FFmpeg actually loaded. Remuxing to MP4
 //! ([issue #92](https://github.com/wildware-uk/clipped/issues/92)) is not
-//! written yet, and neither is the replay buffer's segment writing.
+//! written yet.
+//!
+//! A replay clip is written by this same writer rather than by anything of its
+//! own: `clipped_replay::save_clip` leases the segments a clip needs and drives
+//! [`MkvWriter`] over them
+//! ([issue #37](https://github.com/wildware-uk/clipped/issues/37)). Nothing here
+//! knows a replay buffer exists, and nothing here should — the dependency points
+//! the other way, which is what keeps a recording and a clip written by one
+//! implementation.
 //!
 //! `docs/muxing.md` is the subsystem document: what the container guarantees
 //! when a recording is interrupted, how timestamps are converted, and how the
