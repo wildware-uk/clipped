@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from 'react';
 
-import { describeProblem, useSessions } from './library';
+import { describeProblem, headlineProblem, useSessions } from './library';
 import { SessionList } from './SessionList';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -131,13 +131,21 @@ export function LibraryScreen(): ReactNode {
 
       {read.state === 'unread' && (
         <section className="clipped-panel" aria-label="Sessions">
-          <h2 className="clipped-panel__heading">Your library could not be read</h2>
+          <h2 className="clipped-panel__heading">{headlineProblem(read.problem)}</h2>
           <p className="clipped-panel__body">{describeProblem(read.problem)}</p>
-          <p className="clipped-panel__body clipped-muted">
-            This is not the same as an empty library, and nothing here has been guessed at. Your
-            recordings are ordinary video files and play in anything; the session record beside them
-            is JSON, and is what the index is rebuilt from.
-          </p>
+          {/*
+           * Only for a library that could not be read. A query that would not
+           * parse is the user's own typing and needs no reassurance about their
+           * recordings being safe — offering it would imply something is wrong
+           * with the library when nothing is.
+           */}
+          {read.problem.code !== 'invalid_parameters' && (
+            <p className="clipped-panel__body clipped-muted">
+              This is not the same as an empty library, and nothing here has been guessed at. Your
+              recordings are ordinary video files and play in anything; the session record beside
+              them is JSON, and is what the index is rebuilt from.
+            </p>
+          )}
         </section>
       )}
 

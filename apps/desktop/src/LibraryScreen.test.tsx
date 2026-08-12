@@ -235,6 +235,17 @@ describe('the Library screen', () => {
     await user.click(screen.getByRole('button', { name: 'Search' }));
 
     expect(await screen.findByText(/expected a term after/)).toBeInTheDocument();
+    // And it is said as a search that could not be run, not as a library that
+    // could not be read. The library is fine; the query is not, and sending
+    // somebody to look for a fault in their recordings would be wrong twice
+    // over — it is untrue, and it hides the thing they can actually fix.
+    expect(
+      await screen.findByRole('heading', { name: 'That search could not be run' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Your library could not be read' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('main')).not.toHaveTextContent(/ordinary video files/);
   });
 
   /*
