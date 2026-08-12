@@ -282,6 +282,12 @@ dependencies = [
 [[package]]
 name = "clipped-library"
 version = "0.1.0"
+dependencies = [
+ "clipped-edit",
+ "clipped-events",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "clipped-logging"

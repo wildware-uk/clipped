@@ -8,5 +8,22 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[dependencies]
+# The two layer 0 vocabularies a virtual clip is made of, and the reason it
+# lives here rather than in either of them: a clip is a range of a recording
+# (`clipped-edit`) that exists because of something that happened in a game
+# (`clipped-events`), and those two crates cannot name each other. This is the
+# lowest crate that can see both (docs/highlights.md).
+clipped-edit.workspace = true
+clipped-events.workspace = true
+# A clip's origin is stored, and read back by the build after next. Taken from
+# the workspace so there is one serde in the binary.
+serde.workspace = true
+
+[dev-dependencies]
+# Only the tests read an origin back as text; nothing in the crate itself
+# produces JSON yet.
+serde_json.workspace = true
+
 [lints]
 workspace = true
