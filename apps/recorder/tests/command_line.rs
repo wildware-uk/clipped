@@ -11,13 +11,23 @@
 //! What a *successful* recording produces is `tests/record_end_to_end.rs`,
 //! which needs a GPU and a desktop session; nothing in this file starts a
 //! capture.
+//!
+//! One test here starts `watch`, which does not exit on its own, and stops it
+//! once it has said it is watching. It is in this file rather than beside the
+//! rest of `watch`'s tests because what it is about is only true of the built
+//! program: a sentence on the console of whoever started it.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::CommandFactory;
 use clipped_recorder::cli::{Cli, TARGET_ARGUMENTS};
+use clipped_session::config::FILE_NAME;
 
 /// Exit code for arguments that were rejected. Mirrors
 /// `clipped_recorder::EXIT_USAGE`, restated so that the test fails if the value
@@ -518,5 +528,156 @@ fn the_version_is_reported_on_standard_output() {
         stdout(&output).contains(env!("CARGO_PKG_VERSION")),
         "{}",
         stdout(&output)
+    );
+}
+
+/// How long `watch` is given to reach the point where it says it is watching.
+///
+/// Start-up subscribes to WMI, which is a fraction of a second on an idle
+/// machine and longer on a loaded one. Nothing waits for the whole of this in
+/// the ordinary case — the wait ends at the announcement — so it is set
+/// generously: a tighter timeout buys nothing and costs a flaky test (AGENTS.md
+/// section 25).
+const WATCH_START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The environment variable naming the per-user root Clipped keeps its files
+/// under, and the directory it makes inside it — `%LOCALAPPDATA%\Clipped` on
+/// Windows.
+///
+/// `clipped_logging::application_directory` is what the recorder itself calls,
+/// and the rule is restated here rather than asked of it because that function
+/// reads *this* process's environment. What is under test is a child's, and
+/// setting the variable process-wide would be visible to every test running
+/// beside this one.
+#[cfg(windows)]
+const PER_USER_ROOT_VARIABLE: &str = "LOCALAPPDATA";
+#[cfg(windows)]
+const PER_USER_DIRECTORY: &str = "Clipped";
+#[cfg(not(windows))]
+const PER_USER_ROOT_VARIABLE: &str = "XDG_STATE_HOME";
+#[cfg(not(windows))]
+const PER_USER_DIRECTORY: &str = "clipped";
+
+/// Runs `watch` with `home` as Clipped's per-user root until it says it is
+/// watching, stops it, and returns everything it wrote to standard error.
+///
+/// `watch` runs until Ctrl+C, so waiting for it to exit would wait for ever,
+/// and killing it after a fixed sleep would be a race. Stopping it at the
+/// announcement is neither: the settings file is read during start-up, before
+/// `Watching for games.` is printed, so a run that has printed that has already
+/// done the part this file is about.
+///
+/// Standard error is read on a thread of its own. A pipe holds a few kilobytes;
+/// a child left to fill one and block would be a deadlock rather than a
+/// failure.
+fn watch_until_it_is_watching(home: &Path, recordings: &Path) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clipped-recorder"))
+        .args([
+            "watch",
+            "--output-directory",
+            recordings.to_str().expect("the path is valid UTF-8"),
+        ])
+        .env(PER_USER_ROOT_VARIABLE, home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the recorder binary can be run");
+
+    let pipe = child.stderr.take().expect("standard error was piped");
+    let (lines, printed) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(pipe).lines() {
+            let Ok(line) = line else { return };
+            if lines.send(line).is_err() {
+                return;
+            }
+        }
+    });
+
+    let deadline = Instant::now() + WATCH_START_TIMEOUT;
+    let mut collected: Vec<String> = Vec::new();
+    let mut watching = false;
+    while !watching {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match printed.recv_timeout(remaining) {
+            Ok(line) => {
+                watching = line.starts_with("Watching for games.");
+                collected.push(line);
+            }
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    reader.join().expect("the reader thread does not panic");
+    while let Ok(line) = printed.try_recv() {
+        collected.push(line);
+    }
+
+    let console = collected.join("\n");
+    assert!(
+        watching,
+        "`watch` never got as far as watching, so nothing about its start-up was \
+         exercised:\n{console}"
+    );
+    console
+}
+
+#[test]
+fn watch_says_on_the_console_that_a_settings_file_it_cannot_read_was_left_alone() {
+    // The other half of this report is the log, and `tests/unreadable_settings.rs`
+    // holds that half. This is the half a user who started `watch` in a terminal
+    // sees, and only the built program can show it: the sentence is written by
+    // `eprintln!`, so nothing that calls `load_configuration` in-process can
+    // tell whether it was written at all.
+    let home = TestDirectory::new("unreadable-settings-home");
+    let settings = home.path().join(PER_USER_DIRECTORY);
+    fs::create_dir_all(&settings).expect("the settings directory can be created");
+    let unreadable = "{ \"schema_version\": 99, \"this build\": cannot read this";
+    fs::write(settings.join(FILE_NAME), unreadable).expect("the settings file can be written");
+
+    let recordings = TestDirectory::new("unreadable-settings-recordings");
+    let console = watch_until_it_is_watching(home.path(), recordings.path());
+
+    // The sentence has to *start* a line, which is what separates it from the
+    // log record of the same report. That record also reaches standard error on
+    // a default configuration, but it begins with a timestamp and carries the
+    // sentence as a quoted field — so a `contains` here would pass with the
+    // console half deleted, and this does not.
+    let sentence = console
+        .lines()
+        .find(|line| line.starts_with("Settings not applied:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "nothing on the console said the settings file could not be read, so somebody \
+                 watching a terminal is told nothing:\n{console}"
+            )
+        });
+    assert!(
+        sentence.ends_with("left as it is."),
+        "the sentence must reach the console whole, including the part that says the file was \
+         not written over: {sentence}"
+    );
+
+    // What the sentence promises, checked rather than taken on trust.
+    assert_eq!(
+        fs::read_to_string(settings.join(FILE_NAME)).expect("the settings file is still there"),
+        unreadable,
+        "a file the recorder said it had left alone must be exactly as it was found"
+    );
+
+    // And a run with nothing wrong says none of it. Without this, the assertion
+    // above would also pass if the sentence were printed unconditionally.
+    let quiet_home = TestDirectory::new("no-settings-home");
+    let quiet_recordings = TestDirectory::new("no-settings-recordings");
+    let quiet = watch_until_it_is_watching(quiet_home.path(), quiet_recordings.path());
+    assert!(
+        !quiet.contains("Settings not applied"),
+        "a machine with no settings file has nothing wrong with it:\n{quiet}"
     );
 }

@@ -7,6 +7,13 @@
 //! that the user is told — because a diagnostic nobody observes is a line
 //! somebody can delete without a single test noticing.
 //!
+//! This file is the **log** half of that report. The report also goes to
+//! standard error, and no subscriber installed in this process can see an
+//! `eprintln!`; that half is
+//! `command_line.rs`'s
+//! `watch_says_on_the_console_that_a_settings_file_it_cannot_read_was_left_alone`,
+//! which starts the built `watch` and reads what it printed.
+//!
 //! # Why this is a binary of its own
 //!
 //! The report is observed by running the real `load_configuration` against a

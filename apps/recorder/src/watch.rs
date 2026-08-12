@@ -348,15 +348,24 @@ pub fn load_configuration(path: Option<&Path>) -> Configuration {
 
 /// Says, once, that a settings file could not be read.
 ///
-/// One function rather than two statements at the call site so that "it was
-/// reported" is a single thing to delete and a single thing to observe:
-/// `tests/unreadable_settings.rs` drives [`load_configuration`] into a
-/// subscriber and fails if this stops happening.
+/// One function rather than two statements at the call site, so that "it was
+/// reported" is one thing to find and one thing to change.
 ///
 /// The same sentence goes to both places. The log is where it is found months
 /// later and the console is where somebody who started `watch` in a terminal
 /// sees it now, and a diagnostic that only one of them carries is one half of
 /// the users never see (`docs/logging.md`, AGENTS.md section 45).
+///
+/// Both halves are held by a test, and they have to be different tests because
+/// they are observed in different places:
+///
+/// - the log, by `tests/unreadable_settings.rs`, which drives
+///   [`load_configuration`] into a subscriber of its own;
+/// - the console, by `command_line.rs`'s
+///   `watch_says_on_the_console_that_a_settings_file_it_cannot_read_was_left_alone`,
+///   which starts the built `watch` over an unreadable file and reads its
+///   standard error. Nothing in this process can see an `eprintln!`, so until
+///   that test existed this line could be deleted with every test still green.
 fn report_unreadable_settings(error: &ConfigurationError) {
     let sentence = unreadable_settings_sentence(error);
     tracing::warn!(
