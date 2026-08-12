@@ -869,6 +869,41 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_that_rounds_onto_a_segments_own_start_leaves_the_segment_whole() {
+        // Ten nanoseconds of material stretched over ten milliseconds of
+        // output. Anything in the first millionth of that maps to source offset
+        // zero, so the cut lands on the segment's own start and there is
+        // nothing to divide: the boundary is the one already in front of it.
+        // Getting that index wrong is a trim that silently drops the segment,
+        // and it is only reachable at speeds this extreme, which is exactly why
+        // it is asserted rather than reasoned about.
+        let source = SourceId::new(0);
+        let document = EditDocument::new("Ace")
+            .with_source(Source::new(source, RecordingId::new("rec-1")))
+            .with_segment(
+                Segment::new(source, span(0, 10))
+                    .at_speed(Speed::new(1, 1_000_000).expect("a valid speed")),
+            );
+        assert_eq!(document.output_duration_nanos(), Some(10_000_000));
+
+        let at = OutputTime::from_nanos(500_000);
+        assert_eq!(
+            document
+                .apply(EditOperation::TrimStart { at })
+                .expect("half a millisecond in is inside the clip"),
+            document,
+            "the material before the cut is under a nanosecond of source, so all of it stays"
+        );
+        assert_eq!(
+            document
+                .apply(EditOperation::Split { at })
+                .expect("half a millisecond in is inside the clip"),
+            document,
+            "and there is no boundary to add there"
+        );
+    }
+
+    #[test]
     fn a_split_keeps_the_crop_and_the_rotation_of_the_segment_it_divides() {
         use crate::framing::{CropRect, Rotation};
 
