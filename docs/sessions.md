@@ -98,7 +98,9 @@ that reaches the recorder.
 3. If nothing matches, nothing happens. That is almost every launch on a Windows
    machine, and it is logged at `debug` because the volume would otherwise
    dominate the diagnostics.
-4. If something matches, a session opens and a recording is asked for.
+4. If something matches, a session opens and a recording is asked for — with the
+   settings resolved for *that game* at that moment, over the global ones
+   ("What a recording is made with", below).
 5. The driver waits for the game to put a capturable window on screen —
    `--window-timeout`, two minutes by default. A launch is reported a few seconds
    after the process starts and a game can take much longer than that to reach a
@@ -252,11 +254,39 @@ Only the last is a command-line option. The other four are
 not exposed to a user yet because the place a user would set them is the settings
 screen (M5) and the per-game overrides (M7).
 
-**Per-game settings are not applied.** A catalogue entry can carry
-`default_settings` and nothing reads them, deliberately: per-game configuration
-is M7 (SPEC.md section 31), and interpreting them here would be building a later
-milestone's work. Every automatic recording is made with the global settings
-`watch` was given.
+### What a recording is made with
+
+Those four are how the *session* behaves. What the recording itself is made with
+— the size, the frame rate, the codec, the encoder, the two audio selections —
+comes from the user's settings, resolved for the game that launched
+(`docs/configuration.md`):
+
+```text
+default          →  global  →  this game
+```
+
+The manager resolves them **once, at the moment it asks for a recording**, and
+hands the answer over on `RecordingRequest::settings`. Nothing re-reads it: a
+settings change while a game is being recorded applies to the next recording,
+not to the encoder that is running. A game the user has set nothing for
+inherits the global settings, which is not a special case but what a layer
+saying nothing means; a session filed under `unattributed` — the catalogue
+tied — is recorded at the global settings rather than at one candidate's.
+
+A setting that this machine cannot honour does not cost the session. A
+configured encoder that will not open is followed by the ranked ones, and a
+configured size the capture is not producing is recorded at the size it is
+captured at; both are logged at `warn` and both appear in the session's record.
+A recording asked for by hand — `clipped-recorder record --encoder nvenc` — is
+still refused, for the reason `docs/configuration.md` gives.
+
+**One link is missing.** `apps/recorder/src/watch.rs` does not yet hand the
+session manager a `ConfigurationStore` or apply what it is given, so on a
+shipped build today every automatic recording is still made with the settings
+`watch`'s command line was given. It is the rest of
+[#61](https://github.com/wildware-uk/clipped/issues/61). A catalogue entry's own
+`default_settings` remain uninterpreted, which is a fourth layer and
+[#247](https://github.com/wildware-uk/clipped/issues/247).
 
 ## Where a session is written down
 
@@ -308,7 +338,17 @@ one sitting, one file — produces a file named after the session and nothing el
       "duration_seconds": 1084.0,
       "width": 2560,
       "height": 1440,
-      "end_reason": "target-lost"
+      "end_reason": "target-lost",
+      "settings": {
+        "capture_target": { "value": "game-window", "source": "default" },
+        "resolution": { "value": "2560x1440", "source": "game" },
+        "framerate": { "value": "60", "source": "global" },
+        "codec": { "value": "auto", "source": "default" },
+        "encoder": { "value": "auto", "source": "default" },
+        "microphone": { "value": "default", "source": "default" },
+        "system_audio": { "value": "default", "source": "default" },
+        "replay_window_seconds": { "value": "300", "source": "default" }
+      }
     }
   ],
   "clips": [],
@@ -321,6 +361,20 @@ one sitting, one file — produces a file named after the session and nothing el
   ]
 }
 ```
+
+`settings` is what that recording was made with, and where each answer came
+from: the value in the words `settings.json` uses, so the two can be read
+against each other, and the layer that supplied it, because "this game
+overrode it" and "it followed the global settings" are different things to go
+and change. It is per recording rather than per session because that is where
+the answer can differ — a session that spans a settings change holds one
+recording made at the old settings and one at the new.
+
+The key was added after the schema shipped and the `schema_version` is
+deliberately unchanged: every other field means exactly what it did, and a
+reader that does not know the key ignores it. A sidecar written by an older
+build has no `settings` on its recordings, which is not the same as a recording
+made at the defaults.
 
 `clips` and `bookmarks` are **always empty in this build**. They are written so
 that a reader can tell "no clips" from "a file that predates clips", and so that

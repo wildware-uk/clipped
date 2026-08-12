@@ -25,13 +25,17 @@
 //! subsystem that does not exist is a control that silently does nothing
 //! (AGENTS.md section 27). Each arrives with the subsystem that reads it.
 
+use core::fmt;
 use core::time::Duration;
 
 use clipped_replay::{MAXIMUM_WINDOW, MINIMUM_WINDOW};
 
 use crate::config::error::SettingError;
 use crate::config::value::{Resolved, Scope, SettingKey, SettingSource};
-use crate::settings::{CodecPreference, EncoderPreference, ResolutionSetting, DEFAULT_FRAMERATE};
+use crate::settings::{
+    AudioSourceSetting, CodecPreference, EncoderPreference, RecordingSettings, ResolutionSetting,
+    UnavailableChoice, DEFAULT_FRAMERATE,
+};
 
 /// The lowest frame rate a recording may be configured for.
 ///
@@ -615,6 +619,91 @@ impl ResolvedSettings {
     #[must_use]
     pub fn is_overridden(&self, key: SettingKey) -> bool {
         self.source_of(key) == self.scope.layer()
+    }
+
+    /// `key`'s effective value, spelled the way the settings file spells it.
+    ///
+    /// The same words `--codec hevc` and `"codec": "hevc"` use, so that a log
+    /// line, a session's record and the file a user edited all say the same
+    /// thing about the same setting (`crate::config::document`).
+    #[must_use]
+    pub fn written_value(&self, key: SettingKey) -> String {
+        crate::config::document::written_setting(self, key)
+    }
+
+    /// These settings, applied to a recording.
+    ///
+    /// This is the whole of "the settings that apply are that game's": a
+    /// caller resolves once, for one game, and hands the answer to the
+    /// recording it is about to start. Nothing re-reads the configuration
+    /// afterwards, so a settings change during a recording reaches the *next*
+    /// one — a value changing under a running encoder is a different feature
+    /// and not this one.
+    ///
+    /// What `recording` already carries and this does not touch: what to
+    /// capture and where to write it, both of which the caller has resolved
+    /// against the machine, and the disk guard.
+    ///
+    /// Two settings are deliberately not applied here because they are not
+    /// fields of a [`RecordingSettings`]:
+    ///
+    /// - [`capture_target`](Self::capture_target) decides *which handle* the
+    ///   caller resolves — the game's window, or the display it is on — so it
+    ///   is read before a recording's target exists.
+    /// - [`replay_window`](Self::replay_window) becomes a
+    ///   `clipped_replay::ReplayConfig`, which is built where a recording opens
+    ///   a replay buffer.
+    ///
+    /// The recording is given [`UnavailableChoice::Substitute`], which is the
+    /// difference between a setting and a command-line flag: a configured
+    /// encoder this machine no longer has substitutes and logs rather than
+    /// failing a recording nobody was watching (see
+    /// [`UnavailableChoice`]).
+    #[must_use]
+    pub fn apply_to(&self, recording: RecordingSettings) -> RecordingSettings {
+        recording
+            .with_resolution(self.resolution.get())
+            .with_framerate(self.framerate.get())
+            .with_codec(self.codec.get())
+            .with_encoder(self.encoder.get())
+            .with_microphone(audio_source(self.microphone.value()))
+            .with_system_audio(audio_source(self.system_audio.value()))
+            .with_unavailable_choice(UnavailableChoice::Substitute)
+    }
+}
+
+/// The recording engine's name for a configured audio selection.
+///
+/// The two vocabularies are deliberately separate — `crate::settings` is what a
+/// recording is told and this module is what a user configured — and this is
+/// the one conversion between them.
+fn audio_source(device: &AudioDeviceSetting) -> AudioSourceSetting {
+    match device {
+        AudioDeviceSetting::Default => AudioSourceSetting::SystemDefault,
+        AudioDeviceSetting::Disabled => AudioSourceSetting::Off,
+        AudioDeviceSetting::Named(name) => AudioSourceSetting::Named(name.clone()),
+    }
+}
+
+impl fmt::Display for ResolvedSettings {
+    /// Every setting and where it came from, on one line.
+    ///
+    /// This is what a recording writes into the log when it starts, and it is
+    /// the answer to "why was this session recorded like that" months later
+    /// (AGENTS.md section 35).
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (position, key) in SettingKey::ALL.into_iter().enumerate() {
+            if position > 0 {
+                formatter.write_str(", ")?;
+            }
+            write!(
+                formatter,
+                "{key}={} ({})",
+                self.written_value(key),
+                self.source_of(key)
+            )?;
+        }
+        Ok(())
     }
 }
 
