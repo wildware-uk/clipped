@@ -2,7 +2,8 @@
 
 use core::fmt;
 
-use super::parser::KNOWN_FIELDS_FOR_MESSAGE;
+use super::parser::{example_value_for, KNOWN_FIELDS_FOR_MESSAGE};
+use super::query::Comparison;
 
 /// Why a query could not be parsed.
 ///
@@ -30,6 +31,11 @@ pub enum QueryError {
     MissingValue {
         /// The field's name as it was written.
         field: String,
+        /// The comparison the user wrote after the colon, which is
+        /// [`Comparison::Equal`] when they wrote no operator at all. `date:>`
+        /// said more than `date:` did, and a message that quoted only `date:`
+        /// back would look as though it had not read the query.
+        comparison: Comparison,
         /// Where the field's name starts.
         position: usize,
     },
@@ -134,11 +140,22 @@ impl fmt::Display for QueryError {
                  Use {KNOWN_FIELDS_FOR_MESSAGE}, or put the text in quotes to search for it \
                  as words"
             ),
-            Self::MissingValue { field, .. } => write!(
-                formatter,
-                "`{field}:` at position {at} says what to search but not what to look for. \
-                 Write the value after the colon, such as {field}:cs2"
-            ),
+            // The example is the field's own, because `date:cs2`,
+            // `duration:cs2` and `favourite:cs2` are each an error in their own
+            // right, and advice that has to be typed twice is not advice
+            // (AGENTS.md section 45).
+            Self::MissingValue {
+                field, comparison, ..
+            } => {
+                let operator = comparison.as_written();
+                let example = example_value_for(field);
+                write!(
+                    formatter,
+                    "`{field}:{operator}` at position {at} says what to search but not what to \
+                     look for. Write the value after the colon, such as \
+                     {field}:{operator}{example}"
+                )
+            }
             Self::EmptyTerm { .. } => write!(
                 formatter,
                 "the quotes at position {at} have nothing between them. \
@@ -213,7 +230,7 @@ impl core::error::Error for QueryError {}
 
 #[cfg(test)]
 mod tests {
-    use super::QueryError;
+    use super::{Comparison, QueryError};
 
     /// Every message has to name the position, or the user is left hunting
     /// through their own query for the character Clipped objected to.
@@ -226,6 +243,12 @@ mod tests {
             },
             QueryError::MissingValue {
                 field: "game".to_owned(),
+                comparison: Comparison::Equal,
+                position: 4,
+            },
+            QueryError::MissingValue {
+                field: "duration".to_owned(),
+                comparison: Comparison::GreaterOrEqual,
                 position: 4,
             },
             QueryError::EmptyTerm { position: 4 },

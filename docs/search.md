@@ -64,6 +64,11 @@ A bare `favourite` is the filter, not a word to look for, because SPEC.md
 section 30 writes the example that way. To search for the *word*, quote it:
 `"favourite"`.
 
+`favourite:true` and `favourite:false` say it explicitly. `yes`/`no` and `1`/`0`
+are accepted as the same two answers, without regard to case, because they are
+what people type; the messages and the examples use `true` and `false` so that
+there is one spelling to learn rather than three.
+
 ### Dates
 
 Written year first, always: `date:2026-08-11`. One format only, because
@@ -147,13 +152,21 @@ before it is treated as a field name.
 
 ## Case and other alphabets
 
-Every text comparison ignores case, in every alphabet: `ЗАМЕС` finds `замес`,
-`GROẞE` finds `große`, and `Pokémon` finds `POKÉMON`.
+Every text comparison ignores case, and not only in the Latin alphabet: `ЗАМЕС`
+finds `замес`, `GROẞE` finds `große`, and `Pokémon` finds `POKÉMON`.
 
 Folding is case and nothing else. `pokemon` does **not** find `Pokémon` —
 stripping diacritics is a bigger decision than it looks (it changes what the
 Turkish dotless `ı` and the Scandinavian `å` mean to their own speakers) and it
 is not being made by accident here.
+
+It is also *lower-casing* rather than full Unicode case folding, which differs
+in one place worth knowing about: the Turkish dotted capital `İ` lower-cases to
+an `i` with a separate combining dot on it, so `istanbul` does **not** find
+`İSTANBUL`. Typing the `İ` finds it. This is the same limit as the diacritics
+one, and the same reason: the alternative is a normalisation policy that changes
+what a search means in some languages, and it is not being adopted as a side
+effect of a substring test.
 
 Case folding changes the length of text, in bytes and in characters, which is
 why nothing in the implementation compares lengths as a shortcut. That check is
@@ -172,6 +185,9 @@ is how a search box loses their trust (AGENTS.md section 45).
 | --- | --- |
 | `game:cs2 colour:red` | ``colour`` at position 10 is not something Clipped can search by. Use game:, session:, title:, tag:, event:, date:, duration: or favourite, or put the text in quotes to search for it as words |
 | `game:` | ``game:`` at position 1 says what to search but not what to look for. Write the value after the colon, such as game:cs2 |
+| `date:` | ``date:`` at position 1 says what to search but not what to look for. Write the value after the colon, such as date:2026-08-11 |
+| `duration:>=` | ``duration:>=`` at position 1 says what to search but not what to look for. Write the value after the colon, such as duration:>=30s |
+| `favourite:` | ``favourite:`` at position 1 says what to search but not what to look for. Write the value after the colon, such as favourite:true |
 | `ace "clutch` | the quote opened at position 5 is never closed. Add a closing quote, or remove the opening one |
 | `date:2026-13-01` | ``2026-13-01`` at position 6 is not a date on the calendar. Write a date as year-month-day, such as date:2026-08-11, date:>2026-08-01 or date:<=2026-08-31 |
 | `duration:5x` | ``5x`` at position 10 is not a length of time. Write a number and a unit, such as duration:>30s, duration:<5m or duration:>=1h30m |
@@ -183,6 +199,11 @@ is how a search box loses their trust (AGENTS.md section 45).
 | `ace) clutch` | the closing bracket at position 4 has no opening bracket before it. Remove it, or add the bracket it should close |
 | `ace ()` | the brackets at position 5 have nothing between them. Put part of the search inside them, or remove them |
 | `ace ""` | the quotes at position 5 have nothing between them. Put the words to search for inside them, or remove them |
+
+Each example is one the parser accepts: `date:` is told about a date and
+`favourite:` about `true`, because advice that is itself refused costs a second
+attempt. `the_advice_in_every_missing_value_message_is_itself_a_query` parses
+what every one of those messages offers, so the two cannot drift apart.
 
 The positions in those messages count from one, the way a person counts
 characters. `QueryError::position` gives the same place as a 0-based offset **in
@@ -217,9 +238,20 @@ crates/library/src/search/
     query.rs      the query model: Query, Expr, Term, TextField, Comparison
     matcher.rs    running a Query against a Row
     row.rs        Row: what a query is matched against
-    date.rs       the calendar date a date: term compares against
+    date.rs       why the calendar a date: term compares against is time::Date
     text.rs       case folding, and the one text comparison
 ```
+
+The calendar is [`time::Date`](https://docs.rs/time/latest/time/struct.Date.html),
+not one written here. A date with no time and no zone, ordered chronologically
+and validated against the Gregorian calendar, is exactly what a `date:` term
+needs, `clipped-session` already depends on `time` for the same reason, and two
+leap-year rules in one product is the duplication AGENTS.md section 55 is
+about. It also saves issue #56 an adapter: the indexer holds an
+`OffsetDateTime`, and `OffsetDateTime::date()` is already the day a row belongs
+to. The time zone stays out of this crate — deciding which day a session that
+ran until 01:30 belongs to is the indexer's decision, not the matcher's — which
+is what lets every test here run without a clock.
 
 The grammar the parser implements:
 
@@ -276,11 +308,11 @@ Ryzen 9 9950X3D, single-threaded, with the rest of the machine busy building.
 | Query | Selected | Release build | Test (debug) build |
 | --- | ---: | ---: | ---: |
 | *(empty)* | 100,000 | 0 ms | 0.8 ms |
-| `mirage` | 100,000 | 7.1 ms | 23.3 ms |
-| `game:counter kill favourite` | 607 | 14.3 ms | 31.7 ms |
-| `тан` | 20,000 | 16.5 ms | 39.9 ms |
-| `game:"Elden Ring" duration:>5m -favourite` | 9,984 | 6.8 ms | 18.8 ms |
-| `date:>=2026-08-20 (tag:clutch OR event:kill) -game:minecraft` | 10,474 | 5.2 ms | 9.4 ms |
+| `mirage` | 100,000 | 4.6 ms | 17.6 ms |
+| `game:counter kill favourite` | 607 | 8.7 ms | 26.7 ms |
+| `тан` | 20,000 | 9.9 ms | 34.5 ms |
+| `game:"Elden Ring" duration:>5m -favourite` | 9,984 | 5.9 ms | 14.8 ms |
+| `date:>=2026-08-20 (tag:clutch OR event:kill) -game:minecraft` | 10,474 | 3.1 ms | 8.0 ms |
 
 One run of each build, on a machine with eight other agents' builds running:
 consecutive runs of the release build varied by about 40% on the slower queries,
@@ -294,10 +326,13 @@ filter what it already holds in memory without waiting, and a database-backed
 executor that turns out slower than this over 100,000 rows is slower than not
 having an index at all.
 
-The test asserts a five-second ceiling rather than these numbers. It is there to
-catch a change that makes matching accidentally quadratic, not to measure a
-machine that may be running eight other builds; the numbers above are what the
-measurement is for, and the test prints them on every run.
+The test asserts a **one-second ceiling** rather than these numbers, and the
+ceiling is arrived at rather than picked: the slowest query above takes 34 ms in
+a debug build here, CI is a four-core `windows-latest` runner so call it 150 ms
+there, and a factor of six is left for a runner under load. What that catches is
+a regression — anything an order of magnitude slower than this fails it on any
+machine — rather than a slow afternoon. The numbers above are what the
+measurement is *for*, and the test prints them on every run.
 
 What is **not** measured, because it does not exist yet: search over a library
 on disk. That is issues #55 and #56, and it will need its own numbers.

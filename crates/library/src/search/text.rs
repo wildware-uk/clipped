@@ -27,6 +27,12 @@
 /// Folding is *only* case. Diacritics are kept, so `pokémon` does not match a
 /// search for `pokemon`; that is a deliberate limit, documented in
 /// `docs/search.md`, and not something to fix by half.
+///
+/// It is also *lower-casing* rather than full Unicode case folding, and the two
+/// differ in one place worth naming: `İ` (U+0130) lower-cases to `i` plus a
+/// combining dot above, so an ASCII `istanbul` does not find `İSTANBUL`.
+/// `lower_casing_is_not_full_case_folding_for_the_dotted_capital_i` pins that,
+/// and `docs/search.md` says so where it says the same about diacritics.
 #[must_use]
 pub fn fold(text: &str) -> String {
     text.to_lowercase()
@@ -118,6 +124,24 @@ mod tests {
         assert!(title.contains(&FoldedText::new("финальный")));
         assert!(title.contains(&FoldedText::new("ФИНАЛЬНЫЙ")));
         assert!(!title.contains(&FoldedText::new("инферно")));
+    }
+
+    /// The limit of lower-casing, as opposed to full case folding. `İ` is one
+    /// character that lower-cases to two, so `İSTANBUL` folds to `i`, a
+    /// combining dot above, and `stanbul` — and a user typing the ordinary
+    /// ASCII `istanbul` does not find it. Writing it down here is what keeps
+    /// `docs/search.md` honest about which comparisons ignore case.
+    #[test]
+    fn lower_casing_is_not_full_case_folding_for_the_dotted_capital_i() {
+        assert_eq!(fold("İSTANBUL"), "i\u{307}stanbul");
+        assert!(
+            !FoldedText::new("İSTANBUL").contains(&FoldedText::new("istanbul")),
+            "an ASCII i does not reach a dotted capital I"
+        );
+        assert!(
+            FoldedText::new("İSTANBUL").contains(&FoldedText::new("İstanbul")),
+            "the same letter on both sides folds the same way, and does match"
+        );
     }
 
     #[test]

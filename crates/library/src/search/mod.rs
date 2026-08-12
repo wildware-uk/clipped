@@ -122,6 +122,7 @@ mod tests {
     use super::{Date, Query, Row};
     use core::time::Duration;
     use std::time::Instant;
+    use time::Month;
 
     /// Parsing is fed whatever a user types, so it has to fail rather than
     /// panic on any of it.
@@ -186,8 +187,12 @@ mod tests {
                     .with_title(format!("Match {index} on Mirage"))
                     .favourite(index % 11 == 0)
                     .with_date(
-                        Date::new(2026, 8, u8::try_from(1 + index % 28).expect("1 to 28"))
-                            .expect("a real date"),
+                        Date::from_calendar_date(
+                            2026,
+                            Month::August,
+                            u8::try_from(1 + index % 28).expect("1 to 28"),
+                        )
+                        .expect("a real date"),
                     )
                     .with_duration(Duration::from_secs(
                         u64::try_from(30 + index % 600).expect("a small number of seconds"),
@@ -210,10 +215,14 @@ mod tests {
     /// that quietly selects nothing would measure nothing, and a count taken
     /// from the matcher itself would prove nothing.
     ///
-    /// The time assertion is deliberately far above what this takes: it is
-    /// there to catch a change that makes matching accidentally quadratic, not
-    /// to measure a machine that may be running eight other builds. The number
-    /// that means something is the one printed, which is why it is printed.
+    /// The time assertion is above what this takes, but not arbitrarily: the
+    /// slowest query measures 34 ms in a debug build on the development machine
+    /// and CI is a four-core `windows-latest` runner, so call that 150 ms there
+    /// and leave a factor of six for a loaded one. A second is what that comes
+    /// to. It is a ceiling on a *regression* — anything that made matching an
+    /// order of magnitude slower fails it on any machine — not a benchmark; the
+    /// numbers that mean something are the ones printed, which is why they are
+    /// printed on every run (AGENTS.md sections 19 and 25).
     #[test]
     fn a_large_library_is_searched_in_a_measured_time() {
         const ROWS: usize = 100_000;
@@ -251,7 +260,7 @@ mod tests {
             eprintln!("search: {ROWS} rows, {elapsed:?}, {matched} matched, query {query:?}");
             assert_eq!(matched, expected, "{query}");
             assert!(
-                elapsed < Duration::from_secs(5),
+                elapsed < Duration::from_secs(1),
                 "{query} took {elapsed:?} over {ROWS} rows"
             );
         }

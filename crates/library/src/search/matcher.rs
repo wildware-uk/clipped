@@ -85,6 +85,7 @@ fn matches_text(field: TextField, needle: &FoldedText, row: &Row) -> bool {
 mod tests {
     use crate::search::{Date, Query, Row};
     use core::time::Duration;
+    use time::Month;
 
     /// A row with something in every field, so that a test can say what it is
     /// about by changing one thing.
@@ -98,7 +99,7 @@ mod tests {
             .with_event("kill")
             .with_event("round_win")
             .favourite(true)
-            .with_date(Date::new(2026, 8, 11).expect("a real date"))
+            .with_date(Date::from_calendar_date(2026, Month::August, 11).expect("a real date"))
             .with_duration(Duration::from_secs(90))
     }
 

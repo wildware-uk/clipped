@@ -17,6 +17,8 @@
 
 use core::time::Duration;
 
+use time::Month;
+
 use super::date::Date;
 use super::error::QueryError;
 use super::lexer::{self, RawTerm, Spanned, Token};
@@ -31,6 +33,27 @@ use super::text::{fold, FoldedText};
 /// `the_message_listing_the_fields_lists_only_fields_that_work` asserts.
 pub(super) const KNOWN_FIELDS_FOR_MESSAGE: &str =
     "game:, session:, title:, tag:, event:, date:, duration: or favourite";
+
+/// A value `field` would accept, for the message that says a value is missing.
+///
+/// It has to be per-field, because three of the fields refuse arbitrary text:
+/// telling somebody who typed `date:` to write `date:cs2` is advising a query
+/// that is itself an error, and costs them a second round trip
+/// (AGENTS.md section 45). The text fields take anything, so one example serves
+/// all of them. `the_advice_in_every_missing_value_message_is_itself_a_query`
+/// parses what this produces, so the advice cannot drift from the parser.
+pub(super) fn example_value_for(field: &str) -> &'static str {
+    match field_from_name(field) {
+        Some(Field::Date) => "2026-08-11",
+        Some(Field::Duration) => "30s",
+        Some(Field::Favourite) => "true",
+        // Text is text, and `cs2` is the example SPEC.md section 30 writes.
+        // `None` cannot arrive here — a `MissingValue` is only built once the
+        // name has been recognised — but a field matched as text is the right
+        // answer for anything that is not one of the three above.
+        Some(Field::Text(_)) | None => "cs2",
+    }
+}
 
 /// What a field name means once it is recognised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +290,7 @@ fn term(raw: RawTerm, position: usize) -> Result<Expr, QueryError> {
     if raw.value.is_empty() {
         return Err(QueryError::MissingValue {
             field: field.name,
+            comparison,
             position: field.position,
         });
     }
@@ -312,10 +336,16 @@ fn parse_date(value: &str, position: usize) -> Result<Date, QueryError> {
     if !digits(year) || !digits(month) || !digits(day) {
         return Err(invalid());
     }
-    let (Ok(year), Ok(month), Ok(day)) = (year.parse(), month.parse(), day.parse()) else {
+    let (Ok(year), Ok(month), Ok(day)) = (year.parse::<i32>(), month.parse::<u8>(), day.parse())
+    else {
         return Err(invalid());
     };
-    Date::new(year, month, day).ok_or_else(invalid)
+    // `Month` and `from_calendar_date` between them are the calendar: a month
+    // outside 1–12, and a day outside the length of that month in that year,
+    // are both refused here rather than by a leap-year rule written again in
+    // this crate (see `date.rs`).
+    let month = Month::try_from(month).map_err(|_| invalid())?;
+    Date::from_calendar_date(year, month, day).map_err(|_| invalid())
 }
 
 /// `90s`, `5m`, `1h30m`: a number and a unit, at least once.
@@ -383,6 +413,7 @@ mod tests {
     use crate::search::query::{Comparison, Expr, Term, TextField};
     use crate::search::text::FoldedText;
     use core::time::Duration;
+    use time::Month;
 
     fn root(query: &str) -> Expr {
         parse(query)
@@ -433,7 +464,8 @@ mod tests {
             root("date:2026-08-11"),
             Expr::Term(Term::Date {
                 comparison: Comparison::Equal,
-                value: crate::search::Date::new(2026, 8, 11).expect("a real date"),
+                value: crate::search::Date::from_calendar_date(2026, Month::August, 11)
+                    .expect("a real date"),
             })
         );
         assert_eq!(
@@ -512,16 +544,35 @@ mod tests {
     fn a_date_that_is_not_one_says_so_rather_than_guessing() {
         for query in [
             "date:2026-13-01",
+            "date:2026-00-01",
             "date:2026-02-30",
             "date:2026-8-1",
             "date:2026-08",
             "date:11-08-2026",
             "date:yesterday",
             "date:2026-08-01-01",
+            "date:2026-08-00",
         ] {
             assert!(
                 matches!(error(query), QueryError::InvalidDate { .. }),
                 "{query} was accepted, or refused for the wrong reason: {:?}",
+                parse(query)
+            );
+        }
+    }
+
+    /// The calendar the parser is judged against is `time`'s (see `date.rs`),
+    /// and this is the boundary that says so: a leap day exists in a leap year
+    /// and not otherwise, whichever crate does the arithmetic.
+    #[test]
+    fn february_the_twenty_ninth_follows_the_gregorian_leap_year_rule() {
+        for query in ["date:2024-02-29", "date:2000-02-29"] {
+            assert!(parse(query).is_ok(), "{query} is a real date");
+        }
+        for query in ["date:2025-02-29", "date:1900-02-29"] {
+            assert!(
+                matches!(error(query), QueryError::InvalidDate { .. }),
+                "{query} is not a date the calendar has: {:?}",
                 parse(query)
             );
         }
@@ -651,12 +702,47 @@ mod tests {
         }
     }
 
+    /// A message that says "such as `date:cs2`" is advising a query that is
+    /// itself refused, and following it costs the user a second round trip
+    /// (AGENTS.md section 45). So the advice every `MissingValue` gives is
+    /// parsed here — for every field the message list names, and for a field
+    /// left with a dangling comparison, whose operator has to survive into both
+    /// the quotation and the example.
+    #[test]
+    fn the_advice_in_every_missing_value_message_is_itself_a_query() {
+        let fields: Vec<&str> = KNOWN_FIELDS_FOR_MESSAGE
+            .split(|character: char| !character.is_alphabetic())
+            .filter(|word| !word.is_empty() && *word != "or")
+            .collect();
+        assert_eq!(fields.len(), 8, "{fields:?}");
+
+        let mut queries: Vec<String> = fields.iter().map(|name| format!("{name}:")).collect();
+        queries.extend(["date:>", "date:<=", "duration:>=", "duration:<"].map(ToOwned::to_owned));
+
+        for query in queries {
+            let message = error(&query).to_string();
+            assert!(
+                message.contains(&format!("`{query}`")),
+                "{query} is not quoted back as it was written: {message}"
+            );
+            let (_, advice) = message
+                .rsplit_once("such as ")
+                .unwrap_or_else(|| panic!("{query} offers no example to type: {message}"));
+            assert!(
+                parse(advice).is_ok(),
+                "{query} advises `{advice}`, which is itself refused: {:?}",
+                parse(advice)
+            );
+        }
+    }
+
     #[test]
     fn each_way_a_query_can_be_malformed_is_reported_at_its_own_position() {
         assert_eq!(
             error("game:"),
             QueryError::MissingValue {
                 field: "game".to_owned(),
+                comparison: Comparison::Equal,
                 position: 0,
             }
         );
@@ -664,8 +750,18 @@ mod tests {
             error("ace game:"),
             QueryError::MissingValue {
                 field: "game".to_owned(),
+                comparison: Comparison::Equal,
                 position: 4,
             }
+        );
+        assert_eq!(
+            error("date:>"),
+            QueryError::MissingValue {
+                field: "date".to_owned(),
+                comparison: Comparison::Greater,
+                position: 0,
+            },
+            "a dangling comparison is part of what was written, not something to drop"
         );
         assert_eq!(error(r#"ace """#), QueryError::EmptyTerm { position: 4 });
         assert_eq!(
@@ -766,6 +862,7 @@ mod tests {
             error("замес game:"),
             QueryError::MissingValue {
                 field: "game".to_owned(),
+                comparison: Comparison::Equal,
                 position: 6,
             }
         );
