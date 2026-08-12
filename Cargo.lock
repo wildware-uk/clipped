@@ -206,6 +206,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-edit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "clipped-encoder"
 version = "0.1.0"
 dependencies = [

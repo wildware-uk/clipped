@@ -1,0 +1,20 @@
+[package]
+name = "clipped-edit"
+description = "Non-destructive edit document model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The document is JSON, and JSON because it is the one encoding both ends of
+# this already speak: the recorder writes it, the desktop editor reads it over
+# the IPC protocol (docs/ipc.md), and a user who stops using Clipped can still
+# read their edits. Both crates are already pinned in the workspace manifest.
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

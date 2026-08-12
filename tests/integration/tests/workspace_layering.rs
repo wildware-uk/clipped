@@ -48,6 +48,14 @@ const LAYERS: &[&[&str]] = &[
     // (docs/hotkeys.md), so the dependency points *into* it — the process that
     // owns a recording session plugs a handler in, and a hotkey crate that
     // reached back into the session could be linked by neither end.
+    //
+    // `clipped-edit` is here for the reason `clipped-ipc` is: an edit document
+    // is read by both ends of the application (docs/editing.md). The editor in
+    // the desktop process shows it, the recorder process exports it, and
+    // `clipped-storage` keeps it as text without understanding it — so a
+    // document model that reached into the recording engine could not be linked
+    // by the half of the system that only draws a timeline. It holds no
+    // application logic and performs no I/O at all.
     &[
         "clipped-windows",
         "clipped-events",
@@ -55,6 +63,7 @@ const LAYERS: &[&[&str]] = &[
         "clipped-logging",
         "clipped-ipc",
         "clipped-hotkeys",
+        "clipped-edit",
         "clipped-media-validation",
         "clipped-ffmpeg-runtime",
     ],
