@@ -1,5 +1,5 @@
-//! The edits themselves: trimming the ends, splitting at the playhead and
-//! deleting a section.
+//! The edits themselves: trimming the ends, splitting at the playhead,
+//! deleting a section, and changing the mix.
 //!
 //! Every one of them is about the distinction [`crate::time`] draws. A user
 //! points at a moment on the **edited timeline** — the playhead, a selection
@@ -14,8 +14,9 @@
 //!
 //! # One primitive
 //!
-//! All four operations are the same piece of arithmetic: put a boundary at an
-//! output time, then keep some of what is either side of it.
+//! The four operations that change *material* are the same piece of arithmetic:
+//! put a boundary at an output time, then keep some of what is either side of
+//! it.
 //!
 //! ```text
 //!   before   ├──── segment 0 ────┼──── segment 1 ────┤
@@ -43,12 +44,32 @@
 //! | Trim start | unchanged | everything kept moves earlier by the trim |
 //! | Trim end | unchanged | unchanged |
 //! | Delete section | unchanged | everything after the cut moves earlier by its length |
+//! | A change to the mix | unchanged | unchanged |
 //!
 //! Overlays are timed in output time, so they are carried through the same
 //! mapping the material is; the rules are on [`remapped`]. Audio fades are
 //! measured from the ends of the clip, so a clip that got shorter can leave
 //! fades that no longer fit, and [`clamp_fades`] shortens them rather than
 //! letting the operation fail.
+//!
+//! # Changing the mix
+//!
+//! [`EditOperation::SetTrackGain`], [`EditOperation::SetTrackMuted`] and
+//! [`EditOperation::SetTrackFades`] move no material at all: they name a track
+//! and replace one value on it. They are operations rather than fields the
+//! editor writes to directly for two reasons, and both of them are [issue
+//! #85](https://github.com/wildware-uk/clipped/issues/85)'s user pressing
+//! Ctrl+Z:
+//!
+//! - they go through [`EditHistory`](crate::EditHistory) like every other edit,
+//!   so lowering Discord is undone the same way a trim is; and
+//! - they are validated like every other edit, so a level outside the range the
+//!   model allows, or a pair of fades longer than the clip, is refused *at the
+//!   moment the user asks for it* rather than at the moment they save.
+//!
+//! Soloing a track is not here, because it is not an edit: it is
+//! [`Solo`](crate::Solo), the editor's own listening state, and undoing it
+//! would put back a document that never differed.
 //!
 //! # Refusals
 //!
@@ -70,12 +91,16 @@ use crate::overlay::TextOverlay;
 use crate::segment::Segment;
 use crate::time::{OutputSpan, OutputTime, SourceSpan};
 
-/// A change to the material of a clip.
+/// A change to a clip: to the material it plays, or to how it sounds.
 ///
 /// Positions are on the **edited timeline**, because that is what the user is
 /// looking at: the playhead sits at a moment of the clip, not at a moment of
 /// one of the recordings behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`, because a level is a `f64`. Two operations compare
+/// equal when they say the same thing; a level of `NaN` is not a level, and is
+/// refused by the operation rather than compared.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum EditOperation {
     /// Throw away everything before `at`, and move what is left to the start.
@@ -101,6 +126,32 @@ pub enum EditOperation {
     DeleteSection {
         /// The part of the edited timeline to remove.
         range: OutputSpan,
+    },
+    /// Play one audio track at a different level.
+    ///
+    /// The one the ticket is named after: Discord was too loud, and the fix is
+    /// a slider rather than a re-record.
+    SetTrackGain {
+        /// Which audio track, numbered as the document holds them.
+        track: usize,
+        /// The new level in decibels, `0.0` being the level it was recorded at.
+        gain_db: f64,
+    },
+    /// Silence one audio track, or let it be heard again.
+    SetTrackMuted {
+        /// Which audio track.
+        track: usize,
+        /// Whether it is silenced.
+        muted: bool,
+    },
+    /// Fade one audio track in at the start of the clip and out at its end.
+    SetTrackFades {
+        /// Which audio track.
+        track: usize,
+        /// How long the track takes to reach its level, from the clip's start.
+        fade_in: Duration,
+        /// How long it takes to reach silence, up to the clip's end.
+        fade_out: Duration,
     },
 }
 
@@ -130,6 +181,20 @@ impl EditDocument {
             EditOperation::TrimEnd { at } => trim_end(self, at, clip_nanos),
             EditOperation::Split { at } => split(self, at, clip_nanos),
             EditOperation::DeleteSection { range } => delete_section(self, range, clip_nanos),
+            EditOperation::SetTrackGain { track, gain_db } => {
+                change_track(self, track, |mixed| mixed.gain_db = gain_db)
+            }
+            EditOperation::SetTrackMuted { track, muted } => {
+                change_track(self, track, |mixed| mixed.muted = muted)
+            }
+            EditOperation::SetTrackFades {
+                track,
+                fade_in,
+                fade_out,
+            } => change_track(self, track, |mixed| {
+                mixed.fade_in = fade_in;
+                mixed.fade_out = fade_out;
+            }),
         }?;
 
         edited
@@ -254,6 +319,38 @@ fn delete_section(
             nanos - removed_nanos
         }
     });
+    Ok(edited)
+}
+
+/// The document with `change` applied to one of its audio tracks.
+///
+/// The whole of every mix operation. Nothing about the timeline moves, so there
+/// is no `settle` and no boundary to find; what the change is *allowed* to say
+/// is left to the validation [`apply`](EditDocument::apply) runs on the result,
+/// which is where a level outside the usable range and a pair of fades longer
+/// than the clip are already refused — and refusing there means a slider
+/// dragged too far is one refusal with one message, not a second range check
+/// that could disagree with the first.
+///
+/// Fades are *not* shortened to fit here, unlike the ones a trim leaves behind
+/// ([`clamp_fades`]). A trim is a user asking for something else and finding a
+/// fade in the way; this is a user asking for the fade itself, and quietly
+/// giving them a shorter one than they asked for is the silent control
+/// AGENTS.md section 27 forbids.
+fn change_track(
+    document: &EditDocument,
+    track: usize,
+    change: impl FnOnce(&mut AudioTrack),
+) -> Result<EditDocument, OperationRefused> {
+    let mut edited = document.clone();
+    let mixed = edited
+        .audio_tracks
+        .get_mut(track)
+        .ok_or(OperationRefused::NoSuchTrack {
+            track,
+            tracks: document.audio_tracks.len(),
+        })?;
+    change(mixed);
     Ok(edited)
 }
 
@@ -402,7 +499,7 @@ fn clamp_fades(tracks: &mut [AudioTrack], clip_nanos: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::TrackInput;
+    use crate::audio::{TrackInput, TrackOutput};
     use crate::overlay::TextOverlay;
     use crate::source::{RecordingId, Source, SourceId};
     use crate::time::{SourceTime, Speed};
@@ -838,6 +935,294 @@ mod tests {
             .expect("deleting everything");
         assert_eq!(emptied.audio_tracks[0].fade_in, Duration::ZERO);
         assert_eq!(emptied.audio_tracks[0].fade_out, Duration::ZERO);
+    }
+
+    /// The three-segment clip with a mix on it: a game track and a microphone.
+    fn three_segments_with_a_mix() -> EditDocument {
+        let source = SourceId::new(0);
+        three_segments()
+            .with_audio_track(AudioTrack::new("Game", vec![TrackInput::new(source, 0)]))
+            .with_audio_track(AudioTrack::new(
+                "Microphone",
+                vec![TrackInput::new(source, 1)],
+            ))
+    }
+
+    #[test]
+    fn lowering_one_track_changes_that_track_and_nothing_else() {
+        // The acceptance criterion of #85, said in the only terms this crate
+        // can: the document an exporter reads differs in exactly one number.
+        let document = three_segments_with_a_mix();
+        let quieter = document
+            .apply(EditOperation::SetTrackGain {
+                track: 1,
+                gain_db: -9.0,
+            })
+            .expect("the clip has a second track");
+
+        assert_eq!(
+            quieter.track_output(1),
+            Some(TrackOutput::Audible { gain_db: -9.0 })
+        );
+        assert_eq!(
+            quieter.track_output(0),
+            document.track_output(0),
+            "the other track is untouched"
+        );
+        assert_eq!(
+            quieter.segments, document.segments,
+            "and so is the material"
+        );
+        assert_eq!(
+            quieter.audio_tracks[1].inputs,
+            document.audio_tracks[1].inputs
+        );
+        assert_eq!(
+            quieter.audio_tracks[1].muted,
+            document.audio_tracks[1].muted
+        );
+    }
+
+    #[test]
+    fn muting_and_unmuting_a_track_is_the_same_operation_both_ways() {
+        let document = three_segments_with_a_mix();
+
+        let muted = document
+            .apply(EditOperation::SetTrackMuted {
+                track: 1,
+                muted: true,
+            })
+            .expect("the clip has a second track");
+        assert_eq!(muted.track_output(1), Some(TrackOutput::Silent));
+
+        let heard = muted
+            .apply(EditOperation::SetTrackMuted {
+                track: 1,
+                muted: false,
+            })
+            .expect("the clip has a second track");
+        assert_eq!(
+            heard, document,
+            "unmuting restores exactly the document that was muted"
+        );
+    }
+
+    #[test]
+    fn setting_a_fade_puts_the_envelope_on_that_track_alone() {
+        let document = three_segments_with_a_mix();
+        let faded = document
+            .apply(EditOperation::SetTrackFades {
+                track: 0,
+                fade_in: Duration::from_secs(5),
+                fade_out: Duration::from_secs(10),
+            })
+            .expect("the fades fit a thirty-second clip");
+
+        assert_eq!(faded.audio_tracks[0].fade_in, Duration::from_secs(5));
+        assert_eq!(
+            faded.track_amplitude_at(0, OutputTime::from_nanos(0)),
+            Some(0.0)
+        );
+        assert_eq!(
+            faded.track_amplitude_at(0, OutputTime::from_nanos(5 * SECOND / 2)),
+            Some(0.5)
+        );
+        assert_eq!(
+            faded.track_amplitude_at(1, OutputTime::from_nanos(0)),
+            Some(1.0),
+            "the microphone is not fading, and reads at its recorded level from the first moment"
+        );
+    }
+
+    #[test]
+    fn a_mix_change_to_a_track_the_clip_does_not_have_is_refused() {
+        let document = three_segments_with_a_mix();
+
+        assert_eq!(
+            document.apply(EditOperation::SetTrackGain {
+                track: 2,
+                gain_db: -3.0
+            }),
+            Err(OperationRefused::NoSuchTrack {
+                track: 2,
+                tracks: 2
+            })
+        );
+        assert_eq!(
+            document.apply(EditOperation::SetTrackMuted {
+                track: 9,
+                muted: true
+            }),
+            Err(OperationRefused::NoSuchTrack {
+                track: 9,
+                tracks: 2
+            })
+        );
+    }
+
+    #[test]
+    fn a_level_the_model_would_not_store_is_refused_when_it_is_asked_for() {
+        // The refusal has to arrive when the slider is dragged, not when the
+        // user saves half an hour later.
+        let document = three_segments_with_a_mix();
+
+        for gain_db in [-60.1, 12.1, f64::NAN, f64::INFINITY] {
+            let refused = document
+                .apply(EditOperation::SetTrackGain { track: 0, gain_db })
+                .expect_err("a level outside the usable range is refused");
+            assert!(
+                matches!(
+                    refused,
+                    OperationRefused::WouldBreakTheDocument(DocumentProblem::UnusableGain { .. })
+                ),
+                "{gain_db} was refused as {refused:?}"
+            );
+        }
+
+        for gain_db in [-60.0, 0.0, 12.0] {
+            document
+                .apply(EditOperation::SetTrackGain { track: 0, gain_db })
+                .unwrap_or_else(|refused| panic!("{gain_db} dB should be allowed: {refused}"));
+        }
+    }
+
+    #[test]
+    fn fades_longer_than_the_clip_are_refused_rather_than_quietly_shortened() {
+        let document = three_segments_with_a_mix();
+
+        let refused = document
+            .apply(EditOperation::SetTrackFades {
+                track: 0,
+                fade_in: Duration::from_secs(20),
+                fade_out: Duration::from_secs(20),
+            })
+            .expect_err("forty seconds of fade does not fit a thirty-second clip");
+        assert!(
+            matches!(
+                refused,
+                OperationRefused::WouldBreakTheDocument(
+                    DocumentProblem::FadesLongerThanTheClip { .. }
+                )
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            document.audio_tracks[0].fade_in,
+            Duration::ZERO,
+            "and a refused operation changes nothing"
+        );
+
+        document
+            .apply(EditOperation::SetTrackFades {
+                track: 0,
+                fade_in: Duration::from_secs(15),
+                fade_out: Duration::from_secs(15),
+            })
+            .expect("fades that exactly fill the clip are allowed");
+    }
+
+    #[test]
+    fn a_fade_stays_at_the_end_of_the_clip_when_a_cut_moves_the_material_under_it() {
+        // A fade is a length at an end of the clip, in output time. Deleting a
+        // section moves every later moment earlier, so material that was past
+        // the end of the fade can end up inside it — and the fade itself does
+        // not move, because there is nothing in the recording for it to be
+        // anchored to. This is the case #85 asks about, and the answer has to
+        // be the same one an export will produce.
+        let source = SourceId::new(0);
+        let document = three_segments().with_audio_track(
+            AudioTrack::new("Game", vec![TrackInput::new(source, 0)])
+                .with_fades(Duration::from_secs(6), Duration::ZERO),
+        );
+
+        let before = document
+            .track_amplitude_at(0, OutputTime::from_nanos(9 * SECOND))
+            .expect("the clip has a track");
+        assert_eq!(before, 1.0, "nine seconds in is past a six-second fade");
+
+        let edited = document
+            .apply(EditOperation::DeleteSection {
+                range: when(2 * SECOND, 5 * SECOND),
+            })
+            .expect("the range is inside the clip");
+
+        assert_eq!(
+            edited.audio_tracks[0].fade_in,
+            Duration::from_secs(6),
+            "the fade still fits the shorter clip, so it is left exactly as the user set it"
+        );
+        // The material that was at nine seconds is at six now, which is the
+        // last moment of the fade rather than the first past it.
+        let moved = edited
+            .locate(OutputTime::from_nanos(6 * SECOND))
+            .expect("six seconds in is inside the shorter clip");
+        let was = document
+            .locate(OutputTime::from_nanos(9 * SECOND))
+            .expect("nine seconds in was inside the original");
+        assert_eq!(
+            (moved.source, moved.source_time),
+            (was.source, was.source_time)
+        );
+        assert_eq!(
+            edited.track_amplitude_at(0, OutputTime::from_nanos(6 * SECOND)),
+            Some(1.0)
+        );
+        assert_eq!(
+            edited.track_amplitude_at(0, OutputTime::from_nanos(3 * SECOND)),
+            Some(0.5),
+            "and the material now halfway through the fade is heard at half amplitude"
+        );
+    }
+
+    #[test]
+    fn a_clip_trimmed_shorter_than_its_fades_still_reads_between_silence_and_its_level() {
+        // `clamp_fades` shortens what no longer fits; this is the check that
+        // what it leaves is an envelope somebody can play, rather than a
+        // division that produces a multiplier over one at the join.
+        let source = SourceId::new(0);
+        let document = three_segments().with_audio_track(
+            AudioTrack::new("Game", vec![TrackInput::new(source, 0)])
+                .with_fades(Duration::from_secs(12), Duration::from_secs(12)),
+        );
+
+        let trimmed = document
+            .apply(EditOperation::TrimEnd {
+                at: OutputTime::from_nanos(15 * SECOND),
+            })
+            .expect("a clip with fades can still be trimmed");
+        assert_eq!(trimmed.audio_tracks[0].fade_in, Duration::from_secs(12));
+        assert_eq!(trimmed.audio_tracks[0].fade_out, Duration::from_secs(3));
+
+        let clip_nanos = trimmed
+            .output_duration_nanos()
+            .expect("the trimmed clip is readable");
+        for step in 0..=100 {
+            let at = OutputTime::from_nanos(clip_nanos * step / 100);
+            let amplitude = trimmed
+                .track_amplitude_at(0, at)
+                .expect("the clip has a track");
+            assert!(
+                (0.0..=1.0).contains(&amplitude),
+                "at {at:?} the track reads {amplitude}, which is not a level"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mix_change_that_changes_nothing_produces_the_document_it_was_given() {
+        // What `EditHistory` uses to decide that there is no undo step to
+        // record: setting a level to the level it already has is not an edit.
+        let document = three_segments_with_a_mix();
+
+        assert_eq!(
+            document
+                .apply(EditOperation::SetTrackGain {
+                    track: 0,
+                    gain_db: 0.0
+                })
+                .expect("the clip has that track"),
+            document
+        );
     }
 
     #[test]

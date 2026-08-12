@@ -114,17 +114,23 @@ sample by sample, which needs a decoder and an encoder:
 
 | Track | What happens |
 | --- | --- |
-| One input, `gain_db` of 0, not muted, not silenced by another track's solo, no fades | copied |
+| One input, `gain_db` of 0, not muted, no fades | copied |
 | Two or more inputs | mix (`SeveralInputs`) |
 | Any other level | mix (`Level`) |
-| Muted, or silent because something else is soloed | mix (`Silenced`) |
+| Muted | mix (`Silenced`) |
 | Fading in or out | mix (`Fades`) |
 
-Mute and solo are resolved by `EditDocument::track_output`, so the export cannot
-disagree with the editor about which tracks are audible
-([docs/editing.md](editing.md#audio)). A silenced track is a *mix* and not a
-missing track: the clip has that track, it is simply silent, and dropping it
-would write a file with fewer tracks than the clip has.
+The level and the mute are resolved by `EditDocument::track_output`, so the
+export cannot disagree with the editor about which tracks are audible
+([docs/editing.md](editing.md#audio)). **Soloing is not part of this**: it is
+the editor listening to one track while the user works, is held beside the
+document rather than in it, and is never given to an export
+([#85](https://github.com/wildware-uk/clipped/issues/85)). A silenced track is
+a *mix* and not a missing track: the clip has that track, it is simply silent,
+and dropping it would write a file with fewer tracks than the clip has —
+[docs/editing.md](editing.md#what-a-mix-costs-an-export) records the case for
+omitting a muted track instead, which is a decision for this document and not
+for the model.
 
 **A document that declares no audio tracks at all carries the recording's audio
 as it was recorded** — every stream, in the container's order, with the name the

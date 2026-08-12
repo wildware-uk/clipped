@@ -6,7 +6,14 @@
 //! differently if the reading depends on anything outside them. So this test
 //! *reads* both, the way an export does — walking the whole output timeline and
 //! asking, at each step, which recording is on screen, which frame of it, which
-//! text is over it and how loud each audio track is — and compares the answers.
+//! text is over it, what each audio track contributes and **how loud it is at
+//! that moment** — and compares the answers.
+//!
+//! The last of those is why the walk is a walk. A level and a mute are the same
+//! at every moment of the clip, so a transcript of them would have caught a
+//! save that lost them and nothing else; a fade is a different number at every
+//! step, and a fade lost or shortened in a save changes the shape of the curve
+//! rather than the value of a field.
 //!
 //! That sampled transcript is the closest thing to "identical playback" a model
 //! with no decoder can assert, and it is the same question [issue
@@ -21,6 +28,12 @@
 //! `#[serde(skip_serializing)]` — so that every save silently discarded them —
 //! left the whole suite green. In a *non-destructive* editing model, a save
 //! that loses an edit is the failure this crate exists to prevent.
+//!
+//! (`soloed` is no longer a field of anything: [issue
+//! #85](https://github.com/wildware-uk/clipped/issues/85) moved soloing out of
+//! the document, and
+//! [`a_solo_is_not_something_a_document_can_carry_at_all`] is what holds it
+//! there.)
 //!
 //! So [`every_field_of_a_document_is_set_to_something_other_than_its_default`]
 //! compares the fixture against a baseline document built from this crate's
@@ -38,8 +51,8 @@ use std::collections::BTreeMap;
 
 use clipped_edit::{
     AspectRatio, AudioTrack, CropRect, EditDocument, OutputSpan, OutputTime, OverlayPosition,
-    RecordingId, Rotation, Segment, Source, SourceId, SourceSpan, SourceTime, Speed, TextOverlay,
-    TrackInput, TrackOutput, SCHEMA_VERSION,
+    RecordingId, Rotation, Segment, Solo, Source, SourceId, SourceSpan, SourceTime, Speed,
+    TextOverlay, TrackInput, TrackOutput, SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -51,7 +64,10 @@ struct Frame {
     /// end of the clip.
     material: Option<(usize, u32, u64)>,
     overlays: Vec<String>,
+    /// What each track contributes: mute and level, as the export reads them.
     audio: Vec<TrackOutput>,
+    /// How loud each track actually is here, with its fades applied.
+    levels: Vec<f64>,
 }
 
 /// Reads the clip at one-tenth of a second, from before it starts to past its
@@ -86,6 +102,13 @@ fn transcript(document: &EditDocument) -> Vec<Frame> {
                             .expect("the track is in the document")
                     })
                     .collect(),
+                levels: (0..document.audio_tracks.len())
+                    .map(|track| {
+                        document
+                            .track_amplitude_at(track, at)
+                            .expect("the track is in the document")
+                    })
+                    .collect(),
             }
         })
         .collect()
@@ -108,8 +131,8 @@ fn when(start_nanos: u64, end_nanos: u64) -> OutputSpan {
 }
 
 /// An edit using every part of the model: two recordings, a cut, a speed
-/// change, a crop, a rotation, an exported shape, a mix with a mute, a solo and
-/// a fade, and two overlays.
+/// change, a crop, a rotation, an exported shape, a mix with a mute, two levels
+/// and a pair of fades, and two overlays.
 ///
 /// Every field of every structure this crate writes is set here to something
 /// other than what a plain constructor would give it, which is what makes the
@@ -145,9 +168,7 @@ fn combined_edit() -> EditDocument {
         )
         .with_audio_track(AudioTrack::new("Microphone", vec![TrackInput::new(first, 1)]).muted())
         .with_audio_track(
-            AudioTrack::new("Discord", vec![TrackInput::new(first, 2)])
-                .at_gain_db(-0.1)
-                .soloed(),
+            AudioTrack::new("Discord", vec![TrackInput::new(first, 2)]).at_gain_db(-0.1),
         )
         .with_overlay(
             TextOverlay::new("Round 12", when(0, 2_500_000_000))
@@ -348,13 +369,56 @@ fn the_transcript_is_not_vacuous() {
     assert!(
         transcript.iter().all(|frame| frame.audio
             == [
-                TrackOutput::Silent,
+                TrackOutput::Audible { gain_db: -6.5 },
                 TrackOutput::Silent,
                 TrackOutput::Audible { gain_db: -0.1 },
             ]),
-        "and should read the mix the solo rule gives — the soloed track alone, at its own \
-         level, with the merely loud one silenced beside the muted one — so that a solo \
-         lost in a save changes the transcript and not only the structure"
+        "and should read the mix as the document holds it: two levels and a mute, so that \
+         a level lost in a save changes the transcript and not only the structure"
+    );
+
+    // And the fades, which are the part of the mix that is a different number
+    // at every step. A save that dropped them would leave the level flat.
+    let game: Vec<f64> = transcript.iter().map(|frame| frame.levels[0]).collect();
+    let level = TrackOutput::Audible { gain_db: -6.5 }.amplitude();
+    assert_eq!(game.first(), Some(&0.0), "the clip fades in from silence");
+    assert!(
+        game.iter().any(|at| *at > 0.0 && *at < level),
+        "it should be caught partway up its fade"
+    );
+    assert!(
+        game.iter().any(|at| (at - level).abs() < 1e-12),
+        "and at its own level in the middle: {game:?}"
+    );
+    assert!(
+        transcript.iter().all(|frame| frame.levels[1] == 0.0),
+        "the muted track is silent at every moment, fades or no fades"
+    );
+}
+
+#[test]
+fn a_solo_is_not_something_a_document_can_carry_at_all() {
+    // #85's decision, held in place: soloing is the editor listening to part of
+    // a mix, so it lives beside the document and not in it. A document that
+    // could store one would be a clip that exports with three of its four
+    // tracks missing because somebody left a solo on.
+    let text = combined_edit().write().expect("it saves");
+    assert!(
+        !text.contains("solo"),
+        "nothing in a saved edit may mention a solo: {text}"
+    );
+
+    let document = combined_edit();
+    let solo = Solo::on(1);
+    assert_eq!(
+        document.monitored_output(0, solo),
+        Some(TrackOutput::Silent),
+        "the preview honours it"
+    );
+    assert_eq!(
+        document.track_output(0),
+        Some(TrackOutput::Audible { gain_db: -6.5 }),
+        "and the export, which is what a save is for, does not"
     );
 }
 
