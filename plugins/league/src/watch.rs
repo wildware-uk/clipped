@@ -17,14 +17,47 @@
 //! Every poll returns the whole match, so the state needed is the identifier
 //! after the last one reported ([`LeagueWatch`]'s cursor), and the match clock
 //! that says when the cursor belongs to a different match. A poll that took ten
-//! seconds returns ten seconds of events; a plugin that was restarted mid-match
-//! returns the match.
+//! seconds returns ten seconds of events, and none of them is lost.
 //!
 //! What a slow poll costs is therefore **latency and nothing else** — how long
 //! after a kill the recording hears about it — because the *position* of an
 //! event comes from the game's own match clock rather than from when this
 //! process noticed. That is the whole argument for [`POLL_INTERVAL`] being a
 //! second rather than a tenth of one.
+//!
+//! # Cumulative, which cuts both ways
+//!
+//! The same property that makes a slow poll lossless makes a *fresh* watch
+//! dangerous: the first payload it reads carries the whole match, and a cursor
+//! that starts at zero would report every kill of it. That is not a hypothetical
+//! — the host restarts a plugin that exited or went silent
+//! (`docs/plugin-api.md`, "Supervision and restart"), and the replacement is a
+//! new process with a new cursor attached to the same recording. Reporting what
+//! it finds would put a second copy of every kill, death, assist and
+//! `match_started` on a timeline the attachment before it had already marked.
+//!
+//! So the cursor is not the only thing that decides what is reported. An event
+//! is reported only if it happened **after this watch started observing**, which
+//! [`LeagueWatch::observe`] is told on every call. The match clock in the
+//! payload says how long ago each event was, so this is a comparison of two
+//! numbers and needs no memory of a previous process — and it answers the other
+//! form of the same question at the same time: a session that starts recording
+//! part way through a match must not have the first ten minutes of that match
+//! drawn onto the ten seconds of video it has.
+//!
+//! In the ordinary case it costs nothing at all, and the reason is worth having
+//! written down. This plugin is attached to `League of Legends.exe`, and that
+//! process starts *before* the match clock does — a loading screen is a minute
+//! of it. So for an attachment that saw its match begin, `ago ≤ gameTime ≤ at`
+//! holds for every event, and the rule never fires. It fires exactly when the
+//! match was already under way, which is exactly when firing is right.
+//!
+//! What that trades is stated rather than glossed (AGENTS.md section 54): the
+//! events that happen during the second or two a restart takes are **lost**,
+//! because nothing was watching for them and nothing can prove afterwards
+//! whether they were reported. A missing mark is the better direction to fail
+//! in than a duplicated one — a timeline with two of every kill is wrong in a
+//! way a viewer cannot repair, and the events are still in the recording.
 //!
 //! # What is reported, and what is not
 //!
@@ -159,6 +192,11 @@ pub struct LeagueWatch {
     said_it_is_unreadable: bool,
     /// Whether the user has been told that kills cannot be attributed.
     said_it_does_not_know_the_player: bool,
+    /// Whether the user has been told that entries could not be read.
+    said_entries_could_not_be_read: bool,
+    /// Whether the log has been told that this watch began part way through a
+    /// match, and what it therefore left alone.
+    said_it_began_mid_match: bool,
 }
 
 impl LeagueWatch {
@@ -171,8 +209,11 @@ impl LeagueWatch {
     /// Reads one poll and says what should be reported.
     ///
     /// `at` is how long this watch has been running, measured by the caller
-    /// against a monotonic clock. It is used for nothing but deciding when a
-    /// run of failures has gone on long enough to be worth a sentence.
+    /// against a monotonic clock. Two things read it: how long a run of
+    /// failures has gone on, and — the reason it has to be honest rather than
+    /// merely increasing — how far back this attachment reaches, which is what
+    /// decides whether an event in the payload is this watch's to report or the
+    /// attachment before it (see this module's documentation).
     ///
     /// The reports come out in the order they should be written: the events of
     /// the match in the order the match produced them, then anything wrong.
@@ -188,7 +229,7 @@ impl LeagueWatch {
             }
             PollResult::Answered { body, round_trip } => {
                 self.answered();
-                self.read(body, round_trip)
+                self.read(body, round_trip, at)
             }
         }
     }
@@ -215,7 +256,7 @@ impl LeagueWatch {
     }
 
     /// What is reported for a body that answered.
-    fn read(&mut self, body: &str, round_trip: Duration) -> Vec<PluginReport> {
+    fn read(&mut self, body: &str, round_trip: Duration, at: Duration) -> Vec<PluginReport> {
         let snapshot = match GameSnapshot::parse(body) {
             Ok(snapshot) => snapshot,
             Err(error) => return self.could_not_read(&error),
@@ -230,16 +271,27 @@ impl LeagueWatch {
 
         let mut reports = Vec::new();
         let mut wanted_the_player = false;
+        let mut older_than_this_attachment = 0_usize;
         for event in snapshot.events() {
             if event.id() < self.next_event_id {
                 continue;
             }
+            // Past the cursor whether or not it is reported: an event left to
+            // an earlier attachment must not come back when the next poll
+            // carries it again.
             self.next_event_id = event.id().saturating_add(1);
+
+            let ago = ago(snapshot.game_time(), event.time());
+            if ago > at {
+                older_than_this_attachment += 1;
+                continue;
+            }
+
             let kinds = self.kinds_of(event, &mut wanted_the_player);
             for kind in kinds {
                 reports.push(PluginReport::Event(ReportedEvent {
                     kind,
-                    ago_ns: nanos(ago(snapshot.game_time(), event.time())),
+                    ago_ns: nanos(ago),
                     precision_ns: nanos(round_trip.saturating_add(REPORTED_TIME_RESOLUTION)),
                     // The Live Client Data API is the game reporting its own
                     // events. There is nothing to be unsure of: what is
@@ -251,6 +303,9 @@ impl LeagueWatch {
             }
         }
 
+        self.say_what_was_left_to_an_earlier_attachment(older_than_this_attachment);
+        reports.extend(self.say_what_could_not_be_read(&snapshot));
+
         if wanted_the_player && !self.said_it_does_not_know_the_player {
             self.said_it_does_not_know_the_player = true;
             reports.push(problem(
@@ -259,6 +314,46 @@ impl LeagueWatch {
             ));
         }
         reports
+    }
+
+    /// Logs what this watch found had already happened when it began.
+    ///
+    /// Once per watch, and on standard error rather than as a `problem`: it is
+    /// the normal shape of a restart and of a recording started mid-match, and
+    /// it needs no action from the user. What it must not be is *silent* — a
+    /// timeline missing the first half of a match, with nothing anywhere saying
+    /// why, is the failure AGENTS.md section 15 is about.
+    fn say_what_was_left_to_an_earlier_attachment(&mut self, how_many: usize) {
+        if how_many == 0 || self.said_it_began_mid_match {
+            return;
+        }
+        self.said_it_began_mid_match = true;
+        eprintln!(
+            "league plugin: {how_many} events had already happened when this attachment began, \
+             and are left to whatever was watching then rather than marked twice"
+        );
+    }
+
+    /// Says out loud that entries of the event list could not be read.
+    ///
+    /// [`GameSnapshot`] skips an entry it cannot read so that one costs one
+    /// rather than costing the payload it arrived in — and the skip is only
+    /// defensible while somebody hears about it. Once per watch, because the
+    /// cause is a patch having changed the shape of one kind of entry, which is
+    /// one fact however many entries carry it.
+    fn say_what_could_not_be_read(&mut self, snapshot: &GameSnapshot) -> Option<PluginReport> {
+        if snapshot.unreadable_entries() == 0 || self.said_entries_could_not_be_read {
+            return None;
+        }
+        self.said_entries_could_not_be_read = true;
+        eprintln!(
+            "league plugin: {} entries of the event list could not be read and were skipped",
+            snapshot.unreadable_entries()
+        );
+        Some(problem(
+            "Some of what League's Live Client Data API reported could not be read, so parts of \
+             this match may not be marked. A League patch may have changed it.",
+        ))
     }
 
     /// What is reported for a body that could not be read.
@@ -420,6 +515,22 @@ mod tests {
         }
     }
 
+    /// How long a watch that saw this match begin has been running by the time
+    /// the match clock reads `game_time`.
+    ///
+    /// Not zero, and the difference matters. This plugin is attached to `League
+    /// of Legends.exe`, which starts before the match clock does — a loading
+    /// screen is a minute of it — so an attachment that saw its match begin is
+    /// always older than the match, and passing a reading that says otherwise
+    /// would be testing the derivation against a state no machine is ever in.
+    /// It also keeps these tests about the cursor: the rule that a watch does
+    /// not report what happened before it started is
+    /// `a_restarted_plugin_reports_nothing_the_attachment_before_it_reported`'s
+    /// to prove, and nothing else's to trip over.
+    fn watching_since_before(game_time: f64) -> Duration {
+        Duration::from_secs_f64(game_time + 90.0)
+    }
+
     fn kinds(reports: &[PluginReport]) -> Vec<String> {
         reports
             .iter()
@@ -454,12 +565,52 @@ mod tests {
         // three marks on a timeline.
         let mut watch = LeagueWatch::new();
         let body = snapshot(300.0, &format!("{START},{KILL}"));
+        let at = watching_since_before(300.0);
         assert_eq!(
-            kinds(&watch.observe(answered(&body), Duration::ZERO)),
+            kinds(&watch.observe(answered(&body), at)),
             vec!["match_started", "kill"]
         );
-        assert!(kinds(&watch.observe(answered(&body), Duration::from_secs(1))).is_empty());
-        assert!(kinds(&watch.observe(answered(&body), Duration::from_secs(2))).is_empty());
+        assert!(kinds(&watch.observe(answered(&body), at + POLL_INTERVAL)).is_empty());
+        assert!(kinds(&watch.observe(answered(&body), at + POLL_INTERVAL * 2)).is_empty());
+    }
+
+    #[test]
+    fn a_restarted_plugin_reports_nothing_the_attachment_before_it_reported() {
+        // The host restarts a plugin that exited or went silent
+        // (`docs/plugin-api.md`, "Supervision and restart"). The replacement is
+        // a new process with a new cursor, attached to the same recording — and
+        // League's event list is cumulative, so its first poll carries the whole
+        // match. Reporting it would put a second copy of every kill on a
+        // timeline that already has one.
+        let body = snapshot(900.0, &format!("{START},{KILL},{DEATH}"));
+
+        let mut before = LeagueWatch::new();
+        assert_eq!(
+            kinds(&before.observe(answered(&body), watching_since_before(900.0))),
+            vec!["match_started", "kill", "death"],
+            "the attachment that saw the match begin marks it"
+        );
+
+        // Its replacement, a moment old, reading the same match.
+        let mut after = LeagueWatch::new();
+        assert!(
+            after
+                .observe(answered(&body), Duration::from_millis(200))
+                .is_empty(),
+            "a restarted plugin marks nothing that happened before it was there"
+        );
+
+        // And it is not mute afterwards: what happens next is still its to
+        // report, which is the difference between this and a plugin that gave
+        // up on the match.
+        let next = r#"{"EventID":3,"EventName":"ChampionKill","EventTime":903.0,
+                       "KillerName":"Rosalind#EU1","VictimName":"Marlowe#EUW","Assisters":[]}"#;
+        let later = snapshot(904.0, &format!("{START},{KILL},{DEATH},{next}"));
+        assert_eq!(
+            kinds(&after.observe(answered(&later), Duration::from_secs(5))),
+            vec!["kill"],
+            "the kill that happened while it was watching"
+        );
     }
 
     #[test]
@@ -468,14 +619,15 @@ mod tests {
         // entry, or that assumed one event per poll, would lose the kill and
         // the death that happened while a slow request was outstanding.
         let mut watch = LeagueWatch::new();
+        let at = watching_since_before(10.0);
         assert_eq!(
-            kinds(&watch.observe(answered(&snapshot(10.0, START)), Duration::ZERO)),
+            kinds(&watch.observe(answered(&snapshot(10.0, START)), at)),
             vec!["match_started"]
         );
 
         let missed = snapshot(500.0, &format!("{START},{KILL},{DEATH}"));
         assert_eq!(
-            kinds(&watch.observe(answered(&missed), Duration::from_secs(90))),
+            kinds(&watch.observe(answered(&missed), at + Duration::from_secs(490))),
             vec!["kill", "death"],
             "the events between two polls arrive in match order, once each"
         );
@@ -484,13 +636,14 @@ mod tests {
     #[test]
     fn a_second_match_through_one_attachment_starts_the_cursor_again() {
         let mut watch = LeagueWatch::new();
+        let at = watching_since_before(500.0);
         let first = snapshot(500.0, &format!("{START},{KILL},{DEATH}"));
-        assert_eq!(watch.observe(answered(&first), Duration::ZERO).len(), 3);
+        assert_eq!(watch.observe(answered(&first), at).len(), 3);
 
         // A new match: the identifiers begin at zero again.
         let second = snapshot(6.0, START);
         assert_eq!(
-            kinds(&watch.observe(answered(&second), Duration::from_secs(400))),
+            kinds(&watch.observe(answered(&second), at + Duration::from_secs(400))),
             vec!["match_started"],
             "the second match's events are below the first match's cursor"
         );
@@ -504,14 +657,15 @@ mod tests {
         // is above the cursor, so nothing looks backwards — except the match
         // clock, which cannot go backwards inside a match.
         let mut watch = LeagueWatch::new();
+        let at = watching_since_before(500.0);
         let first = snapshot(500.0, &format!("{START},{KILL}"));
-        assert_eq!(watch.observe(answered(&first), Duration::ZERO).len(), 2);
+        assert_eq!(watch.observe(answered(&first), at).len(), 2);
 
         let later = r#"{"EventID":7,"EventName":"ChampionKill","EventTime":211.0,
                         "KillerName":"Rosalind#EU1","VictimName":"Kestrel#EUW","Assisters":[]}"#;
         let second = snapshot(240.0, &format!("{START},{KILL},{later}"));
         assert_eq!(
-            kinds(&watch.observe(answered(&second), Duration::from_secs(600))),
+            kinds(&watch.observe(answered(&second), at + Duration::from_secs(600))),
             vec!["match_started", "kill", "kill"],
             "a match whose clock has gone back is another match, whatever its identifiers say"
         );
@@ -557,7 +711,7 @@ mod tests {
         let body = snapshot(800.0, &format!("{KILL},{DEATH},{assist},{elsewhere}"));
 
         assert_eq!(
-            kinds(&watch.observe(answered(&body), Duration::ZERO)),
+            kinds(&watch.observe(answered(&body), watching_since_before(800.0))),
             vec!["kill", "death", "assist"],
             "somebody else's kill on the other side of the map is not a mark on this recording"
         );
@@ -579,7 +733,10 @@ mod tests {
                 r#"{{"EventID":0,"EventName":"GameEnd","EventTime":1799.8,"Result":{result}}}"#
             );
             assert_eq!(
-                kinds(&watch.observe(answered(&snapshot(1800.0, &ended)), Duration::ZERO)),
+                kinds(&watch.observe(
+                    answered(&snapshot(1800.0, &ended)),
+                    watching_since_before(1800.0)
+                )),
                 expected,
                 "for a result of {result}"
             );
@@ -592,7 +749,8 @@ mod tests {
             r#"{{"events":{{"Events":[{START},{KILL}]}},"gameData":{{"gameTime":300.0}}}}"#
         );
         let mut watch = LeagueWatch::new();
-        let first = watch.observe(answered(&body), Duration::ZERO);
+        let at = watching_since_before(300.0);
+        let first = watch.observe(answered(&body), at);
 
         assert_eq!(
             kinds(&first),
@@ -611,7 +769,7 @@ mod tests {
             r#"{{"events":{{"Events":[{START},{KILL},{more}]}},"gameData":{{"gameTime":500.0}}}}"#
         );
         assert!(
-            problems(&watch.observe(answered(&again), Duration::from_secs(1))).is_empty(),
+            problems(&watch.observe(answered(&again), at + Duration::from_secs(200))).is_empty(),
             "the plugin says it once, not once a kill"
         );
     }
@@ -681,19 +839,27 @@ mod tests {
         assert!(problems(&told)[0].contains("patch"));
 
         // And a run that ends resets, so the next one is reported too.
+        let readable = watching_since_before(10.0);
         assert!(
             watch
-                .observe(answered(&snapshot(10.0, START)), Duration::from_secs(6))
+                .observe(answered(&snapshot(10.0, START)), readable)
                 .len()
                 == 1
         );
-        for poll in 7..7 + u64::from(UNREADABLE_RUN_NOTICE) - 1 {
+        for poll in 1..u64::from(UNREADABLE_RUN_NOTICE) {
             assert!(watch
-                .observe(answered("still not json"), Duration::from_secs(poll))
+                .observe(
+                    answered("still not json"),
+                    readable + Duration::from_secs(poll)
+                )
                 .is_empty());
         }
         assert_eq!(
-            problems(&watch.observe(answered("still not json"), Duration::from_secs(20))).len(),
+            problems(&watch.observe(
+                answered("still not json"),
+                readable + Duration::from_secs(20)
+            ))
+            .len(),
             1
         );
     }
@@ -706,18 +872,29 @@ mod tests {
         let mut watch = LeagueWatch::new();
         watch.observe(PollResult::Unreachable, Duration::ZERO);
         let mut messages = problems(&watch.observe(PollResult::Unreachable, UNREACHABLE_NOTICE));
-        for poll in 0..UNREADABLE_RUN_NOTICE {
-            messages.extend(problems(
-                &watch.observe(answered("not json"), Duration::from_secs(u64::from(poll))),
-            ));
+        for poll in 0..u64::from(UNREADABLE_RUN_NOTICE) {
+            messages.extend(problems(&watch.observe(
+                answered("not json"),
+                UNREACHABLE_NOTICE + Duration::from_secs(poll + 1),
+            )));
         }
-        let unnamed =
+
+        let named_nobody =
             format!(r#"{{"events":{{"Events":[{KILL}]}},"gameData":{{"gameTime":300}}}}"#);
         messages.extend(problems(
-            &watch.observe(answered(&unnamed), Duration::from_secs(30)),
+            &watch.observe(answered(&named_nobody), watching_since_before(300.0)),
         ));
 
-        assert_eq!(messages.len(), 3, "one of each: {messages:?}");
+        // An entry with no identifier: skipped by `GameSnapshot`, and said out
+        // loud here rather than counted and forgotten.
+        let unreadable_entry = r#"{"events":{"Events":[
+             {"EventName":"AnEntryWithNoIdentifier","EventTime":301.0}]},
+             "gameData":{"gameTime":302}}"#;
+        messages.extend(problems(
+            &watch.observe(answered(unreadable_entry), watching_since_before(302.0)),
+        ));
+
+        assert_eq!(messages.len(), 4, "one of each: {messages:?}");
         for message in messages {
             assert!(
                 message.len() <= MAX_PROBLEM_BYTES,

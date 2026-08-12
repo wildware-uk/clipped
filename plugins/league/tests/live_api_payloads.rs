@@ -31,6 +31,20 @@ fn answered(body: &str) -> PollResult<'_> {
     }
 }
 
+/// How long a watch that saw this match begin has been running by the time the
+/// match clock reads `game_time`.
+///
+/// Not zero. This plugin is attached to `League of Legends.exe`, which starts
+/// before the match clock does — a loading screen is a minute of it — so an
+/// attachment that saw its match begin is always older than the match it is
+/// watching. A watch told otherwise is a watch being asked about a match that
+/// was already under way when it arrived, which is a different question, and
+/// `a_restarted_plugin_reports_nothing_the_attachment_before_it_reported`
+/// (`src/watch.rs`) is where it is asked.
+fn watching_since_before(game_time: f64) -> Duration {
+    Duration::from_secs_f64(game_time + 90.0)
+}
+
 fn events(reports: &[PluginReport]) -> Vec<&ReportedEvent> {
     reports
         .iter()
@@ -65,29 +79,31 @@ fn three_polls_of_one_match_report_each_event_once_and_in_order() {
     // is one `LeagueWatch`, as one attachment would be.
     let mut watch = LeagueWatch::new();
 
+    let attached = watching_since_before(4.6);
+
     let opening = fixture("match_started.json");
     assert_eq!(
-        kinds(&watch.observe(answered(&opening), Duration::ZERO)),
+        kinds(&watch.observe(answered(&opening), attached)),
         vec!["match_started"]
     );
 
     let middle = fixture("kills_deaths_assists.json");
     assert_eq!(
-        kinds(&watch.observe(answered(&middle), Duration::from_secs(900))),
+        kinds(&watch.observe(answered(&middle), attached + Duration::from_secs(908))),
         vec!["kill", "death", "assist"],
         "the player's own kill, death and assist, and none of the four events they are not in"
     );
 
     let finished = fixture("ended_in_a_win.json");
     assert_eq!(
-        kinds(&watch.observe(answered(&finished), Duration::from_secs(1_800))),
+        kinds(&watch.observe(answered(&finished), attached + Duration::from_secs(1_798))),
         vec!["kill", "match_ended", "win"],
         "the last kill, and how it ended"
     );
 
     assert!(
         watch
-            .observe(answered(&finished), Duration::from_secs(1_801))
+            .observe(answered(&finished), attached + Duration::from_secs(1_799))
             .is_empty(),
         "a match that has ended and is polled again is not a second match"
     );
@@ -101,7 +117,7 @@ fn a_kill_is_placed_by_the_match_clock_and_carries_the_games_own_words() {
             body: &fixture("kills_deaths_assists.json"),
             round_trip: Duration::from_millis(12),
         },
-        Duration::ZERO,
+        watching_since_before(912.4),
     );
     let kill = events(&reports)[1];
 
@@ -126,7 +142,10 @@ fn a_kill_is_placed_by_the_match_clock_and_carries_the_games_own_words() {
 #[test]
 fn a_match_with_no_kills_in_it_still_reports_how_it_ended() {
     let mut watch = LeagueWatch::new();
-    let reports = watch.observe(answered(&fixture("ended_in_a_loss.json")), Duration::ZERO);
+    let reports = watch.observe(
+        answered(&fixture("ended_in_a_loss.json")),
+        watching_since_before(1205.9),
+    );
     assert_eq!(
         kinds(&reports),
         vec!["match_started", "match_ended", "loss"]
@@ -141,7 +160,7 @@ fn a_client_that_reports_summoner_names_is_still_the_player() {
     let mut watch = LeagueWatch::new();
     let reports = watch.observe(
         answered(&fixture("summoner_names_only.json")),
-        Duration::ZERO,
+        watching_since_before(401.0),
     );
     assert_eq!(kinds(&reports), vec!["match_started", "kill", "death"]);
     assert!(problems(&reports).is_empty(), "{reports:?}");
@@ -153,7 +172,10 @@ fn spectating_reports_the_match_and_says_why_it_cannot_report_a_kill() {
     // a plugin that quietly reported neither would look exactly like one that
     // was working (AGENTS.md section 45).
     let mut watch = LeagueWatch::new();
-    let reports = watch.observe(answered(&fixture("no_active_player.json")), Duration::ZERO);
+    let reports = watch.observe(
+        answered(&fixture("no_active_player.json")),
+        watching_since_before(220.1),
+    );
 
     assert_eq!(kinds(&reports), vec!["match_started"]);
     assert_eq!(problems(&reports).len(), 1, "{reports:?}");
@@ -177,7 +199,7 @@ fn a_payload_from_a_later_patch_is_read_for_what_it_still_says() {
     assert_eq!(snapshot.events().len(), 3);
 
     let mut watch = LeagueWatch::new();
-    let reports = watch.observe(answered(&payload), Duration::ZERO);
+    let reports = watch.observe(answered(&payload), watching_since_before(410.9));
     assert_eq!(
         kinds(&reports),
         vec!["match_started", "kill"],
@@ -187,6 +209,13 @@ fn a_payload_from_a_later_patch_is_read_for_what_it_still_says() {
         events(&reports)[1].data["KillType"],
         "SOMETHING_NEW",
         "a field added by a patch still reaches the recording"
+    );
+
+    let said = problems(&reports);
+    assert_eq!(said.len(), 1, "{reports:?}");
+    assert!(
+        said[0].contains("could not be read"),
+        "the skipped entry is said out loud rather than only counted: {said:?}"
     );
 }
 

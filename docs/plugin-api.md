@@ -886,9 +886,28 @@ whole of what is interesting here.
 *cumulative and indexed*: every poll returns the whole match, each entry with an
 `EventID` that never moves. So the state the plugin keeps is the identifier
 after the last one it reported. A poll that took ten seconds returns ten seconds
-of events; a plugin restarted mid-match returns the match. This is the property
-that makes polling acceptable at all, and `plugins/league`'s tests drive three
-payloads of one match through one watch to hold it.
+of events, and none of them is lost. This is the property that makes polling
+acceptable at all, and `plugins/league`'s tests drive three payloads of one
+match through one watch to hold it.
+
+**The same property is a hazard for a restarted plugin.** A plugin that exited
+or went silent is restarted ([Supervision and restart](#supervision-and-restart)),
+and the replacement is a new process with a cursor at zero attached to a
+recording that already has marks on it. Its first poll carries the whole match,
+and reporting it would put a second copy of every kill, death, assist and
+`match_started` on the timeline. So the cursor is not the only thing that
+decides what is reported: an event is reported only if it happened **after the
+watch started observing**, which the match clock in the same payload answers
+without any memory of a previous process. That also stops a session which began
+recording part way through a match drawing the first ten minutes of it onto ten
+seconds of video.
+
+The cost is stated rather than implied: the events that happen during the second
+or two a restart takes are **lost**, because nothing was watching for them.
+That is the better direction to fail in — a timeline with two of every kill is
+wrong in a way nobody can repair afterwards. In the ordinary case it costs
+nothing at all, because the plugin is attached to `League of Legends.exe` and
+that process starts before the match clock does.
 
 The cursor needs one more thing beside it, and it is the part that is easy to
 get wrong: **a second match through the same attachment starts the identifiers
@@ -935,12 +954,24 @@ declaration true rather than nearly true: a machine with a system proxy
 configured must not be able to send this request off the machine
 ([privacy.md](privacy.md)).
 
+**The request also refuses to be redirected**, and that is not a detail beside
+the certificate exception — it is what keeps the exception meaningful. WinHTTP
+follows redirects by default, and its default policy permits `https` to `https`,
+so a listener on port 2999 answering `302 Location: https://somewhere.else`
+would take this request off the machine *with certificate validation disabled*,
+under a manifest that declares loopback and nothing else. Every request
+therefore sets `WINHTTP_OPTION_REDIRECT_POLICY` to
+`WINHTTP_OPTION_REDIRECT_POLICY_NEVER` on the same handle, which makes a `3xx` a
+status code the plugin reads rather than an address it goes to. A test stands
+two loopback listeners up, has the first answer with a redirect to the second,
+and asserts the second is never connected to.
+
 What is left over is worth saying rather than glossing: because the certificate
 is not checked, the plugin cannot prove that the thing answering on port 2999 is
-League. So the body is treated as hostile input — bounded before it is read,
-parsed leniently, and never used for anything but producing marks on a timeline.
-The request carries no body, no cookie and no authorisation header, so there is
-nothing there to give away.
+League. So the body is treated as hostile input — bounded in size, bounded in
+how long it may take to arrive, parsed leniently, and never used for anything
+but producing marks on a timeline. The request carries no body, no cookie and no
+authorisation header, so there is nothing there to give away.
 
 ### Which name in an event is the player
 
