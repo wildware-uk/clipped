@@ -22,7 +22,22 @@ export default tseslint.config(
   {
     // Build output and dependencies. `apps/desktop/src-tauri` is Rust and is
     // linted by clippy, not by this.
-    ignores: ['**/dist/', '**/node_modules/', 'apps/desktop/src-tauri/'],
+    // `.claude/` holds agent worktrees: full checkouts of this repository,
+    // gitignored but still on disk. Without this, `eslint .` walks every one of
+    // them and lints the whole project once per worktree — 55 of them at one
+    // point, which produced thousands of duplicate findings and failed outright
+    // when a concurrent agent removed a worktree mid-run. CI never saw it,
+    // because a clean checkout has none (issue #267).
+    ignores: [
+      '**/dist/',
+      '**/node_modules/',
+      'apps/desktop/src-tauri/',
+      '.claude/',
+      // Cargo's build output. Gitignored, and it holds JavaScript: the FFmpeg
+      // build's own scripts, and anything a build script emits. None of it is
+      // ours to lint.
+      'target/',
+    ],
   },
 
   js.configs.recommended,
