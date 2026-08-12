@@ -926,6 +926,7 @@ Left-clicking the icon raises the window; right-clicking opens the menu.
 | `src-tauri/src/tray.rs` | The menu, the redraws, and turning a click into a command on the recorder. |
 | `src-tauri/src/tray_icon.rs` | The four marks, drawn in code. |
 | `src-tauri/src/foreground.rs` | Which application the user was last in, which is what Start Recording records. |
+| `src-tauri/src/this_application.rs` | Which processes are Clipped — this one and the WebView2 host it starts — so that the record control never offers to record Clipped itself (issue #390). |
 
 ### Four marks, and why they are shapes
 
@@ -1012,12 +1013,45 @@ event hook, which costs nothing until a foreground window changes — the same
 non-polling choice `clipped-game-detection` made for process starts (issue #41),
 for the same reason, because this process runs beside a game.
 
-Two things are deliberately not remembered: this process's own windows, and the
+Two things are deliberately not remembered: **Clipped's own windows**, and the
 shell's own surfaces by window class — the taskbar, the notification overflow,
 Start, Search and the desktop. Opening the tray menu raises the taskbar, so
 without that exclusion the answer would be `explorer.exe` every time. A File
 Explorer *window* is `CabinetWClass` and is remembered like anything else,
 because somebody may want to record one.
+
+The record button on the Home screen reads the same answer, through
+`record_target`, so both controls name the same application and neither can name
+something the other would not (issue #389).
+
+#### Clipped is more than one process
+
+"Clipped's own windows" is not the same as "this process's windows", and the
+difference was [issue #390](https://github.com/wildware-uk/clipped/issues/390).
+The window is this process; the interface *inside* it is drawn by WebView2, in
+`msedgewebview2.exe` processes this one starts, and those have windows of their
+own — the developer tools are a top-level, visible window belonging to the
+webview host. Raising them left the record control reading **"Start recording
+msedgewebview2.exe"**, and pressing it recorded Clipped.
+
+So the exclusion is *this process, or a process it started*, which
+`this_application.rs` answers from the process table. Two things it deliberately
+is not:
+
+- **not the executable's name.** `msedgewebview2.exe` is the runtime any
+  application may host a webview in — Teams, the widgets board, another Tauri
+  application — and all of those are recordable. What identifies *this*
+  application's webview host is that this process started it, not what it is
+  called.
+- **not an identifier remembered once**, such as `ICoreWebView2::BrowserProcessId`.
+  WebView2 recreates its browser process after a crash and Windows reuses
+  process identifiers, so a remembered number can come to mean somebody's game.
+
+The table's parent identifiers are not trusted alone, for the same reason: a
+process whose creator has exited goes on naming a number Windows may since have
+given to Clipped. A candidate must also have started no earlier than Clipped
+did, which is the comparison `clipped_windows::ProcessTree` makes about the same
+hazard.
 
 The recorder is then asked for a `pid`, and resolves the window itself. One set
 of rules about what a recordable window is, in the recorder (AGENTS.md section
