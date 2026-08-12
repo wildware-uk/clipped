@@ -23,6 +23,14 @@
     prove nothing (AGENTS.md section 25), which is why the fixture pin names a
     version of FFmpeg this project has never used.
 
+    The last case is the exception and runs against the pin this repository
+    actually carries, because that is the only one that can catch the parameter
+    block of scripts/fetch-ffmpeg.ps1 being rewritten into a form the AST reader
+    cannot read. What it expects is asked of that script with -PrintPin rather
+    than written down here, so that moving the pin moves the case with it.
+    Nothing in this suite skips: a case that switches itself off when the thing
+    it guards changes is the failure mode AGENTS.md section 54 is about.
+
     Written as a plain script rather than as Pester tests for the same reason
     scripts/test-check-prerequisites.ps1 is: the only Pester on a stock Windows
     install is 3.4.0, whose syntax is incompatible with the Pester 5 a
@@ -197,20 +205,54 @@ try {
 
     Write-Host 'Against the real pin'
 
-    # The pin this repository actually carries, read the same way. This case is
-    # the one that fails if the parameter block of scripts/fetch-ffmpeg.ps1 is
-    # rewritten into a form the AST reader does not understand - a change that
-    # would otherwise be noticed only when a release published source for a
-    # build it did not ship.
-    $realAsset = 'ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-shared-8.1.zip'
-    if (-not (Select-String -Path $realFetchScript -SimpleMatch $realAsset -Quiet)) {
-        Write-Host "  SKIP  the pin has moved since this case was written; it expects $realAsset" -ForegroundColor Yellow
+    # The pin this repository actually carries. This case is the one that fails
+    # if the parameter block of scripts/fetch-ffmpeg.ps1 is rewritten into a
+    # form the AST reader does not understand - a change that would otherwise be
+    # noticed only when a release published source for a build it did not ship.
+    #
+    # What it expects is asked of the fetch script rather than written down
+    # here. An earlier version of this case carried the asset name as a literal
+    # and skipped itself when the two stopped matching, so the first pin bump
+    # would have turned the only case that runs against the real pin off,
+    # silently and permanently - which is exactly the failure mode the docstring
+    # above complains about. -PrintPin is the pin reporting itself, and is not
+    # the reader under test: the AST reader is, and the case is that the two
+    # agree.
+    $printed = & powershell -ExecutionPolicy Bypass -File $realFetchScript -PrintPin
+    $realAsset = @($printed | Select-String -Pattern '^asset=(.+)$')[0]
+    $realTag = @($printed | Select-String -Pattern '^tag=(.+)$')[0]
+    $realSha = @($printed | Select-String -Pattern '^sha256=(.+)$')[0]
+
+    if (-not ($realAsset -and $realTag -and $realSha)) {
+        Write-Host '  FAIL  the pin could not be read out of scripts/fetch-ffmpeg.ps1 -PrintPin' -ForegroundColor Red
+        foreach ($line in $printed) { Write-Host "        | $line" -ForegroundColor DarkGray }
+        $failureCount++
     } else {
-        Assert-Case `
-            -Name 'the current pin resolves to the FFmpeg commit its asset names' `
-            -Result (Invoke-Case -Arguments @('-PlanOnly')) `
-            -ExpectedExitCode 0 `
-            -Contains @($realAsset, '9b6c8969e0 (from the asset name, as a commit)')
+        $realAsset = $realAsset.Matches[0].Groups[1].Value
+        $realTag = $realTag.Matches[0].Groups[1].Value
+        $realSha = $realSha.Matches[0].Groups[1].Value
+
+        # The revision the plan must name, derived here from the asset name by
+        # the rule the builder documents, so that a pin bump moves what this
+        # case expects instead of switching it off.
+        $expectedRevision = if ($realAsset -match '-g(?<commit>[0-9a-f]{7,40})-win64') {
+            "$($Matches['commit']) (from the asset name, as a commit)"
+        } elseif ($realAsset -match '^ffmpeg-(?<tag>n[0-9][^-]*)-win64') {
+            "$($Matches['tag']) (from the asset name, as a tag)"
+        } else {
+            $null
+        }
+
+        if (-not $expectedRevision) {
+            Write-Host "  FAIL  the pinned asset $realAsset names neither a commit nor a tag, so the pin itself is unusable" -ForegroundColor Red
+            $failureCount++
+        } else {
+            Assert-Case `
+                -Name 'the current pin resolves to the FFmpeg commit its asset names' `
+                -Result (Invoke-Case -Arguments @('-PlanOnly')) `
+                -ExpectedExitCode 0 `
+                -Contains @($realAsset, $realTag, $realSha, $expectedRevision)
+        }
     }
 } finally {
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue

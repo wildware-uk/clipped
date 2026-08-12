@@ -69,8 +69,23 @@
 .PARAMETER Force
     Re-download and re-extract even when the pinned build is already present.
 
+.PARAMETER PrintPin
+    Print the pin as `name=value` lines and exit, touching nothing. This exists
+    so that anything needing the pin can ask the pin for it instead of reading
+    this file: .github/workflows/ci.yml keys its FFmpeg cache on the asset name,
+    and used to recover it with a regular expression over this script's
+    parameter block - which reformatting the block would have broken, in a way
+    that fails the build rather than silently restoring the wrong cache, but
+    breaks it all the same.
+
+    The output is deliberately dull and machine-readable, one `key=value` per
+    line, because that is what a workflow step can consume without a parser.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PrintPin
 
 .OUTPUTS
     Exit code 0 when the pinned build is present and verified, 1 otherwise.
@@ -83,7 +98,8 @@ param(
     [string] $Sha256 = '2936e5449886641b4279ca3fc554b678c8e9a2d20dd0c0a34fe7208b254a0905',
     [string] $BaseUri = 'https://github.com/BtbN/FFmpeg-Builds/releases/download',
     [string] $Destination = '',
-    [switch] $Force
+    [switch] $Force,
+    [switch] $PrintPin
 )
 
 Set-StrictMode -Version Latest
@@ -312,6 +328,17 @@ function Write-ReadyNotice {
 # block around the text, and the reader has to find the sentence that matters
 # inside that.
 try {
+    # Before anything else, and before anything is touched: this is the pin
+    # answering a question about itself, which is the only reading of it that
+    # cannot fall out of step with it.
+    if ($PrintPin) {
+        Write-Output "tag=$Tag"
+        Write-Output "asset=$Asset"
+        Write-Output "sha256=$($Sha256.ToLowerInvariant())"
+        Write-Output "uri=$downloadUri"
+        exit 0
+    }
+
     if ((Test-InstalledPin) -and -not $Force) {
         Write-Step "$buildName is already present and matches the pin; nothing to download."
         Write-ReadyNotice

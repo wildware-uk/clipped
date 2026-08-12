@@ -134,24 +134,31 @@ ticket.
 ### Replacing the FFmpeg libraries
 
 This is the permission the whole arrangement rests on, so it is tested rather
-than asserted. Verified on 2026-08-12, against binaries built from `086de5c`:
+than asserted. Verified on 2026-08-12, against binaries built from `ecc9aa5`:
 
 Three copies of the FFmpeg-linked test executables were staged in separate
 directories, each with a different set of FFmpeg DLLs beside it — Windows
 resolves a DLL from the directory of the executable that needs it — and each was
-run from the same working directory.
+run from the same working directory. Every FFmpeg-linked test in the workspace
+is in the table; the two that drive the recorder as a child process
+(`synthetic_recording`, `abrupt_termination`) had the DLLs staged beside the
+example binary as well.
 
-| DLLs beside the binaries | `clipped_muxer` unit tests | `mkv_writing` | `synthetic_recording` | `ffmpeg_linkage` |
-| --- | --- | --- | --- | --- |
-| The pinned build, `n8.1.2-34-g9b6c8969e0-20260809` | 23 passed | 12 passed | 1 passed | 4 passed |
-| A different LGPL 8.1 build, `n8.1-11-g75d37c499d-20260430` | 23 passed | 12 passed | 1 passed | 3 passed, 1 failed |
-| FFmpeg 7.1, `n7.1.5-12-g1fdbca85aa` | will not start | will not start | will not start | will not start |
+| DLLs beside the binaries | `clipped_muxer` unit tests | `mkv_writing` | `synthetic_recording` | `abrupt_termination` | `ffmpeg_linkage` |
+| --- | --- | --- | --- | --- | --- |
+| The pinned build, `n8.1.2-34-g9b6c8969e0-20260809` | 24 passed | 12 passed | 1 passed | 2 passed | 4 passed |
+| A different LGPL 8.1 build, `n8.1-11-g75d37c499d-20260430` | 24 passed | 12 passed | 1 passed | 2 passed | 3 passed, 1 failed |
+| FFmpeg 7.1, `n7.1.5-12-g1fdbca85aa` | will not start | will not start | 1 failed | 2 failed | will not start |
 
-The middle row is the result. Every test that uses FFmpeg — including the one
-that writes a Matroska file through `libavformat` and probes the result, and the
-one that runs the synthetic-recording example as a separate process — passes
-against a build made four months earlier from a different commit, with a
-different configuration. The single failure is
+The middle row is the result. Every test that uses FFmpeg passes against a build
+made four months earlier from a different commit, with a different
+configuration — including the one that writes a Matroska file through
+`libavformat` and probes the result, the one that runs the synthetic-recording
+example as a separate process, and `abrupt_termination`, which kills that
+process with `TerminateProcess` part-way through and then demuxes what survived.
+That last one is the strongest of the five for this purpose: it is the test ADR
+0001's container choice rests on, and it exercises `libavformat`'s cluster
+writing on a file that was never closed. The single failure is
 `loaded_libraries_are_the_pinned_ffmpeg_build`, which exists to assert that the
 loaded build *is* the pin:
 
@@ -165,28 +172,38 @@ libavformat 62.12.100, libavcodec 62.28.100, libavutil 60.26.100
 
 That failure is what makes the row mean anything: it proves the substituted
 libraries really were the ones loaded, rather than the pinned DLLs having been
-picked up from somewhere else.
+picked up from somewhere else — and it comes from the same staged directory, run
+in the same pass, as the four columns that passed.
 
 The bottom row is the control. FFmpeg 7.1 carries different library majors
-(`avformat-61` where 8.1 has `avformat-62`), the binaries cannot start at all,
-and the process exits before any test runs. "Compatible" means the same major
-version of each library — which is exactly what the DLL file names carry, so a
-user can see it — and the relinking permission is about a modified version of
-the same library, not about any FFmpeg at all.
+(`avformat-61` where 8.1 has `avformat-62`), so nothing that needs those
+libraries can start. Three of the five executables link them directly and exit
+with `0xC0000135` (`STATUS_DLL_NOT_FOUND`) before any test runs. The other two
+link no FFmpeg themselves — they drive the recorder as a child process — so they
+start, and then every one of their tests fails, because the recorder they launch
+is the thing that cannot start. Either way nothing passes: a substitution that
+is *not* interface-compatible does not silently succeed. "Compatible" means the
+same major version of each library — which is exactly what the DLL file names
+carry, so a user can see it — and the relinking permission is about a modified
+version of the same library, not about any FFmpeg at all.
 
-To repeat it: build the workspace, copy the test executables and the DLLs into a
-directory of their own, replace the DLLs with another `win64-lgpl-shared` build
-of the same FFmpeg major, and run the executables. Do not run them through
-`cargo test`: `clipped-ffmpeg-runtime` puts the pinned DLLs back over the
-substituted ones on the next build, which is correct behaviour and would
-silently undo the experiment.
+To repeat it: `cargo test -p clipped-muxer --no-run`, then copy the five test
+executables into a `deps` directory of their own and
+`target/debug/examples/synthetic_recording.exe` into an `examples` directory
+beside it — the layout `crates/muxer/tests/support` expects — put the DLLs in
+both, replace them with another `win64-lgpl-shared` build of the same FFmpeg
+major, and run the executables. Run `ffmpeg_linkage` from the same directory as
+the rest: its failure is what proves which libraries were loaded. Do not run any
+of it through `cargo test`: `clipped-ffmpeg-runtime` puts the pinned DLLs back
+over the substituted ones on the next build, which is correct behaviour and
+would silently undo the experiment.
 
 ## The Rust dependency tree
 
 `scripts/collect-notices.ps1` writes `THIRD-PARTY-NOTICES-RUST.md` into the
-payload: every third-party crate compiled into the binaries, with the licence
-text that crate publishes inside itself. On 2026-08-12 that was 272 crates
-across both workspaces.
+payload: every third-party crate Clipped is built from, with the licence text
+that crate publishes inside itself. On 2026-08-12 that was 275 crates across
+both workspaces.
 
 Two decisions in it are worth stating, because the wrong version of each is easy
 to reach and impossible to see afterwards:
@@ -195,12 +212,25 @@ to reach and impossible to see afterwards:
   require the copyright line and the permission notice to travel with the
   binary, and the copyright line is in the crate's own licence file rather than
   in its metadata. So each entry carries the file.
-- **It lists what is in the binaries.** The list is the normal-dependency
-  closure of both workspaces, resolved for `x86_64-pc-windows-msvc` with all
-  features: `dev-dependencies` and `build-dependencies` are excluded, because
-  `bindgen`, `cc` and `tauri-build` are not in anything a user is given, and a
-  notice for them would claim otherwise. Clipped's own crates are excluded too;
-  `LICENSE.txt` in the same payload covers them.
+- **It lists the normal-dependency closure, which is a superset of what is
+  linked.** The closure is taken over both workspaces, resolved for
+  `x86_64-pc-windows-msvc` with all features. `dev-dependencies` and
+  `build-dependencies` are excluded, so `bindgen`, `cc` and `tauri-build` are
+  absent — nothing reached only over those edges is in a binary at all.
+  Clipped's own crates are excluded too; `LICENSE.txt` in the same payload
+  covers them.
+
+  It is a superset rather than the linked set, and says so, because a
+  procedural macro is an ordinary dependency of the crate that uses it. So
+  `serde_derive`, `thiserror-impl`, `syn`, `quote`, `proc-macro2` and
+  `unicode-ident` are all listed, and every one of them runs in the compiler and
+  is no more present in a shipped binary than `bindgen` is. Telling those apart
+  would mean deciding per crate which edges lead only into the compiler, and
+  being wrong in the direction that drops a crate that *is* linked. A notice for
+  something you did not receive costs you a paragraph; a missing notice costs
+  you a right, so the rule chosen is the one that cannot under-report. The
+  generated file states the same thing at the top, so nobody reading only the
+  payload is told the narrower claim.
 
 This is not the same question as the one CI asks.
 [`deny.toml`](../deny.toml) checks every crate in both graphs — including
@@ -232,7 +262,10 @@ than a procedure anyone can run end to end. The first four steps work today.
 3. `scripts/collect-notices.ps1` — write the licences payload from the build
    that is actually installed. It refuses to write anything if the FFmpeg it
    finds reports a licence other than LGPL, or if either licence text is
-   missing.
+   missing. `-Destination` may be an empty directory or a payload from a
+   previous run; anything else is refused rather than emptied, and the payload
+   is assembled beside the destination and moved onto it only once it is
+   complete, so a failed run never leaves half of one where the last one was.
 4. `scripts/fetch-ffmpeg-source.ps1` — assemble the corresponding source and its
    manifest.
 5. Include the payload in the installer, beside the binaries and the seven
@@ -248,4 +281,9 @@ than a procedure anyone can run end to end. The first four steps work today.
 Steps 3 and 4 have their own tests —
 [`scripts/test-collect-notices.ps1`](../scripts/test-collect-notices.ps1) and
 [`scripts/test-fetch-ffmpeg-source.ps1`](../scripts/test-fetch-ffmpeg-source.ps1)
-— which are run by hand, as `scripts/test-check-prerequisites.ps1` is.
+— and CI runs both, in the Rust job, after the step that installs the pinned
+FFmpeg they need. Unlike `scripts/test-check-prerequisites.ps1`, which is run by
+hand because it guards a contributor's setup and fails visibly for whoever broke
+it, these guard what a release is obliged to give a user, and a regression in
+them is silent by construction: a payload missing two hundred notices reads
+exactly like a complete one.

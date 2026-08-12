@@ -177,8 +177,11 @@ The script is non-interactive and safe to run unconditionally, and it needs no
 wiring into the job's environment: the workflow checks the repository out, so it
 has `.cargo/config.toml` for the same reason a contributor does.
 `.github/workflows/ci.yml` caches `third-party/ffmpeg` keyed on the pinned asset
-name read out of the fetch script, so moving the pin misses the cache and a hit
-turns the step into a no-op that touches no network.
+name, so moving the pin misses the cache and a hit turns the step into a no-op
+that touches no network. It gets that name by running the fetch script with
+`-PrintPin`, which prints the pin as `key=value` lines and exits without
+touching anything — the pin answering a question about itself, rather than a
+second reader of it that a reformatted parameter block could break.
 
 The runner also needs `libclang.dll`. GitHub's `windows-latest` image ships LLVM,
 and the workflow's "Locate libclang for bindgen" step finds it and exports

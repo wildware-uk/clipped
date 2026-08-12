@@ -178,17 +178,29 @@ jobs:
       # when the pin moves, and getting it wrong would silently restore the wrong
       # build - which the linkage tests would catch, but only after several
       # minutes and with a confusing message.
+      #
+      # Asked of the script rather than read out of it. An earlier version of
+      # this step recovered the asset name with a regular expression over the
+      # script's parameter block, which made this the second reader of the pin
+      # and the more brittle one: reformatting that block leaves
+      # scripts/fetch-ffmpeg-source.ps1 - which parses it - working, and fails
+      # the build here. -PrintPin is the pin reporting itself, so there is
+      # nothing left in this file that can disagree with it.
       - name: Read the pinned FFmpeg asset name
         id: ffmpeg-pin
         run: |
-          $match = Select-String -Path scripts/fetch-ffmpeg.ps1 `
-              -Pattern '^\s*\[string\]\s*\$Asset\s*=\s*''([^'']+)''' |
-              Select-Object -First 1
-          if (-not $match) {
-              Write-Host 'Could not read the pinned FFmpeg asset name from scripts/fetch-ffmpeg.ps1.' -ForegroundColor Red
+          $printed = & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PrintPin
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'scripts/fetch-ffmpeg.ps1 -PrintPin failed.' -ForegroundColor Red
               exit 1
           }
-          $asset = $match.Matches[0].Groups[1].Value
+          $asset = ($printed | Select-String -Pattern '^asset=(.+)$' | Select-Object -First 1)
+          if (-not $asset) {
+              Write-Host 'scripts/fetch-ffmpeg.ps1 -PrintPin printed no asset name.' -ForegroundColor Red
+              Write-Host ($printed -join "`n")
+              exit 1
+          }
+          $asset = $asset.Matches[0].Groups[1].Value
           Write-Host "Pinned FFmpeg asset: $asset"
           "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -294,6 +306,45 @@ jobs:
           CLIPPED_REQUIRE_CAPTURE: '1'
           CLIPPED_REQUIRE_MEDIA: '1'
         run: cargo test --workspace
+
+      # What a release is legally obliged to ship (docs/licensing.md): the
+      # notices payload and the corresponding source of the pinned FFmpeg. Both
+      # generators are PowerShell, so `cargo test` cannot reach them, and
+      # neither can be checked by reading - the notices are 2 MB of reproduced
+      # licence text and the source pin is one asset name.
+      #
+      # Here rather than left to a contributor's hand, unlike
+      # test-check-prerequisites.ps1: that one guards a developer's setup and
+      # fails visibly for whoever broke it, whereas these guard what a user is
+      # given, and a regression in them is silent by construction - a payload
+      # missing two hundred notices reads exactly like a complete one.
+      #
+      # This job is where they belong. test-collect-notices.ps1 needs the pinned
+      # FFmpeg, which the fetch step above installed, and `cargo metadata` for
+      # both workspaces; test-fetch-ffmpeg-source.ps1 needs neither a network
+      # nor git, because every case runs the script with -PlanOnly.
+      #
+      # Invoked through the Windows PowerShell 5.1 host each script declares,
+      # for the same reason the prerequisite check is: what CI exercises should
+      # be what a contributor pastes.
+      - name: Check the release licence tooling
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $failed = @()
+          foreach ($suite in @('scripts/test-collect-notices.ps1', 'scripts/test-fetch-ffmpeg-source.ps1')) {
+              Write-Host "== $suite"
+              $output = & powershell -ExecutionPolicy Bypass -File $suite 2>&1 | Out-String
+              $code = $LASTEXITCODE
+              Write-Host $output
+              "## $suite`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              if ($code -ne 0) { $failed += "$suite exited $code" }
+          }
+          if ($failed.Count -gt 0) {
+              Write-Host ($failed -join "`n") -ForegroundColor Red
+              exit 1
+          }
 
   deny:
     name: Dependencies (licences and advisories)
