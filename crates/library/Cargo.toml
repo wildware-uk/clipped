@@ -60,11 +60,42 @@ clipped-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# The raw FFmpeg FFI, for `src/thumbnail`. Making a thumbnail means demuxing a
+# finished recording, seeking in it, decoding a frame of whatever video codec is
+# in it, scaling that frame and encoding a JPEG, and there is no lower-layer
+# route to any of it: `clipped-muxer` owns the workspace's safe wrappers over the
+# container API and is layer 2, above this crate, so depending on it would invert
+# the dependency direction `tests/integration/tests/workspace_layering.rs`
+# asserts (README, "Dependency direction").
+#
+# `docs/adr/0004-ffmpeg-dependency-strategy.md` permits exactly this, in the
+# amendment issue #155 added: a crate with no lower-layer route to what it needs
+# may name the binding. `crates/encoder` and `crates/waveform` are the other two.
+#
+# WHAT THIS COSTS. Every executable that depends on this crate imports
+# `avformat-62.dll`, `avcodec-62.dll`, `avutil-60.dll` and `swscale-9.dll`, and
+# Windows resolves imports before `main` runs. The DLLs are placed beside the
+# binaries by the build script below; the shipped application already
+# distributes them (ADR 0004). MIT.
+rusty_ffmpeg.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # `GetCurrentThread`, `SetThreadPriority`, `GetThreadPriority` and the
+    # `THREAD_MODE_BACKGROUND_BEGIN`/`THREAD_PRIORITY_LOWEST` constants, for
+    # `src/thumbnail/windows/priority.rs`. Generating thumbnails for a library
+    # must not take processor or disk bandwidth from a game that is being
+    # recorded (AGENTS.md section 18), and on Windows that is the mechanism.
+    "Win32_System_Threading",
 ] }
+
+[build-dependencies]
+# This crate links FFmpeg, so it needs the runtime DLLs beside its own test and
+# example executables. It is not a dependent of `clipped-muxer`, which is why it
+# cannot rely on the muxer's build script having run (issue #158).
+clipped-ffmpeg-runtime.workspace = true
 
 [dev-dependencies]
 # `tests/accounting_privacy.rs` renders real log output through a real
@@ -104,6 +135,13 @@ serde_json.workspace = true
 # Indexing runs unattended on a background thread, so what it decided about a
 # file nobody can find afterwards is only knowable from the log. MIT.
 tracing.workspace = true
+
+# `tests/thumbnails.rs` needs a real recording to take a frame out of, and this
+# is the workspace's one place that knows where the pinned build's `ffmpeg.exe`
+# is and how to skip cleanly when a checkout has none (tests/media,
+# docs/testing.md). Its `TemporaryDirectory` is what those tests write into,
+# rather than a sixth copy of "a directory that deletes itself".
+clipped-media-validation.workspace = true
 
 [lints]
 workspace = true

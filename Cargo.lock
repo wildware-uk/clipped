@@ -284,8 +284,13 @@ name = "clipped-library"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipped-edit",
+ "clipped-events",
+ "clipped-ffmpeg-runtime",
  "clipped-logging",
+ "clipped-media-validation",
  "clipped-storage",
+ "rusty_ffmpeg",
  "serde",
  "serde_json",
  "time",

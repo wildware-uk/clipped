@@ -1,0 +1,125 @@
+//! Getting out of a game's way.
+//!
+//! AGENTS.md section 18 is the requirement: this application runs alongside
+//! games, and generating thumbnails for a library of recordings is exactly the
+//! background work that must not take anything a game needs. Two things are
+//! asked of Windows, and both matter.
+//!
+//! **`THREAD_PRIORITY_LOWEST`** drops the thread three levels below normal, so
+//! the scheduler runs it only when nothing else in its priority class wants the
+//! processor.
+//!
+//! **`THREAD_MODE_BACKGROUND_BEGIN`** does more than that: it drops the thread
+//! to the lowest scheduling priority *and* puts its disk reads at background I/O
+//! priority. That second half is the important one here. Seeking into a
+//! recording means reading from the same disk a recording in progress is being
+//! written to, and a low-priority thread issuing normal-priority reads would
+//! still take disk bandwidth from the recorder. Background I/O priority is what
+//! Windows gives its own indexer, for the same reason.
+//!
+//! Both are per-thread and reversible, and this module applies them to a thread
+//! `super::super::service` created and owns, never to a caller's.
+//!
+//! # This is deliberately the same as `clipped-waveform`'s
+//!
+//! Both crates are layer 1, so neither can depend on the other, and the shared
+//! home for this would be a new crate below both — an architecture change rather
+//! than a thumbnail ticket
+//! ([issue #293](https://github.com/wildware-uk/clipped/issues/293)). Until then
+//! there are two copies of eight lines of Win32, and this comment is what stops
+//! the second one being mistaken for an accident.
+//!
+//! # When it does not work
+//!
+//! `SetThreadPriority` can fail. The service reports what actually happened
+//! through [`WorkerPriority`] rather than assuming, because "we asked for
+//! background priority" and "the thread is running at background priority" are
+//! different statements and only the second one is worth anything.
+
+use windows::Win32::System::Threading::{
+    GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+    THREAD_MODE_BACKGROUND_END, THREAD_PRIORITY_LOWEST, THREAD_PRIORITY_NORMAL,
+};
+
+use crate::thumbnail::service::WorkerPriority;
+
+/// What `GetThreadPriority` reports for a thread at `THREAD_PRIORITY_LOWEST`.
+const LOWEST: i32 = THREAD_PRIORITY_LOWEST.0;
+
+/// Puts the calling thread into the background, and reports what took.
+///
+/// Call once, from the thread itself. Reversed by [`leave`].
+pub(crate) fn enter() -> WorkerPriority {
+    // SAFETY: `GetCurrentThread` returns a pseudo-handle to the calling thread.
+    // It needs no closing and is valid wherever it is used on this thread.
+    let thread = unsafe { GetCurrentThread() };
+
+    // SAFETY: `thread` is a valid thread handle and the value is a documented
+    // priority constant.
+    let lowest = unsafe { SetThreadPriority(thread, THREAD_PRIORITY_LOWEST) }.is_ok();
+    // Read here, before background mode, because that is the only point at
+    // which `GetThreadPriority` answers the question "did the thread take the
+    // lowest scheduling priority?". Once the thread is in background mode
+    // Windows reports the background value instead, which is lower still but is
+    // not `THREAD_PRIORITY_LOWEST`.
+    //
+    // SAFETY: as above. Returns `THREAD_PRIORITY_ERROR_RETURN` on failure, which
+    // is a value no priority has, so it is reported as it is.
+    let scheduling = unsafe { GetThreadPriority(thread) };
+
+    // SAFETY: as above. Failure is expected when the thread is already in
+    // background mode, which is why the result is reported rather than checked.
+    let background = unsafe { SetThreadPriority(thread, THREAD_MODE_BACKGROUND_BEGIN) }.is_ok();
+    // SAFETY: as above.
+    let observed = unsafe { GetThreadPriority(thread) };
+
+    WorkerPriority::new(lowest && scheduling == LOWEST, background, observed)
+}
+
+/// Undoes [`enter`], both halves of it.
+///
+/// Called before the worker thread ends, so that a thread returned to a pool —
+/// which this crate does not do today, but a future host might — is neither left
+/// in background I/O mode nor left three levels below normal. Ending background
+/// mode does not restore the scheduling priority: `THREAD_MODE_BACKGROUND_END`
+/// puts back whatever was set before background mode began, which here was
+/// `THREAD_PRIORITY_LOWEST`, so the second call is what actually makes the
+/// thread ordinary again.
+pub(crate) fn leave() {
+    // SAFETY: as in `enter`.
+    let thread = unsafe { GetCurrentThread() };
+    // SAFETY: as in `enter`. Failing here means the thread was not in background
+    // mode, which is the state this is trying to reach.
+    let _ = unsafe { SetThreadPriority(thread, THREAD_MODE_BACKGROUND_END) };
+    // SAFETY: as in `enter`; the value is a documented priority constant.
+    let _ = unsafe { SetThreadPriority(thread, THREAD_PRIORITY_NORMAL) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaving_the_background_puts_the_thread_back_to_an_ordinary_priority() {
+        // On a thread of its own: this changes the priority of whichever thread
+        // it runs on, and the test harness's threads are not this test's to
+        // alter.
+        std::thread::spawn(|| {
+            let entered = enter();
+            assert!(entered.is_lowest(), "{entered:?}");
+            leave();
+
+            // SAFETY: a pseudo-handle to the calling thread, valid here.
+            let thread = unsafe { GetCurrentThread() };
+            // SAFETY: as above.
+            let after = unsafe { GetThreadPriority(thread) };
+            assert_eq!(
+                after, THREAD_PRIORITY_NORMAL.0,
+                "leave() ended background mode but left the thread at {after}, so a thread \
+                 handed back to a pool would still be below normal"
+            );
+        })
+        .join()
+        .expect("the test thread finishes");
+    }
+}
