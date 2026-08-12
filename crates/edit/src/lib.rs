@@ -22,6 +22,10 @@
 //!   #89](https://github.com/wildware-uk/clipped/issues/89)) and a preview
 //!   ([issue #83](https://github.com/wildware-uk/clipped/issues/83)) both ask
 //!   several thousand times per clip and must never answer differently.
+//! - **Editing it.** Trimming the ends, splitting at the playhead, deleting a
+//!   section and undoing any of it: [`operations`] and [`history`]. Every one
+//!   of them is arithmetic over the same two kinds of time, and none of them
+//!   goes anywhere near a recording.
 //! - Validation: what makes a document readable at all, checked on the way in
 //!   and on the way out.
 //! - The encoding, its version, and the migration of documents written by an
@@ -39,14 +43,16 @@
 //! cannot rewrite one. `tests/sources_are_never_touched.rs` asserts it against
 //! the source of this crate rather than trusting this paragraph.
 //!
-//! **Performing edits.** Trimming, splitting, deleting a section, undo and redo
-//! are [issue #84](https://github.com/wildware-uk/clipped/issues/84); the mix
-//! is [#85](https://github.com/wildware-uk/clipped/issues/85), framing and
-//! speed [#86](https://github.com/wildware-uk/clipped/issues/86), overlays
+//! **The rest of the edits.** [`operations`] covers what [issue
+//! #84](https://github.com/wildware-uk/clipped/issues/84) asks for and stops
+//! there: changing the mix is
+//! [#85](https://github.com/wildware-uk/clipped/issues/85), framing and speed
+//! [#86](https://github.com/wildware-uk/clipped/issues/86), overlays
 //! [#87](https://github.com/wildware-uk/clipped/issues/87) and combining
-//! recordings [#88](https://github.com/wildware-uk/clipped/issues/88). What is
-//! here is the shape those operations produce and the arithmetic they have to
-//! agree with, so that six tickets do not each invent their own timeline.
+//! recordings [#88](https://github.com/wildware-uk/clipped/issues/88). The
+//! model those tickets change is already here, and so is the timeline
+//! arithmetic they have to agree with, so that six tickets do not each invent
+//! their own.
 //!
 //! **Rendering.** Nothing here decodes, draws or encodes a frame.
 //!
@@ -93,7 +99,9 @@
 //! # Example
 //!
 //! ```
-//! use clipped_edit::{EditDocument, OutputTime, RecordingId, SourceSpan, SourceTime};
+//! use clipped_edit::{
+//!     EditDocument, EditOperation, OutputTime, RecordingId, SourceSpan, SourceTime,
+//! };
 //!
 //! // Twelve seconds of a recording, starting thirty seconds in.
 //! let span = SourceSpan::new(
@@ -112,6 +120,15 @@
 //!     .locate(OutputTime::from_nanos(2_000_000_000))
 //!     .expect("two seconds in is inside the clip");
 //! assert_eq!(placement.source_time, SourceTime::from_nanos(32_000_000_000));
+//!
+//! // Editing it moves material in output time and never in source time.
+//! let trimmed = document.apply(EditOperation::TrimStart {
+//!     at: OutputTime::from_nanos(2_000_000_000),
+//! })?;
+//! let placement = trimmed
+//!     .locate(OutputTime::ZERO)
+//!     .expect("the clip now starts where the trim did");
+//! assert_eq!(placement.source_time, SourceTime::from_nanos(32_000_000_000));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -119,6 +136,8 @@ pub mod audio;
 pub mod document;
 pub mod error;
 pub mod framing;
+pub mod history;
+pub mod operations;
 pub mod overlay;
 pub mod schema;
 pub mod segment;
@@ -128,8 +147,10 @@ pub mod timeline;
 
 pub use audio::{AudioTrack, TrackInput, TrackOutput};
 pub use document::EditDocument;
-pub use error::{DocumentProblem, EditDocumentError};
+pub use error::{DocumentProblem, EditDocumentError, OperationRefused};
 pub use framing::{AspectRatio, CropRect, Rotation};
+pub use history::{EditHistory, MAX_UNDO_STEPS};
+pub use operations::EditOperation;
 pub use overlay::{OverlayPosition, TextOverlay};
 pub use schema::{Loaded, Migrated, SCHEMA_VERSION};
 pub use segment::Segment;
