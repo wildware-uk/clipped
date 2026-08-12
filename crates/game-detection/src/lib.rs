@@ -35,11 +35,18 @@
 //! `docs/sessions.md`), which is where that decision belongs — this crate
 //! reports what is running and nothing more.
 //!
-//! The launcher providers that would supply a launcher identity are
-//! [#43](https://github.com/wildware-uk/clipped/issues/43) onwards.
+//! The third part is the **launcher providers**
+//! ([#43](https://github.com/wildware-uk/clipped/issues/43) onwards), which
+//! supply the launcher identity the catalogue's strongest matching rung needs.
+//! [`launcher::steam`] is the first of them: it reads Steam's own library index
+//! and application manifests off the local disk and answers "which Steam
+//! application is this executable?", which is what turns a process called
+//! `launcher.exe` into a game with a name. #44 adds the other shops.
+//!
 //! `docs/game-detection.md` is the subsystem document.
 
 pub mod catalogue;
+pub mod launcher;
 mod process_watcher;
 
 pub use process_watcher::{

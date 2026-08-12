@@ -66,6 +66,15 @@ pub use entry::{
 };
 pub use error::{CatalogueError, EntryLocation, EntryProblem};
 pub use matching::{Match, MatchStrength, ProcessCandidate};
+
+/// How a path is compared, shared with the launcher providers.
+///
+/// Not public API: it is here so that [`crate::launcher::steam`] decides
+/// whether an executable is inside a Steam application's directory by exactly
+/// the rule this module uses for `path_contains` (AGENTS.md section 55). Two
+/// implementations of "is this path inside that one?" that disagreed about a
+/// trailing separator would be two different answers about the same game.
+pub(crate) use matching::{normalise_path, segments as path_segments};
 pub use overlay::{default_path as overlay_path, OverlayStatus, OVERLAY_FILE_NAME};
 
 /// The version of the catalogue file format.

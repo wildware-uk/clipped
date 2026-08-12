@@ -1,0 +1,51 @@
+"AppState"
+{
+	"appid"		"620"
+	"Universe"		"1"
+	"LauncherPath"		"C:\\Program Files (x86)\\Steam\\steam.exe"
+	"name"		"Portal 2"
+	"StateFlags"		"4"
+	"installdir"		"Portal 2"
+	"LastUpdated"		"1783767566"
+	"LastPlayed"		"0"
+	"SizeOnDisk"		"12755935432"
+	"StagingSize"		"0"
+	"buildid"		"23973718"
+	"LastOwner"		"0"
+	"DownloadType"		"1"
+	"UpdateResult"		"0"
+	"BytesToDownload"		"906640"
+	"BytesDownloaded"		"906640"
+	"BytesToStage"		"52101758"
+	"BytesStaged"		"52101758"
+	"TargetBuildID"		"23973718"
+	"AutoUpdateBehavior"		"0"
+	"AllowOtherDownloadsWhileRunning"		"0"
+	"ScheduledAutoUpdate"		"0"
+	"InstalledDepots"
+	{
+		"624"
+		{
+			"manifest"		"8207314901980262131"
+			"size"		"20537496"
+		}
+		"622"
+		{
+			"manifest"		"916560128540961379"
+			"size"		"62718518"
+		}
+		"621"
+		{
+			"manifest"		"9122696443005314333"
+			"size"		"12674356162"
+		}
+	}
+	"UserConfig"
+	{
+		"language"		"english"
+	}
+	"MountedConfig"
+	{
+		"language"		"english"
+	}
+}
