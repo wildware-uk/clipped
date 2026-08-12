@@ -88,7 +88,7 @@ use clipped_session::automatic::{
     AutomaticSettings, RecordingId, RecordingOutcome, RecordingOutcomeSummary, RecordingRequest,
     Session, SessionAction, SessionManager,
 };
-use clipped_session::config::{Configuration, ConfigurationStore};
+use clipped_session::config::{Configuration, ConfigurationError, ConfigurationStore};
 use clipped_session::plugins::{installed_but_not_enabled, PluginOutcome, SessionPlugins};
 use clipped_session::{
     RecordingOutputs, RecordingProgress, RecordingReport, RecordingSettings, SessionError,
@@ -349,7 +349,7 @@ fn load_configuration(path: Option<&Path>) -> Configuration {
 /// their file is still theirs — a user who reads "settings not applied" and
 /// nothing else has no way to know whether the recorder has just overwritten
 /// what it could not read (AGENTS.md sections 45 and 56).
-fn unreadable_settings_sentence(error: &clipped_session::config::ConfigurationError) -> String {
+fn unreadable_settings_sentence(error: &ConfigurationError) -> String {
     format!(
         "Settings not applied: {error}. Recording with Clipped's defaults; your settings file \
          has been left as it is."
@@ -961,8 +961,9 @@ fn attempt(
 /// configured settings over it, and turning what came back into an outcome — is
 /// this command's own logic, and taking them as arguments is what lets that
 /// logic be tested on a machine that can capture nothing. `attempt` is this with
-/// the real pair, and is the only caller outside the tests. The seam is the one
-/// `crate::shutdown::run_with_finalisation` uses, for the same reason.
+/// the real pair, and is the only caller outside the tests — the same shape
+/// [`crate::shutdown::run_until_shutdown`] takes the recording itself as, and
+/// which its own tests drive with a closure that records nothing.
 fn attempt_with<FindWindow, Record>(
     request: &RecordingRequest,
     plan: &RecordingPlan,
@@ -1520,7 +1521,7 @@ name = "test-game.exe"
         // The wording, not the wiring. Somebody who is told only "settings not
         // applied" has no way to know whether the recorder has just overwritten
         // a file it could not read.
-        let error = clipped_session::config::ConfigurationError::Read {
+        let error = ConfigurationError::Read {
             path: PathBuf::from(r"D:\settings.json"),
             source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
         };
