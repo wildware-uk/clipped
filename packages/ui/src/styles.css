@@ -549,6 +549,17 @@ code {
   margin: 0;
 }
 
+/* The clip's name, and what can be done with the whole clip: the export dialog
+   (issue #90). Aligned on the baseline so the button sits with the heading
+   rather than under it. */
+.clipped-editor__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
 .clipped-editor__transport {
   display: flex;
   flex-wrap: wrap;
@@ -575,6 +586,34 @@ code {
   margin: 0;
   font-size: var(--text-sm);
   line-height: var(--leading-snug);
+}
+
+/* The heading over what the export dialog says an export of this clip would be
+   (issue #90). One step under the dialog's own title, which is the step every
+   other second-level heading in the interface takes. */
+.clipped-editor__export-heading {
+  font-size: var(--text-xl);
+}
+
+/*
+ * The export dialog's reasons: one item per thing that decides what an export
+ * of the open clip would be (issue #90). A list rather than prose because each
+ * item is about a different edit and somebody is looking for theirs, and a
+ * marked list rather than a table because a dialog is one column wide.
+ *
+ * It sets no colour: the item's own sentence is the window's ink and the
+ * sentence after it takes `.clipped-dialog__body`, both of which
+ * `contrast.test.ts` already measures on the dialog's ground.
+ */
+.clipped-editor__reasons {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-4);
+  font-size: var(--text-md);
+  line-height: var(--leading-snug);
+}
+
+.clipped-editor__reasons li + li {
+  margin-top: var(--space-2);
 }
 
 /* The label column and the scrolling timeline beside it. The labels stay put
