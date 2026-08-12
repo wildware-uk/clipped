@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::kind::{is_valid_segment, EventKind, MAX_IDENTIFIER_BYTES, RESERVED_NAMESPACE};
@@ -135,17 +135,32 @@ impl fmt::Display for GameEvent {
 /// source it has not met. The syntax is [`CustomName`](crate::CustomName)'s
 /// without the namespace requirement: lowercase ASCII letters, digits, `-`,
 /// `_` and `.`, each dot-separated segment starting with a letter, at most
-/// [`MAX_IDENTIFIER_BYTES`] bytes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+/// [`MAX_IDENTIFIER_BYTES`] bytes, and not [`APPLICATION`](Self::APPLICATION).
+///
+/// # Checked when produced, not when read
+///
+/// [`plugin`](Self::plugin) is the boundary a producer comes through, and it
+/// enforces all of the above. Reading a stored document does **not**: a `source`
+/// already in a user's library is kept exactly as it was written, because
+/// refusing the document would delete an event to enforce a rule the event has
+/// already broken (AGENTS.md section 56, `crates/events/src/schema.rs`).
+/// [`is_well_formed`](Self::is_well_formed) is how a consumer asks whether what
+/// it read obeys the syntax.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct EventSource(String);
 
 impl EventSource {
     /// Clipped itself: the process watcher, the session, the user interface.
     ///
-    /// The identifier is [`RESERVED_NAMESPACE`], which no plugin may use as the
-    /// namespace of a custom event, so an event that appears to come from the
-    /// application cannot come from anywhere else.
+    /// The identifier is [`RESERVED_NAMESPACE`], which
+    /// [`plugin`](Self::plugin) refuses and which no plugin may use as the
+    /// namespace of a custom event, so an event this build produced claiming to
+    /// come from the application did come from the application.
+    ///
+    /// It is a claim about what this build will *produce*, not about what it
+    /// will read: a document is not evidence of who wrote it, and anything that
+    /// can write to a user's library can write this string into it.
     pub const APPLICATION: &'static str = RESERVED_NAMESPACE;
 
     /// The source Clipped itself reports under.
@@ -161,18 +176,20 @@ impl EventSource {
     /// [`InvalidSource`] when the identifier breaks the syntax above, naming
     /// the rule it broke.
     pub fn plugin(identifier: &str) -> Result<Self, InvalidSource> {
-        if identifier.is_empty() || identifier.len() > MAX_IDENTIFIER_BYTES {
-            return Err(InvalidSource {
+        if identifier == Self::APPLICATION {
+            return Err(InvalidSource::Reserved {
                 identifier: identifier.to_owned(),
             });
         }
-        if identifier.split('.').all(is_valid_segment) {
-            Ok(Self(identifier.to_owned()))
-        } else {
-            Err(InvalidSource {
+        if identifier.is_empty()
+            || identifier.len() > MAX_IDENTIFIER_BYTES
+            || !identifier.split('.').all(is_valid_segment)
+        {
+            return Err(InvalidSource::Malformed {
                 identifier: identifier.to_owned(),
-            })
+            });
         }
+        Ok(Self(identifier.to_owned()))
     }
 
     /// The identifier.
@@ -185,6 +202,26 @@ impl EventSource {
     #[must_use]
     pub fn is_application(&self) -> bool {
         self.0 == Self::APPLICATION
+    }
+
+    /// Whether the identifier obeys the syntax.
+    ///
+    /// True for everything [`plugin`](Self::plugin) and
+    /// [`application`](Self::application) produce, so the only way to hold a
+    /// source this is false for is to have read one from a stored document.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.is_application() || Self::plugin(&self.0).is_ok()
+    }
+}
+
+/// Kept verbatim, without the checks [`EventSource::plugin`] applies.
+///
+/// See the type's documentation: the producer boundary is where the syntax is
+/// enforced, and a stored event is past it.
+impl<'de> Deserialize<'de> for EventSource {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self)
     }
 }
 
@@ -208,22 +245,47 @@ impl From<EventSource> for String {
     }
 }
 
-/// An event source identifier that breaks the syntax.
+/// Why an event source identifier was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InvalidSource {
-    /// The identifier offered.
-    pub identifier: String,
+pub enum InvalidSource {
+    /// It is empty, too long, or contains something the syntax does not allow.
+    Malformed {
+        /// The identifier offered.
+        identifier: String,
+    },
+    /// It is [`EventSource::APPLICATION`], which only Clipped itself reports
+    /// under.
+    Reserved {
+        /// The identifier offered.
+        identifier: String,
+    },
+}
+
+impl InvalidSource {
+    /// The identifier that was refused.
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        match self {
+            Self::Malformed { identifier } | Self::Reserved { identifier } => identifier,
+        }
+    }
 }
 
 impl fmt::Display for InvalidSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "`{}` is not a usable event source: an identifier is up to {MAX_IDENTIFIER_BYTES} \
-             bytes of lowercase ASCII letters, digits, `-`, `_` and `.`, and each dot-separated \
-             segment starts with a letter",
-            self.identifier
-        )
+        match self {
+            Self::Malformed { identifier } => write!(
+                f,
+                "`{identifier}` is not a usable event source: an identifier is up to \
+                 {MAX_IDENTIFIER_BYTES} bytes of lowercase ASCII letters, digits, `-`, `_` and \
+                 `.`, and each dot-separated segment starts with a letter"
+            ),
+            Self::Reserved { identifier } => write!(
+                f,
+                "`{identifier}` is the identifier Clipped itself reports events under, and is \
+                 reserved: a plugin's events must be traceable to the plugin"
+            ),
+        }
     }
 }
 
@@ -249,8 +311,17 @@ impl core::error::Error for InvalidSource {}
 /// feed reports [`CERTAIN`](Self::CERTAIN); a detector that computes a score
 /// reports the score it computed. Nothing in between should be invented
 /// (AGENTS.md section 27).
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(try_from = "f32", into = "f32")]
+///
+/// # Checked when produced, not when read
+///
+/// As with [`EventSource`], and for the same reason: [`new`](Self::new) is the
+/// producer boundary and refuses anything outside 0 to 1, while a value already
+/// in a user's library is read back as it was written. Refusing it would fail
+/// the whole document — losing an event's kind, time and payload over one
+/// number — to enforce a range the stored value has already left.
+/// [`is_usable`](Self::is_usable) is how a consumer asks.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct Confidence(f32);
 
 impl Confidence {
@@ -272,10 +343,43 @@ impl Confidence {
         }
     }
 
-    /// The value, between 0 and 1.
+    /// The value. Between 0 and 1 unless it was read from a stored document,
+    /// which is what [`is_usable`](Self::is_usable) reports.
     #[must_use]
     pub const fn as_f32(self) -> f32 {
         self.0
+    }
+
+    /// Whether this is a confidence a rule can act on: a number between 0 and
+    /// 1.
+    ///
+    /// True for everything [`new`](Self::new) produces. False only for a value
+    /// read from a document that was not written by this model — where the
+    /// honest answer is that the source's certainty is not known, and inventing
+    /// one by clamping would put a number in a user's library that nothing ever
+    /// claimed.
+    #[must_use]
+    pub fn is_usable(self) -> bool {
+        (0.0..=1.0).contains(&self.0)
+    }
+}
+
+/// Kept verbatim, without the range check [`Confidence::new`] applies.
+///
+/// `NaN` is the one exception, and it is unreachable through
+/// [`schema::read`](crate::schema::read): JSON has no literal for it and
+/// `serde_json::Number` cannot hold one. The arm is here so that "a
+/// `Confidence` is never `NaN`" is a property of the type rather than of the
+/// format — a `NaN` compares false against every threshold, which would make an
+/// event silently invisible instead of merely uncertain, and that is the one
+/// failure mode worse than refusing the value.
+impl<'de> Deserialize<'de> for Confidence {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let confidence = f32::deserialize(deserializer)?;
+        if confidence.is_nan() {
+            return Err(serde::de::Error::custom(InvalidConfidence { confidence }));
+        }
+        Ok(Self(confidence))
     }
 }
 
@@ -413,6 +517,7 @@ impl core::error::Error for PayloadTooLarge {}
 mod tests {
     use core::time::Duration;
 
+    use serde::de::IntoDeserializer;
     use serde_json::json;
 
     use super::*;
@@ -484,22 +589,66 @@ mod tests {
     }
 
     #[test]
-    fn the_application_is_a_source_no_plugin_can_impersonate() {
+    fn the_application_is_a_source_no_plugin_can_claim() {
         assert!(EventSource::application().is_application());
         assert!(!source().is_application());
-        // A plugin *can* be named `clipped` as a source identifier — the
-        // syntax allows it — so the guarantee is on the namespace of custom
-        // event names, which is where a plugin would otherwise appear to speak
-        // for the project. `CustomName` enforces that; see its tests.
         assert_eq!(EventSource::application().as_str(), "clipped");
+
+        // The identifier is reserved at the producer boundary, so an event this
+        // build produces that appears to come from the application did. It is
+        // the same rule `CustomName` applies to the namespace of a custom event
+        // name, applied to the other place a plugin could speak for the project.
+        let refused = EventSource::plugin("clipped").expect_err("`clipped` is reserved");
+        assert_eq!(
+            refused,
+            InvalidSource::Reserved {
+                identifier: "clipped".to_owned()
+            }
+        );
+        assert!(
+            refused.to_string().contains("reserved"),
+            "the message should say why: {refused}"
+        );
+        // A namespaced identifier under the reserved name is a different
+        // string, and is nobody's impersonation of the application.
+        assert!(EventSource::plugin("clipped-cs2").is_ok());
+        assert!(!EventSource::plugin("clipped.cs2")
+            .expect("namespaced, and not the reserved identifier")
+            .is_application());
+    }
+
+    #[test]
+    fn a_source_read_from_a_document_is_kept_rather_than_refused() {
+        // The read path does not re-run the producer's checks: an event already
+        // in a library is past that boundary, and failing the document would
+        // delete a mark from a timeline to enforce a rule it has already broken
+        // (AGENTS.md section 56).
+        let stored: EventSource =
+            serde_json::from_str(r#""Counter Strike""#).expect("a stored source is readable");
+        assert_eq!(stored.as_str(), "Counter Strike");
+        assert!(!stored.is_well_formed());
+        assert!(source().is_well_formed());
+        assert!(EventSource::application().is_well_formed());
+        // And it goes back out as it came in.
+        assert_eq!(
+            serde_json::to_string(&stored).expect("it serialises"),
+            r#""Counter Strike""#
+        );
     }
 
     #[test]
     fn a_source_identifier_is_checked() {
         assert!(EventSource::plugin("counter-strike-2").is_ok());
         assert!(EventSource::plugin("acme.cs2").is_ok());
-        assert!(EventSource::plugin("").is_err());
-        assert!(EventSource::plugin("Counter Strike").is_err());
+        for refused in ["", "Counter Strike", "9acme", "acme..cs2"] {
+            assert_eq!(
+                EventSource::plugin(refused),
+                Err(InvalidSource::Malformed {
+                    identifier: refused.to_owned()
+                }),
+                "`{refused}` should be refused as malformed"
+            );
+        }
         assert!(EventSource::plugin(&"a".repeat(MAX_IDENTIFIER_BYTES + 1)).is_err());
     }
 
@@ -517,11 +666,45 @@ mod tests {
     }
 
     #[test]
-    fn a_confidence_from_a_document_goes_through_the_same_check() {
-        assert!(serde_json::from_str::<Confidence>("0.75").is_ok());
+    fn a_confidence_from_a_document_is_read_rather_than_refused() {
+        assert!(serde_json::from_str::<Confidence>("0.75")
+            .expect("a normal confidence")
+            .is_usable());
+
+        // The producer boundary refuses this; the read path does not, because
+        // failing here fails the whole document and loses the event's kind,
+        // time and payload over one number (AGENTS.md section 56).
+        assert!(Confidence::new(1.5).is_err());
+        let stored: Confidence =
+            serde_json::from_str("1.5").expect("a stored confidence is readable");
         assert!(
-            serde_json::from_str::<Confidence>("1.5").is_err(),
-            "validation must not be bypassed by deserialisation"
+            !stored.is_usable(),
+            "it is readable, and a rule is told not to act on it"
         );
+        assert!(
+            (stored.as_f32() - 1.5).abs() < f32::EPSILON,
+            "kept verbatim"
+        );
+        assert_eq!(
+            serde_json::to_string(&stored).expect("it serialises"),
+            "1.5",
+            "and written back as it was stored"
+        );
+    }
+
+    #[test]
+    fn a_nan_confidence_cannot_arrive_from_a_document_at_all() {
+        // JSON has no literal for it, and `serde_json::Number` cannot hold one,
+        // so the read path never has to decide what a `NaN` certainty means.
+        assert!(serde_json::from_str::<Confidence>("NaN").is_err());
+        assert!(serde_json::Number::from_f64(f64::NAN).is_none());
+
+        // The type refuses it regardless, so that the property does not rest on
+        // the format: a `NaN` compares false against every threshold, which is
+        // an invisible event rather than an uncertain one. Deserialised from a
+        // `f32` directly, because no JSON document can pose the question.
+        let nan = IntoDeserializer::<serde::de::value::Error>::into_deserializer(f32::NAN);
+        assert!(Confidence::deserialize(nan).is_err());
+        assert!(Confidence::new(f32::NAN).is_err());
     }
 }

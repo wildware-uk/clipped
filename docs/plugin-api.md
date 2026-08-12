@@ -73,7 +73,7 @@ readable forever.
 | `at` | integer, signed nanoseconds | When it happened, on the recording's timeline. See [Timing](#timing). |
 | `precision` | integer, nanoseconds | How far either side of `at` the true moment may lie. `0` means the source timed it exactly. Required. |
 | `latency` | integer, nanoseconds | How much later than `at` the report arrived. Omitted when zero. |
-| `source` | string | Who reported it: a plugin identifier, or `clipped` for the application itself. |
+| `source` | string | Who reported it: a plugin identifier, or `clipped` for the application itself. `clipped` is reserved — `EventSource::plugin` refuses it. |
 | `confidence` | number, 0 to 1 | How sure the source is that it happened at all. See [below](#confidence-and-what-it-is-not). |
 | `data` | object | Whatever the source wanted to attach. Omitted when empty. Nothing above the plugin interprets it. |
 
@@ -172,6 +172,16 @@ There is no default. An integration reading an authoritative feed reports
 in between should be invented (AGENTS.md section 27). `NaN` is refused at
 construction, because a `NaN` confidence compares false against every threshold
 and would make an event silently invisible rather than merely uncertain.
+
+**Checked when produced, not when read.** The range is enforced where a producer
+creates a confidence, and *not* again when one is read back out of a library —
+for the same reason the payload size limit is not
+([the compatibility policy](#compatibility-policy)). A stored `1.5` is read as
+it was written and reported by `Confidence::is_usable`, because failing the
+document would lose the event's kind, time and payload over one number. The same
+applies to `source`: `EventSource::plugin` enforces the identifier syntax,
+`EventSource::is_well_formed` reports whether what was read obeys it, and
+nothing on the read path refuses a document over it.
 
 ## Timing
 
@@ -284,6 +294,10 @@ holds it, so an event copied out of one and into another — exported, attached 
 a bug report, moved between a session's sidecar and the library database — is
 still self-describing. `clipped_events::schema::read` is the reading path: it
 reports which schema wrote the document and upgrades it if it needs upgrading.
+`ReadEvent::to_json` is the way back, and keeps everything the reading build did
+not understand — see [the compatibility policy](#compatibility-policy).
+`StoredEvent::new` is for an event this build produced, and writes only what the
+model holds.
 
 ## Compatibility policy
 
@@ -300,35 +314,57 @@ Everything below rests on that.
 
 | What a build meets | What it does |
 | --- | --- |
-| **A field it does not know** | Ignores it. Adding a field costs no version bump — this is `serde`'s default behaviour, and the reason the version stays still for years. |
+| **A field it does not know** | Ignores it, **and keeps it**. Adding a field costs no version bump. Ignoring it is `serde`'s default; keeping it is not, and is why `ReadEvent::to_json` exists — a build that reads a library and writes it back would otherwise delete every field it had not learned. |
+| **A `source` or `confidence` its own types would refuse** | Reads it as it was stored. Those rules are enforced where a producer creates an event; enforcing them again on the way out of a database would fail the whole document over one field, and lose the kind, the time and the payload with it. `EventSource::is_well_formed` and `Confidence::is_usable` are how a consumer asks. |
 | **A `kind` it does not know, unnamespaced** | Keeps it verbatim as `EventKind::Unrecognised`. It is a kind added to the vocabulary after this build shipped: still a mark it can place, attribute and draw, and still exactly what it was when written back. |
 | **A `kind` it does not know, namespaced** | Keeps it as `EventKind::Custom`. A plugin's vocabulary works on every build, because the rule is syntactic. |
-| **A `schema` it does not know** | Reads it, and flags it — in practice this is a file written by a newer Clipped. The envelope is frozen, so the times and the source are exactly what they say they are; what a bump can change is the meaning of what lies *inside*, so `ReadEvent::is_understood` is false and a consumer that wants to interpret `data` knows not to. It is reported as unknown rather than as *newer*, because a number below the current one would land here too and calling that "newer" would be a claim the reader cannot support. |
-| **A `schema` older than its own** | Upgrades it, through `schema::upgrade`. |
+| **A `schema` it does not know** | Reads it, and flags it — in practice this is a file written by a newer Clipped. The envelope is frozen, so the times and the source are exactly what they say they are; what a bump can change is the meaning of what lies *inside*, so `ReadEvent::is_understood` is false and a consumer that wants to interpret `data` knows not to. It is reported as unknown rather than as *newer*, because a number below the current one would land here too and calling that "newer" would be a claim the reader cannot support. Writing it back keeps the number it arrived with: this build never re-encoded the payload, so stamping the current version on it would assert a meaning it did not read. |
+| **A `schema` older than its own** | Upgrades it, through `schema::upgrade`, and writes it back at the current version — which is what upgrading it means. |
 | **A `schema` field that is missing** | Refuses, by name. Every document this crate writes has one, and a document without one cannot be interpreted at all — this is the one case where guessing would be worse than failing. |
+| **A `schema` field that is not a number** | Refuses, saying what it found. `"1"`, `1.0` and `-1` are not versions, and a document carrying one was not written by this crate. Reported separately from a missing field, because sending somebody to look for a field that is in front of them is worse than no error at all. |
 | **An envelope it cannot read at all** | Refuses, saying so. An event with no time is not a mark on any timeline. |
 
 The catch-alls are the part that has to be *implemented* rather than inherited.
 An unknown field costs nothing to ignore; an unknown *tag* in a tagged union
 fails the whole document it is part of, which would take a mark off somebody's
-timeline over a word this build had not learned. `EventKind::Unrecognised` and
-`EventKind::Custom` are what make the table above true rather than aspirational,
-and `crates/events`'s tests assert it in both directions — including that an
-event read from a future schema and written back again survives unchanged, which
-is what "survive" has to mean for a library that gets re-indexed.
+timeline over a word this build had not learned. `EventKind::Unrecognised`,
+`EventKind::Custom` and `ReadEvent`'s kept unknown fields are what make the table
+above true rather than aspirational.
+
+**Reading and writing back.** `ReadEvent::to_json` is the write path for an
+event that came off a disk, and `crates/events`'s tests compare the **whole
+document** across it — not the fields the current model happens to know, which
+is a comparison that cannot see the loss it is looking for. A document from a
+schema this build has never met, carrying a kind it cannot name, fields it has
+no names for and a payload it must not interpret, comes back out as the same
+document. The one thing that is not byte-identical is a field this build *does*
+understand: a document that spells out `"latency":0` or `"data":{}` gets them
+back omitted, exactly as this build omits them when it writes an event of its
+own. That is what "survive" has to mean for a library that gets re-indexed by
+whichever build the user happens to be running.
 
 **When the version changes.** Adding a kind, a field, a source or a custom name
 does *not* bump `SchemaVersion`. Removing one, renaming one, or changing what
 one means does. Since the envelope is frozen, in practice a bump can only be
 about the interpretation of a payload or of an existing kind.
 
-`SchemaVersion` is a closed enumeration rather than a bare integer, and
-`schema::upgrade` matches on it exhaustively. Adding a version therefore stops
-the crate compiling until the step that migrates the documents already on disk
-is written — a schema can be bumped, but it cannot be bumped quietly, leaving
-events on somebody's disk to be discovered unreadable a release later. Today
-there is one version and no upgrade step, because there is nothing yet to
-upgrade from.
+`SchemaVersion` is a closed enumeration rather than a bare integer, and two
+guards make adding one a change that cannot be made quietly:
+
+- `schema::upgrade` matches on it exhaustively, so a new version does not
+  compile until the step that migrates the documents already on disk is written.
+- `SchemaVersion::position` matches on it exhaustively too, and a constant
+  asserts at compile time that `SchemaVersion::ALL` lists every version in order
+  and ends at `CURRENT`. Without it, a version could be added — with a number,
+  and with a migration — that `from_number` still answered `None` to, so every
+  document the build wrote would read back as one from an unknown schema on the
+  machine that wrote it.
+
+The first is about a version the build cannot *migrate*; the second about one it
+cannot *recognise*. Today there is one version and no upgrade step, because
+there is nothing yet to upgrade from — and `crates/events`'s golden documents
+are keyed by version and asserted to cover `ALL`, so the first bump cannot be
+made without a version-1 document being read by the version-2 build.
 
 ## How the three planned integrations map
 

@@ -37,11 +37,31 @@ use serde::{Deserialize, Serialize};
 /// [`from_media_nanos`](Self::from_media_nanos) and
 /// [`as_media_nanos`](Self::as_media_nanos).
 ///
-/// `docs/av-sync.md` names a third crate needing this vocabulary as the point
-/// at which a shared `clipped-time` crate earns its place. This is that third
-/// crate, and extracting one touches `clipped-capture`, `clipped-audio` and the
-/// layering test, which is more than this issue owns:
-/// [issue #253](https://github.com/wildware-uk/clipped/issues/253) tracks it.
+/// # The shared `clipped-time` crate, and why this is not it
+///
+/// `docs/av-sync.md` names "a third crate needing the same vocabulary" as the
+/// point at which a shared `clipped-time` crate earns its place, and
+/// `clipped-events` is that third crate. The trigger has fired, and the answer
+/// is **yes, extract one — as its own change**, not here.
+///
+/// It is a decision rather than a deferral, and the reasoning is on
+/// [issue #253](https://github.com/wildware-uk/clipped/issues/253): the
+/// extraction moves a type out of `clipped-capture` and rewrites every call
+/// site in it and in `clipped-audio`, adds a crate to the layering table in
+/// `README.md` and to `tests/integration/tests/workspace_layering.rs`, and
+/// changes a public type name in two crates that six open issues are being
+/// written against. None of that is verifiable by the tests of the event model,
+/// and doing it inside this issue would mean a change nobody could review as
+/// one thing (AGENTS.md section 39).
+///
+/// What is owed in the meantime is that the duplication stays exactly as
+/// bounded as `docs/av-sync.md` says: one `i64` of nanoseconds against the same
+/// zero, converted at
+/// [`from_media_nanos`](Self::from_media_nanos) and
+/// [`as_media_nanos`](Self::as_media_nanos) and nowhere else. #253 should land
+/// before the next consumer copies it a fourth time — persistence
+/// ([#71](https://github.com/wildware-uk/clipped/issues/71)) is the next one
+/// due.
 ///
 /// # Why it is signed
 ///
