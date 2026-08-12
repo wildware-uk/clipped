@@ -39,6 +39,18 @@
 //! `crate::recording::report_submission_over_headroom` says so, once, if that
 //! ever stops being true, rather than leaving a stall with no explanation.
 //!
+//! # Watching the drive
+//!
+//! This thread is also the one that asks how much room is left, for the same
+//! reason it exists at all: reading a volume's free space is a filesystem call
+//! and the capture thread may not make one (AGENTS.md section 20). At most once
+//! every [`crate::disk::PROBE_INTERVAL`] it asks, judges the answer against the
+//! floor the recording was given, and publishes it as one atomic
+//! ([`SpaceWatch`]) that the capture loop reads between frames. A recording
+//! that reaches the floor is stopped by that loop while there is still room to
+//! write the trailer — see `crate::disk` for why that matters more than it
+//! sounds.
+//!
 //! # Ownership
 //!
 //! The writer thread owns the [`MkvWriter`], which owns the file. Nothing else
@@ -46,15 +58,18 @@
 //! one container context — which is precisely what libavformat does not support
 //! (`crates/muxer/src/writer.rs`).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use clipped_muxer::{
     EncodedPacket, MkvWriter, MuxError, PacketTimestamp, RecordingSummary, TrackId,
 };
 
+use crate::disk::{self, SpaceVerdict};
 use crate::error::SessionError;
 
 /// How many encoded packets may be waiting to be written.
@@ -103,6 +118,116 @@ struct QueuedPacket {
     keyframe: bool,
 }
 
+/// What the writer thread has found out about the drive it is writing to.
+///
+/// One byte, written by the writer thread and read by the capture loop once per
+/// acquisition. It is an atomic and not a lock for the same reason
+/// [`MuxingThread::depth`](MuxingThread) is: the capture loop reads it between
+/// frames and must never wait for it.
+#[derive(Debug, Default)]
+pub(crate) struct SpaceWatch {
+    state: AtomicU8,
+}
+
+/// [`SpaceWatch`]'s states, as the byte holds them.
+const SPACE_AMPLE: u8 = 0;
+const SPACE_LOW: u8 = 1;
+const SPACE_EXHAUSTED: u8 = 2;
+const SPACE_UNREADABLE: u8 = 3;
+
+/// What the capture loop should do about the drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpaceState {
+    /// Carry on.
+    Ample,
+    /// Carry on, and say so once.
+    Low,
+    /// Finish the recording now, while there is still room to finish it
+    /// properly.
+    Exhausted,
+    /// The drive stopped answering. Nothing more can be written to it.
+    Unreadable,
+}
+
+impl SpaceWatch {
+    /// What the last probe found.
+    fn state(&self) -> SpaceState {
+        match self.state.load(Ordering::Relaxed) {
+            SPACE_LOW => SpaceState::Low,
+            SPACE_EXHAUSTED => SpaceState::Exhausted,
+            SPACE_UNREADABLE => SpaceState::Unreadable,
+            _ => SpaceState::Ample,
+        }
+    }
+
+    /// Publishes what a probe found.
+    fn publish(&self, state: SpaceState) {
+        self.state.store(
+            match state {
+                SpaceState::Ample => SPACE_AMPLE,
+                SpaceState::Low => SPACE_LOW,
+                SpaceState::Exhausted => SPACE_EXHAUSTED,
+                SpaceState::Unreadable => SPACE_UNREADABLE,
+            },
+            Ordering::Relaxed,
+        );
+    }
+}
+
+/// Where the recording is going and how much of the drive it refuses to
+/// consume.
+///
+/// A floor of zero turns the guard off, and the writer thread then makes no
+/// filesystem call at all beyond the writes themselves.
+#[derive(Debug, Clone)]
+pub(crate) struct SpaceGuard {
+    directory: PathBuf,
+    minimum_free_bytes: u64,
+}
+
+impl SpaceGuard {
+    /// A guard over the volume holding `output`.
+    pub(crate) fn new(output: &Path, minimum_free_bytes: u64) -> Self {
+        Self {
+            // The parent, not the file: the file may not exist yet, and
+            // `crate::disk::free_space` walks up from whatever it is given
+            // anyway. Naming the directory keeps the probe off a path that is
+            // being written to.
+            directory: output
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map_or_else(|| output.to_path_buf(), Path::to_path_buf),
+            minimum_free_bytes,
+        }
+    }
+
+    /// Whether this guard does anything at all.
+    const fn is_armed(&self) -> bool {
+        self.minimum_free_bytes > 0
+    }
+
+    /// Asks the volume, judges the answer, and reports it.
+    fn measure(&self) -> SpaceState {
+        match disk::free_space(&self.directory) {
+            Ok(space) => match disk::judge(space.free_bytes(), self.minimum_free_bytes) {
+                SpaceVerdict::Ample => SpaceState::Ample,
+                SpaceVerdict::Low => SpaceState::Low,
+                SpaceVerdict::Exhausted => SpaceState::Exhausted,
+            },
+            Err(error) => {
+                // At `warn` rather than `error`: the recording is about to be
+                // finished deliberately, which is the good outcome, and the
+                // capture loop is what reports the end reason.
+                tracing::warn!(
+                    %error,
+                    "the drive the recording is being written to stopped answering"
+                );
+                SpaceState::Unreadable
+            }
+        }
+    }
+}
+
 /// The writer thread, and the queue into it.
 #[derive(Debug)]
 pub(crate) struct MuxingThread {
@@ -112,19 +237,24 @@ pub(crate) struct MuxingThread {
     /// How many packets have been sent and not yet written. Read by the capture
     /// loop before every submission, so it is an atomic and not a lock.
     depth: Arc<AtomicUsize>,
+    /// What the writer thread last found out about the drive.
+    space: Arc<SpaceWatch>,
     handle: Option<JoinHandle<Result<RecordingSummary, MuxError>>>,
 }
 
 impl MuxingThread {
-    /// Starts a thread that writes into `writer` until the queue closes.
-    pub(crate) fn start(writer: MkvWriter) -> Self {
+    /// Starts a thread that writes into `writer` until the queue closes,
+    /// watching `guard`'s volume as it goes.
+    pub(crate) fn start(writer: MkvWriter, guard: SpaceGuard) -> Self {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let depth = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&depth);
+        let space = Arc::new(SpaceWatch::default());
+        let watched = Arc::clone(&space);
 
         let handle = thread::Builder::new()
             .name("clipped-muxer".to_owned())
-            .spawn(move || write_until_closed(writer, &receiver, &counted))
+            .spawn(move || write_until_closed(writer, &receiver, &counted, &guard, &watched))
             // A machine that cannot start a thread cannot record, and there is
             // nothing to fall back to. `spawn` failing here means the process
             // is out of handles or memory, which is not a state to carry on in.
@@ -133,8 +263,17 @@ impl MuxingThread {
         Self {
             sender: Some(sender),
             depth,
+            space,
             handle: Some(handle),
         }
+    }
+
+    /// What the writer thread last found out about the drive.
+    ///
+    /// Read once per acquisition by the capture loop. One relaxed load; the
+    /// filesystem call behind the answer happened on the writer thread.
+    pub(crate) fn space(&self) -> SpaceState {
+        self.space.state()
     }
 
     /// Whether the writer is far enough behind that no more frames should be
@@ -237,15 +376,34 @@ impl Drop for MuxingThread {
 
 /// The writer thread's body: write until the queue closes or a write fails,
 /// then finalise whatever happened.
+///
+/// The volume is probed here, between packets, rather than on a timer thread of
+/// its own: this thread is already awake for every packet, already owns the
+/// path, and is the only thread in the recording that is allowed to touch the
+/// filesystem at all.
 fn write_until_closed(
     mut writer: MkvWriter,
     receiver: &Receiver<QueuedPacket>,
     depth: &AtomicUsize,
+    guard: &SpaceGuard,
+    space: &SpaceWatch,
 ) -> Result<RecordingSummary, MuxError> {
     let mut failure = None;
+    // Measured before the first packet as well as between them, so that a
+    // recording started on a drive that was full a moment ago does not have to
+    // wait out an interval to find out (`crate::disk`).
+    let mut next_probe = Instant::now();
 
     while let Ok(packet) = receiver.recv() {
         depth.fetch_sub(1, Ordering::Relaxed);
+
+        if guard.is_armed() {
+            let now = Instant::now();
+            if now >= next_probe {
+                next_probe = now + disk::PROBE_INTERVAL;
+                space.publish(guard.measure());
+            }
+        }
 
         let muxed = EncodedPacket::new(
             TrackId::Video,
@@ -301,3 +459,82 @@ const _: () = {
         "the queue holds more memory than a queue should"
     );
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_guard_watches_the_folder_the_recording_goes_in_rather_than_the_file() {
+        // `GetDiskFreeSpaceExW` wants a directory, and the recording's own file
+        // does not exist when the guard is built. Pointing at the file would
+        // make the first probe fail and read as an unplugged drive.
+        let guard = SpaceGuard::new(Path::new(r"D:\clips\session.mkv"), 1);
+        assert_eq!(guard.directory, Path::new(r"D:\clips"));
+    }
+
+    #[test]
+    fn a_recording_written_to_the_working_directory_still_has_something_to_probe() {
+        // `Path::parent` of a bare file name is an empty path, which is not a
+        // directory anything can be asked about.
+        let guard = SpaceGuard::new(Path::new("session.mkv"), 1);
+        assert_eq!(guard.directory, Path::new("session.mkv"));
+    }
+
+    #[test]
+    fn a_floor_of_zero_leaves_the_writer_thread_making_no_extra_filesystem_call() {
+        // The guard being off has to mean *off*: a probe every two seconds on
+        // the thread that has to keep up with the encoder is not free, and a
+        // caller that turned the guard off asked for it not to happen.
+        assert!(!SpaceGuard::new(Path::new(r"D:\clips\a.mkv"), 0).is_armed());
+        assert!(SpaceGuard::new(Path::new(r"D:\clips\a.mkv"), 1).is_armed());
+    }
+
+    #[test]
+    fn every_state_survives_the_byte_it_is_published_through() {
+        // The capture loop acts on this: a state that decoded to `Ample` when
+        // it was published as `Exhausted` would let a recording run the drive
+        // dry, which is precisely what the guard exists to prevent.
+        let watch = SpaceWatch::default();
+        assert_eq!(watch.state(), SpaceState::Ample, "the default is ample");
+
+        for state in [
+            SpaceState::Low,
+            SpaceState::Exhausted,
+            SpaceState::Unreadable,
+            SpaceState::Ample,
+        ] {
+            watch.publish(state);
+            assert_eq!(watch.state(), state);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_guard_over_a_drive_that_is_not_there_reports_it_rather_than_reporting_room() {
+        // The failure mode this rules out is the dangerous direction: a probe
+        // that could not read the volume must never be read as "there is
+        // plenty", because the recording would then carry on writing into
+        // nothing.
+        let guard = SpaceGuard::new(
+            Path::new(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\clips\a.mkv"),
+            1 << 30,
+        );
+        assert_eq!(guard.measure(), SpaceState::Unreadable);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_guard_over_a_real_drive_with_an_impossible_floor_asks_for_the_recording_to_stop() {
+        // The other end of the same call: a real volume, judged against a floor
+        // no drive can be above, must come back `Exhausted`. Together with the
+        // test above this proves the probe reads the volume rather than always
+        // answering the same way.
+        let recording = std::env::temp_dir().join("clipped-muxing-space-guard.mkv");
+        let ample = SpaceGuard::new(&recording, 1);
+        let impossible = SpaceGuard::new(&recording, u64::MAX);
+
+        assert_eq!(ample.measure(), SpaceState::Ample);
+        assert_eq!(impossible.measure(), SpaceState::Exhausted);
+    }
+}

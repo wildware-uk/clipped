@@ -286,6 +286,8 @@ fn announce(directory: &Path, watcher: &ProcessWatcher, manager: &SessionManager
         directory.display()
     );
 
+    report_interrupted_recordings(directory);
+
     if let Some(declined) = watcher.declined_source() {
         tracing::warn!(
             error = %declined,
@@ -305,6 +307,59 @@ fn announce(directory: &Path, watcher: &ProcessWatcher, manager: &SessionManager
             game.display_name()
         );
     }
+}
+
+/// Says whether a previous run left footage nobody has claimed.
+///
+/// This is the moment to ask. A recorder that was killed left a file that plays
+/// and a session record that never says the recording ended
+/// (`clipped_session::automatic::recovery`), and nothing else in the product
+/// will mention it: the library indexes finished recordings and the file simply
+/// sits there. Startup is also the only moment at which the question is
+/// unambiguous — a recording that is running right now looks exactly the same
+/// from the outside, and this runs before this process has started one.
+///
+/// It reports and does nothing else. Adopting or discarding is
+/// `clipped-recorder recover`, deliberately, because one of the two deletes
+/// footage (AGENTS.md section 56).
+fn report_interrupted_recordings(directory: &Path) {
+    let found = match clipped_session::automatic::recovery::interrupted_recordings(directory) {
+        Ok(found) => found,
+        // Never fatal. Watching for games is what this command is for, and a
+        // directory listing that failed is not a reason to refuse to record.
+        Err(error) => {
+            tracing::warn!(
+                directory = %RedactedPath::new(directory),
+                %error,
+                "the recordings directory could not be checked for interrupted recordings"
+            );
+            return;
+        }
+    };
+
+    if found.is_empty() {
+        return;
+    }
+
+    let with_footage = found
+        .iter()
+        .filter(|recording| recording.has_footage())
+        .count();
+    tracing::warn!(
+        interrupted = found.len(),
+        with_footage,
+        "a previous run left recordings that were never closed off"
+    );
+    eprintln!(
+        "{} recording{} from an earlier run {} never finished, and {} still {} footage. \
+         Run `clipped-recorder recover` to keep or discard {}.",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" },
+        if found.len() == 1 { "was" } else { "were" },
+        with_footage,
+        if with_footage == 1 { "has" } else { "have" },
+        if found.len() == 1 { "it" } else { "them" }
+    );
 }
 
 /// The command's own state: the policy, what every recording is made with, and
@@ -543,15 +598,16 @@ fn record_process(
     // would otherwise be an absence the user has to notice rather than a
     // sentence they can read — and "why was my game not recorded" deserves an
     // answer at the moment it is known (AGENTS.md section 27).
-    match &outcome {
-        RecordingOutcome::Recorded(_) => {}
-        RecordingOutcome::NoWindow { detail } => eprintln!(
+    //
+    // A *failure* is said by whichever function diagnosed it, because only
+    // that function knows what to suggest doing about it: `failure` for the
+    // ones that happen before a session is reached and `session_failure` for
+    // the ones the pipeline reports (`crate::record::report_failure`).
+    if let RecordingOutcome::NoWindow { detail } = &outcome {
+        eprintln!(
             "Nothing was recorded of {}: {detail}",
             request.game.display_name()
-        ),
-        RecordingOutcome::Failed { detail } => {
-            eprintln!("Recording {} failed: {detail}", request.game.display_name())
-        }
+        );
     }
     outcome
 }
@@ -562,10 +618,11 @@ fn attempt(
     plan: &RecordingPlan,
     stop: &ShutdownSignal,
 ) -> RecordingOutcome {
+    let game = request.game.display_name();
     let args = plan.args_for(request.process_id, &request.output);
     let config = match RecordingConfig::resolve(&args) {
         Ok(config) => config,
-        Err(error) => return failure(&error),
+        Err(error) => return failure(&error, game),
     };
 
     let window = match wait_for_window(&config.target, plan.window_timeout, stop) {
@@ -586,16 +643,53 @@ fn attempt(
         clipped_session::record(&settings, stop)
     })) {
         Ok(Ok(report)) => RecordingOutcome::Recorded(Box::new(report)),
-        Ok(Err(error)) => failure(&error),
-        Err(_) => RecordingOutcome::Failed {
-            detail: "the recording thread panicked; the file was finalised before it did"
-                .to_owned(),
-        },
+        Ok(Err(error)) => session_failure(&error, game, &config.output),
+        Err(_) => failure(
+            &"the recording thread panicked; the file was finalised before it did",
+            game,
+        ),
     }
 }
 
-/// A failure, as the session records it.
-fn failure(error: &dyn fmt::Display) -> RecordingOutcome {
+/// A failure the recording pipeline diagnosed, put to the user.
+///
+/// The same treatment `record` gives the same failures
+/// (`crate::record::report_failure`), because an automatic recording is where
+/// they matter most: nobody is watching a terminal, so the one line that
+/// reaches the console has to say what happened to the footage and what to do
+/// (AGENTS.md section 45).
+///
+/// The string kept for the session's record carries both the headline and the
+/// technical words: it is written into the sidecar and read months later
+/// (`docs/sessions.md`).
+fn session_failure(
+    error: &clipped_session::SessionError,
+    game: &str,
+    output: &Path,
+) -> RecordingOutcome {
+    let failure = clipped_session::RecordingFailure::of(error, output);
+
+    tracing::error!(
+        failure = failure.kind().token(),
+        output = %RedactedPath::new(output),
+        detail = failure.detail(),
+        "an automatic recording failed"
+    );
+
+    eprintln!("Recording {game} failed. {}", failure.headline());
+    eprintln!("{}", failure.footage_sentence(output));
+    for action in failure.actions() {
+        eprintln!("  - {action}");
+    }
+
+    RecordingOutcome::Failed {
+        detail: format!("{}: {}", failure.headline(), failure.detail()),
+    }
+}
+
+/// A failure before a recording session was reached, as the session records it.
+fn failure(error: &dyn fmt::Display, game: &str) -> RecordingOutcome {
+    eprintln!("Recording {game} failed: {error}");
     RecordingOutcome::Failed {
         detail: error.to_string(),
     }

@@ -48,7 +48,7 @@ use clipped_replay::ReplayBuffer;
 
 use crate::encoding;
 use crate::error::SessionError;
-use crate::muxing::MuxingThread;
+use crate::muxing::{MuxingThread, SpaceGuard, SpaceState};
 use crate::pacing::FrameGate;
 use crate::report::{EndReason, RecordingReport};
 use crate::settings::RecordingSettings;
@@ -161,7 +161,10 @@ fn record_frames(
 
     let mut encoder = opened.encoder;
     let writer = open_output(settings, encoder.as_ref(), opened.codec, encode_size)?;
-    let muxing = MuxingThread::start(writer);
+    let muxing = MuxingThread::start(
+        writer,
+        SpaceGuard::new(settings.output(), settings.minimum_free_space()),
+    );
     let sinks = PacketSinks {
         muxing: &muxing,
         replay,
@@ -172,8 +175,45 @@ fn record_frames(
     let mut clock = None;
     let mut end_reason = EndReason::Stopped;
     let mut failure = None;
+    let mut low_space_reported = false;
 
     while !stop.is_requested() {
+        // Before the acquisition, not after: the point of the guard is to stop
+        // the recording while there is still room to finish the file, so a
+        // frame that has already been captured is worth less than the trailer.
+        // One relaxed atomic load — the filesystem call behind it happened on
+        // the writer thread (`crate::muxing`).
+        match muxing.space() {
+            SpaceState::Ample => {}
+            SpaceState::Low => {
+                if !low_space_reported {
+                    low_space_reported = true;
+                    // Once, at `warn`, while there is still time to act on it.
+                    // A line per frame would be a log nobody reads and a
+                    // recording that spends its last minutes writing about
+                    // itself.
+                    tracing::warn!(
+                        output = %RedactedPath::new(settings.output()),
+                        "the drive this recording is being written to is filling up; the \
+                         recording will be finished cleanly if it reaches the reserve"
+                    );
+                }
+            }
+            SpaceState::Exhausted => {
+                tracing::warn!(
+                    output = %RedactedPath::new(settings.output()),
+                    "the drive this recording is being written to reached its reserve; \
+                     finishing the recording now so that the file is complete"
+                );
+                end_reason = EndReason::DiskSpaceLow;
+                break;
+            }
+            SpaceState::Unreadable => {
+                end_reason = EndReason::OutputUnavailable;
+                break;
+            }
+        }
+
         match backend.acquire(ACQUIRE_TIMEOUT) {
             Ok(Acquisition::Frame(frame)) => {
                 counters.captured += 1;
@@ -594,6 +634,8 @@ fn open_output(
         }
     }
 
+    check_there_is_room(settings)?;
+
     // `MkvWriter::create` refuses to truncate anything that is already there
     // (AGENTS.md section 56), so replacing an existing recording is done here,
     // deliberately, and only when the caller asked for it.
@@ -628,6 +670,51 @@ fn open_output(
         settings.output(),
         &RecordingLayout::new(track),
     )?)
+}
+
+/// Refuses a recording the drive has no room to make.
+///
+/// Asked once, before the file is created, because the alternative is a
+/// recording that opens, records for a few seconds and is stopped by the same
+/// floor from the inside — which looks like a bug rather than a full disk. A
+/// caller who has turned the guard off
+/// ([`RecordingSettings::with_minimum_free_space`](crate::RecordingSettings::with_minimum_free_space))
+/// is not stopped here either, because the two have to agree.
+///
+/// A volume that cannot be read is **not** a refusal. The recording is about to
+/// try to create a file on it, and that will fail with something far more
+/// specific than "the free space could not be read"; refusing here would
+/// replace a good message with a worse one, and would stop recording altogether
+/// on any volume Windows will not answer for.
+fn check_there_is_room(settings: &RecordingSettings) -> Result<(), SessionError> {
+    let minimum = settings.minimum_free_space();
+    if minimum == 0 {
+        return Ok(());
+    }
+
+    match crate::disk::free_space(settings.output()) {
+        Ok(space) => {
+            let free = space.free_bytes();
+            if crate::disk::judge(free, minimum) == crate::disk::SpaceVerdict::Exhausted {
+                return Err(SessionError::NotEnoughDiskSpace { free, minimum });
+            }
+            tracing::debug!(
+                free_bytes = free,
+                total_bytes = space.total_bytes(),
+                minimum_free_bytes = minimum,
+                "there is room for the recording"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "how much room the recording has could not be read, so it is being started \
+                 without the check"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// The container's name for a codec the encoder produces.
@@ -867,6 +954,80 @@ mod tests {
         assert!(matches!(reported, SessionError::Mux(_)), "{reported}");
     }
 
+    // ---- the disk guard, before anything is created ------------------------
+
+    /// Settings for a recording that would go to `output`.
+    fn settings_for(output: PathBuf, minimum_free_space: u64) -> RecordingSettings {
+        RecordingSettings::new(
+            crate::settings::CaptureTargetSettings::window(0x1234, 1280, 720),
+            output,
+        )
+        .with_minimum_free_space(minimum_free_space)
+    }
+
+    #[test]
+    fn a_recording_is_refused_before_it_starts_when_the_drive_is_below_the_reserve() {
+        // A floor no real drive can be above, so the refusal is about the
+        // check and not about the machine this runs on. Refusing here rather
+        // than four seconds in is the point: a recording that opens and is
+        // stopped immediately by the same floor from the inside looks like a
+        // bug rather than a full disk.
+        let error = check_there_is_room(&settings_for(
+            std::env::temp_dir().join("clipped-preflight.mkv"),
+            u64::MAX,
+        ))
+        .expect_err("no drive has more room than u64::MAX");
+
+        match error {
+            SessionError::NotEnoughDiskSpace { free, minimum } => {
+                assert_eq!(minimum, u64::MAX);
+                assert!(
+                    free < u64::MAX,
+                    "the refusal should carry what was actually free"
+                );
+            }
+            other => panic!("the refusal should name the room, not {other}"),
+        }
+    }
+
+    #[test]
+    fn a_drive_with_room_lets_the_recording_start() {
+        // The other direction. Without this the test above would pass just as
+        // well against a check that refused everything.
+        check_there_is_room(&settings_for(
+            std::env::temp_dir().join("clipped-preflight.mkv"),
+            1,
+        ))
+        .expect("the temporary drive has more than one byte free");
+    }
+
+    #[test]
+    fn a_caller_that_turned_the_guard_off_is_not_refused_by_it() {
+        // Zero has to mean the same thing at both ends: the pre-flight check
+        // and the guard inside the recording must agree, or a caller who turned
+        // the guard off would still be refused before the file was created.
+        check_there_is_room(&settings_for(
+            std::env::temp_dir().join("clipped-preflight.mkv"),
+            0,
+        ))
+        .expect("a floor of zero turns the check off");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_volume_that_cannot_be_read_does_not_refuse_the_recording_here() {
+        // Deliberate. The recording is about to try to create a file on that
+        // volume, and *that* failure says something specific — "the recording
+        // could not be created where it was asked for: the system cannot find
+        // the path specified". Refusing here would replace a good message with
+        // "the free space could not be read", and would stop recording on any
+        // volume Windows declines to answer for.
+        let gone = PathBuf::from(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\clips\a.mkv");
+
+        check_there_is_room(&settings_for(gone, 1 << 30))
+            .expect("an unreadable volume is not this check's refusal to make");
+    }
+
     #[test]
     fn every_codec_the_encoder_produces_has_a_container_name() {
         // A codec added to `clipped-encoder` without a container name would not
@@ -1044,6 +1205,15 @@ mod tests {
         }
     }
 
+    /// A muxing thread's disk guard, turned off.
+    ///
+    /// The tests below are about where packets go. A probe of the temporary
+    /// drive every two seconds inside them would be an unrelated syscall and an
+    /// unrelated failure mode; the guard itself is tested in `crate::muxing`.
+    fn unguarded(recording: &TemporaryRecording) -> crate::muxing::SpaceGuard {
+        crate::muxing::SpaceGuard::new(recording.path(), 0)
+    }
+
     /// A real Matroska writer over a temporary file.
     fn writer_for(recording: &TemporaryRecording) -> MkvWriter {
         let track = VideoTrack::new(VideoCodec::H264, TEST_SIZE.0, TEST_SIZE.1)
@@ -1069,7 +1239,7 @@ mod tests {
         // buffer is dropped the buffer holds nothing; if the wrong packet is
         // pushed the bytes below do not match the frame they claim to be.
         let recording = TemporaryRecording::new("replay-tap");
-        let muxing = MuxingThread::start(writer_for(&recording));
+        let muxing = MuxingThread::start(writer_for(&recording), unguarded(&recording));
         let buffer = replay_buffer();
         let sinks = PacketSinks {
             muxing: &muxing,
@@ -1124,7 +1294,7 @@ mod tests {
         // The other half of the option: attaching a buffer is what a caller
         // chooses, and a recording without one must be untouched by any of it.
         let recording = TemporaryRecording::new("no-replay");
-        let muxing = MuxingThread::start(writer_for(&recording));
+        let muxing = MuxingThread::start(writer_for(&recording), unguarded(&recording));
         let sinks = PacketSinks {
             muxing: &muxing,
             replay: None,
@@ -1146,7 +1316,7 @@ mod tests {
         // then report the failure, which is a buffer describing a recording
         // that does not exist.
         let recording = TemporaryRecording::new("refused-packet");
-        let muxing = MuxingThread::start(writer_for(&recording));
+        let muxing = MuxingThread::start(writer_for(&recording), unguarded(&recording));
 
         // An empty packet is what the writer refuses (`MuxError::EmptyPacket`),
         // and the writer thread stops at its first failure — so after this the

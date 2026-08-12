@@ -62,18 +62,28 @@ time = { workspace = true, features = [
     "macros",
 ] }
 
-# One Direct3D call, and only one: `ID3D11Texture2D::GetDevice`, which is how a
-# session finds the device a captured frame lives on so that it can open an
-# encoder against the same one. `clipped-capture` owns its device privately and
-# hands out only textures, and asking a texture which device it belongs to is
-# both the documented way to answer that and the way `crates/capture`'s own
-# tests do it. Anything else would mean a second device and a cross-adapter
-# copy of every frame.
+# Two Windows calls, and only two.
 #
-# The feature list is exactly what `src/windows/device.rs` names. Dual
-# MIT/Apache-2.0.
+# `ID3D11Texture2D::GetDevice` is how a session finds the device a captured
+# frame lives on so that it can open an encoder against the same one.
+# `clipped-capture` owns its device privately and hands out only textures, and
+# asking a texture which device it belongs to is both the documented way to
+# answer that and the way `crates/capture`'s own tests do it. Anything else
+# would mean a second device and a cross-adapter copy of every frame.
+#
+# `GetDiskFreeSpaceExW` is how a recording knows to stop before the drive it is
+# writing to fills up, which is what keeps the *trailer* from being the write
+# that fails (#103, `src/disk.rs`). `clipped-library` makes the same call for
+# storage accounting; consolidating them into `clipped-windows` is #277, and
+# `src/windows/volume.rs` says why the recording engine does not simply depend
+# on the media library to ask it.
+#
+# The feature list is exactly what `src/windows/` names. Dual MIT/Apache-2.0.
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Graphics_Direct3D11"] }
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 # `examples/replay_probe.rs` takes command-line arguments, and every executable

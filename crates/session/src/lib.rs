@@ -146,6 +146,8 @@
 pub mod automatic;
 pub mod bookmarks;
 pub mod config;
+pub mod disk;
+pub mod failure;
 
 mod error;
 mod pacing;
@@ -163,7 +165,9 @@ mod recording;
 #[cfg(windows)]
 mod windows;
 
+pub use disk::{SpaceVerdict, VolumeSpace, VolumeUnreadable, DEFAULT_MINIMUM_FREE_SPACE};
 pub use error::SessionError;
+pub use failure::{FailureKind, FootageKept, RecordingFailure};
 pub use pacing::FrameGate;
 pub use progress::RecordingProgress;
 pub use report::{EndReason, RecordingReport};

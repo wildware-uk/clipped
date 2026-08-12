@@ -38,6 +38,7 @@
 //! | [`serve`] | The `serve` subcommand, and the recorder behind the IPC protocol |
 //! | [`start_at_login`] | The `start-at-login` subcommand: the opt-in registry value |
 //! | [`watch`] | The `watch` subcommand: recording games automatically |
+//! | [`recover`] | The `recover` subcommand: the footage a killed recorder left |
 //! | [`shutdown`] | Ctrl+C, and the finalisation seam a recording ends through |
 
 pub mod capabilities;
@@ -46,6 +47,7 @@ pub mod config;
 pub mod list_windows;
 pub mod options;
 pub mod record;
+pub mod recover;
 pub mod serve;
 pub mod shutdown;
 pub mod start_at_login;
@@ -94,6 +96,8 @@ pub enum RunError {
     StartAtLogin(start_at_login::StartAtLoginError),
     /// `watch` failed.
     Watch(watch::WatchCommandError),
+    /// `recover` failed.
+    Recover(recover::RecoverError),
 }
 
 impl RunError {
@@ -140,6 +144,15 @@ impl RunError {
             // to fix except the first, and that one names a path the user gave
             // us, so the message is the useful part rather than `--help`.
             Self::Watch(_) => EXIT_FAILURE,
+            // `--discard` without `--session`, and a `--session` that names
+            // nothing, are both command lines to fix — and the message already
+            // says what to type. The rest is a directory that could not be read
+            // or a record that could not be rewritten, which no argument fixes.
+            Self::Recover(
+                recover::RecoverError::DiscardNeedsASession
+                | recover::RecoverError::NoSuchRecording { .. },
+            ) => EXIT_USAGE,
+            Self::Recover(_) => EXIT_FAILURE,
         }
     }
 
@@ -165,6 +178,7 @@ impl fmt::Display for RunError {
             Self::Serve(error) => write!(formatter, "{error}"),
             Self::StartAtLogin(error) => write!(formatter, "{error}"),
             Self::Watch(error) => write!(formatter, "{error}"),
+            Self::Recover(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -178,6 +192,7 @@ impl Error for RunError {
             Self::Serve(error) => Some(error),
             Self::StartAtLogin(error) => Some(error),
             Self::Watch(error) => Some(error),
+            Self::Recover(error) => Some(error),
         }
     }
 }
@@ -218,6 +233,12 @@ impl From<watch::WatchCommandError> for RunError {
     }
 }
 
+impl From<recover::RecoverError> for RunError {
+    fn from(error: recover::RecoverError) -> Self {
+        Self::Recover(error)
+    }
+}
+
 /// Runs the subcommand the command line selected.
 ///
 /// A new subcommand is a variant on [`Command`] and an arm here.
@@ -234,6 +255,7 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::Serve(args) => serve::run(args).map_err(RunError::from),
         Command::StartAtLogin(args) => start_at_login::run(args).map_err(RunError::from),
         Command::Watch(args) => watch::run(args).map_err(RunError::from),
+        Command::Recover(args) => recover::run(args).map_err(RunError::from),
     }
 }
 

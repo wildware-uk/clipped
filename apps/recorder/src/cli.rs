@@ -22,6 +22,8 @@
 //!   ([issue #106](https://github.com/wildware-uk/clipped/issues/106)).
 //! - `watch` — record games automatically as they start and stop
 //!   ([issue #46](https://github.com/wildware-uk/clipped/issues/46)).
+//! - `recover` — the footage a killed recorder left behind
+//!   ([issue #103](https://github.com/wildware-uk/clipped/issues/103)).
 //!
 //! Nothing is currently specified without being declared here. A subcommand
 //! that parses arguments and then does nothing is a control that silently
@@ -112,6 +114,82 @@ pub enum Command {
     /// value is `start-at-login enable`, and `disable` removes it again
     /// (ADR 0006, docs/privacy.md).
     StartAtLogin(StartAtLoginArgs),
+
+    /// List the recordings an interrupted recorder left behind, and keep or
+    /// discard them.
+    ///
+    /// A recorder that was killed leaves a file that plays as far as it got and
+    /// a session record that never says the recording finished. With no
+    /// arguments this lists them and changes nothing (docs/sessions.md).
+    Recover(RecoverArgs),
+}
+
+/// Arguments to `clipped-recorder recover`.
+///
+/// The two actions are a group rather than a `--action` value because they are
+/// not two settings of one thing: listing is the default and is safe, adopting
+/// is safe and deliberate, and discarding deletes footage. clap refuses both at
+/// once.
+#[derive(Debug, Default, Args)]
+#[command(group(ArgGroup::new("recovery").args(["adopt", "discard"])))]
+pub struct RecoverArgs {
+    /// Directory to look in. [default: the Clipped folder of your videos
+    /// directory]
+    ///
+    /// The same directory `watch` writes into.
+    //
+    // The default is stated in the summary rather than through a
+    // `default_value` because it is resolved from the environment, and `-h`
+    // should still show what it will be.
+    #[arg(long, value_name = "PATH")]
+    pub directory: Option<PathBuf>,
+
+    /// Only this session, by the identifier `recover` prints. [default: all of
+    /// them]
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
+
+    /// Keep the recordings and stop listing them. [default: off]
+    ///
+    /// Nothing is written to the footage itself; what changes is the session
+    /// record, so the recording is indexed like any other.
+    #[arg(long)]
+    pub adopt: bool,
+
+    /// Delete one recording's file and record that you did. [default: off]
+    ///
+    /// Requires `--session`, because this is footage that cannot be made again.
+    #[arg(long, requires = "session")]
+    pub discard: bool,
+}
+
+/// What a `recover` invocation was asking for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverAction {
+    /// Say what there is and change nothing.
+    List,
+    /// Keep the recordings.
+    Adopt,
+    /// Delete the named recording.
+    Discard,
+}
+
+impl RecoverArgs {
+    /// What the arguments asked for.
+    ///
+    /// Listing is what "nothing was asked for" means, and it is deliberately
+    /// the default: somebody typing `recover` to find out where their recording
+    /// went must not have anything happen to it.
+    #[must_use]
+    pub const fn action(&self) -> RecoverAction {
+        if self.discard {
+            RecoverAction::Discard
+        } else if self.adopt {
+            RecoverAction::Adopt
+        } else {
+            RecoverAction::List
+        }
+    }
 }
 
 /// Arguments to `clipped-recorder watch`.

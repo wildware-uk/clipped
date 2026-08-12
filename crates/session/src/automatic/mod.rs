@@ -119,6 +119,7 @@
 //! [ADR 0001]: ../../../docs/adr/0001-mkv-archival-container.md
 
 pub(crate) mod clock;
+pub mod recovery;
 mod session;
 mod settings;
 mod sidecar;

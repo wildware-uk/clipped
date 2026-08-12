@@ -832,10 +832,20 @@ fn summarise(report: &RecordingReport) -> RecordingSummary {
     RecordingSummary {
         output: report.output().to_string_lossy().into_owned(),
         duration_ms: u64::try_from(report.duration().as_millis()).unwrap_or(u64::MAX),
+        // The protocol's own three words where they line up, and
+        // `EndReason::Other` where they do not. The disk guard's reasons
+        // (#103) are newer than the protocol's vocabulary, and inventing a
+        // mapping onto `Stopped` would tell the desktop application that
+        // somebody chose to stop a recording their drive stopped — which is
+        // the difference between a notification and a lie. `Other` carries the
+        // word verbatim, which is what that variant is for (docs/ipc.md);
+        // promoting these two to named variants is
+        // [issue #284](https://github.com/wildware-uk/clipped/issues/284).
         end_reason: match report.end_reason() {
             clipped_session::EndReason::Stopped => EndReason::Stopped,
             clipped_session::EndReason::TargetLost => EndReason::TargetLost,
             clipped_session::EndReason::TargetResized => EndReason::TargetResized,
+            other => EndReason::Other(other.token().replace('-', "_")),
         },
         frames_encoded: report.frames_encoded(),
         frames_skipped_for_rate: report.frames_skipped_for_rate(),
