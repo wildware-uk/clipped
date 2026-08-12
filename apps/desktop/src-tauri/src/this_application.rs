@@ -455,9 +455,9 @@ mod tests {
     /// The creation times of a written-down tree, by identifier.
     ///
     /// Anything not named started half a second after this application, which
-    /// every process this application could have started did, and so leaves the
-    /// table to answer; a test about a creation time names the ones it is
-    /// about.
+    /// is what a process this application started looks like and so leaves the
+    /// table to answer. A test that is *about* a creation time names the ones
+    /// it is about.
     fn started(named: &[(u32, u64)]) -> impl Fn(u32) -> Option<u64> + '_ {
         move |of| {
             Some(
