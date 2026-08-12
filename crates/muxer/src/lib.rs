@@ -33,9 +33,14 @@
 //!
 //! [`MkvWriter`] writes a recording — one video track and any number of named
 //! audio tracks — into Matroska as the packets arrive, and [`linkage`] reports
-//! and probes the FFmpeg actually loaded. Remuxing to MP4
-//! ([issue #92](https://github.com/wildware-uk/clipped/issues/92)) is not
-//! written yet.
+//! and probes the FFmpeg actually loaded.
+//!
+//! [`remux_to_mp4`] copies a finished recording into MP4 without decoding it, so
+//! that a recording can be uploaded somewhere that will not take Matroska
+//! without waiting for a re-encode or losing quality to one (ADR 0001).
+//! [`Mp4Plan`] answers what such a copy would cost *before* it is made, because
+//! MP4 stores less than Matroska does and the person who finds out should not be
+//! the one who uploaded it.
 //!
 //! A replay clip is written by this same writer rather than by anything of its
 //! own: `clipped_replay::save_clip` leases the segments a clip needs and drives
@@ -79,15 +84,20 @@
 //! # }
 //! ```
 
+mod av;
 pub mod error;
 pub mod linkage;
 pub mod packet;
+pub mod remux;
 mod timeline;
 pub mod track;
 pub mod writer;
 
 pub use crate::error::{AvError, MuxError};
 pub use crate::packet::{EncodedPacket, PacketTimestamp};
+pub use crate::remux::{
+    remux_to_mp4, Carriage, Mp4Plan, PlannedTrack, RemuxError, RemuxSummary, TrackKind,
+};
 pub use crate::track::{
     AudioCodec, AudioTrack, FrameRate, InvalidLanguage, Language, RecordingLayout, TrackId,
     VideoCodec, VideoTrack,
