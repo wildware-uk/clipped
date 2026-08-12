@@ -1033,6 +1033,88 @@ fn every_setting_a_game_was_given_reaches_the_recording_it_is_made_with() {
 }
 
 #[test]
+fn only_a_setting_somebody_configured_replaces_what_a_caller_already_asked_for() {
+    // `apply_configured_to`, and the reason it exists: `clipped-recorder watch`
+    // reaches a recording with a command line already answered — a resolution,
+    // a frame rate, a codec, an encoder and two audio selections — and a
+    // settings file that says nothing about them must leave every one of them
+    // alone. `apply_to` would put the shipped default over all six, which is
+    // `watch --framerate 144` recording at 60 and `--microphone none` opening
+    // a microphone (AGENTS.md section 27).
+    let base = RecordingSettings::new(
+        CaptureTargetSettings::window(0x1234, 1920, 1080),
+        PathBuf::from("out.mkv"),
+    )
+    .with_resolution(ResolutionSetting::Fixed {
+        width: 1920,
+        height: 1080,
+    })
+    .with_framerate(144)
+    .with_codec(CodecPreference::Fixed(Codec::Av1))
+    .with_encoder(EncoderPreference::Fixed(EncoderKind::Nvenc))
+    .with_microphone(AudioSourceSetting::Off)
+    .with_system_audio(AudioSourceSetting::Named("Speakers".to_owned()));
+
+    assert_eq!(
+        Configuration::defaults()
+            .resolve_global()
+            .apply_configured_to(base.clone()),
+        base,
+        "a user who has configured nothing must change nothing about what was asked for"
+    );
+
+    // And what they did configure — and only that — replaces it.
+    let mut configuration = Configuration::defaults();
+    let mut preferences = Preferences::none();
+    preferences.set_framerate(Some(60)).expect("60 is in range");
+    configuration.set_game(game("counter-strike-2"), preferences);
+
+    let applied = configuration
+        .resolve_for(&game("counter-strike-2"))
+        .apply_configured_to(base.clone());
+
+    assert_eq!(applied.framerate(), 60);
+    assert_eq!(applied.resolution(), base.resolution());
+    assert_eq!(applied.codec(), base.codec());
+    assert_eq!(applied.encoder(), base.encoder());
+    assert_eq!(applied.microphone(), base.microphone());
+    assert_eq!(applied.system_audio(), base.system_audio());
+    assert_eq!(
+        applied.unavailable_choice(),
+        UnavailableChoice::Refuse,
+        "a configured frame rate is not one of the two settings the choice governs, so what the          caller named still refuses rather than substituting"
+    );
+}
+
+#[test]
+fn a_configured_encoder_substitutes_where_the_one_a_caller_named_would_refuse() {
+    // The other half of the rule the table in `docs/configuration.md` states:
+    // a value chosen once, possibly before this machine had the graphics card
+    // it has now, must not fail a recording nobody is watching.
+    let base = RecordingSettings::new(
+        CaptureTargetSettings::window(0x1234, 1920, 1080),
+        PathBuf::from("out.mkv"),
+    )
+    .with_encoder(EncoderPreference::Fixed(EncoderKind::Software));
+    assert_eq!(base.unavailable_choice(), UnavailableChoice::Refuse);
+
+    let mut configuration = Configuration::defaults();
+    let mut preferences = Preferences::none();
+    preferences.set_encoder(Some(EncoderPreference::Fixed(EncoderKind::Nvenc)));
+    configuration.set_game(game("counter-strike-2"), preferences);
+
+    let applied = configuration
+        .resolve_for(&game("counter-strike-2"))
+        .apply_configured_to(base);
+
+    assert_eq!(
+        applied.encoder(),
+        EncoderPreference::Fixed(EncoderKind::Nvenc)
+    );
+    assert_eq!(applied.unavailable_choice(), UnavailableChoice::Substitute);
+}
+
+#[test]
 fn what_a_recording_asks_for_when_nothing_was_configured_is_what_it_already_did() {
     // The promise that a user who has configured nothing sees no change. Every
     // video setting a resolved default asks for is the one a recording already

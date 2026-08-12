@@ -88,14 +88,15 @@ use clipped_session::automatic::{
     AutomaticSettings, RecordingId, RecordingOutcome, RecordingOutcomeSummary, RecordingRequest,
     Session, SessionAction, SessionManager,
 };
+use clipped_session::config::{Configuration, ConfigurationStore};
 use clipped_session::plugins::{installed_but_not_enabled, PluginOutcome, SessionPlugins};
-use clipped_session::{RecordingOutputs, RecordingProgress};
+use clipped_session::{
+    RecordingOutputs, RecordingProgress, RecordingReport, RecordingSettings, SessionError,
+};
 use clipped_windows::WindowInfo;
 
 use crate::cli::{RecordArgs, WatchArgs};
 use crate::config::{CaptureTarget, RecordingConfig};
-use clipped_session::config::{Configuration, ConfigurationStore};
-
 use crate::record::{resolve_window, settings_for, RecordError};
 use crate::shutdown::{install_ctrl_c_handler, CtrlCError, ShutdownSignal};
 
@@ -213,24 +214,24 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
 
     let mut watcher =
         ProcessWatcher::start(WatchConfig::default()).map_err(WatchCommandError::Detection)?;
-    let settings = AutomaticSettings::new(directory.clone());
 
-    // The user's own settings, if they have any. A missing file is not an
-    // error: somebody who has never changed a setting has none, and a file that
-    // cannot be read leaves the shipped defaults standing rather than stopping
-    // a recorder from recording (crates/session/src/config, AGENTS.md 16).
-    let configuration = load_configuration();
-    let manager = SessionManager::new(catalogue, settings).with_configuration(configuration);
-    let plan = RecordingPlan::from(args);
+    // Two things on disk are read at start-up: the user's settings and the
+    // plugins directory. Which file and which directory is all this function
+    // decides — `default_path` and `installed_plugins` — because what is in
+    // them, and what to do when one cannot be read, is `Driver`'s, and that is
+    // what lets both be tested against what a test wrote rather than against
+    // whatever is in this machine's user directory (`clipped_logging::
+    // directories` separates the two the same way).
+    let mut driver = Driver::new(
+        catalogue,
+        AutomaticSettings::new(directory.clone()),
+        ConfigurationStore::default_path().as_deref(),
+        RecordingPlan::from(args),
+        installed_plugins(),
+    );
 
-    announce(&directory, &watcher, &manager);
+    announce(&directory, &watcher, &driver.manager);
 
-    let mut driver = Driver {
-        manager,
-        plan,
-        installed_plugins: installed_plugins(),
-        running: None,
-    };
     let stopped_by = driver.watch(&mut watcher, &signal);
 
     eprintln!("Automatic recording stopped.");
@@ -305,22 +306,25 @@ fn load_catalogue() -> Result<Catalogue, WatchCommandError> {
     Ok(loaded.into_catalogue())
 }
 
-/// Says what is about to happen, and what will not.
+/// The user's settings from `path`, or the shipped defaults when there are
+/// none to read.
 ///
-/// The last part matters: a game that is already running will not be recorded,
-/// and a user who is told nothing would reasonably conclude the recorder is
-/// broken (AGENTS.md section 27).
-/// The user's settings, or the shipped defaults when there are none to read.
+/// `None` is a machine that describes no per-user directory at all, which
+/// [`ConfigurationStore::default_path`] documents as a supported state.
 ///
 /// A missing file is the ordinary case rather than a failure: somebody who has
 /// never changed a setting has no settings file, and writing one on first run
 /// would put a file on their disk for nothing. A file that exists but cannot be
 /// read is reported and then ignored — a recorder that refuses to record
 /// because a preference is malformed has chosen the wrong thing to protect
-/// (AGENTS.md sections 16 and 45). Neither case is written back over, which is
-/// what stops a build that cannot read a newer file destroying it.
-fn load_configuration() -> Configuration {
-    let Some(path) = ConfigurationStore::default_path() else {
+/// (AGENTS.md sections 16 and 45).
+///
+/// **Neither case is written back over.** Nothing here calls
+/// [`ConfigurationStore::store`], which is what stops a build that cannot read
+/// a newer settings file from replacing it with what this one understood
+/// (AGENTS.md section 56; the same defect was found in #108 during review).
+fn load_configuration(path: Option<&Path>) -> Configuration {
+    let Some(path) = path else {
         return Configuration::defaults();
     };
 
@@ -332,12 +336,31 @@ fn load_configuration() -> Configuration {
                 %error,
                 "the settings file could not be read, so this run uses the shipped defaults"
             );
-            eprintln!("Settings not applied: {error}");
+            eprintln!("{}", unreadable_settings_sentence(&error));
             Configuration::defaults()
         }
     }
 }
 
+/// What somebody is told when their settings file cannot be read.
+///
+/// Three things, because all three are what they need to know: that their
+/// settings are not in force, that recording is happening anyway, and that
+/// their file is still theirs — a user who reads "settings not applied" and
+/// nothing else has no way to know whether the recorder has just overwritten
+/// what it could not read (AGENTS.md sections 45 and 56).
+fn unreadable_settings_sentence(error: &clipped_session::config::ConfigurationError) -> String {
+    format!(
+        "Settings not applied: {error}. Recording with Clipped's defaults; your settings file \
+         has been left as it is."
+    )
+}
+
+/// Says what is about to happen, and what will not.
+///
+/// The last part matters: a game that is already running will not be recorded,
+/// and a user who is told nothing would reasonably conclude the recorder is
+/// broken (AGENTS.md section 27).
 fn announce(directory: &Path, watcher: &ProcessWatcher, manager: &SessionManager) {
     tracing::info!(
         directory = %RedactedPath::new(directory),
@@ -488,6 +511,40 @@ struct Running {
 }
 
 impl Driver {
+    /// A driver with nothing running, recording each game at whatever the
+    /// user's settings say it should be recorded at.
+    ///
+    /// `settings_file` is where those settings are kept — read here rather than
+    /// taken as a [`Configuration`] so that the whole path from a file on disk
+    /// to the settings a recording is started with is one thing a test can
+    /// exercise, including the two cases where there is nothing to read
+    /// ([`load_configuration`]).
+    ///
+    /// `installed_plugins` is the other half of the same idea and is handed in
+    /// rather than discovered here, because [`installed_plugins`] reads a real
+    /// directory and reports what it refused: a test that builds a driver must
+    /// not have its result depend on what is installed on the machine running
+    /// it (AGENTS.md section 25).
+    fn new(
+        catalogue: Catalogue,
+        settings: AutomaticSettings,
+        settings_file: Option<&Path>,
+        plan: RecordingPlan,
+        installed_plugins: Vec<InstalledPlugin>,
+    ) -> Self {
+        // Per-game settings reach a recording through the manager: it resolves
+        // them when it asks for one, and `attempt` lays the answer over what
+        // the command line asked for (issue #61).
+        let manager = SessionManager::new(catalogue, settings)
+            .with_configuration(load_configuration(settings_file));
+        Self {
+            manager,
+            plan,
+            installed_plugins,
+            running: None,
+        }
+    }
+
     /// The loop. Returns the reason detection stopped, if that is why it ended.
     fn watch(&mut self, watcher: &mut ProcessWatcher, signal: &ShutdownSignal) -> Option<String> {
         let mut stopping = false;
@@ -886,6 +943,42 @@ fn attempt(
     stop: &ShutdownSignal,
     progress: &RecordingProgress,
 ) -> RecordingOutcome {
+    attempt_with(
+        request,
+        plan,
+        stop,
+        progress,
+        wait_for_window,
+        |settings, stop, outputs| clipped_session::record_into(settings, stop, outputs),
+    )
+}
+
+/// The attempt, against a given way of finding the window and making the
+/// recording.
+///
+/// The two arguments are the only parts of an attempt that need a desktop and a
+/// GPU; everything between them — validating the plan, laying this game's
+/// configured settings over it, and turning what came back into an outcome — is
+/// this command's own logic, and taking them as arguments is what lets that
+/// logic be tested on a machine that can capture nothing. `attempt` is this with
+/// the real pair, and is the only caller outside the tests. The seam is the one
+/// `crate::shutdown::run_with_finalisation` uses, for the same reason.
+fn attempt_with<FindWindow, Record>(
+    request: &RecordingRequest,
+    plan: &RecordingPlan,
+    stop: &ShutdownSignal,
+    progress: &RecordingProgress,
+    find_window: FindWindow,
+    record: Record,
+) -> RecordingOutcome
+where
+    FindWindow: FnOnce(&CaptureTarget, Duration, &ShutdownSignal) -> Result<WindowInfo, String>,
+    Record: FnOnce(
+        &RecordingSettings,
+        &ShutdownSignal,
+        &RecordingOutputs<'_>,
+    ) -> Result<RecordingReport, SessionError>,
+{
     let game = request.game.display_name();
     let args = plan.args_for(request.process_id, &request.output);
     let config = match RecordingConfig::resolve(&args) {
@@ -893,7 +986,7 @@ fn attempt(
         Err(error) => return failure(&error, game),
     };
 
-    let window = match wait_for_window(&config.target, plan.window_timeout, stop) {
+    let window = match find_window(&config.target, plan.window_timeout, stop) {
         Ok(window) => window,
         Err(detail) => return RecordingOutcome::NoWindow { detail },
     };
@@ -909,16 +1002,21 @@ fn attempt(
     // What the command line asked for, then what this game was configured for
     // laid over it. Resolved once, when the recording started; `request` has
     // been carrying the answer since then (issue #61).
-    let settings = request.settings.apply_to(settings_for(&config, &window));
+    //
+    // `apply_configured_to` and not `apply_to`: only settings a user configured
+    // replace what this command was asked for on its command line. `apply_to`
+    // would put the shipped default over every flag nobody has a settings file
+    // for, which is `watch --framerate 144` recording at 60.
+    let settings = request
+        .settings
+        .apply_configured_to(settings_for(&config, &window));
     // `record_into` rather than `record`, for the one output this command needs:
     // where the recording's timeline begins. That is what places a plugin's
     // event inside the file (`clipped_session::plugins`), and publishing it is
     // one `OnceLock` store on the first frame — nothing the capture thread can
     // wait on.
     let outputs = RecordingOutputs::default().with_progress(progress);
-    match std::panic::catch_unwind(AssertUnwindSafe(|| {
-        clipped_session::record_into(&settings, stop, &outputs)
-    })) {
+    match std::panic::catch_unwind(AssertUnwindSafe(|| record(&settings, stop, &outputs))) {
         Ok(Ok(report)) => RecordingOutcome::Recorded(Box::new(report)),
         Ok(Err(error)) => session_failure(&error, game, &config.output),
         Err(_) => failure(
@@ -1079,9 +1177,362 @@ fn report_session(session: &Session) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::time::Duration;
 
+    use clipped_game_detection::catalogue::EntrySource;
+    use clipped_game_detection::{LaunchGroup, LaunchId, ProcessSnapshot};
+    use clipped_session::config::{
+        AudioDeviceSetting, GameKey, Preferences, ResolutionSetting, SettingSource,
+    };
+    use clipped_session::{
+        AudioSourceSetting, CodecPreference, EncoderPreference, UnavailableChoice,
+    };
+
     use super::*;
+
+    /// One game, which is all any test here needs to launch.
+    const GAMES: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "test-game"
+name = "Test Game"
+[[game.executables]]
+name = "test-game.exe"
+"#;
+
+    /// A directory of this test's own, removed when it is dropped.
+    ///
+    /// The workspace has no `tempfile` dependency and this is not enough reason
+    /// to add one; `crate::config` and `clipped_session::automatic`'s tests
+    /// build the same thing from `std::env::temp_dir` (AGENTS.md sections 10
+    /// and 55).
+    #[derive(Debug)]
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "clipped-watch-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(path.join("recordings")).expect("the directory can be created");
+            fs::create_dir_all(path.join("settings")).expect("the directory can be created");
+            Self(path)
+        }
+
+        /// Where recordings and session records go.
+        fn recordings(&self) -> PathBuf {
+            self.0.join("recordings")
+        }
+
+        /// The settings file this run would read, whether or not it exists.
+        ///
+        /// In a directory of its own, as it is on a real machine: settings live
+        /// under `%LOCALAPPDATA%\Clipped` and recordings do not
+        /// ([`ConfigurationStore::default_path`]).
+        fn settings_file(&self) -> PathBuf {
+            self.0
+                .join("settings")
+                .join(clipped_session::config::FILE_NAME)
+        }
+
+        /// Everything in the settings directory, sorted, so that a test can say
+        /// what was written as well as what was not.
+        fn settings_directory_entries(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.0.join("settings"))
+                .expect("the directory can be listed")
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A command line that asks for something no default would produce, so that
+    /// a settings file that quietly replaced it is visible in an assertion.
+    fn args() -> WatchArgs {
+        WatchArgs {
+            output_directory: None,
+            window_timeout: 30,
+            resolution: crate::options::Resolution::Fixed {
+                width: 1920,
+                height: 1080,
+            },
+            framerate: "144".parse().expect("a valid framerate"),
+            codec: crate::options::VideoCodec::Av1,
+            encoder: crate::options::EncoderSelection::Nvenc,
+            microphone: crate::options::AudioDeviceSelection::Disabled,
+            system_audio: crate::options::AudioDeviceSelection::Named("Speakers".to_owned()),
+        }
+    }
+
+    /// A launch of one process.
+    ///
+    /// [`LaunchId::ALREADY_RUNNING`] is the only identifier constructible
+    /// outside `clipped_game_detection`, and nothing in the policy reads it —
+    /// a launch is identified by the processes in it.
+    fn launch(pid: u32, image_name: &str) -> WatchEvent {
+        WatchEvent::Launched(LaunchGroup {
+            id: LaunchId::ALREADY_RUNNING,
+            processes: vec![ProcessSnapshot::new(pid, 4, None, image_name)],
+        })
+    }
+
+    /// The recording a launch of `test-game.exe` asks for, with the settings
+    /// resolved from `settings_file` — the whole of what `run` sets up, from
+    /// the file on disk to the request handed to the recording thread.
+    fn recording_asked_for(directory: &TestDirectory, settings_file: &Path) -> RecordingRequest {
+        let catalogue =
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue");
+        let mut driver = Driver::new(
+            catalogue,
+            AutomaticSettings::new(directory.recordings()),
+            Some(settings_file),
+            RecordingPlan::from(&args()),
+            // No plugins: what a settings file does to a recording is what
+            // these tests are about, and reading this machine's plugins
+            // directory would make them depend on it (AGENTS.md section 25).
+            Vec::new(),
+        );
+
+        driver
+            .manager
+            .observe(&launch(4242, "test-game.exe"), SystemTime::UNIX_EPOCH)
+            .into_iter()
+            .find_map(|action| match action {
+                SessionAction::StartRecording(request) => Some(request),
+                _ => None,
+            })
+            .expect("a launch of a game in the catalogue asks for a recording")
+    }
+
+    /// A window that is already there, so that an attempt reaches the point of
+    /// starting a recording without a desktop.
+    fn window() -> WindowInfo {
+        WindowInfo::new(
+            clipped_windows::WindowHandle::from_raw(0x0001_04ac),
+            "Test Game".to_owned(),
+            4242,
+            Some("test-game.exe".to_owned()),
+            clipped_windows::WindowGeometry::new(
+                clipped_windows::PixelSize::new(2560, 1440),
+                96,
+                clipped_windows::MonitorHandle::from_raw(1),
+            ),
+            false,
+            None,
+        )
+    }
+
+    /// What the recording engine was actually asked to record.
+    ///
+    /// Runs the real attempt — the plan, the window and this game's configured
+    /// settings, composed by the code `run` reaches — against a window that is
+    /// already there and an engine that records nothing and reports a failure.
+    fn settings_the_recording_was_started_with(request: &RecordingRequest) -> RecordingSettings {
+        let mut started: Option<RecordingSettings> = None;
+        let outcome = attempt_with(
+            request,
+            &RecordingPlan::from(&args()),
+            &ShutdownSignal::new(),
+            &RecordingProgress::new(),
+            |_, _, _| Ok(window()),
+            |settings, _, _| {
+                started = Some(settings.clone());
+                Err(SessionError::TargetHasNoPixels)
+            },
+        );
+
+        assert!(
+            matches!(outcome, RecordingOutcome::Failed { .. }),
+            "the stand-in engine reports a failure: {outcome:?}"
+        );
+        started.expect("the recording engine was asked to record something")
+    }
+
+    #[test]
+    fn a_games_own_settings_reach_the_recording_that_is_started_for_it() {
+        // The point of #61, end to end and in one test: a settings file on
+        // disk, the manager that resolves it for the game that launched, and
+        // the settings the recording engine is handed. Every link between them
+        // is one this PR added, and dropping any of them leaves the command
+        // line's 1080p144 in the assertions below.
+        let directory = TestDirectory::new("configured");
+        let mut configuration = Configuration::defaults();
+        let mut preferences = Preferences::none();
+        preferences
+            .set_resolution(Some(ResolutionSetting::Fixed {
+                width: 2560,
+                height: 1440,
+            }))
+            .expect("1440p is in range");
+        preferences.set_framerate(Some(60)).expect("60 is in range");
+        preferences
+            .set_microphone(Some(AudioDeviceSetting::Named("Yeti".to_owned())))
+            .expect("a device name in range");
+        configuration.set_game(
+            GameKey::parse("test-game").expect("the fixture's identifier is a key"),
+            preferences,
+        );
+        ConfigurationStore::at(directory.settings_file())
+            .store(configuration)
+            .expect("the settings file can be written");
+
+        let request = recording_asked_for(&directory, &directory.settings_file());
+        assert_eq!(
+            request.settings.framerate().source(),
+            SettingSource::Game,
+            "the request must carry what was resolved for this game"
+        );
+
+        let settings = settings_the_recording_was_started_with(&request);
+        assert_eq!(
+            settings.resolution(),
+            ResolutionSetting::Fixed {
+                width: 2560,
+                height: 1440
+            },
+            "the game's configured resolution must reach the recording"
+        );
+        assert_eq!(
+            settings.framerate(),
+            60,
+            "the game's configured frame rate must reach the recording"
+        );
+        assert_eq!(
+            settings.microphone(),
+            &AudioSourceSetting::Named("Yeti".to_owned()),
+            "the game's configured microphone must reach the recording"
+        );
+        assert_eq!(
+            settings.unavailable_choice(),
+            UnavailableChoice::Substitute,
+            "a configured resolution this machine cannot produce substitutes rather than losing \
+             the recording"
+        );
+
+        // And what the file says nothing about is still what the command line
+        // asked for, rather than what Clipped ships with.
+        assert_eq!(
+            settings.codec(),
+            CodecPreference::Fixed(clipped_encoder::Codec::Av1)
+        );
+        assert_eq!(
+            settings.encoder(),
+            EncoderPreference::Fixed(clipped_encoder::EncoderKind::Nvenc)
+        );
+        assert_eq!(
+            settings.system_audio(),
+            &AudioSourceSetting::Named("Speakers".to_owned())
+        );
+    }
+
+    #[test]
+    fn no_settings_file_records_at_what_was_asked_for_and_writes_nothing() {
+        // The ordinary case: somebody who has never changed a setting. The
+        // recording happens at the command line's settings, and no file is
+        // invented on their disk to say so.
+        let directory = TestDirectory::new("absent");
+        let settings_file = directory.settings_file();
+
+        let request = recording_asked_for(&directory, &settings_file);
+        let settings = settings_the_recording_was_started_with(&request);
+
+        assert_eq!(settings.framerate(), 144);
+        assert_eq!(
+            settings.resolution(),
+            ResolutionSetting::Fixed {
+                width: 1920,
+                height: 1080
+            }
+        );
+        assert_eq!(
+            settings.microphone(),
+            &AudioSourceSetting::Off,
+            "`--microphone none` must not be turned back on by a settings file that is not there"
+        );
+        assert_eq!(
+            settings.unavailable_choice(),
+            UnavailableChoice::Refuse,
+            "nothing was configured, so nothing substitutes for what the command line named"
+        );
+
+        assert!(
+            !settings_file.exists(),
+            "a first run must not write a settings file: {}",
+            settings_file.display()
+        );
+        assert!(
+            directory.settings_directory_entries().is_empty(),
+            "nothing may be written where the settings live: {:?}",
+            directory.settings_directory_entries()
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_ignored_and_never_written_over() {
+        // AGENTS.md section 56, and the data-loss defect found in #108: a file
+        // this build cannot read is one whose contents are not known to be
+        // worthless — it may have been written by a newer Clipped. It is
+        // reported, the shipped defaults stand, the recording still happens,
+        // and the file is left exactly as it was found.
+        let directory = TestDirectory::new("unreadable");
+        let settings_file = directory.settings_file();
+        let as_found = "{ \"schema_version\": 99, \"this build\": cannot read this";
+        fs::write(&settings_file, as_found).expect("the file can be written");
+
+        let request = recording_asked_for(&directory, &settings_file);
+        let settings = settings_the_recording_was_started_with(&request);
+
+        assert_eq!(
+            settings.framerate(),
+            144,
+            "an unreadable settings file must leave the recording as it was asked for rather \
+             than stop it"
+        );
+        assert_eq!(settings.microphone(), &AudioSourceSetting::Off);
+
+        assert_eq!(
+            fs::read_to_string(&settings_file).expect("the file is still there"),
+            as_found,
+            "a settings file this build cannot read must never be replaced by what it understood"
+        );
+        assert_eq!(
+            directory.settings_directory_entries(),
+            vec![clipped_session::config::FILE_NAME.to_owned()],
+            "no temporary file, no backup and no rewrite: the directory is as it was found"
+        );
+    }
+
+    #[test]
+    fn the_sentence_about_an_unreadable_settings_file_says_it_was_left_alone() {
+        // The wording, not the wiring. Somebody who is told only "settings not
+        // applied" has no way to know whether the recorder has just overwritten
+        // a file it could not read.
+        let error = clipped_session::config::ConfigurationError::Read {
+            path: PathBuf::from(r"D:\settings.json"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        let sentence = unreadable_settings_sentence(&error);
+
+        assert!(sentence.contains("settings.json"), "{sentence}");
+        assert!(sentence.contains("defaults"), "{sentence}");
+        assert!(
+            sentence.contains("left as it is"),
+            "the sentence must say the file was not written over: {sentence}"
+        );
+    }
 
     #[test]
     fn the_loop_promises_the_session_manager_what_its_suspend_rule_assumes() {

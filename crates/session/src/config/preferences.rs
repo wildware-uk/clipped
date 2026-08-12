@@ -670,6 +670,71 @@ impl ResolvedSettings {
             .with_system_audio(audio_source(self.system_audio.value()))
             .with_unavailable_choice(UnavailableChoice::Substitute)
     }
+
+    /// These settings, applied to a recording that already carries answers of
+    /// its own.
+    ///
+    /// [`Self::apply_to`] is for a caller whose recording carries nothing but a
+    /// target and an output, so that every setting has to come from somewhere
+    /// and the shipped default is where. This is for a caller that was already
+    /// told what to record with — `clipped-recorder watch`, whose command line
+    /// says a resolution, a frame rate, a codec, an encoder and two audio
+    /// selections before any game has launched — and it applies **only what a
+    /// user configured**: a setting no layer above the default speaks to leaves
+    /// what the recording already asked for.
+    ///
+    /// The difference is not a nicety. `apply_to` would replace
+    /// `watch --framerate 144` with the 60 Clipped ships with, on every machine
+    /// with no settings file for it, and `--microphone none` with the default
+    /// microphone — a flag that parses and then does nothing, which is the
+    /// defect AGENTS.md section 27 is about, and in the microphone's case one
+    /// that records a device the user asked not to record.
+    ///
+    /// A setting a user *did* configure wins over the same setting on the
+    /// command line, which is the layering the settings screen assumes
+    /// ([issue #61](https://github.com/wildware-uk/clipped/issues/61) records
+    /// the question of whether a flag typed at that moment should beat it).
+    ///
+    /// [`UnavailableChoice::Substitute`] is given only when the resolution or
+    /// the encoder is one of the configured settings, because those are the two
+    /// the choice governs: a recording still encoding at what a command line
+    /// named keeps that command line's refusal (`docs/configuration.md`, "What
+    /// a stale setting does, and why it is not what a flag does").
+    #[must_use]
+    pub fn apply_configured_to(&self, recording: RecordingSettings) -> RecordingSettings {
+        let mut recording = recording;
+        if let Some(resolution) = configured(&self.resolution) {
+            recording = recording.with_resolution(resolution);
+        }
+        if let Some(framerate) = configured(&self.framerate) {
+            recording = recording.with_framerate(framerate);
+        }
+        if let Some(codec) = configured(&self.codec) {
+            recording = recording.with_codec(codec);
+        }
+        if let Some(encoder) = configured(&self.encoder) {
+            recording = recording.with_encoder(encoder);
+        }
+        if let Some(microphone) = configured(&self.microphone) {
+            recording = recording.with_microphone(audio_source(&microphone));
+        }
+        if let Some(system_audio) = configured(&self.system_audio) {
+            recording = recording.with_system_audio(audio_source(&system_audio));
+        }
+        if configured(&self.resolution).is_some() || configured(&self.encoder).is_some() {
+            recording = recording.with_unavailable_choice(UnavailableChoice::Substitute);
+        }
+        recording
+    }
+}
+
+/// The value, when a layer above the shipped default supplied it.
+///
+/// `None` is "nothing configured this", which is the state
+/// [`ResolvedSettings::apply_configured_to`] leaves the recording's own answer
+/// standing for.
+fn configured<T: Clone>(resolved: &Resolved<T>) -> Option<T> {
+    (resolved.source() != SettingSource::Default).then(|| resolved.value().clone())
 }
 
 /// The recording engine's name for a configured audio selection.
