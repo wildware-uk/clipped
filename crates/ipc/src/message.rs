@@ -113,6 +113,16 @@ pub mod features {
         RECORDING = "recording";
         /// The recorder can report its status, and push status events.
         STATUS_EVENTS = "status_events";
+        /// The recorder can mark a moment in the recording it is making.
+        ///
+        /// A UI asks for this before offering an "Add Bookmark" control,
+        /// because a recorder built before
+        /// [issue #64](https://github.com/wildware-uk/clipped/issues/64) has no
+        /// `add_bookmark` command at all and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) —
+        /// which is the version skew this list exists to make visible before
+        /// the button is drawn rather than after it is pressed.
+        BOOKMARKS = "bookmarks";
         /// The recorder can be asked to finish and exit over the protocol.
         ///
         /// Unlike the two above, this one is not the application's to claim:

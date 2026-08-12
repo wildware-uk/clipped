@@ -39,7 +39,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clipped_ipc::supervisor::{wait_for_recorder_to_exit, RecorderCallError, ShutdownOutcome};
-use clipped_ipc::{Command, RecorderLink, RecorderLinkState, Reply, StartRecording, StopRecording};
+use clipped_ipc::{
+    AddBookmark, Command, RecorderLink, RecorderLinkState, Reply, StartRecording, StopRecording,
+};
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter as _, Manager as _, Runtime};
@@ -316,11 +318,13 @@ enum MenuAction {
     Navigate(&'static str),
     /// Start or stop a recording, whichever the model is offering.
     Record,
+    /// Mark this moment in the recording that is running.
+    Bookmark,
     /// Stop the recorder and then this process.
     Exit,
     /// A line of the menu that is not a control.
     ///
-    /// The status line and the two unbuilt commands. All are disabled, so
+    /// The status line and the one unbuilt command. Both are disabled, so
     /// Windows raises no event for them; naming them anyway is what tells an
     /// item with no handler apart from an item with nothing to do.
     Inert,
@@ -334,8 +338,9 @@ fn action_for(id: &str) -> MenuAction {
         ids::LIBRARY => MenuAction::Navigate("/library"),
         ids::SETTINGS => MenuAction::Navigate("/settings"),
         ids::RECORD => MenuAction::Record,
+        ids::ADD_BOOKMARK => MenuAction::Bookmark,
         ids::EXIT => MenuAction::Exit,
-        ids::STATUS | ids::SAVE_REPLAY | ids::ADD_BOOKMARK => MenuAction::Inert,
+        ids::STATUS | ids::SAVE_REPLAY => MenuAction::Inert,
         _ => MenuAction::Unknown,
     }
 }
@@ -351,6 +356,9 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         MenuAction::Navigate(path) => open_screen(&app, path),
         MenuAction::Record => {
             std::thread::spawn(move || record(&app));
+        }
+        MenuAction::Bookmark => {
+            std::thread::spawn(move || bookmark(&app));
         }
         MenuAction::Exit => {
             std::thread::spawn(move || exit(&app));
@@ -423,6 +431,43 @@ fn stop_recording(link: &RecorderLink) -> Result<(), String> {
         }
         Ok(other) => Err(format!("The recorder answered a stop with {other:?}.")),
         Err(error) => Err(format!("The recording could not be stopped. {error}")),
+    }
+}
+
+/// Marks this moment in the recording that is running.
+///
+/// Deliberately without a recording identifier, for the same reason
+/// [`stop_recording`] is: the tray is marking "the recording", and it has no
+/// particular one on screen. It sends no label and no colour either — the menu
+/// item is one click and there is nowhere in a notification-area menu to type,
+/// so the bookmark is the bare mark a hotkey would take. Naming it is what the
+/// timeline does afterwards ([issue
+/// #65](https://github.com/wildware-uk/clipped/issues/65)).
+///
+/// Feedback is the whole point of answering at all: a mark that is taken
+/// silently is indistinguishable from a click that missed. Where it landed is
+/// what is worth saying, because it is not where the click was — the recorder
+/// stamps a bookmark a few seconds earlier to allow for reaction time
+/// (`docs/bookmarks.md`).
+fn bookmark(app: &AppHandle) {
+    let Some(link) = app.try_state::<RecorderLink>() else {
+        return;
+    };
+
+    let outcome = match link.call(&Command::AddBookmark(AddBookmark::default())) {
+        Ok(Reply::BookmarkAdded { bookmark }) => {
+            tracing_line(&format!(
+                "bookmarked {:.1}s into the recording",
+                bookmark.at_seconds
+            ));
+            Ok(())
+        }
+        Ok(other) => Err(format!("The recorder answered a bookmark with {other:?}.")),
+        Err(error) => Err(format!("The moment could not be bookmarked. {error}")),
+    };
+
+    if let Err(message) = outcome {
+        report(app, &message);
     }
 }
 
@@ -595,14 +640,19 @@ mod tests {
         assert_eq!(action_for(ids::SETTINGS), MenuAction::Navigate("/settings"));
         assert_eq!(action_for(ids::RECORD), MenuAction::Record);
         assert_eq!(action_for(ids::EXIT), MenuAction::Exit);
+        // Issue #64 turned this from a line that never did anything into one
+        // that sends a command. An item left `Inert` after the recorder gained
+        // the command would be enabled in the menu and silently do nothing when
+        // clicked, which is the failure AGENTS.md section 27 names.
+        assert_eq!(action_for(ids::ADD_BOOKMARK), MenuAction::Bookmark);
     }
 
     #[test]
     fn the_lines_that_are_not_controls_are_named_rather_than_left_over() {
-        // All three are disabled, so Windows raises no event for them. Naming
-        // them anyway is what makes `Unknown` mean "somebody added an item and
+        // Both are disabled, so Windows raises no event for them. Naming them
+        // anyway is what makes `Unknown` mean "somebody added an item and
         // forgot" rather than "one of the lines that never does anything".
-        for id in [ids::STATUS, ids::SAVE_REPLAY, ids::ADD_BOOKMARK] {
+        for id in [ids::STATUS, ids::SAVE_REPLAY] {
             assert_eq!(action_for(id), MenuAction::Inert, "{id}");
         }
     }

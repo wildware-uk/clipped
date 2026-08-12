@@ -417,8 +417,16 @@ fn structures() -> BTreeMap<String, Structure> {
             ),
         ),
         (
+            "add_bookmark".to_owned(),
+            structure_of(&exemplar_add_bookmark(), &[]),
+        ),
+        (
             "recording_summary".to_owned(),
             structure_of(&exemplar_summary(), &[]),
+        ),
+        (
+            "bookmark_summary".to_owned(),
+            structure_of(&exemplar_bookmark(), &[]),
         ),
         (
             "active_recording".to_owned(),
@@ -470,6 +478,7 @@ fn commands() -> Vec<CommandSchema> {
             params: match command {
                 Command::StartRecording(_) => Some("start_recording".to_owned()),
                 Command::StopRecording(_) => Some("stop_recording".to_owned()),
+                Command::AddBookmark(_) => Some("add_bookmark".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping | Command::GetStatus | Command::Unbuilt(_) => None,
             },
@@ -478,6 +487,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::GetStatus => Some("reply.status".to_owned()),
                 Command::StartRecording(_) => Some("reply.recording_started".to_owned()),
                 Command::StopRecording(_) => Some("reply.recording_stopped".to_owned()),
+                Command::AddBookmark(_) => Some("reply.bookmark_added".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
                 Command::Unbuilt(_) => None,
             },
@@ -885,6 +895,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::RecordingStopped { summary } => {
             format!("recording_stopped.{}", summary.end_reason.as_str())
         }
+        Reply::BookmarkAdded { .. } => "bookmark_added".to_owned(),
         // Whether a recording is being finished is the whole of what this reply
         // says, so it is part of the path: a mirror that dropped the field would
         // otherwise reach the same discriminant either way.
@@ -1111,6 +1122,32 @@ fn exemplar_summary() -> RecordingSummary {
     }
 }
 
+/// Every `add_bookmark` parameter at once.
+fn exemplar_add_bookmark() -> crate::command::AddBookmark {
+    crate::command::AddBookmark {
+        recording_id: Some("r-1".to_owned()),
+        label: Some("triple kill on mid".to_owned()),
+        colour: Some("#ffcc00".to_owned()),
+        duration_seconds: Some(12.5),
+        lead_seconds: Some(5.0),
+    }
+}
+
+/// A bookmark, with every optional field present so the schema sees them.
+fn exemplar_bookmark() -> crate::status::BookmarkSummary {
+    crate::status::BookmarkSummary {
+        recording_id: "r-1".to_owned(),
+        at_seconds: 115.0,
+        pressed_at_seconds: 120.0,
+        lead_seconds: 5.0,
+        label: Some("triple kill on mid".to_owned()),
+        colour: Some("#ffcc00".to_owned()),
+        duration_seconds: Some(12.5),
+        bookmarks_file: r"D:\clips\session.bookmarks.json".to_owned(),
+        bookmarks_in_recording: 3,
+    }
+}
+
 // Every `every_*` function below exists to make its list exhaustive. The `match`
 // in each one is a no-op at run time and a compile error the moment a variant is
 // added and not named, which is what keeps this schema — and through it the
@@ -1208,6 +1245,7 @@ fn every_built_command() -> Vec<Command> {
         Command::GetStatus,
         Command::StartRecording(exemplar_start_recording()),
         Command::StopRecording(StopRecording::default()),
+        Command::AddBookmark(exemplar_add_bookmark()),
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -1216,6 +1254,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::GetStatus
             | Command::StartRecording(_)
             | Command::StopRecording(_)
+            | Command::AddBookmark(_)
             | Command::Shutdown(_)
             | Command::Unbuilt(_) => {}
         }
@@ -1353,6 +1392,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::RecordingStopped {
             summary: exemplar_summary(),
         },
+        Reply::BookmarkAdded {
+            bookmark: exemplar_bookmark(),
+        },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
@@ -1364,6 +1406,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Status { .. }
             | Reply::RecordingStarted { .. }
             | Reply::RecordingStopped { .. }
+            | Reply::BookmarkAdded { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }

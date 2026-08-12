@@ -17,10 +17,14 @@
 //!
 //! **Nothing is offered that would do nothing.** Every item is either something
 //! this build can perform or is disabled with the reason in its own label. Save
-//! Replay and Add Bookmark are commands the protocol defines and this build
-//! refuses, and their labels carry the subsystem and the issue *from the
-//! protocol's own typed refusal* rather than from a sentence typed here — so
-//! the day the recorder gains one, this stops claiming it has not.
+//! Replay is a command the protocol defines and this build refuses, and its
+//! label carries the subsystem and the issue *from the protocol's own typed
+//! refusal* rather than from a sentence typed here — so the day the recorder
+//! gains one, this stops claiming it has not. Add Bookmark is what that looked
+//! like the day it happened ([issue
+//! #64](https://github.com/wildware-uk/clipped/issues/64)): the refusal it
+//! quoted no longer exists, so the item is a control, disabled only while there
+//! is no recording to put a bookmark in.
 
 use clipped_ipc::{RecorderLinkState, RecorderStatus, UnbuiltCommand};
 
@@ -147,7 +151,7 @@ pub(crate) fn tray_model(
         // of the menu, and there is nothing to click.
         status: MenuEntry::refused(status),
         save_replay: MenuEntry::unbuilt("Save Replay", UnbuiltCommand::SaveReplay),
-        add_bookmark: MenuEntry::unbuilt("Add Bookmark", UnbuiltCommand::AddBookmark),
+        add_bookmark: bookmark_entry(recording.is_some()),
         record,
         record_action,
         // Both of these open the window at a screen. Neither screen is written
@@ -249,6 +253,25 @@ pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str
     )
 }
 
+/// The Add Bookmark item.
+///
+/// Live only while something is being recorded, because a bookmark is an offset
+/// *into a recording* and there is nothing to put one in otherwise — the
+/// recorder refuses `add_bookmark` with `not_recording` in exactly that case
+/// (`docs/bookmarks.md`), and offering a control whose command is about to be
+/// refused is what AGENTS.md section 27 rules out.
+///
+/// It was a `not in this build` refusal until
+/// [issue #64](https://github.com/wildware-uk/clipped/issues/64), which is the
+/// ticket that built the bookmark store and the command.
+fn bookmark_entry(recording: bool) -> MenuEntry {
+    if recording {
+        MenuEntry::live("Add Bookmark")
+    } else {
+        MenuEntry::refused("Add Bookmark — nothing is being recorded")
+    }
+}
+
 /// The Start/Stop Recording item, and what it does.
 ///
 /// Three ways it can be disabled, and each says which:
@@ -338,14 +361,26 @@ mod tests {
     fn no_enabled_item_has_nothing_behind_it() {
         // The acceptance criterion, as a property rather than as five
         // assertions: whatever the application knows, an item a user can click
-        // does something. Save Replay and Add Bookmark are the ones with no
-        // subsystem, and they are never enabled in any state.
+        // does something. Save Replay has no subsystem and is never enabled;
+        // Add Bookmark has one, and is enabled exactly when there is a
+        // recording to put a bookmark in.
         for link in every_link_state() {
             for foreground in [None, Some(game())] {
                 let model = tray_model(&link, foreground.as_ref());
 
                 assert!(!model.save_replay.enabled, "{link:?}");
-                assert!(!model.add_bookmark.enabled, "{link:?}");
+                assert_eq!(
+                    model.add_bookmark.enabled,
+                    matches!(
+                        link,
+                        RecorderLinkState::Attached {
+                            status: RecorderStatus::Recording(_),
+                            ..
+                        }
+                    ),
+                    "{link:?}: a bookmark is an offset into a recording, so the item may only be \
+                     clickable while there is one"
+                );
                 assert!(!model.status.enabled, "the status line is not a control");
                 assert_eq!(
                     model.record.enabled,
@@ -400,10 +435,27 @@ mod tests {
             model.save_replay.label,
             "Save Replay — needs a recording with a replay buffer (#38)"
         );
+    }
+
+    #[test]
+    fn add_bookmark_stopped_claiming_the_feature_is_unbuilt_and_became_a_control() {
+        // Issue #64 built the bookmark store and the `add_bookmark` command, so
+        // the menu must stop saying "needs bookmarks (#64)". A ticket closed
+        // while the product still says the feature is unbuilt is the failure
+        // AGENTS.md sections 27 and 54 name, and it is invisible from the
+        // recorder's side — the refusal simply stops being sent while the menu
+        // goes on quoting it.
+        let idle = tray_model(&attached(RecorderStatus::Idle), Some(&game()));
+        assert!(!idle.add_bookmark.label.contains("#64"), "{idle:?}");
         assert_eq!(
-            model.add_bookmark.label,
-            "Add Bookmark — needs bookmarks (#64)"
+            idle.add_bookmark.label,
+            "Add Bookmark — nothing is being recorded"
         );
+        assert!(!idle.add_bookmark.enabled);
+
+        let recording = tray_model(&recording(), Some(&game()));
+        assert_eq!(recording.add_bookmark.label, "Add Bookmark");
+        assert!(recording.add_bookmark.enabled);
     }
 
     #[test]

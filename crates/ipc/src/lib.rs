@@ -125,7 +125,8 @@ pub mod transport;
 
 pub use client::{Client, ClientError, EventClient};
 pub use command::{
-    Command, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand, UNBUILT_COMMANDS,
+    AddBookmark, Command, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand,
+    UNBUILT_COMMANDS,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
@@ -137,7 +138,7 @@ pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,
     MAX_CONCURRENT_CONNECTIONS,
 };
-pub use status::{ActiveRecording, EndReason, RecorderStatus, RecordingSummary};
+pub use status::{ActiveRecording, BookmarkSummary, EndReason, RecorderStatus, RecordingSummary};
 pub use supervisor::{
     ensure_recorder, wait_for_recorder_to_exit, Attachment, AttachmentOrigin, RecorderCallError,
     RecorderLink, RecorderLinkEvent, RecorderLinkState, RestartPolicy, ShutdownOutcome,
