@@ -203,6 +203,26 @@
   --shadow-md: 0 3px 10px color-mix(in srgb, var(--color-neutral-900) 16%, transparent);
   --shadow-lg: 0 12px 32px color-mix(in srgb, var(--color-neutral-900) 22%, transparent);
 
+  /* — editor metrics — */
+  /*
+   * The editor's timeline (issue #83). None of the three is a step on the
+   * spacing scale, which is why each is here with a reason rather than written
+   * at the rule that uses it:
+   *
+   * - a lane is as tall as the waveform it will eventually hold has to be to be
+   *   read. `docs/waveforms.md` quantises peaks to eight bits against "an audio
+   *   row on the order of a hundred pixels", and quarters that for a lane in a
+   *   dense editor where several are stacked;
+   * - the ruler is as tall as one line of `--text-xs`, because that is all it
+   *   holds;
+   * - the label column is as wide as a track name and its level need, and is
+   *   fixed so that every lane's body starts at the same place - a timeline
+   *   whose lanes did not line up would misreport where a cut is.
+   */
+  --editor-lane-height: 44px;
+  --editor-ruler-height: 18px;
+  --editor-lane-label-width: 132px;
+
   /* — shell metrics — */
   --shell-sidebar-width: 210px;
   --shell-header-height: 36px;

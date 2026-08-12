@@ -72,19 +72,20 @@ describe('the application shell', () => {
   });
 
   /*
-   * Games is written (issue #107) and is therefore not in this list. It is
-   * named rather than filtered by "has a screen", because a list that computed
-   * itself from the same fact the shell routes on could not fail: the point of
-   * naming it is that building a screen and forgetting to route it, or routing
-   * one that was never built, both show up here.
+   * Games (issue #107) and Editor (issue #83) are written and are therefore not
+   * in this list. They are named rather than filtered by "has a screen", because
+   * a list that computed itself from the same fact the shell routes on could not
+   * fail: the point of naming them is that building a screen and forgetting to
+   * route it, or routing one that was never built, both show up here.
    */
-  const PLACEHOLDER_SCREENS = SCREENS.filter((entry) => entry.id !== 'games');
+  const WRITTEN_SCREENS = ['games', 'editor'];
+  const PLACEHOLDER_SCREENS = SCREENS.filter((entry) => !WRITTEN_SCREENS.includes(entry.id));
 
   it('says which issue builds each unwritten screen instead of drawing an empty one', async () => {
     const user = userEvent.setup();
     renderApp();
 
-    expect(PLACEHOLDER_SCREENS).toHaveLength(SCREENS.length - 1);
+    expect(PLACEHOLDER_SCREENS).toHaveLength(SCREENS.length - WRITTEN_SCREENS.length);
 
     for (const entry of PLACEHOLDER_SCREENS) {
       await user.click(screen.getByRole('link', { name: entry.label }));
@@ -104,6 +105,17 @@ describe('the application shell', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Games');
     expect(screen.queryByRole('heading', { level: 2, name: 'Not built yet' })).toBeNull();
     expect(screen.getByRole('region', { name: 'Game detection' })).toBeVisible();
+  });
+
+  it('routes Editor to the screen that was built rather than to the placeholder', async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(screen.getByRole('link', { name: 'Editor' }));
+
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Editor');
+    expect(screen.queryByRole('heading', { level: 2, name: 'Not built yet' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Open clip' })).toBeVisible();
   });
 
   it('offers no recorder controls while the recorder cannot be reached', () => {

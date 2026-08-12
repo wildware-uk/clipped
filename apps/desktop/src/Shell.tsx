@@ -3,6 +3,7 @@ import { AppShell, RecorderStatus, ScreenNav, ScreenNotBuilt } from '@clipped/ui
 import { useCallback, type ReactNode } from 'react';
 import { Route, Routes, useLocation, useNavigate } from 'react-router';
 
+import { EditorScreen } from './editor/EditorScreen';
 import { GamesScreen } from './GamesScreen';
 import { UnknownScreen } from './UnknownScreen';
 import {
@@ -24,12 +25,25 @@ const screenFor = (pathname: string): Screen | undefined =>
  *
  * Every route still comes from `SCREENS`, so the sidebar and the router cannot
  * disagree about what the application contains; this is only the question of
- * which element sits behind one. Six of the seven are still the placeholder
- * that names the issue building them. Games is written (issue #107), and the
- * change that builds another screen adds it here.
+ * which element sits behind one. Five of the seven are still the placeholder
+ * that names the issue building them. Games is written (issue #107) and so is
+ * Editor (issue #83), and the change that builds another screen adds it here.
+ *
+ * The Editor is given no clip, because nothing in this window can open one:
+ * a clip's edit document is a row of a database this process may not read
+ * (issue #306). The screen says so rather than drawing an empty timeline, and
+ * takes the document as a prop so that the day something can supply one, this
+ * is the line that changes.
  */
 function elementFor(screen: Screen, link: RecorderLinkState | null): ReactNode {
-  return screen.id === 'games' ? <GamesScreen link={link} /> : <ScreenNotBuilt screen={screen} />;
+  switch (screen.id) {
+    case 'games':
+      return <GamesScreen link={link} />;
+    case 'editor':
+      return <EditorScreen />;
+    default:
+      return <ScreenNotBuilt screen={screen} />;
+  }
 }
 
 /**
