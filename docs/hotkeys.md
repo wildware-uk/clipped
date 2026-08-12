@@ -106,7 +106,7 @@ line and will appear in a configuration file.
 | --- | --- | --- | --- |
 | Save replay | `save_replay` | `Ctrl`+`F10` | Nothing: the buffer and its save exist ([#37](https://github.com/wildware-uk/clipped/issues/37)), but no build runs a recording with one, which is M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
 | Add bookmark | `add_bookmark` | `Ctrl`+`F9` | Bookmarks exist ([#64](https://github.com/wildware-uk/clipped/issues/64), docs/bookmarks.md); a handler has to be supplied |
-| Take screenshot | `take_screenshot` | — | Nothing: screenshots are M8, [#67](https://github.com/wildware-uk/clipped/issues/67) |
+| Take screenshot | `take_screenshot` | — | Screenshots exist ([#67](https://github.com/wildware-uk/clipped/issues/67), docs/screenshots.md); a handler has to be supplied |
 | Start or stop recording | `toggle_recording` | — | Recording exists; a handler has to be supplied |
 | Mute microphone | `mute_microphone` | — | Nothing mutes a microphone mid-recording, [#234](https://github.com/wildware-uk/clipped/issues/234) |
 | Toggle microphone | `toggle_microphone` | — | As above |

@@ -37,6 +37,9 @@ import type {
   ActiveRecording,
   AddBookmarkParams,
   BookmarkAddedReply,
+  ScreenshotSummary,
+  ScreenshotTakenReply,
+  TakeScreenshotParams,
   BookmarkSummary,
   ClientMessage,
   CommandName,
@@ -255,6 +258,13 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     duration_seconds: 'optional',
     lead_seconds: 'optional',
   }),
+  take_screenshot: fields<TakeScreenshotParams>({
+    recording_id: 'optional',
+    window: 'optional',
+    process: 'optional',
+    pid: 'optional',
+    format: 'optional',
+  }),
   shutdown: fields<ShutdownParams>({ finalise_recording: 'optional' }),
   active_recording: fields<ActiveRecording>({
     recording_id: 'required',
@@ -286,6 +296,15 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     bookmarks_file: 'required',
     bookmarks_in_recording: 'required',
   }),
+  screenshot_summary: fields<ScreenshotSummary>({
+    path: 'required',
+    format: 'required',
+    width: 'required',
+    height: 'required',
+    bytes: 'required',
+    recording_id: 'optional',
+    at_seconds: 'optional',
+  }),
   'outcome.ok': fields<OkOutcome>({ ok: 'required' }),
   'outcome.error': fields<ErrorOutcome>({ error: 'required' }),
   'reply.pong': fields<PongReply>({ reply: 'required' }),
@@ -302,6 +321,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.bookmark_added': fields<BookmarkAddedReply>({
     reply: 'required',
     bookmark: 'required',
+  }),
+  'reply.screenshot_taken': fields<ScreenshotTakenReply>({
+    reply: 'required',
+    screenshot: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -373,13 +396,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'take_screenshot',
+    params: 'take_screenshot',
+    reply: 'reply.screenshot_taken',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
     available_in_this_build: true,
   },
   { name: 'save_replay', params: null, reply: null, available_in_this_build: false },
-  { name: 'take_screenshot', params: null, reply: null, available_in_this_build: false },
   { name: 'apply_settings', params: null, reply: null, available_in_this_build: false },
 ];
 
@@ -409,6 +437,8 @@ function replyDiscriminant(reply: Reply): string {
       return `recording_stopped.${reply.summary.end_reason}`;
     case 'bookmark_added':
       return 'bookmark_added';
+    case 'screenshot_taken':
+      return 'screenshot_taken';
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise

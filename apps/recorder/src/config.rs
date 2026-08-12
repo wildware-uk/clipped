@@ -289,23 +289,42 @@ impl RecordingConfig {
 /// from tests and from any future caller that builds [`RecordArgs`] itself, so
 /// it enforces the rule rather than assuming it.
 fn resolve_target(args: &RecordArgs) -> Result<CaptureTarget, ConfigError> {
-    let selected = usize::from(args.window.is_some())
-        + usize::from(args.process.is_some())
-        + usize::from(args.pid.is_some());
+    target_from(args.window.as_deref(), args.process.as_deref(), args.pid)
+}
+
+/// The same rule, from the three selectors alone.
+///
+/// Separated from [`resolve_target`] because a screenshot names a target and
+/// nothing else (`crate::serve`): it has no output path, no codec and no audio,
+/// so building a whole [`RecordArgs`] to ask this one question would be
+/// inventing values for fields nobody set. One rule, in one place (AGENTS.md
+/// section 55).
+///
+/// # Errors
+///
+/// [`ConfigError::NoTarget`] or [`ConfigError::ConflictingTargets`] when the
+/// count is not one, and the empty, path-like and zero cases below.
+pub(crate) fn target_from(
+    window: Option<&str>,
+    process: Option<&str>,
+    pid: Option<u32>,
+) -> Result<CaptureTarget, ConfigError> {
+    let selected =
+        usize::from(window.is_some()) + usize::from(process.is_some()) + usize::from(pid.is_some());
     match selected {
         0 => return Err(ConfigError::NoTarget),
         1 => {}
         _ => return Err(ConfigError::ConflictingTargets),
     }
 
-    if let Some(title) = &args.window {
+    if let Some(title) = window {
         let title = title.trim();
         if title.is_empty() {
             return Err(ConfigError::EmptyWindowTitle);
         }
         return Ok(CaptureTarget::WindowTitle(title.to_owned()));
     }
-    if let Some(name) = &args.process {
+    if let Some(name) = process {
         let name = name.trim();
         if name.is_empty() {
             return Err(ConfigError::EmptyProcessName);
@@ -318,9 +337,7 @@ fn resolve_target(args: &RecordArgs) -> Result<CaptureTarget, ConfigError> {
         return Ok(CaptureTarget::ProcessName(name.to_owned()));
     }
 
-    let pid = args
-        .pid
-        .expect("one selector was counted and two were absent");
+    let pid = pid.expect("one selector was counted and two were absent");
     if pid == 0 {
         return Err(ConfigError::ZeroProcessId);
     }

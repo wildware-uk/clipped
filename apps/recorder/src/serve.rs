@@ -77,13 +77,20 @@ use std::time::{Instant, SystemTime};
 
 use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
-    Endpoint, EventPublisher, ProtocolError, RecorderStatus, RecordingSummary, Reply, Server,
-    ServerError, StartRecording, StopRecording, TransportError,
+    Endpoint, EventPublisher, ProtocolError, RecorderStatus, RecordingSummary, Reply,
+    ScreenshotSummary, Server, ServerError, StartRecording, StopRecording, TakeScreenshot,
+    TransportError,
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
 use clipped_session::bookmarks::{BookmarkError, BookmarkLog, BookmarkRequest};
-use clipped_session::{RecordingProgress, RecordingReport, RecordingSettings};
+use clipped_session::screenshot::{
+    Screenshot, ScreenshotError, ScreenshotFormat, ScreenshotRequests, ScreenshotSettings,
+    StillFrame,
+};
+use clipped_session::{
+    CaptureTargetSettings, RecordingProgress, RecordingReport, RecordingSettings,
+};
 
 use crate::cli::{RecordArgs, ServeArgs};
 use crate::config::{ConfigError, RecordingConfig};
@@ -99,6 +106,7 @@ fn features_of_this_build() -> Vec<String> {
         features::RECORDING.to_owned(),
         features::STATUS_EVENTS.to_owned(),
         features::BOOKMARKS.to_owned(),
+        features::SCREENSHOTS.to_owned(),
     ]
 }
 
@@ -273,6 +281,9 @@ impl CommandHandler for RecorderService {
             Command::AddBookmark(request) => Ok(Reply::BookmarkAdded {
                 bookmark: self.recordings.bookmark(&request, SystemTime::now())?,
             }),
+            Command::TakeScreenshot(request) => Ok(Reply::ScreenshotTaken {
+                screenshot: self.recordings.screenshot(&request, SystemTime::now())?,
+            }),
             // Refused by `clipped-ipc` before dispatch, so that no handler can
             // answer a command whose subsystem does not exist (AGENTS.md
             // section 54). Reaching here would be a bug in that refusal.
@@ -341,6 +352,14 @@ struct Running {
     /// Shared so that the connection thread answering `add_bookmark` holds it
     /// without holding [`RecordingState::current`] while it writes.
     bookmarks: Arc<BookmarkLog>,
+    /// Where a `take_screenshot` asks this recording for one of the frames it
+    /// has already captured.
+    ///
+    /// Cloned rather than borrowed, for the same reason `bookmarks` is: the
+    /// connection thread waits on it, and it must not be holding
+    /// [`RecordingState::current`] while it does — the recording thread stores
+    /// its outcome through that same mutex.
+    screenshots: ScreenshotRequests,
     /// [`None`] while it is still recording.
     outcome: Option<Result<RecordingReport, String>>,
 }
@@ -391,7 +410,15 @@ impl RecordingState {
         );
 
         let progress = RecordingProgress::new();
-        let thread = spawn_recording(self, &id, settings, stop.clone(), progress.clone());
+        let screenshots = ScreenshotRequests::new();
+        let thread = spawn_recording(
+            self,
+            &id,
+            settings,
+            stop.clone(),
+            progress.clone(),
+            screenshots.clone(),
+        );
 
         *current = Some(Running {
             id: id.clone(),
@@ -402,6 +429,7 @@ impl RecordingState {
             thread: Some(thread),
             progress,
             bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
+            screenshots,
             outcome: None,
         });
         let status = status_of(current.as_ref());
@@ -558,6 +586,103 @@ impl RecordingState {
         })
     }
 
+    /// Saves a still image of what is being captured.
+    ///
+    /// Two paths, and which one is taken is not the caller's choice:
+    ///
+    /// - **A recording is running.** The picture comes from a frame that
+    ///   recording already captured. It costs the capture thread one texture
+    ///   copy and cannot interrupt the recording
+    ///   (`clipped_session::screenshot`).
+    /// - **Nothing is running.** A capture is opened for the target the request
+    ///   names, one frame is taken and it is shut down. Far more expensive, and
+    ///   the reason the request carries a target at all.
+    ///
+    /// Encoding and writing happen on this thread — the connection thread the
+    /// command arrived on — and never on a capture thread (AGENTS.md section
+    /// 20). `now` is passed in so that the file's name is testable without a
+    /// wall clock (AGENTS.md section 25).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] for a format this build will not write
+    /// or a target that cannot be parsed; [`ErrorCode::NotRecording`] when a
+    /// named recording is not the one running; [`ErrorCode::TargetNotFound`]
+    /// when nothing is being recorded and the request names no window that
+    /// exists; and [`ErrorCode::Internal`] when the picture was taken and could
+    /// not be saved — which names the file, because a full or disconnected
+    /// drive is something only the user can fix (AGENTS.md section 45).
+    fn screenshot(
+        &self,
+        request: &TakeScreenshot,
+        now: SystemTime,
+    ) -> Result<ScreenshotSummary, ProtocolError> {
+        let settings = screenshot_settings(request)?;
+
+        // Everything this needs comes out of the lock here, and the lock is
+        // released before anything waits or writes: the recording thread stores
+        // its outcome through this same mutex, and a screenshot that held it
+        // across a frame wait would make a recording's end wait on one.
+        let running = {
+            let current = self.lock()?;
+            match current.as_ref().filter(|running| running.outcome.is_none()) {
+                Some(running) => {
+                    if let Some(named) = &request.recording_id {
+                        if named != &running.id {
+                            return Err(ProtocolError::new(
+                                ErrorCode::NotRecording,
+                                format!(
+                                    "recording `{named}` is not the one this recorder is running"
+                                ),
+                            ));
+                        }
+                    }
+                    Some((running.id.clone(), running.screenshots.clone()))
+                }
+                None => {
+                    if let Some(named) = &request.recording_id {
+                        return Err(ProtocolError::new(
+                            ErrorCode::NotRecording,
+                            format!("recording `{named}` is not the one this recorder is running"),
+                        ));
+                    }
+                    None
+                }
+            }
+        };
+
+        let (recording_id, still, position) = match running {
+            Some((id, requests)) => {
+                let served = requests.take().map_err(screenshot_failed)?;
+                (Some(id), served.still, served.position)
+            }
+            None => (None, self.photograph_target(request)?, None),
+        };
+
+        let screenshot = clipped_session::screenshot::write(
+            &still, &settings,
+            // The game a screenshot belongs to is the session's, and no `serve`
+            // runs a session yet (`clipped_session::automatic` is driven by the
+            // `watch` subcommand). Until it does, a screenshot taken here is
+            // filed unattributed rather than under a game nobody identified —
+            // which is the same answer a session gives when the catalogue will
+            // not name one, and it is honest rather than invented (AGENTS.md
+            // section 27). Attributing it is issue #334.
+            "", now, position,
+        )
+        .map_err(screenshot_failed)?;
+
+        Ok(summarise_screenshot(&screenshot, recording_id))
+    }
+
+    /// Opens a capture of the target the request names, for one frame.
+    ///
+    /// Only reached when nothing is being recorded.
+    fn photograph_target(&self, request: &TakeScreenshot) -> Result<StillFrame, ProtocolError> {
+        let target = screenshot_target(request)?;
+        clipped_session::screenshot::capture_still(&target).map_err(screenshot_failed)
+    }
+
     /// What the recorder is doing.
     ///
     /// Deliberately reads through a poisoned lock. A panic while the state was
@@ -638,6 +763,7 @@ fn spawn_recording(
     settings: RecordingSettings,
     stop: crate::shutdown::ShutdownSignal,
     progress: RecordingProgress,
+    screenshots: ScreenshotRequests,
 ) -> JoinHandle<()> {
     let state = Arc::clone(state);
     let id = id.to_owned();
@@ -645,7 +771,9 @@ fn spawn_recording(
     thread::Builder::new()
         .name("clipped-recording".to_owned())
         .spawn(move || {
-            let outputs = clipped_session::RecordingOutputs::default().with_progress(&progress);
+            let outputs = clipped_session::RecordingOutputs::default()
+                .with_progress(&progress)
+                .with_screenshots(&screenshots);
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 clipped_session::record_into(&settings, &stop, &outputs)
             }));
@@ -817,6 +945,121 @@ fn bookmark_not_saved(error: &BookmarkError) -> ProtocolError {
     ProtocolError::new(ErrorCode::Internal, error.to_string())
 }
 
+/// Where a screenshot goes and what it is saved as, from the request.
+///
+/// The directory is the recorder's default until the settings API is read at
+/// the moment a command arrives ([issue
+/// #61](https://github.com/wildware-uk/clipped/issues/61)); saying so here is
+/// better than inventing a per-request one nothing would remember.
+fn screenshot_settings(request: &TakeScreenshot) -> Result<ScreenshotSettings, ProtocolError> {
+    let directory = clipped_session::screenshot::default_directory().ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::Internal,
+            "this account has no home directory, so there is nowhere to put a screenshot",
+        )
+    })?;
+
+    let format = match &request.format {
+        None => ScreenshotFormat::default(),
+        Some(name) => ScreenshotFormat::from_name(name).ok_or_else(|| {
+            let known: Vec<&str> = ScreenshotFormat::ALL
+                .iter()
+                .map(|format| format.name())
+                .collect();
+            ProtocolError::new(
+                ErrorCode::InvalidParameters,
+                format!("`{name}` is not a screenshot format; this build writes {known:?}"),
+            )
+        })?,
+    };
+
+    // Asked of the linked FFmpeg rather than assumed, because the answer for
+    // lossless WebP depends on how it was built. Refusing here names the format
+    // instead of writing a file with the wrong contents (AGENTS.md section 54).
+    if !format.is_available() {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!("this build of Clipped cannot write {format}"),
+        ));
+    }
+
+    Ok(ScreenshotSettings::new(directory).with_format(format))
+}
+
+/// The window a screenshot with no recording behind it photographs.
+fn screenshot_target(request: &TakeScreenshot) -> Result<CaptureTargetSettings, ProtocolError> {
+    if request.window.is_none() && request.process.is_none() && request.pid.is_none() {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            "nothing is being recorded, so a screenshot has to say which window to photograph: \
+             send `window`, `process` or `pid`",
+        ));
+    }
+
+    // The same resolution a recording goes through, so "which window is
+    // `cs2.exe`" has one answer in this process (AGENTS.md section 55).
+    let target = crate::config::target_from(
+        request.window.as_deref(),
+        request.process.as_deref(),
+        request.pid,
+    )
+    .map_err(invalid_parameters)?;
+    let window = resolve_window(&target).map_err(|error| match error {
+        crate::record::RecordError::Resolution(resolution) => {
+            ProtocolError::new(ErrorCode::TargetNotFound, resolution.to_string())
+        }
+        other => ProtocolError::new(ErrorCode::Internal, other.to_string()),
+    })?;
+
+    let size = window.geometry().client_size();
+    Ok(
+        CaptureTargetSettings::window(window.handle().as_u64(), size.width(), size.height())
+            .content_protected(window.is_content_protected()),
+    )
+}
+
+/// The refusal for a screenshot that could not be taken or saved.
+///
+/// The code says what the caller can do about it: a format or a target it got
+/// wrong is [`ErrorCode::InvalidParameters`], a window that stopped drawing is
+/// [`ErrorCode::TargetNotFound`], and a disk that refused is
+/// [`ErrorCode::Internal`] with the file named in the message.
+fn screenshot_failed(error: ScreenshotError) -> ProtocolError {
+    let code = match &error {
+        ScreenshotError::FormatUnavailable { .. } => ErrorCode::InvalidParameters,
+        ScreenshotError::NoFrame { .. } => ErrorCode::TargetNotFound,
+        ScreenshotError::Capture(_) => ErrorCode::TargetNotFound,
+        ScreenshotError::Copy(_)
+        | ScreenshotError::Encode { .. }
+        | ScreenshotError::DirectoryNotCreated { .. }
+        | ScreenshotError::NotWritten { .. }
+        | ScreenshotError::NoFreeName { .. }
+        | ScreenshotError::NotCaptured { .. } => ErrorCode::Internal,
+        // `ScreenshotError` is `#[non_exhaustive]`, and a variant added there
+        // is a decision to make here rather than a silent `Internal`. It cannot
+        // be caught by the compiler across a crate boundary, so it is caught by
+        // the message instead.
+        _ => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
+}
+
+/// A screenshot, as the protocol reports it.
+fn summarise_screenshot(
+    screenshot: &Screenshot,
+    recording_id: Option<String>,
+) -> ScreenshotSummary {
+    ScreenshotSummary {
+        path: screenshot.path().to_string_lossy().into_owned(),
+        format: screenshot.format().name().to_owned(),
+        width: screenshot.width(),
+        height: screenshot.height(),
+        bytes: screenshot.bytes(),
+        recording_id,
+        at_seconds: screenshot.position().map(|at| at.as_secs_f64()),
+    }
+}
+
 /// The refusal for a lock a panic left poisoned.
 fn poisoned(what: &str) -> ProtocolError {
     ProtocolError::new(
@@ -931,6 +1174,7 @@ mod tests {
             thread: None,
             progress,
             bookmarks: Arc::new(BookmarkLog::for_recording(output)),
+            screenshots: ScreenshotRequests::new(),
             outcome: None,
         });
         state

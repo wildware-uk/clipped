@@ -1221,6 +1221,43 @@ platform actually exists is a question for then.
    ([issue #24](https://github.com/wildware-uk/clipped/issues/24)) will replace
    the bespoke half of it.
 
+## The one frame that leaves the GPU: screenshots
+
+Everything above keeps a frame on the GPU from the compositor to the encoder,
+and the "Assumptions" section below says so outright. A screenshot is the one
+thing that genuinely cannot: a PNG is bytes in system memory, and there is no
+route from a Direct3D texture to a file that does not pass through them
+(SPEC.md section 26,
+[issue #67](https://github.com/wildware-uk/clipped/issues/67)).
+
+So the exception is made as narrow as it can be. `StillFrame` is one frame's
+pixels, owned and `Send`; `windows::D3d11StillCopier` is what produces one, on
+request, never per frame. Nothing on the recording path calls it, and the type
+that comes out is the only thing in this crate that outlives an acquisition.
+
+**The copy is in two halves, and that is the whole design.** `CopyResource` into
+a staging texture is queued for the GPU and returns; `Map` is what waits for it,
+and a wait on the capture thread is a frame nobody recorded. So `begin` issues
+the copy and flushes on the frame the key was pressed on, and `poll` maps with
+`D3D11_MAP_FLAG_DO_NOT_WAIT` on a later one — answering "not yet" until the GPU
+has caught up rather than blocking. Measured on an RTX 4090 with
+`cargo run --release -p clipped-capture --example still_cost`:
+
+| Frame | Bytes | `begin` | `poll` |
+| --- | --- | --- | --- |
+| 1920x1080 | 8.1 MB | 0.054 ms median | 1.05 ms median |
+| 2560x1440 | 14.4 MB | 0.071 ms median | 1.95 ms median |
+| 3840x2160 | 32.4 MB | 0.070 ms median | 4.29 ms median |
+
+The frame the key was pressed on pays the first column; a frame or two later
+pays the second, with a whole frame's budget in hand rather than whatever was
+left of it. Encoding and writing happen on the thread that asked for the
+screenshot and never here.
+
+[screenshots.md](screenshots.md) is the rest of it: the rendezvous with the
+thread that asked, the format and colour decisions, where the files go, and what
+the path with no recording behind it costs.
+
 ## Assumptions
 
 - A capture source stamps every frame with a monotonic reading from a clock the
@@ -1228,9 +1265,10 @@ platform actually exists is a question for then.
   is untrue would need more than a new backend.
 - One target per session. Capturing two windows at once is not in the interface
   and is not planned.
-- Frames stay on the GPU. Nothing here has a path for system-memory frames,
-  because a CPU round trip at 1080p60 would exceed the whole performance budget
-  in SPEC.md section 38 on its own.
+- Frames stay on the GPU **on the recording path**. There is no path for
+  system-memory frames, because a CPU round trip at 1080p60 would exceed the
+  whole performance budget in SPEC.md section 38 on its own. The one exception
+  is a screenshot, above: one frame, on request, and measured.
 
 ## Still to be written
 

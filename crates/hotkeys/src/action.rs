@@ -142,6 +142,16 @@ impl HotkeyAction {
     /// [`Some`] and names what is genuinely absent, rather than naming a buffer
     /// that has been built.
     ///
+    /// Taking a screenshot is [`None`] as of
+    /// [issue #67](https://github.com/wildware-uk/clipped/issues/67), for the
+    /// same reason as the bookmark below and with the same care:
+    /// `clipped_session::screenshot` copies a frame out of the capture that is
+    /// already running, encodes it and writes it, and the recorder answers
+    /// `take_screenshot` with the file it wrote. A build that still said
+    /// "screenshot capture arrives in M8" would be telling a user a shipped
+    /// feature is unbuilt. What is missing in *this* process is a handler,
+    /// which is [`crate::Unhandled`]'s sentence rather than this one.
+    ///
     /// Adding a bookmark is [`None`] as of
     /// [issue #64](https://github.com/wildware-uk/clipped/issues/64): the
     /// recorder stores bookmarks and answers `add_bookmark`, so a build that
@@ -158,9 +168,9 @@ impl HotkeyAction {
                 "M3",
                 38,
             )),
-            Self::TakeScreenshot => Some(PlannedSubsystem::new("screenshot capture", "M8", 67)),
             Self::OpenOverlay => Some(PlannedSubsystem::new("the in-game overlay", "M5", 53)),
             Self::AddBookmark
+            | Self::TakeScreenshot
             | Self::ToggleRecording
             | Self::MuteMicrophone
             | Self::ToggleMicrophone => None,
@@ -308,6 +318,17 @@ mod tests {
         // Recording exists (M1). What a build may be missing is a handler, and
         // that is a different sentence — see `Unhandled`.
         assert_eq!(HotkeyAction::ToggleRecording.planned_subsystem(), None);
+    }
+
+    #[test]
+    fn screenshots_stopped_being_a_missing_subsystem_when_the_recorder_gained_them() {
+        // Issue #67 built the frame copy, the still-image encoder and the
+        // `take_screenshot` command the recorder answers. A key that still said
+        // "screenshot capture arrives in M8 (issue #67)" would be telling the
+        // user a shipped feature is unbuilt — the same silent failure the
+        // bookmark test below guards, and the same one that has now happened
+        // twice.
+        assert_eq!(HotkeyAction::TakeScreenshot.planned_subsystem(), None);
     }
 
     #[test]

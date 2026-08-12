@@ -38,9 +38,9 @@
         "start_recording",
         "stop_recording",
         "add_bookmark",
+        "take_screenshot",
         "shutdown",
         "save_replay",
-        "take_screenshot",
         "apply_settings"
       ],
       "tolerates_unrecognised": true
@@ -105,6 +105,7 @@
         "recording",
         "status_events",
         "bookmarks",
+        "screenshots",
         "shutdown"
       ],
       "tolerates_unrecognised": true
@@ -130,6 +131,7 @@
         "recording_started",
         "recording_stopped",
         "bookmark_added",
+        "screenshot_taken",
         "shutting_down"
       ],
       "tolerates_unrecognised": false
@@ -311,6 +313,13 @@
       ],
       "optional": []
     },
+    "reply.screenshot_taken": {
+      "required": [
+        "reply",
+        "screenshot"
+      ],
+      "optional": []
+    },
     "reply.shutting_down": {
       "required": [
         "reply"
@@ -342,6 +351,19 @@
       ],
       "optional": []
     },
+    "screenshot_summary": {
+      "required": [
+        "bytes",
+        "format",
+        "height",
+        "path",
+        "width"
+      ],
+      "optional": [
+        "at_seconds",
+        "recording_id"
+      ]
+    },
     "shutdown": {
       "required": [],
       "optional": [
@@ -368,6 +390,16 @@
       "required": [],
       "optional": [
         "recording_id"
+      ]
+    },
+    "take_screenshot": {
+      "required": [],
+      "optional": [
+        "format",
+        "pid",
+        "process",
+        "recording_id",
+        "window"
       ]
     },
     "welcome": {
@@ -414,6 +446,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "take_screenshot",
+      "params": "take_screenshot",
+      "reply": "reply.screenshot_taken",
+      "available_in_this_build": true
+    },
+    {
       "name": "shutdown",
       "params": "shutdown",
       "reply": "reply.shutting_down",
@@ -421,12 +459,6 @@
     },
     {
       "name": "save_replay",
-      "params": null,
-      "reply": null,
-      "available_in_this_build": false
-    },
-    {
-      "name": "take_screenshot",
       "params": null,
       "reply": null,
       "available_in_this_build": false
@@ -547,6 +579,7 @@
           "recording",
           "status_events",
           "bookmarks",
+          "screenshots",
           "shutdown"
         ],
         "protocol_version": 1,

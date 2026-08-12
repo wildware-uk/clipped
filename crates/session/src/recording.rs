@@ -72,6 +72,7 @@ use crate::error::SessionError;
 use crate::muxing::{MuxingThread, SpaceGuard, SpaceState};
 use crate::pacing::FrameGate;
 use crate::report::{AudioTrackReport, EndReason, RecordingReport};
+use crate::screenshot::{ScreenshotRequests, ServedStill};
 use crate::settings::RecordingSettings;
 use crate::windows::device::FrameDevice;
 
@@ -201,8 +202,17 @@ fn record_frames(
     let mut end_reason = EndReason::Stopped;
     let mut failure = None;
     let mut low_space_reported = false;
+    let mut screenshots = outputs.screenshots.map(Screenshots::new);
 
     while !stop.is_requested() {
+        // Before the space check and before the acquisition: a copy issued on
+        // an earlier frame may be ready now, and reading it back is what lets
+        // whoever pressed the key stop waiting. It touches the GPU and nothing
+        // else — no disk, no encoder, no lock held across either.
+        if let Some(screenshots) = screenshots.as_mut() {
+            screenshots.collect();
+        }
+
         // Before the acquisition, not after: the point of the guard is to stop
         // the recording while there is still room to finish the file, so a
         // frame that has already been captured is worth less than the trailer.
@@ -266,6 +276,13 @@ fn record_frames(
                     failure = Some(error);
                     break;
                 }
+
+                // After the encoder, deliberately. The recording is what must
+                // not be delayed; a screenshot waits one more frame rather than
+                // being the reason a frame was late (AGENTS.md section 17).
+                if let Some(screenshots) = screenshots.as_mut() {
+                    screenshots.consider(&frame, clock);
+                }
             }
             Ok(Acquisition::Timeout) => {}
             Ok(Acquisition::SizeChanged(size)) => {
@@ -293,6 +310,14 @@ fn record_frames(
                 break;
             }
         }
+    }
+
+    // Anything still waiting for a frame is told there will not be one, before
+    // the finalisation below — which takes as long as it takes to write a
+    // trailer — rather than being left to time out. A screenshot key pressed as
+    // a game exits is the case: the request is real and the answer is no.
+    if let Some(mut screenshots) = screenshots.take() {
+        screenshots.abandon();
     }
 
     // The finalisation, in order: the encoder is told the stream has ended and
@@ -384,6 +409,149 @@ fn record_frames(
     match failure {
         Some(error) => Err(error),
         None => Ok(report),
+    }
+}
+
+/// How long a screenshot copy is polled before the loop waits for it.
+///
+/// A quarter of a second. Polling is what keeps the capture thread off the GPU's
+/// critical path (`clipped_capture::windows::D3d11StillCopier`), and in practice
+/// the copy is ready on the next frame — but a source that stops producing
+/// frames stops the polling too, and somebody who pressed a key is owed a
+/// picture rather than a timeout. So after this long the loop maps the staging
+/// texture the blocking way, once, and takes whatever stall that costs.
+const SCREENSHOT_POLL_LIMIT: Duration = Duration::from_millis(250);
+
+/// The screenshot half of the capture loop.
+///
+/// Owned by [`record_frames`] and touched only from its thread. The division of
+/// labour is `crate::screenshot::request`'s: this copies pixels, and the thread
+/// that asked encodes and writes them.
+struct Screenshots<'a> {
+    requests: &'a ScreenshotRequests,
+    copier: clipped_capture::windows::D3d11StillCopier,
+    /// The request a copy is in flight for, and when it was issued.
+    serving: Option<(u64, Instant)>,
+    /// Where the frame being copied sits on the recording's timeline.
+    position: Option<Duration>,
+}
+
+impl<'a> Screenshots<'a> {
+    fn new(requests: &'a ScreenshotRequests) -> Self {
+        Self {
+            requests,
+            copier: clipped_capture::windows::D3d11StillCopier::new(),
+            serving: None,
+            position: None,
+        }
+    }
+
+    /// Reads back a copy issued on an earlier frame, if it is ready.
+    ///
+    /// Called once per turn of the loop, including turns where no frame
+    /// arrived: a window that stopped drawing the instant after the key was
+    /// pressed still has a copy in flight, and it is still readable.
+    fn collect(&mut self) {
+        let Some((id, began)) = self.serving else {
+            return;
+        };
+
+        let waited = began.elapsed();
+        let outcome = if waited >= SCREENSHOT_POLL_LIMIT {
+            // Long enough. The blocking map costs this thread the GPU's
+            // remaining work on one texture copy, which is the price of not
+            // leaving a request unanswered.
+            self.copier.finish().map(Some)
+        } else {
+            self.copier.poll()
+        };
+
+        match outcome {
+            // Not ready. Nothing is dropped and nothing is retried; the next
+            // turn of the loop asks again.
+            Ok(None) => {}
+            Ok(Some(still)) => {
+                self.serving = None;
+                self.requests.serve(
+                    id,
+                    Ok(ServedStill {
+                        still,
+                        position: self.position,
+                    }),
+                );
+            }
+            Err(error) => {
+                self.serving = None;
+                // Said at `warn` rather than swallowed: a screenshot that
+                // cannot be copied is a feature that has stopped working, and
+                // the waiter is told the same thing.
+                tracing::warn!(%error, "a screenshot could not be copied out of the frame");
+                self.requests.serve(id, Err(error.to_string()));
+            }
+        }
+    }
+
+    /// Starts a copy of `frame` if somebody is waiting for one.
+    ///
+    /// One request at a time: a copy already in flight is left alone, because
+    /// replacing it would mean the earlier waiter never being answered. The
+    /// next turn of the loop serves the next request.
+    fn consider(&mut self, frame: &CapturedFrame<'_>, clock: CaptureClock) {
+        if self.serving.is_some() || !self.requests.is_waiting() {
+            return;
+        }
+        let Some(id) = self.requests.claim() else {
+            return;
+        };
+
+        // The frame's own position on the recording's timeline, converted the
+        // one way everything else in this pipeline converts a timestamp
+        // (`docs/av-sync.md`). A clock mismatch leaves it unknown rather than
+        // guessed: the picture is still worth having without a marker.
+        self.position = clock
+            .media_time(frame.timestamp())
+            .ok()
+            .map(|media| Duration::from_nanos(media.as_nanos().max(0).unsigned_abs()));
+
+        match self.copier.begin(frame) {
+            Ok(()) => self.serving = Some((id, Instant::now())),
+            Err(error) => {
+                tracing::warn!(%error, "a screenshot could not be taken from this frame");
+                self.requests.serve(id, Err(error.to_string()));
+            }
+        }
+    }
+
+    /// Tells every waiter that this recording has no more frames.
+    ///
+    /// The claimed request first, then anything still queued. Without this a
+    /// screenshot asked for as a game exits waits for its whole timeout to
+    /// learn what the recording already knew.
+    fn abandon(&mut self) {
+        const GONE: &str = "the recording ended before a frame could be copied";
+
+        if let Some((id, _)) = self.serving.take() {
+            // One last attempt: the copy may already be finished, and a picture
+            // is a better answer than an explanation.
+            match self.copier.poll() {
+                Ok(Some(still)) => self.requests.serve(
+                    id,
+                    Ok(ServedStill {
+                        still,
+                        position: self.position,
+                    }),
+                ),
+                Ok(None) | Err(_) => self.requests.serve(id, Err(GONE.to_owned())),
+            }
+        }
+
+        while let Some(id) = self.requests.claim() {
+            self.requests.serve(id, Err(GONE.to_owned()));
+        }
+
+        // The staging texture is several megabytes of video memory and the
+        // recording is over (AGENTS.md section 58).
+        self.copier.release();
     }
 }
 
