@@ -187,6 +187,7 @@ pub mod config;
 pub mod disk;
 pub mod failure;
 pub mod highlights;
+pub mod screenshot;
 
 mod error;
 mod pacing;
@@ -294,15 +295,26 @@ pub fn record_with_replay(
 /// one carries on recording, and a bookmark is taken by whichever thread the
 /// command arrived on.
 ///
-/// **Neither can fail a recording.** A replay buffer copies bytes into memory it
-/// already owns, and progress is one relaxed atomic store per encoded frame.
-/// That is the whole of what a recording gives them, and it is what keeps
-/// AGENTS.md section 17's promise that nothing optional can cost somebody their
-/// footage.
+/// **None of them can fail a recording.** A replay buffer copies bytes into
+/// memory it already owns, progress is one relaxed atomic store per encoded
+/// frame, and a screenshot is a texture copy taken after the frame has already
+/// reached the encoder — a screenshot that cannot be copied is refused to
+/// whoever asked for it and the recording carries on. That is the whole of what
+/// a recording gives them, and it is what keeps AGENTS.md section 17's promise
+/// that nothing optional can cost somebody their footage.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RecordingOutputs<'a> {
     /// A rolling window of the last few minutes, filled from the same encoder.
     pub replay: Option<&'a clipped_replay::ReplayBuffer>,
+    /// Where a screenshot asks the recording for one of the frames it already
+    /// has ([issue #67](https://github.com/wildware-uk/clipped/issues/67)).
+    ///
+    /// The recording copies the frame and hands the pixels over; encoding and
+    /// writing the file happen on the thread that asked. Without this a
+    /// screenshot would have to open a second capture of a window that is
+    /// already being captured — see [`screenshot::capture_still`] for what that
+    /// costs.
+    pub screenshots: Option<&'a screenshot::ScreenshotRequests>,
     /// Where the recording has reached on its own timeline.
     ///
     /// What a manual bookmark is placed against
@@ -325,6 +337,16 @@ impl<'a> RecordingOutputs<'a> {
     #[must_use]
     pub const fn with_progress(mut self, progress: &'a RecordingProgress) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    /// The same outputs, also serving screenshots from the frames it captures.
+    #[must_use]
+    pub const fn with_screenshots(
+        mut self,
+        screenshots: &'a screenshot::ScreenshotRequests,
+    ) -> Self {
+        self.screenshots = Some(screenshots);
         self
     }
 }

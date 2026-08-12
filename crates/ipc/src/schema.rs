@@ -421,12 +421,20 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_add_bookmark(), &[]),
         ),
         (
+            "take_screenshot".to_owned(),
+            structure_of(&exemplar_take_screenshot(), &[]),
+        ),
+        (
             "recording_summary".to_owned(),
             structure_of(&exemplar_summary(), &[]),
         ),
         (
             "bookmark_summary".to_owned(),
             structure_of(&exemplar_bookmark(), &[]),
+        ),
+        (
+            "screenshot_summary".to_owned(),
+            structure_of(&exemplar_screenshot(), &[]),
         ),
         (
             "active_recording".to_owned(),
@@ -479,6 +487,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::StartRecording(_) => Some("start_recording".to_owned()),
                 Command::StopRecording(_) => Some("stop_recording".to_owned()),
                 Command::AddBookmark(_) => Some("add_bookmark".to_owned()),
+                Command::TakeScreenshot(_) => Some("take_screenshot".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping | Command::GetStatus | Command::Unbuilt(_) => None,
             },
@@ -488,6 +497,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::StartRecording(_) => Some("reply.recording_started".to_owned()),
                 Command::StopRecording(_) => Some("reply.recording_stopped".to_owned()),
                 Command::AddBookmark(_) => Some("reply.bookmark_added".to_owned()),
+                Command::TakeScreenshot(_) => Some("reply.screenshot_taken".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
                 Command::Unbuilt(_) => None,
             },
@@ -896,6 +906,7 @@ fn reply_discriminant(reply: &Reply) -> String {
             format!("recording_stopped.{}", summary.end_reason.as_str())
         }
         Reply::BookmarkAdded { .. } => "bookmark_added".to_owned(),
+        Reply::ScreenshotTaken { .. } => "screenshot_taken".to_owned(),
         // Whether a recording is being finished is the whole of what this reply
         // says, so it is part of the path: a mirror that dropped the field would
         // otherwise reach the same discriminant either way.
@@ -1133,6 +1144,30 @@ fn exemplar_add_bookmark() -> crate::command::AddBookmark {
     }
 }
 
+/// Every `take_screenshot` parameter at once.
+fn exemplar_take_screenshot() -> crate::command::TakeScreenshot {
+    crate::command::TakeScreenshot {
+        recording_id: Some("r-1".to_owned()),
+        window: Some("Counter-Strike".to_owned()),
+        process: Some("cs2.exe".to_owned()),
+        pid: Some(4242),
+        format: Some("png".to_owned()),
+    }
+}
+
+/// A screenshot, with every optional field present so the schema sees them.
+fn exemplar_screenshot() -> crate::status::ScreenshotSummary {
+    crate::status::ScreenshotSummary {
+        path: r"C:\Users\player\Pictures\Clipped\clipped-cs2-20260811-143205.png".to_owned(),
+        format: "png".to_owned(),
+        width: 2560,
+        height: 1440,
+        bytes: 4_812_009,
+        recording_id: Some("r-1".to_owned()),
+        at_seconds: Some(115.0),
+    }
+}
+
 /// A bookmark, with every optional field present so the schema sees them.
 fn exemplar_bookmark() -> crate::status::BookmarkSummary {
     crate::status::BookmarkSummary {
@@ -1246,6 +1281,7 @@ fn every_built_command() -> Vec<Command> {
         Command::StartRecording(exemplar_start_recording()),
         Command::StopRecording(StopRecording::default()),
         Command::AddBookmark(exemplar_add_bookmark()),
+        Command::TakeScreenshot(exemplar_take_screenshot()),
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -1255,6 +1291,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::StartRecording(_)
             | Command::StopRecording(_)
             | Command::AddBookmark(_)
+            | Command::TakeScreenshot(_)
             | Command::Shutdown(_)
             | Command::Unbuilt(_) => {}
         }
@@ -1395,6 +1432,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::BookmarkAdded {
             bookmark: exemplar_bookmark(),
         },
+        Reply::ScreenshotTaken {
+            screenshot: exemplar_screenshot(),
+        },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
@@ -1407,6 +1447,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::RecordingStarted { .. }
             | Reply::RecordingStopped { .. }
             | Reply::BookmarkAdded { .. }
+            | Reply::ScreenshotTaken { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }

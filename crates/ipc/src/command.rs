@@ -16,9 +16,8 @@
 //!
 //! # Commands whose subsystem does not exist yet
 //!
-//! Three of the commands the protocol defines belong to subsystems that are not
-//! built: a recording with a replay buffer, screenshots and the configuration
-//! API.
+//! Two of the commands the protocol defines belong to subsystems that are not
+//! built: a recording with a replay buffer and the configuration API.
 //! They are [`UnbuiltCommand`], they are refused with
 //! [`ErrorCode::NotImplemented`] and the milestone and issue that build them,
 //! and there is deliberately nowhere for them to be handled — a command that
@@ -42,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, ProtocolError};
 use crate::message::Request;
-use crate::status::{BookmarkSummary, RecorderStatus, RecordingSummary};
+use crate::status::{BookmarkSummary, RecorderStatus, RecordingSummary, ScreenshotSummary};
 
 /// A command, parsed and known to be one this build understands.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +56,8 @@ pub enum Command {
     StopRecording(StopRecording),
     /// Mark this moment in the recording that is running.
     AddBookmark(AddBookmark),
+    /// Save a still image of what is being captured.
+    TakeScreenshot(TakeScreenshot),
     /// Stop serving, finish anything still being recorded, and exit.
     ///
     /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
@@ -83,6 +84,7 @@ impl Command {
             Self::StartRecording(_) => "start_recording",
             Self::StopRecording(_) => "stop_recording",
             Self::AddBookmark(_) => "add_bookmark",
+            Self::TakeScreenshot(_) => "take_screenshot",
             Self::Shutdown(_) => "shutdown",
             Self::Unbuilt(command) => command.name(),
         }
@@ -103,6 +105,7 @@ impl Command {
             "start_recording" => Ok(Self::StartRecording(parse_params(request)?)),
             "stop_recording" => Ok(Self::StopRecording(parse_params(request)?)),
             "add_bookmark" => Ok(Self::AddBookmark(parse_params(request)?)),
+            "take_screenshot" => Ok(Self::TakeScreenshot(parse_params(request)?)),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => match UnbuiltCommand::from_name(name) {
                 Some(command) => Ok(Self::Unbuilt(command)),
@@ -129,6 +132,7 @@ impl Command {
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
+            Self::TakeScreenshot(screenshot) => serde_json::to_value(screenshot),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
             Self::Unbuilt(_) => Ok(serde_json::Value::Null),
         }
@@ -186,8 +190,6 @@ pub enum UnbuiltCommand {
     /// #38](https://github.com/wildware-uk/clipped/issues/38) — so that is the
     /// issue this refusal names.
     SaveReplay,
-    /// `take_screenshot` — needs screenshot capture.
-    TakeScreenshot,
     /// `apply_settings` — needs the configuration API.
     ApplySettings,
 }
@@ -196,11 +198,8 @@ pub enum UnbuiltCommand {
 ///
 /// A test walks this, so a command added to [`UnbuiltCommand`] and forgotten
 /// here is a failure rather than a command that quietly stops being refused.
-pub const UNBUILT_COMMANDS: &[UnbuiltCommand] = &[
-    UnbuiltCommand::SaveReplay,
-    UnbuiltCommand::TakeScreenshot,
-    UnbuiltCommand::ApplySettings,
-];
+pub const UNBUILT_COMMANDS: &[UnbuiltCommand] =
+    &[UnbuiltCommand::SaveReplay, UnbuiltCommand::ApplySettings];
 
 impl UnbuiltCommand {
     /// The command's name on the wire.
@@ -208,7 +207,6 @@ impl UnbuiltCommand {
     pub const fn name(self) -> &'static str {
         match self {
             Self::SaveReplay => "save_replay",
-            Self::TakeScreenshot => "take_screenshot",
             Self::ApplySettings => "apply_settings",
         }
     }
@@ -227,7 +225,6 @@ impl UnbuiltCommand {
     pub const fn subsystem(self) -> &'static str {
         match self {
             Self::SaveReplay => "a recording with a replay buffer",
-            Self::TakeScreenshot => "screenshot capture",
             Self::ApplySettings => "the settings API",
         }
     }
@@ -237,7 +234,6 @@ impl UnbuiltCommand {
     pub const fn milestone(self) -> &'static str {
         match self {
             Self::SaveReplay => "M3",
-            Self::TakeScreenshot => "M8",
             Self::ApplySettings => "M7",
         }
     }
@@ -247,7 +243,6 @@ impl UnbuiltCommand {
     pub const fn tracking_issue(self) -> u32 {
         match self {
             Self::SaveReplay => 38,
-            Self::TakeScreenshot => 67,
             Self::ApplySettings => 108,
         }
     }
@@ -360,6 +355,55 @@ pub struct AddBookmark {
     pub lead_seconds: Option<f64>,
 }
 
+/// What to photograph, and how to save it.
+///
+/// Every field is optional, because the shape a hotkey and a tray menu send is
+/// no fields at all: photograph whatever is being recorded, in the configured
+/// format, and put it where screenshots go (SPEC.md section 26).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TakeScreenshot {
+    /// Which recording to take the picture from, as
+    /// [`ActiveRecording::recording_id`](crate::ActiveRecording::recording_id)
+    /// reported it.
+    ///
+    /// Absent means "whatever is being recorded", exactly as it does for
+    /// [`AddBookmark`]. Naming it is what a window that had a particular
+    /// recording on screen does, so that a screenshot meant for a recording
+    /// which ended in the meantime is refused rather than taken of its
+    /// successor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<String>,
+    /// Photograph the window whose title contains this text.
+    ///
+    /// The three target fields — this, [`Self::process`] and [`Self::pid`] —
+    /// are only consulted when **nothing is being recorded**. A screenshot
+    /// taken during a recording comes from a frame that recording already
+    /// captured, which is both far cheaper and the only way to be sure the
+    /// picture is of what is being recorded.
+    ///
+    /// They are the same three [`StartRecording`] takes, under the same names,
+    /// so a caller that can start a recording of something can photograph it
+    /// (AGENTS.md section 43).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    /// Photograph the window belonging to this executable, such as `cs2.exe`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    /// Photograph the window belonging to this process identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// `png`, `jpeg` or `webp`. Absent means the recorder's own default.
+    ///
+    /// A string rather than an enumeration for the reason
+    /// [`StartRecording::codec`] is one: the recorder validates it through the
+    /// same code path its own settings go through, so a value it would refuse
+    /// on the command line is refused here with the same message (AGENTS.md
+    /// section 55).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
 /// How far a shutdown may go.
 ///
 /// The parameter exists because the two answers to "the user asked to exit and a
@@ -416,6 +460,11 @@ pub enum Reply {
     BookmarkAdded {
         /// Where it landed, which is not where the key was pressed.
         bookmark: BookmarkSummary,
+    },
+    /// A screenshot was taken, and the file is on disk.
+    ScreenshotTaken {
+        /// The file, and what is in it.
+        screenshot: ScreenshotSummary,
     },
     /// The recorder has stopped listening and is winding up.
     ///

@@ -300,7 +300,7 @@ closing.
 {"type":"welcome","protocol_version":1,
  "recorder":{"name":"clipped-recorder","version":"0.1.0"},
  "role":"control",
- "features":["recording","status_events","bookmarks"]}
+ "features":["recording","status_events","bookmarks","screenshots"]}
 ```
 
 ```json
@@ -330,11 +330,11 @@ says what a build can express; a feature says what it can do, and the two are
 not the same — two recorders speaking protocol 1 can differ in what was compiled
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
-that. Today: `recording`, `status_events`, `bookmarks`, `shutdown`.
+that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`, `shutdown`.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
-belongs to `clipped-ipc` (`crates/ipc/src/server.rs`). The other two are the
+belongs to `clipped-ipc` (`crates/ipc/src/server.rs`). The other three are the
 application's own.
 
 ## Compatibility policy
@@ -457,9 +457,9 @@ when a command's parameters are all optional.
 | `start_recording` | the `record` options, below | `recording_started` | yes |
 | `stop_recording` | `recording_id` (optional) | `recording_stopped` | yes |
 | `add_bookmark` | all optional, below | `bookmark_added` | yes |
+| `take_screenshot` | all optional, below | `screenshot_taken` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 | `save_replay` | not yet defined | — | no — M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
-| `take_screenshot` | not yet defined | — | no — M8, [#67](https://github.com/wildware-uk/clipped/issues/67) |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
 
 ### `start_recording`
@@ -529,6 +529,40 @@ Refused with `not_recording` when nothing is being recorded, when the named
 recording is not the one running, or when the recording has not captured its
 first frame yet — there is no moment to mark, and marking zero would put the
 bookmark somewhere the user was not looking.
+
+### `take_screenshot`
+
+Saves a still image of what is being captured (SPEC.md section 26,
+[docs/screenshots.md](screenshots.md)). Every parameter is optional, because the
+request a hotkey or a tray item sends carries none of them.
+
+| Parameter | Meaning |
+| --- | --- |
+| `recording_id` | Which recording to photograph. Absent means "whatever is being recorded". |
+| `window`, `process`, `pid` | Which window to photograph **when nothing is being recorded**. Exactly one, under the same names `start_recording` uses. |
+| `format` | `png` (the default), `jpeg` or `webp`. |
+
+```json
+{"type":"response","id":9,"outcome":{"ok":{
+  "reply":"screenshot_taken",
+  "screenshot":{"path":"C:\Users\player\Pictures\Clipped\clipped-cs2-20260811-143205.png",
+                "format":"png","width":2560,"height":1440,"bytes":4812009,
+                "recording_id":"r-1","at_seconds":115.0}}}}
+```
+
+Which of the two paths the recorder takes is not the caller's choice. **If a
+recording is running**, the picture comes from a frame that recording already
+captured: it costs the capture thread one texture copy, `recording_id` and
+`at_seconds` are present, and the recording is not interrupted. **If nothing is
+running**, a capture is opened for the target the request names, one frame is
+taken and it is shut down - a few hundred milliseconds rather than a few, which
+is why the target parameters exist at all.
+
+Refused with `invalid_parameters` for a format this build cannot write -
+lossless WebP needs a `libwebp` the FFmpeg build may not carry - or when nothing
+is being recorded and no target was named; with `target_not_found` when the
+window named does not exist or has stopped drawing; and with `internal`, naming
+the file, when the picture was taken and the disk refused it.
 
 ### `stop_recording`
 

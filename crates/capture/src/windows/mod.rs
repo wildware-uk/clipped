@@ -19,6 +19,10 @@
 //!   ([issue #97](https://github.com/wildware-uk/clipped/issues/97)). It is not
 //!   a backend; it is the platform half of
 //!   [`BlackFrameWatch`](crate::BlackFrameWatch).
+//! - [`D3d11StillCopier`], which copies a whole captured frame into system
+//!   memory so that a screenshot can be written from a frame the recording
+//!   already had ([issue #67](https://github.com/wildware-uk/clipped/issues/67)).
+//!   It is the platform half of [`StillFrame`](crate::StillFrame).
 //!
 //! # Apartments and devices
 //!
@@ -36,7 +40,9 @@ mod desktop_duplication;
 mod device;
 mod graphics_capture;
 mod pixel_sample;
+mod still;
 
 pub use desktop_duplication::DesktopDuplication;
 pub use graphics_capture::WindowsGraphicsCapture;
 pub use pixel_sample::D3d11FrameSampler;
+pub use still::D3d11StillCopier;

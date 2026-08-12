@@ -21,6 +21,10 @@
 //!   [`MethodChange`].
 //! - Noticing a capture that has silently gone black: [`BlackFrameWatch`],
 //!   [`FrameSampler`], [`windows::D3d11FrameSampler`].
+//! - Getting **one** frame out of the GPU and into system memory, so that a
+//!   screenshot is a frame the recording already had rather than a second
+//!   capture path: [`StillFrame`], [`windows::D3d11StillCopier`]
+//!   ([issue #67](https://github.com/wildware-uk/clipped/issues/67)).
 //! - The vocabulary frames arrive in: [`CapturedFrame`], [`FrameFormat`],
 //!   [`CaptureTimestamp`].
 //! - The clock a whole recording is timed against, and how far its tracks have
@@ -34,7 +38,9 @@
 //! Enumerating windows and monitors — that is platform work
 //! ([issue #10](https://github.com/wildware-uk/clipped/issues/10)), and it
 //! produces the [`CaptureTarget`] this crate consumes — encoding, muxing, or
-//! deciding when a recording starts.
+//! deciding when a recording starts. Nor writing files: a [`StillFrame`] is
+//! pixels, and what a screenshot is *called*, what format it is saved in and
+//! where it goes are `clipped-session`'s (`docs/screenshots.md`).
 //!
 //! # Position in the architecture
 //!
@@ -148,6 +154,7 @@ mod frame;
 mod method;
 mod registry;
 mod selection;
+mod still;
 mod target;
 mod time;
 
@@ -168,6 +175,7 @@ pub use frame::{CapturedFrame, FrameFormat, FrameSize, FrameTexture, PixelFormat
 pub use method::{CaptureMethod, CaptureMethodSetting};
 pub use registry::{registered_backend, registered_backends, registered_declarations};
 pub use selection::{select, Considered, Outcome, Rejection, Selection, SelectionError};
+pub use still::{bytes_per_pixel, row_bytes, StillError, StillFrame};
 pub use target::{CaptureTarget, TargetHandle, TargetKind, TargetProperties};
 pub use time::{
     CaptureClock, CaptureTimestamp, ClockMismatch, DriftEstimator, DriftRate, MediaTime,

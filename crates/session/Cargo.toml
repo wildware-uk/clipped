@@ -59,6 +59,20 @@ clipped-hotkeys.workspace = true
 # (docs/logging.md). `RedactedPath` keeps the output path out of the logs.
 clipped-logging.workspace = true
 tracing.workspace = true
+# The raw FFmpeg FFI, for `src/screenshot`. A screenshot is one captured frame
+# encoded as a PNG, a JPEG or a lossless WebP (SPEC.md section 26), and there is
+# no lower-layer route to any of those: `clipped-muxer` wraps the *container*
+# API and knows nothing about still images, and `clipped-encoder` opens hardware
+# video encoders. `docs/adr/0004-ffmpeg-dependency-strategy.md` permits exactly
+# this in the amendment issue #155 added — a crate with no lower-layer route to
+# what it needs may name the binding — as `crates/library` already does for
+# thumbnails, which is the same job on a decoded frame instead of a captured
+# one.
+#
+# It adds no runtime cost to a recording: nothing here is loaded or called until
+# somebody takes a screenshot, and this crate's dependents already import the
+# same FFmpeg libraries through `clipped-muxer`. MIT.
+rusty_ffmpeg.workspace = true
 # A session's record on disk (`src/automatic/sidecar.rs`, docs/sessions.md).
 # It is a documented sidecar rather than a second database: M6's issue #55 owns
 # the SQLite library index, and arriving at a second persistence mechanism by

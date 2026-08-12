@@ -106,7 +106,13 @@ export type KnownEventStream = (typeof EVENT_STREAMS)[number];
 export type EventStream = Extensible<KnownEventStream>;
 
 /** The capabilities a recorder can advertise in its welcome. */
-export const FEATURES = ['recording', 'status_events', 'bookmarks', 'shutdown'] as const;
+export const FEATURES = [
+  'recording',
+  'status_events',
+  'bookmarks',
+  'screenshots',
+  'shutdown',
+] as const;
 
 /** A capability this build knows how to make use of. */
 export type KnownFeature = (typeof FEATURES)[number];
@@ -121,16 +127,16 @@ export type KnownFeature = (typeof FEATURES)[number];
  */
 export type Feature = Extensible<KnownFeature>;
 
-/** Every command the protocol defines, including the three no build performs yet. */
+/** Every command the protocol defines, including the two no build performs yet. */
 export const COMMANDS = [
   'ping',
   'get_status',
   'start_recording',
   'stop_recording',
   'add_bookmark',
+  'take_screenshot',
   'shutdown',
   'save_replay',
-  'take_screenshot',
   'apply_settings',
 ] as const;
 
@@ -200,6 +206,7 @@ export const REPLIES = [
   'recording_started',
   'recording_stopped',
   'bookmark_added',
+  'screenshot_taken',
   'shutting_down',
 ] as const;
 
@@ -358,6 +365,36 @@ export type StopRecordingParams = {
   readonly recording_id?: string;
 };
 
+/**
+ * What to photograph, and how to save it.
+ *
+ * Every field is optional, because the request a hotkey or a tray item sends
+ * carries none of them: photograph whatever is being recorded, in the
+ * configured format, and put it where screenshots go.
+ */
+export type TakeScreenshotParams = {
+  /**
+   * Which recording to take the picture from. Absent means "whatever is being
+   * recorded", exactly as it does for a bookmark.
+   */
+  readonly recording_id?: string;
+  /**
+   * Photograph the window whose title contains this text.
+   *
+   * This and the two below are only consulted when nothing is being recorded.
+   * A screenshot taken during a recording comes from a frame that recording
+   * already captured, which is far cheaper and is the only way to be sure the
+   * picture is of what is being recorded.
+   */
+  readonly window?: string;
+  /** Photograph the window belonging to this executable, such as `cs2.exe`. */
+  readonly process?: string;
+  /** Photograph the window belonging to this process identifier. */
+  readonly pid?: number;
+  /** `png`, `jpeg` or `webp`. Absent means the recorder's own default. */
+  readonly format?: string;
+};
+
 /** One command, and the identifier its reply will quote. */
 export interface RecorderRequest {
   /** Chosen by the client, and quoted back in the response. */
@@ -431,6 +468,14 @@ export interface BookmarkAddedReply {
   readonly bookmark: BookmarkSummary;
 }
 
+/** A screenshot was taken, and the file is on disk. */
+export interface ScreenshotTakenReply {
+  /** The tag. */
+  readonly reply: 'screenshot_taken';
+  /** The file, and what is in it. */
+  readonly screenshot: ScreenshotSummary;
+}
+
 /**
  * The recorder has stopped listening and is winding up.
  *
@@ -462,6 +507,7 @@ export type Reply =
   | RecordingStartedReply
   | RecordingStoppedReply
   | BookmarkAddedReply
+  | ScreenshotTakenReply
   | ShuttingDownReply;
 
 /** Nothing is being recorded. */
@@ -573,6 +619,41 @@ export interface BookmarkSummary {
   readonly bookmarks_file: string;
   /** How many bookmarks this recording now has, including this one. */
   readonly bookmarks_in_recording: number;
+}
+
+/**
+ * A screenshot that was taken and written to disk.
+ *
+ * It carries the file rather than only confirming the picture was taken,
+ * because every useful next action - showing it, revealing it in Explorer,
+ * attaching it to a message - needs the path.
+ */
+export interface ScreenshotSummary {
+  /** The file that was written. */
+  readonly path: string;
+  /** What it was written as: `png`, `jpeg` or `webp`. */
+  readonly format: string;
+  /** The picture's width in pixels. */
+  readonly width: number;
+  /** The picture's height in pixels. */
+  readonly height: number;
+  /** How large the file is. */
+  readonly bytes: number;
+  /**
+   * The recording it was taken during.
+   *
+   * Absent for a screenshot taken with nothing recording, which is a supported
+   * thing to do rather than an error.
+   */
+  readonly recording_id?: string;
+  /**
+   * How far into that recording the picture was taken.
+   *
+   * Absent for the same reason `recording_id` is, and also when a recording had
+   * not yet put a frame in its file. It is the recording's own media clock, so
+   * a timeline can put a marker exactly where the picture came from.
+   */
+  readonly at_seconds?: number;
 }
 
 /** Which versions this recorder actually speaks. */

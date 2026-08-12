@@ -123,6 +123,15 @@ pub mod features {
         /// which is the version skew this list exists to make visible before
         /// the button is drawn rather than after it is pressed.
         BOOKMARKS = "bookmarks";
+        /// The recorder can take a screenshot.
+        ///
+        /// A UI asks for this before offering a "Take Screenshot" control, for
+        /// the reason the line above gives: a recorder built before
+        /// [issue #67](https://github.com/wildware-uk/clipped/issues/67) has no
+        /// `take_screenshot` command it will perform, and the version skew is
+        /// worth seeing before the button is drawn rather than after it is
+        /// pressed.
+        SCREENSHOTS = "screenshots";
         /// The recorder can be asked to finish and exit over the protocol.
         ///
         /// Unlike the two above, this one is not the application's to claim:

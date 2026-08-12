@@ -409,6 +409,7 @@ dependencies = [
  "clipped-media-validation",
  "clipped-muxer",
  "clipped-replay",
+ "rusty_ffmpeg",
  "serde",
  "serde_json",
  "time",
@@ -432,6 +433,7 @@ dependencies = [
  "clipped-audio",
  "clipped-capture",
  "clipped-media-validation",
+ "clipped-session",
  "clipped-windows",
  "windows",
 ]

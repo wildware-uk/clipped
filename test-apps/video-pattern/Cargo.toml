@@ -39,6 +39,16 @@ path = "../../tests/capture/wgc_video_pattern.rs"
 name = "av_sync"
 path = "../../tests/capture/av_sync.rs"
 
+# The screenshot system test: photograph this application's window through the
+# real capture backend, save the file, and read the pattern back out of the
+# picture that was saved (issue #67, docs/screenshots.md). It belongs to this
+# package for the same reason the two above do — it starts this binary — and it
+# is the only place a screenshot is checked against a picture whose contents
+# something other than Clipped decided.
+[[test]]
+name = "screenshot"
+path = "../../tests/capture/screenshot.rs"
+
 [dependencies]
 # The command-line parser every executable in this workspace uses, so that
 # `--help` looks the same wherever a contributor meets it (see the root
@@ -99,6 +109,15 @@ windows = { workspace = true, features = [
 [target.'cfg(windows)'.dev-dependencies]
 clipped-capture.workspace = true
 clipped-audio.workspace = true
+
+# tests/capture/screenshot.rs takes a screenshot the way the recorder does —
+# `clipped_session::screenshot::capture_still` opens the capture, and
+# `clipped_session::screenshot::write` names, encodes and writes the file — so
+# that what the test exercises is the product's own path rather than a second
+# one written here (AGENTS.md section 55). Test-only, and `clipped-session` is
+# layer 4 while this package is layer 6, so it follows the dependency direction
+# `tests/integration/tests/workspace_layering.rs` asserts.
+clipped-session.workspace = true
 
 # The tone analysis the absolute A/V offset measurement in tests/capture/av_sync.rs
 # is built on. `AudioContent::magnitude_at` is the media harness's own Goertzel

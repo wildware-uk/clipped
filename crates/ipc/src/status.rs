@@ -138,6 +138,42 @@ pub struct BookmarkSummary {
     pub bookmarks_in_recording: u32,
 }
 
+/// A screenshot that was taken and written to disk.
+///
+/// The reply to `take_screenshot`. It carries the file rather than only
+/// confirming the picture was taken, because the useful next action — showing
+/// it, revealing it in Explorer, attaching it to a message — needs the path,
+/// and because a user is entitled to find their own screenshots without Clipped
+/// (AGENTS.md section 32).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScreenshotSummary {
+    /// The file that was written.
+    pub path: String,
+    /// What it was written as: `png`, `jpeg` or `webp`.
+    pub format: String,
+    /// The picture's width in pixels.
+    pub width: u32,
+    /// The picture's height in pixels.
+    pub height: u32,
+    /// How large the file is.
+    pub bytes: u64,
+    /// The recording it was taken during, if one was running.
+    ///
+    /// Absent for a screenshot taken with nothing recording, which is a
+    /// supported thing to do rather than an error — see
+    /// `clipped_session::screenshot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<String>,
+    /// How far into that recording the picture was taken.
+    ///
+    /// Absent for the same reason [`Self::recording_id`] is, and also when a
+    /// recording had not yet put a frame in its file. It is the recording's own
+    /// media clock, so a timeline can put a marker exactly where the picture
+    /// came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_seconds: Option<f64>,
+}
+
 /// Why a recording ended.
 ///
 /// Mirrors `clipped_session::EndReason`. It is restated here rather than
