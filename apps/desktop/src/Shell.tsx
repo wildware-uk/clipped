@@ -4,6 +4,7 @@ import { useCallback, type ReactNode } from 'react';
 import { Route, Routes, useLocation, useNavigate } from 'react-router';
 
 import { GamesScreen } from './GamesScreen';
+import { SettingsScreen } from './SettingsScreen';
 import { UnknownScreen } from './UnknownScreen';
 import {
   describeInterruption,
@@ -24,12 +25,19 @@ const screenFor = (pathname: string): Screen | undefined =>
  *
  * Every route still comes from `SCREENS`, so the sidebar and the router cannot
  * disagree about what the application contains; this is only the question of
- * which element sits behind one. Six of the seven are still the placeholder
- * that names the issue building them. Games is written (issue #107), and the
- * change that builds another screen adds it here.
+ * which element sits behind one. Five of the seven are still the placeholder
+ * that names the issue building them. Games is written (issue #107) and Settings
+ * is (issue #51), and the change that builds another screen adds it here.
  */
 function elementFor(screen: Screen, link: RecorderLinkState | null): ReactNode {
-  return screen.id === 'games' ? <GamesScreen link={link} /> : <ScreenNotBuilt screen={screen} />;
+  switch (screen.id) {
+    case 'games':
+      return <GamesScreen link={link} />;
+    case 'settings':
+      return <SettingsScreen />;
+    default:
+      return <ScreenNotBuilt screen={screen} />;
+  }
 }
 
 /**

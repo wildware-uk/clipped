@@ -286,6 +286,17 @@ const INHERITED: Painted = ['styles', 'body', 'color'];
 /* The global focus ring, which most components take rather than declare. */
 const GLOBAL_RING: Painted = ['styles', ':focus-visible', 'outline'];
 
+/*
+ * The rule that marks the open item, as the stylesheet writes it. One rule
+ * serves the sidebar's current screen and the open section of a screen's rail,
+ * which are the same thing to look at on two different grounds - so its selector
+ * is named here as the whole group. Reading half of it would match no rule and
+ * throw, which is the failure this file wants rather than a case that quietly
+ * stopped measuring anything.
+ */
+const NAV_OPEN =
+  "\\.clipped-nav__link\\[aria-current='page'\\],\\n\\.clipped-nav__link\\[aria-selected='true'\\]";
+
 describe('the shell', () => {
   /*
    * The skip link is read out of the stylesheet rather than named here, because
@@ -317,11 +328,16 @@ describe('the shell', () => {
       SIDEBAR,
     ],
     ['a link on the window ground', ['styles', 'a', 'color'], WINDOW],
-    [
-      'the open navigation item',
-      ['styles', "\\.clipped-nav__link\\[aria-current='page'\\]", 'color'],
-      SIDEBAR,
-    ],
+    ['the open navigation item', ['styles', NAV_OPEN, 'color'], SIDEBAR],
+    /*
+     * The same two rules again on the window ground, which is where a screen's
+     * own rail draws them. A rail entry is the sidebar's item on a different
+     * ground, and a ground it had never been measured on is exactly how a pair
+     * that passes in one place ships failing in another.
+     */
+    ['a section in a screen rail', ['styles', '\\.clipped-nav__link', 'color'], WINDOW],
+    ['the open section of a screen rail', ['styles', NAV_OPEN, 'color'], WINDOW],
+    ['a settings key, path or command', ['styles', '\\.clipped-code', 'color'], WINDOW],
     ['the title strip', ['styles', '\\.clipped-header', 'color'], TITLE_STRIP],
     ['the title strip tagline', ['styles', '\\.clipped-header__tagline', 'color'], TITLE_STRIP],
   ];

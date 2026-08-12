@@ -205,6 +205,11 @@
 
   /* — shell metrics — */
   --shell-sidebar-width: 210px;
+  /* The rail of sections down the left of a screen that has more than one
+     (`SectionRail`). Narrower than the sidebar beside it, so that two vertical
+     lists of words are not read as one: it carries a section of a screen rather
+     than a screen. */
+  --rail-width: 168px;
   --shell-header-height: 36px;
   /* The brand square in the title strip, and the recorder's state square in the
      sidebar. Both are squares of accent or neutral, not glyphs, so their size is
