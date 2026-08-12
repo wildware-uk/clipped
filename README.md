@@ -148,9 +148,13 @@ two rules that actually apply are asserted directly, by
 - **Nothing may depend on a plugin**, of any kind, including for tests. A plugin
   is reached by starting a process.
 - **A plugin may name only `clipped-plugins` and `clipped-events`** — the
-  contract and the vocabulary. A plugin that reached `clipped-session` would be
-  a game's protocol inside the recording engine, which is what the process
-  boundary exists to prevent.
+  contract and the vocabulary — plus `clipped-game-detection` and
+  `clipped-logging`, which answer *where a game is installed* and *where
+  Clipped's own directory is* and know nothing about a recording. A plugin that
+  reached `clipped-session` would be a game's protocol inside the recording
+  engine, which is what the process boundary exists to prevent. The allowlist is
+  in `workspace_layering.rs`, one entry at a time with a reason each, and is
+  deliberately not "anything at a lower layer".
 
 Their layer is therefore only what the layer table needs in order to cover
 every member, and every plugin sits on the same one so that adding the next is a
