@@ -1,24 +1,28 @@
 # Configuration
 
-**Status: automatic recording resolves a game's settings; the `watch` command
-does not hand them over yet.** `clipped_session::config` models the settings,
+**Status: a settings file changes what `clipped-recorder watch` records, and
+nothing else reads one yet.** `clipped_session::config` models the settings,
 resolves global and per-game layers, validates them and reads and writes
-`settings.json`. `clipped_session::automatic` now *uses* it: every recording it
-asks for carries the settings resolved for that game
+`settings.json`. `clipped_session::automatic` uses it — every recording it asks
+for carries the settings resolved for that game — and `watch` now loads the
+file at start-up and applies what it holds to each recording it starts
 ([issue #61](https://github.com/wildware-uk/clipped/issues/61), and
 ["Applying a setting to a recording"](#applying-a-setting-to-a-recording)
-below). What is still missing is one link at the very edge — the `watch`
-subcommand builds one `RecordingPlan` from its command line, does not hand a
-`ConfigurationStore` to the session manager, and does not apply what it is
-given — so **a settings file still changes nothing about what a shipped build
-records**. `clipped-recorder record` takes its settings from its command line
-and always will; that is what a command line is for. The settings screen that
-edits all of this is
-[issue #51](https://github.com/wildware-uk/clipped/issues/51).
+below). `clipped-recorder record` takes its settings from its command line and
+always will; that is what a command line is for. Nothing yet *writes* a
+settings file: the screen that edits all of this is
+[issue #51](https://github.com/wildware-uk/clipped/issues/51), and until it
+exists the file is one somebody writes by hand.
+
+What #61 still does not have is its evidence: two games recorded at two
+resolutions and checked with `ffprobe`, an encoder substitution seen happening,
+and the effective settings in diagnostics and session metadata. The issue lists
+those as unmet.
 
 This is stated first, and plainly, because a configuration API that looked as
-though it were in force would be worse than one that admits it is not
-(AGENTS.md sections 27 and 54).
+though it were in force — or one that looked as though it were not — would be
+worse than one that says exactly how far it reaches (AGENTS.md sections 27
+and 54).
 
 ## The three layers
 
@@ -443,19 +447,39 @@ survives it"](#failure-and-what-survives-it)).
   recording opens a replay buffer, which needs the bitrate the encoder session
   was opened with; `record_with_replay` is where that meets.
 
-### The link that is missing
+### The two ways a caller applies them, and which one to use
 
-`apps/recorder/src/watch.rs` does not yet load a `ConfigurationStore`, hand it
-to `SessionManager::with_configuration`, or apply `request.settings` — so a
-settings file changes nothing about a shipped build's recordings today. It is
-three lines and it is the rest of
-[issue #61](https://github.com/wildware-uk/clipped/issues/61):
+A driver reaches a recording with a `RecordingSettings` that either carries
+answers of its own or does not, and that decides which method it wants:
+
+| The caller | The base recording | Method | A setting nobody configured |
+| --- | --- | --- | --- |
+| had nothing but a target and an output | `RecordingSettings::new(target, output)` | `apply_to` | becomes the value Clipped ships with |
+| was already told what to record with | built from a command line, as `watch` builds it from `settings_for` | `apply_configured_to` | stays as the caller asked for it |
+
+`apps/recorder/src/watch.rs` is the second row: its command line names a
+resolution, a frame rate, a codec, an encoder and two audio selections before
+any game has launched.
 
 ```rust
+// at start-up, from `%LOCALAPPDATA%\Clipped\settings.json`
 let manager = SessionManager::new(catalogue, settings).with_configuration(configuration);
 // … and in the recording thread, where `settings_for` builds the recording:
-let settings = request.settings.apply_to(settings_for(&config, &window));
+let settings = request.settings.apply_configured_to(settings_for(&config, &window));
 ```
+
+`apply_to` there would have put the shipped default over every option that
+command line offers, on every machine with no settings file for it —
+`watch --framerate 144` recording at 60, and `--microphone none` recording a
+microphone. A flag that parses and then does nothing is AGENTS.md section 27's
+defect, and the microphone case is one that records a device somebody asked not
+to record. `apply_configured_to` applies only settings whose `SettingSource` is
+not `Default`, which is exactly "what a user configured".
+
+The unavailable-encoder question follows the same rule: `apply_configured_to`
+gives the recording `UnavailableChoice::Substitute` when the *configuration*
+supplied the encoder or the resolution, and leaves a command line's `Refuse`
+standing when it did not — the two rows of the table above.
 
 ## Where the code is
 

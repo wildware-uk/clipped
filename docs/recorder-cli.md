@@ -235,8 +235,29 @@ it costs somebody a session.
 | --- | --- | --- |
 | `--output-directory <PATH>` | the Clipped folder of your videos directory | Where recordings and session records go |
 | `--window-timeout <SECONDS>` | 120 | How long a game may take to put a window on screen |
-| `--resolution`, `--framerate`, `--codec`, `--encoder` | as `record` | Applied to every automatic recording |
+| `--resolution`, `--framerate`, `--codec`, `--encoder` | as `record` | Applied to every automatic recording the settings file says nothing about |
 | `--microphone`, `--system-audio` | `default` | As `record`: one named audio track per source, `none` to record without it |
+
+### The settings file, and what these options mean beside it
+
+`watch` reads `%LOCALAPPDATA%\Clipped\settings.json` once, at start-up, and each
+recording is made with the settings resolved for the game that launched
+([configuration.md](configuration.md)). A setting that file gives a game — or
+gives everything, in its global layer — is what that game records at. **Every
+setting it does not mention is what this command line asked for**, so
+`watch --framerate 144` records at 144 on a machine with no settings file, and
+on one whose file says nothing about the frame rate.
+
+A setting configured for a game therefore wins over the same option typed here.
+Which of the two should win is
+[issue #61](https://github.com/wildware-uk/clipped/issues/61)'s open question;
+what is not open is that an option must not be silently discarded.
+
+There need not be a settings file. Somebody who has never changed a setting has
+none, and `watch` does not write one: a missing file is the ordinary case, and
+one that exists but cannot be read is reported once and then ignored, leaving
+these options and the shipped defaults standing. Neither case is written back
+over, so a file written by a newer Clipped survives being read by an older one.
 
 What it prints, on standard error:
 
