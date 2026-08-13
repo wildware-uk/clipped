@@ -436,7 +436,7 @@ mod tests {
                     let differing = printed(*first, *ground)
                         .into_iter()
                         .zip(printed(*second, *ground))
-                        .filter(|(first, second)| first != second)
+                        .filter(|(ink_in_first, ink_in_second)| ink_in_first != ink_in_second)
                         .count();
 
                     assert!(
