@@ -54,8 +54,16 @@ const PATIENCE: Duration = Duration::from_secs(30);
 const A_RECORDING_IS_NEVER_HELD_UP_LONGER_THAN: Duration = Duration::from_millis(100);
 
 /// A policy tuned to fail fast, so the rules can be watched in a test rather
-/// than in an afternoon. The same numbers `crates/plugins`' own supervisor tests
-/// use.
+/// than in an afternoon.
+///
+/// These were the numbers `crates/plugins`' own supervisor tests used, and are
+/// no longer: 400 ms is a budget for `CreateProcess`, a loader run and a first
+/// write on a pipe, which a shared CI runner exceeded twice in a row, so that
+/// crate now holds both timeouts open and shortens one only in the test that is
+/// about it (#405). The same is worth doing here, and is
+/// [issue #415](https://github.com/wildware-uk/clipped/issues/415) rather than
+/// part of that change: three of the comments below reason from these numbers
+/// and have to move with them.
 fn impatient() -> SupervisionPolicy {
     SupervisionPolicy {
         silence_timeout: Duration::from_millis(400),

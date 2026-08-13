@@ -346,12 +346,22 @@ impl Supervising<'_> {
             return;
         }
 
-        let quiet_for = now.duration_since(snapshot.last_report);
-        if quiet_for >= self.policy.silence_timeout {
-            // The case a separate process is chosen for: this kills something
-            // that will never answer, which is not possible for a thread.
-            let trouble = PluginTrouble::Silent { quiet_for };
-            self.stop_and_recover(plugin, trouble, now, Restartable::Yes);
+        // Silence is only asked of a plugin that has introduced itself. Before
+        // that there is exactly one question — has it started? — and
+        // `hello_timeout` is the budget for it. A plugin that has never spoken
+        // is not one that stopped speaking, and judging the same interval by
+        // both numbers charges a slow start to whichever of the two happens to
+        // be smaller: on a loaded machine that reports a plugin the operating
+        // system took a moment to load as one that hung (#405).
+        if snapshot.hello.is_some() {
+            let quiet_for = now.duration_since(snapshot.last_report);
+            if quiet_for >= self.policy.silence_timeout {
+                // The case a separate process is chosen for: this kills
+                // something that will never answer, which is not possible for a
+                // thread.
+                let trouble = PluginTrouble::Silent { quiet_for };
+                self.stop_and_recover(plugin, trouble, now, Restartable::Yes);
+            }
         }
     }
 
@@ -541,7 +551,7 @@ mod tests {
     use clipped_events::{EventKind, GameEvent};
 
     use super::*;
-    use crate::fixture::{install_example, session, until, TemporaryDirectory};
+    use crate::fixture::{install_example, session, until, TemporaryDirectory, PATIENCE};
 
     /// The longest a recording may spend *draining its plugins' events*,
     /// whatever they are doing.
@@ -569,10 +579,27 @@ mod tests {
 
     /// A supervisor with a policy tuned to fail fast, so that the rules can be
     /// watched in a test rather than in an afternoon.
+    ///
+    /// **Nothing here is a budget for starting a process.** `hello_timeout` and
+    /// `silence_timeout` are as long as these tests are willing to wait for a
+    /// child process at all, so a machine that takes a moment over
+    /// `CreateProcess`, a loader run and a first write on a pipe fails the wait
+    /// below with a sentence saying so, rather than being reported as a plugin
+    /// that could not start. Four hundred milliseconds used to be the budget,
+    /// and a CI runner exceeded it twice in a row while starting the flooding
+    /// plugin, which turned a test about flooding into a test about how busy
+    /// the runner was (#405).
+    ///
+    /// Every test that shares this is about something a plugin does *after* it
+    /// has introduced itself. The two that are about these numbers —
+    /// `a_plugin_that_never_introduces_itself_is_reported_as_that` and
+    /// `a_plugin_that_hangs_is_killed_rather_than_waited_for` — shorten the one
+    /// they are about, and each says why a short one cannot give it the wrong
+    /// answer.
     fn impatient() -> SupervisionPolicy {
         SupervisionPolicy {
-            silence_timeout: Duration::from_millis(400),
-            hello_timeout: Duration::from_millis(400),
+            silence_timeout: PATIENCE,
+            hello_timeout: PATIENCE,
             dropped_event_budget: 4,
             protocol_fault_budget: 5,
             attempts: 2,
@@ -642,6 +669,25 @@ mod tests {
         })
     }
 
+    /// Whether a plugin was replaced **because it flooded**.
+    ///
+    /// The decision this crate refuses to make, and deliberately not "whether it
+    /// was replaced at all": a plugin that was slow to start and replaced for
+    /// that is a supervisor doing its job, and a test that cannot tell the two
+    /// apart fails on a busy machine while saying something untrue about the
+    /// rule it is named for (#405).
+    fn restarted_for_flooding(reported: &[SupervisionEvent]) -> bool {
+        reported.iter().any(|event| {
+            matches!(
+                event,
+                SupervisionEvent::Restarting {
+                    trouble: PluginTrouble::Flooded { .. },
+                    ..
+                }
+            )
+        })
+    }
+
     #[test]
     fn a_supervisor_with_no_plugins_has_nothing_to_say() {
         let (mut supervisor, receiver) = PluginSupervisor::new(SupervisionPolicy::default());
@@ -701,9 +747,20 @@ mod tests {
         // the recording's loop is timed on every turn, and the plugin is
         // reclaimed by the operating system, which is not possible for a thread
         // that has stopped answering.
+        //
+        // The one test that is about the silence budget, so it is the one that
+        // shortens it. It can: silence is asked only of a plugin that has
+        // already introduced itself (`Supervising::examine_running`), so the
+        // time this plugin spends being loaded is charged to `hello_timeout`
+        // and not to this number, and a machine having a bad afternoon delays
+        // the answer instead of changing it.
         let root = TemporaryDirectory::new("hang");
         let plugin = install_example(&root, "hanger", "misbehaving_plugin", "hang-plugin");
-        let (mut supervisor, receiver) = PluginSupervisor::new(impatient());
+        let quick_to_notice_silence = SupervisionPolicy {
+            silence_timeout: Duration::from_millis(400),
+            ..impatient()
+        };
+        let (mut supervisor, receiver) = PluginSupervisor::new(quick_to_notice_silence);
         supervisor.attach(
             plugin,
             session(),
@@ -734,9 +791,22 @@ mod tests {
     fn a_plugin_that_floods_is_bounded_counted_and_stopped_for_good() {
         // Three things at once: the queue holds the line, the loss is counted
         // rather than hidden, and a flood is not something a replacement fixes.
+        //
+        // The restart budget is opened wide on purpose, and it is what gives
+        // the third claim its teeth: this supervisor would replace this plugin
+        // twenty times over if the rule allowed it, so "it was never restarted
+        // for flooding" is the rule holding rather than a budget running out.
+        // It also leaves room for the restart this test must *not* care
+        // about — a start slow enough to be given up on, which is a decision
+        // the supervisor is right to make and which a busy runner produces
+        // (#405) — to happen without becoming a different answer.
         let root = TemporaryDirectory::new("flood");
         let plugin = install_example(&root, "flooder", "misbehaving_plugin", "flood-plugin");
-        let (mut supervisor, receiver) = PluginSupervisor::with_capacity(impatient(), 8);
+        let eager_to_replace = SupervisionPolicy {
+            attempts: 20,
+            ..impatient()
+        };
+        let (mut supervisor, receiver) = PluginSupervisor::with_capacity(eager_to_replace, 8);
         supervisor.attach(
             plugin,
             session(),
@@ -748,9 +818,17 @@ mod tests {
             &mut supervisor,
             &receiver,
             "a plugin that floods to be stopped",
-            |_, reported| disabled_with(reported).is_some(),
+            // Stopping on the wrong answer as well as on the right one: a
+            // supervisor that decided to replace a flooding plugin should fail
+            // this test at the moment it decides, rather than by running out of
+            // patience half a minute later with nothing said about why.
+            |_, reported| disabled_with(reported).is_some() || restarted_for_flooding(reported),
         );
 
+        assert!(
+            !restarted_for_flooding(&reported),
+            "a plugin that outruns a recording is not worth restarting: {reported:?}"
+        );
         assert!(
             matches!(
                 disabled_with(&reported),
@@ -758,11 +836,26 @@ mod tests {
             ),
             "expected a flood, got {reported:?}"
         );
+
+        // Stopped *for good*, which is the half of that claim a single report
+        // cannot make: polled again with the clock an hour on — past any delay
+        // a replacement could have been waiting out — it has nothing more to
+        // say and nothing has been started in its place.
+        let much_later = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(
+            supervisor.poll(much_later),
+            Vec::new(),
+            "a plugin disabled for flooding had something more to say an hour later"
+        );
         assert!(
-            !reported
-                .iter()
-                .any(|event| matches!(event, SupervisionEvent::Restarting { .. })),
-            "a plugin that outruns a recording is not worth restarting: {reported:?}"
+            matches!(
+                supervisor.health()[0].state,
+                PluginState::Disabled {
+                    trouble: PluginTrouble::Flooded { .. }
+                }
+            ),
+            "an hour later it is still disabled, and still for flooding: {:?}",
+            supervisor.health()[0].state
         );
 
         let stats = supervisor.inbox_stats();
@@ -782,9 +875,18 @@ mod tests {
 
     #[test]
     fn a_plugin_that_never_introduces_itself_is_reported_as_that() {
+        // The one test that is about the start-up budget, so it is the one that
+        // shortens it. It is also the only test that can afford to: this plugin
+        // never introduces itself *at all*, so "slow to start" and "never
+        // started" are the same plugin here and no amount of load on the
+        // machine can turn one into the other (#405).
         let root = TemporaryDirectory::new("quiet");
         let plugin = install_example(&root, "quiet-one", "misbehaving_plugin", "quiet-plugin");
-        let (mut supervisor, receiver) = PluginSupervisor::new(impatient());
+        let quick_to_give_up_on_starting = SupervisionPolicy {
+            hello_timeout: Duration::from_millis(400),
+            ..impatient()
+        };
+        let (mut supervisor, receiver) = PluginSupervisor::new(quick_to_give_up_on_starting);
         supervisor.attach(
             plugin,
             session(),
@@ -804,6 +906,63 @@ mod tests {
                 Some(PluginTrouble::NeverStarted { .. })
             ),
             "expected a plugin that never started, got {reported:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_has_not_started_is_never_reported_as_one_that_went_quiet() {
+        // Two budgets, one interval, and the interval belongs to exactly one of
+        // them. A plugin that has said nothing at all has not *gone* quiet, and
+        // the difference is what the user is shown: `NeverStarted` names a
+        // plugin that could not run and `Silent` names one that ran and stopped
+        // answering (AGENTS.md section 45). Under a policy whose silence budget
+        // is the shorter of the two the answer must still be the first one —
+        // which is also what lets every test above hold the start-up budget
+        // open without a short silence budget quietly taking its place (#405).
+        let root = TemporaryDirectory::new("quiet-not-silent");
+        let plugin = install_example(&root, "quiet-one", "misbehaving_plugin", "quiet-plugin");
+        let quicker_to_call_it_silence = SupervisionPolicy {
+            silence_timeout: Duration::from_millis(50),
+            hello_timeout: Duration::from_millis(400),
+            ..impatient()
+        };
+        let (mut supervisor, receiver) = PluginSupervisor::new(quicker_to_call_it_silence);
+        supervisor.attach(
+            plugin,
+            session(),
+            SessionTimeline::starting_now(),
+            Instant::now(),
+        );
+
+        let (_, reported) = record_until(
+            &mut supervisor,
+            &receiver,
+            "a plugin that never says hello to be given up on",
+            |_, reported| disabled_with(reported).is_some(),
+        );
+
+        let called_silent = reported.iter().any(|event| {
+            matches!(
+                event,
+                SupervisionEvent::Restarting {
+                    trouble: PluginTrouble::Silent { .. },
+                    ..
+                } | SupervisionEvent::Disabled {
+                    trouble: PluginTrouble::Silent { .. },
+                    ..
+                }
+            )
+        });
+        assert!(
+            !called_silent,
+            "a plugin that has never spoken was reported as one that stopped speaking: {reported:?}"
+        );
+        assert!(
+            matches!(
+                disabled_with(&reported),
+                Some(PluginTrouble::NeverStarted { waited }) if waited == Duration::from_millis(400)
+            ),
+            "expected the start-up budget to be what it was given up on, got {reported:?}"
         );
     }
 

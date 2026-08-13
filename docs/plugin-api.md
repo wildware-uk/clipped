@@ -755,7 +755,7 @@ and everything else about a plugin happens on threads it does not wait for.
 | It | Costs a recording | Because |
 | --- | --- | --- |
 | crashes | nothing | it is another process; it is replaced, with a widening delay, a bounded number of times |
-| hangs | nothing | nothing waits on it; after the silence timeout it is killed, and the thread reading it ends with it |
+| hangs | nothing | nothing waits on it; after the silence timeout — counted from its `hello` — it is killed, and the thread reading it ends with it |
 | floods | a bounded queue and a counter | delivery never blocks, a drain never returns more than one queue's worth, and the plugin is stopped |
 | prints rubbish | a counter | unreadable lines are counted against a budget, and an over-long line is discarded without being allocated |
 | is late | nothing | an event that arrives after the moment it describes has been written to disk is still placed where it belongs (`RecordedSpan`) |
@@ -789,6 +789,14 @@ a timeline that is missing marks has to say so rather than look complete
 | It flooded | **no** | A replacement floods the same queue a second later, and what is being lost is the events this subsystem exists to record |
 | Its output was unreadable | **no** | Same reasoning |
 | It speaks another contract version | **no** | It will speak the same one next time |
+
+**The silence timeout starts at `hello`, not at start-up.** Until a plugin has
+introduced itself there is one question — has it started? — and the start-up
+timeout is the budget for it. A plugin that has never spoken has not *gone*
+quiet, and a host that judged the same interval by both numbers would charge a
+slow start to whichever of the two was smaller: on a busy machine, a plugin the
+operating system was still loading would be reported as one that hung
+([issue #405](https://github.com/wildware-uk/clipped/issues/405)).
 
 Restarts are bounded, widen, and reset: three attempts by default at one, two
 and four seconds, and the counter resets once a plugin has run for a minute. A
