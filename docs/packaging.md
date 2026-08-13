@@ -59,6 +59,36 @@ the payload; [docs/licensing.md](licensing.md) says what a release owes and what
 each part is discharged by. **An installer built today is not one that may be
 distributed.**
 
+## What it depends on from Windows, and what it carries
+
+An installed Clipped needs **the Windows it already targets — build 19044 or
+later ([docs/prerequisites.md](prerequisites.md)) — and nothing else
+installed**. Every library either of its executables imports is either a
+component of that operating system or a file in the directory beside it.
+
+| | |
+| --- | --- |
+| **From Windows** | `kernel32`, `ntdll`, `user32`, `advapi32`, `ole32`, `combase`, `oleaut32`, `shell32`, `comctl32`, `gdi32`, `shlwapi`, `dwmapi`, `d3d11`, `dxgi`, `mfplat`, `mmdevapi`, and the `api-ms-win-crt-*` universal CRT forwarders, which resolve to `ucrtbase.dll`. All are Windows components, serviced by Windows Update. |
+| **Carried in the install directory** | The seven FFmpeg libraries above, and the recorder itself. |
+| **Not needed** | The **Microsoft Visual C++ 2015-2022 redistributable**. Neither executable imports `VCRUNTIME140.dll`; both link the compiler runtime statically and the universal CRT dynamically ([ADR 0007](adr/0007-visual-c-runtime-linkage.md)). |
+| **Installed if absent** | **WebView2**, which the window draws the interface in. It is present on Windows 11 and on current Windows 10; `tauri.conf.json` leaves `webviewInstallMode` at Tauri's default, so the installer runs Microsoft's bootstrapper where it is not. |
+
+That last row is the one that used to be false. `clipped-recorder.exe` imported
+`VCRUNTIME140.dll` and `clipped-desktop.exe` did not, so on a machine without the
+redistributable the window opened, looked healthy and recorded nothing: the
+recorder was ended by the loader with `STATUS_DLL_NOT_FOUND` before `main`, with
+no log file to say so ([#407](https://github.com/wildware-uk/clipped/issues/407)).
+`apps/recorder/build.rs` is the fix and
+`apps/recorder/tests/runtime_libraries.rs` reads the recorder's import table on
+every CI run, so the table above fails a test rather than going quietly out of
+date.
+
+Both facts about the recorder are asserted there: that it imports nothing from
+the redistributable, and that it *does* still import the universal CRT — which
+is what keeps its heap the same heap the FFmpeg libraries allocate from. ADR
+0007 says why the one-flag alternative, `-C target-feature=+crt-static`, was not
+taken.
+
 ## How it gets there
 
 Three pieces, each doing one thing.
@@ -147,11 +177,6 @@ uninstall entry under `HKEY_CURRENT_USER`.
 
 ## What is not solved here
 
-- **The Visual C++ runtime.** `clipped-recorder.exe` imports `VCRUNTIME140.dll`,
-  which is not part of Windows; `clipped-desktop.exe` does not, and neither do
-  the FFmpeg DLLs. On a machine without the Visual C++ 2015-2022
-  redistributable the window will start and the recorder will not
-  ([#407](https://github.com/wildware-uk/clipped/issues/407)).
 - **Licence texts and notices**, and the corresponding source offer:
   [#123](https://github.com/wildware-uk/clipped/issues/123).
 - **Code signing, versioning and releases.** Nothing here is signed, so Windows

@@ -175,11 +175,18 @@ fn workspace_root() -> PathBuf {
 /// Fails when `binary` is older than something it was built from.
 ///
 /// What is scanned is exactly what an example in this package compiles from:
-/// every crate of the workspace, this package's own library and examples, and
-/// the manifests and lock file that decide which versions of everything else
-/// come with them. `tests/` is deliberately *not* scanned — editing the test
-/// that drives a fixture does not make the fixture stale, and a check that said
-/// otherwise would cry wolf on the most ordinary change anybody makes here.
+/// every crate of the workspace, this package's own library, its own source
+/// file, and the manifests and lock file that decide which versions of
+/// everything else come with them. `tests/` is deliberately *not* scanned —
+/// editing the test that drives a fixture does not make the fixture stale, and a
+/// check that said otherwise would cry wolf on the most ordinary change anybody
+/// makes here.
+///
+/// Neither are the *other* examples, for the same reason and a sharper one: each
+/// is a single file that compiles from none of the others, so adding one — as
+/// `examples/cannot_be_loaded.rs` did — would otherwise declare every fixture
+/// beside it stale until something unrelated caused it to be relinked, and
+/// rebuilding would not clear it.
 ///
 /// The comparison is against sources rather than against sibling artefacts on
 /// purpose. Two binaries built by one `cargo` invocation are linked in whatever
@@ -203,11 +210,14 @@ fn assert_fresh(binary: &Path, name: &str) {
     for directory in [
         root.join("crates"),
         root.join("apps").join("recorder").join("src"),
-        root.join("apps").join("recorder").join("examples"),
     ] {
         walk(&directory, &mut consider);
     }
     for file in [
+        root.join("apps")
+            .join("recorder")
+            .join("examples")
+            .join(format!("{name}.rs")),
         root.join("Cargo.toml"),
         root.join("Cargo.lock"),
         root.join("apps").join("recorder").join("Cargo.toml"),

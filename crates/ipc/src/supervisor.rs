@@ -113,6 +113,27 @@ const PROBE: Duration = Duration::ZERO;
 /// How long to wait between attempts to reach a recorder that is starting.
 const STARTUP_POLL: Duration = Duration::from_millis(25);
 
+/// `STATUS_DLL_NOT_FOUND`: a library the executable imports was not found, so
+/// Windows ended the process before its first instruction.
+///
+/// This is the exit code of a recorder installed on a machine that is missing
+/// something it needs beside it, or missing the Microsoft Visual C++
+/// redistributable from the operating system
+/// ([issue #407](https://github.com/wildware-uk/clipped/issues/407),
+/// [ADR 0007](../../../docs/adr/0007-visual-c-runtime-linkage.md)). The failure
+/// is entirely the loader's: `main` never runs, so no log file is opened and
+/// nothing the recorder could have said is said.
+const STATUS_DLL_NOT_FOUND: u32 = 0xC000_0135;
+
+/// `STATUS_ENTRYPOINT_NOT_FOUND`: a library was found but does not contain a
+/// function the executable imports.
+///
+/// The same failure with a different cause — a half-replaced install, or a
+/// recorder beside FFmpeg libraries from a different pin — and the same
+/// symptoms, which is why it is reported the same way. Windows shows a user the
+/// same dialog for both.
+const STATUS_ENTRYPOINT_NOT_FOUND: u32 = 0xC000_0139;
+
 /// What a supervisor needs in order to find, start and watch a recorder.
 #[derive(Debug, Clone)]
 pub struct SupervisorSettings {
@@ -157,11 +178,15 @@ impl SupervisorSettings {
 /// The shape of this type is the decision: a bounded number of attempts, each
 /// further apart than the last, and a counter that resets once a recorder has
 /// stayed up long enough to be called working. A recorder that fails on startup
-/// — a missing runtime, a corrupt configuration, a graphics device that is not
-/// there — fails again immediately, and a supervisor with no bound would restart
-/// it for ever, burning CPU beside a game and filling a log with the same line.
-/// Staying down and saying so is the better failure (AGENTS.md sections 16 and
-/// 45): it is visible, and it leaves the user an action.
+/// — a corrupt configuration, a graphics device that is not there — fails again
+/// immediately, and a supervisor with no bound would restart it for ever,
+/// burning CPU beside a game and filling a log with the same line. Staying down
+/// and saying so is the better failure (AGENTS.md sections 16 and 45): it is
+/// visible, and it leaves the user an action.
+///
+/// A failure that is *certain* to repeat spends none of the budget:
+/// [`SupervisorError::NotLoadable`] and its neighbours are reported at the first
+/// attempt (`supervisor::link::worth_trying_again`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestartPolicy {
     /// How many consecutive replacements to start before giving up.
@@ -276,6 +301,27 @@ pub enum SupervisorError {
         /// Where it was looked for.
         path: PathBuf,
     },
+    /// Windows refused to load the recorder, so it never ran.
+    ///
+    /// Distinct from [`NeverListened`](Self::NeverListened), which it would
+    /// otherwise be indistinguishable from — the process starts and is gone by
+    /// the next poll — because the two need opposite things said about them. A
+    /// recorder that started and exited has a log file to look in; a recorder
+    /// the loader refused has none, because the refusal happens before its first
+    /// instruction. Reporting the second as the first sends a user to an empty
+    /// log directory and shows them an exit status of `-1073741515`
+    /// ([issue #407](https://github.com/wildware-uk/clipped/issues/407)).
+    ///
+    /// It is not retried either: a library that is not on the machine does not
+    /// arrive because the recorder was started again
+    /// (`supervisor::link::worth_trying_again`).
+    NotLoadable {
+        /// The recorder Windows would not load.
+        path: PathBuf,
+        /// The `STATUS_` code it was ended with, kept so that the message names
+        /// what a user would otherwise have to look up.
+        status: u32,
+    },
     /// The recorder executable could not be started.
     Spawn {
         /// What was being started.
@@ -327,6 +373,16 @@ impl fmt::Display for SupervisorError {
                 "the recorder was not found at {}, so no recording can be started",
                 path.display()
             ),
+            Self::NotLoadable { path, status } => write!(
+                formatter,
+                "Windows would not load the recorder at {} ({}, 0x{status:08X}), so it never ran \
+                 and has logged nothing: a library it needs is missing or is the wrong build. \
+                 Reinstalling Clipped replaces the libraries that belong beside it; a Clipped \
+                 built elsewhere may also need the Microsoft Visual C++ 2015-2022 \
+                 redistributable.",
+                path.display(),
+                loader_status_name(*status)
+            ),
             Self::Spawn { path, source } => write!(
                 formatter,
                 "the recorder at {} could not be started: {source}",
@@ -371,6 +427,38 @@ impl std::error::Error for SupervisorError {
             Self::Connect { source, .. } => Some(source),
             _ => None,
         }
+    }
+}
+
+/// Whether an exit status is Windows saying it would not load the executable,
+/// and which refusal it was.
+///
+/// The loader ends a process it refuses with the `NTSTATUS` describing why,
+/// which arrives here as an exit code like any other: `STATUS_DLL_NOT_FOUND`
+/// reaches [`std::process::ExitStatus::code`] as `-1073741515`, because the
+/// status has its top bit set and the code is signed. That is the whole of the
+/// difference between "the recorder failed" and "the recorder was never given
+/// the chance to", and without recognising it the supervisor reports the second
+/// as the first (issue #407).
+///
+/// Only the two loader refusals are recognised. A recorder that reached `main`
+/// and exited is a different thing to say, whatever number it exited with.
+fn loader_refusal(code: Option<i32>) -> Option<u32> {
+    let status = code? as u32;
+    match status {
+        STATUS_DLL_NOT_FOUND | STATUS_ENTRYPOINT_NOT_FOUND => Some(status),
+        _ => None,
+    }
+}
+
+/// The name Windows gives a loader refusal, for a message that can be searched
+/// for.
+fn loader_status_name(status: u32) -> &'static str {
+    match status {
+        STATUS_ENTRYPOINT_NOT_FOUND => "STATUS_ENTRYPOINT_NOT_FOUND",
+        // Every value reaching here has been through `loader_refusal`, and the
+        // only other one it admits is this.
+        _ => "STATUS_DLL_NOT_FOUND",
     }
 }
 
@@ -530,6 +618,17 @@ fn start_and_wait(settings: &SupervisorSettings) -> Result<Attachment, Superviso
         // ends early.
         let exit = child.try_wait().ok().flatten();
         if let Some(status) = exit {
+            // A recorder Windows would not load is reported as that rather than
+            // as one that started and vanished, because they need opposite
+            // things said about them and only this one has an action attached
+            // (issue #407).
+            if let Some(refusal) = loader_refusal(status.code()) {
+                return Err(SupervisorError::NotLoadable {
+                    path: settings.executable.clone(),
+                    status: refusal,
+                });
+            }
+
             return Err(SupervisorError::NeverListened {
                 endpoint: settings.endpoint.path(),
                 waited: settings.startup_timeout,

@@ -768,12 +768,20 @@ fn follow(
 /// again, and a recorder that speaks a different protocol version will speak
 /// the same one next time — and the only way to change that is to stop it,
 /// which may be to stop a recording.
+///
+/// A recorder Windows would not load is in the same class as a missing one, and
+/// for the same reason: the library it is missing does not arrive because the
+/// recorder was started a second time. Retrying it would spend four backoff
+/// delays before showing a message that was already true at the first attempt,
+/// and every one of those attempts leaves a process in the user's event log
+/// (`SupervisorError::NotLoadable`, issue #407).
 fn worth_trying_again(error: &SupervisorError) -> bool {
     match error {
         SupervisorError::Spawn { .. }
         | SupervisorError::NeverListened { .. }
         | SupervisorError::Connect { .. } => true,
         SupervisorError::ExecutableMissing { .. }
+        | SupervisorError::NotLoadable { .. }
         | SupervisorError::Incompatible { .. }
         | SupervisorError::Unsupported => false,
     }
@@ -829,6 +837,10 @@ mod tests {
                 crate::error::ErrorCode::UnsupportedProtocolVersion,
                 "a different version"
             )
+        }));
+        assert!(!worth_trying_again(&SupervisorError::NotLoadable {
+            path: std::path::PathBuf::from("clipped-recorder.exe"),
+            status: 0xC000_0135
         }));
         assert!(worth_trying_again(&SupervisorError::NeverListened {
             endpoint: r"\\.\pipe\x".to_owned(),

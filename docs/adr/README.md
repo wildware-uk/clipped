@@ -69,3 +69,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0004](0004-ffmpeg-dependency-strategy.md) | FFmpeg is a pinned LGPL build, linked dynamically through a sys binding | Accepted |
 | [0005](0005-named-pipe-control-protocol.md) | A named pipe carries the control protocol between the UI and the recorder | Accepted |
 | [0006](0006-recorder-lifetime-and-supervision.md) | The desktop application starts a detached recorder and supervises it, and neither stops the other | Accepted |
+| [0007](0007-visual-c-runtime-linkage.md) | The recorder links the Visual C++ runtime statically and the universal CRT dynamically | Accepted |

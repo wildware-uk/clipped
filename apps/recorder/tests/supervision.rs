@@ -43,7 +43,10 @@
 //!
 //! The tests that run everywhere cover each criterion's process behaviour — the
 //! recorder survives its supervisor, the second launch starts nothing, the loss
-//! is reported and the retrying is bounded — and the `#[ignore]`d two add the
+//! is reported, the retrying is bounded, and a recorder Windows will not load at
+//! all is named as that ([issue
+//! #407](https://github.com/wildware-uk/clipped/issues/407)) — and the
+//! `#[ignore]`d two add the
 //! half that needs a recording: that the file is playable and that the recording
 //! carried on.
 //!
@@ -660,6 +663,64 @@ fn a_supervisor_pointed_at_no_recorder_at_all_says_so_at_once() {
     assert!(
         waited < Duration::from_secs(5),
         "a failure no retry could fix should be reported at once, and took {waited:?}"
+    );
+
+    supervisor.drain();
+    assert_eq!(
+        supervisor.count_containing(r#""reconnecting""#),
+        0,
+        "nothing should have been retried:\n{}",
+        supervisor.transcript()
+    );
+}
+
+#[test]
+fn a_recorder_windows_will_not_load_is_reported_as_that_and_not_as_one_that_exited() {
+    // Issue #407. An installed recorder missing a library it imports is killed
+    // by the loader before `main`, so there is no log file to send anybody to
+    // and no exit code a person can read. The supervisor used to report it as a
+    // recorder that "exited with status -1073741515", four backoff delays after
+    // it could have said anything at all.
+    //
+    // `examples/cannot_be_loaded.rs` is a real one: it imports a DLL no machine
+    // has, and Windows ends it with STATUS_DLL_NOT_FOUND while resolving
+    // imports. Nothing here asserts the number — what is asserted is what a
+    // window would show somebody.
+    let name = unique_name("unloadable");
+    let mut supervisor = SupervisorFixture::start(&[
+        "--endpoint",
+        &name,
+        "--recorder",
+        &example_binary("cannot_be_loaded").to_string_lossy(),
+        // Generous, so that a supervisor which retried this would take far
+        // longer than the bound below and fail rather than pass slowly.
+        "--restart-attempts",
+        "4",
+        "--restart-delay-ms",
+        "5000",
+    ]);
+
+    let started = Instant::now();
+    let unavailable = supervisor.wait_for_containing(r#""unavailable""#);
+    let waited = started.elapsed();
+
+    assert!(
+        unavailable.contains("STATUS_DLL_NOT_FOUND"),
+        "the state should name the refusal rather than a number: {unavailable}"
+    );
+    assert!(
+        unavailable.contains("Visual C++"),
+        "the state should name the runtime a machine may be missing: {unavailable}"
+    );
+    assert!(
+        !unavailable.contains("Clipped log directory"),
+        "the old message sent the user to a log directory that is empty, because a recorder the \
+         loader refused never opened a log file: {unavailable}"
+    );
+    assert!(
+        waited < Duration::from_secs(5),
+        "a library that is not on the machine does not arrive because the recorder was started \
+         again, so it should be reported at once, and took {waited:?}"
     );
 
     supervisor.drain();
