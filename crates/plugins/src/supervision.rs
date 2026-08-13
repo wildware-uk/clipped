@@ -12,7 +12,7 @@
 //! | | What it looks like | What the host does |
 //! | --- | --- | --- |
 //! | It crashes | The process exits without being asked to | Replace it, with a widening delay, a bounded number of times |
-//! | It hangs | No report of any kind for [`silence_timeout`](SupervisionPolicy::silence_timeout) | Kill it, then treat it as a crash |
+//! | It hangs | No report of any kind for [`silence_timeout`](SupervisionPolicy::silence_timeout), once it has introduced itself | Kill it, then treat it as a crash |
 //! | It floods | Events dropped past [`dropped_event_budget`](SupervisionPolicy::dropped_event_budget) | Stop it and disable it: a plugin outrunning the recording is not going to stop of its own accord |
 //!
 //! None of the three reaches a recording, whatever the host decides, because
@@ -42,6 +42,14 @@ use std::time::Instant;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupervisionPolicy {
     /// How long a plugin may say nothing at all before it is treated as hung.
+    ///
+    /// **Asked only of a plugin that has already introduced itself.** One that
+    /// has not is not a plugin that stopped talking — it is one that has not
+    /// started, which [`hello_timeout`](Self::hello_timeout) is the budget for.
+    /// Judging the interval before `hello` by both numbers would charge a slow
+    /// start to whichever of the two happened to be smaller, and report a
+    /// plugin the operating system took a moment to load as one that hung
+    /// (issue #405).
     ///
     /// A plugin with nothing to report says `alive` (`crate::report`), so
     /// silence here means the plugin is not running its own loop: deadlocked,
