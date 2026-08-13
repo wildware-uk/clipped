@@ -46,9 +46,16 @@ pub const UNATTRIBUTED: &str = "unattributed";
 
 /// Which game a session is of.
 ///
-/// There is deliberately no "unknown" variant. A process the catalogue does not
-/// claim never becomes a session at all, so every session here is of something
-/// the catalogue recognised; what varies is whether it recognised *one* thing.
+/// Automatic recording never asks about a process the catalogue does not claim
+/// — a launch it does not recognise never becomes a session at all — so for a
+/// session [`SessionManager`](super::SessionManager) opened, what varies is
+/// only whether the catalogue recognised *one* thing.
+///
+/// A session somebody asked for by pointing at a window is the case that needs
+/// the third answer. The user chose the window, so there is a session and a
+/// recording whatever the catalogue would have said, and nothing has asked it:
+/// that is [`Self::Unidentified`], and it is a different statement from
+/// [`Self::Ambiguous`] — "nobody looked" against "several answers tied".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GameIdentity {
     /// Exactly one catalogue entry claimed the process.
@@ -71,6 +78,19 @@ pub enum GameIdentity {
         /// Every entry that tied, by `game_id`, in catalogue order.
         candidates: Vec<String>,
     },
+
+    /// Nothing identified a game, because nothing was asked.
+    ///
+    /// A recording started over the protocol names a *window*, and the person
+    /// who pressed the button is the authority on it being worth recording
+    /// (`clipped_session::automatic::ManualSession`). The session is filed
+    /// under [`UNATTRIBUTED`] with no candidates, because there are none: this
+    /// is the absence of a question rather than an unresolved answer.
+    ///
+    /// Attributing such a recording to a game is
+    /// [issue #403](https://github.com/wildware-uk/clipped/issues/403). It is a
+    /// change to what fills this field and not to what the field is.
+    Unidentified,
 }
 
 impl GameIdentity {
@@ -79,7 +99,7 @@ impl GameIdentity {
     pub fn slug(&self) -> &str {
         match self {
             Self::Known { game_id, .. } => game_id,
-            Self::Ambiguous { .. } => UNATTRIBUTED,
+            Self::Ambiguous { .. } | Self::Unidentified => UNATTRIBUTED,
         }
     }
 
@@ -89,6 +109,7 @@ impl GameIdentity {
         match self {
             Self::Known { name, .. } => name,
             Self::Ambiguous { .. } => "an unattributed game",
+            Self::Unidentified => "an unidentified window",
         }
     }
 
@@ -373,16 +394,32 @@ pub enum SessionEndReason {
     SystemResumed,
     /// The recorder was shutting down.
     RecorderStopping,
+    /// The recording the session was opened for finished.
+    ///
+    /// Only a session somebody asked for ends this way
+    /// ([`ManualSession`](super::ManualSession)). It has no game whose exit
+    /// could end it and no grace period to wait through: the person who started
+    /// the recording is the whole of the session, so the session is over when
+    /// their recording is. *Why* that recording ended — stopped, the window
+    /// went, the encoder failed — is on the recording itself, where the same
+    /// answer belongs for an automatic session too.
+    RecordingEnded,
 }
 
 impl SessionEndReason {
     /// The token this reason is written as.
+    ///
+    /// Also a value of `sessions.end_reason`, which is a `CHECK` constraint:
+    /// adding a reason here means a migration in `clipped-storage`, and a
+    /// reason the database has never heard of costs a session that column
+    /// (`crates/library/src/index/ingest.rs`).
     #[must_use]
     pub const fn token(self) -> &'static str {
         match self {
             Self::GameExited => "game-exited",
             Self::SystemResumed => "system-resumed",
             Self::RecorderStopping => "recorder-stopping",
+            Self::RecordingEnded => "recording-ended",
         }
     }
 }

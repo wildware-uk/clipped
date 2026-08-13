@@ -5,15 +5,19 @@ This document covers the thing that fills that index and keeps it honest: what
 it reads, what it does when the database and the filesystem disagree, what it
 costs on a large library, and why it cannot get in the way of a recording.
 
-**Status: reading the index has a caller; filling it still does not.**
-`clipped-library`'s `index` module reconciles a real database against real
-folders ([#56]), with tests that run it against real files on a real disk. Since
-[#301] the recorder answers `library_sessions` and `library_games` from it, so
-the desktop window draws real rows ([ipc.md](ipc.md), [desktop-ui.md](desktop-ui.md)).
-What still does not exist is a caller for `reconcile`: the recorder does not run
-it when a session ends and nothing runs it at start-up, so on a real machine the
-index is empty until something does. That is the other half of the same work and
-it is [#385]. Nothing here pretends otherwise.
+**Status: this is built, and something calls it.** `clipped-library`'s `index`
+module reconciles a real database against real folders ([#56]), with tests that
+run it against real files on a real disk. Since [#301] the recorder answers
+`library_sessions` and `library_games` from it, so the desktop window draws real
+rows ([ipc.md](ipc.md), [desktop-ui.md](desktop-ui.md)). Since [#402] the
+recorder *fills* it: `clipped-recorder serve` reconciles at start-up and again
+whenever a recording finishes, on a thread and a connection of its own
+([#385]) — see [Where it runs](#where-it-runs-and-why-it-cannot-compete-with-a-recording).
+
+`clipped-recorder watch` does not index. It writes session sidecars and nothing
+else; the run `serve` makes at start-up is what picks them up, so a machine that
+only ever runs `watch` has a library that catches up the next time the
+application is opened.
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
 [#46]: https://github.com/wildware-uk/clipped/issues/46
@@ -27,6 +31,7 @@ it is [#385]. Nothing here pretends otherwise.
 [#272]: https://github.com/wildware-uk/clipped/issues/272
 [#301]: https://github.com/wildware-uk/clipped/issues/301
 [#385]: https://github.com/wildware-uk/clipped/issues/385
+[#402]: https://github.com/wildware-uk/clipped/issues/402
 
 ## The shape of it
 
@@ -135,8 +140,15 @@ hand — and a mark is reversible the moment the file is found again.
 Counted and reported, never invented. A file with no sidecar cannot be
 attributed to a game without guessing, and a wrong guess files somebody's
 footage under a game they were not playing, silently (AGENTS.md section 27).
-`IndexReport` carries the count and a bounded, sorted sample of the paths.
-Giving the user a deliberate way to claim those files is [#272].
+`IndexReport` carries the count and a bounded, sorted sample of the paths, and
+the recorder logs both at every run.
+
+**This is the state an upgrading user is in.** A build before [#402] recorded
+from the window and wrote no session record at all, so those `.mkv` files have no
+sidecar and nothing can say what they are. They are left exactly where they are —
+never adopted under a guessed game, never moved, never renamed, never deleted
+(AGENTS.md section 56) — and reported at every run. Giving the user a deliberate
+way to claim them is [#272].
 
 ## Where it runs, and why it cannot compete with a recording
 
@@ -170,6 +182,37 @@ Four properties keep it out of the way:
 Cancellation is checked between files and between transactions. What a cancelled
 run had already committed stays committed, so the next run carries on rather
 than starting again.
+
+### The caller
+
+`apps/recorder`'s `LibraryIndexer` (`apps/recorder/src/library.rs`). It owns a
+thread and a database connection of its own, and it runs at exactly two moments:
+
+| When | Why that moment |
+| --- | --- |
+| `serve` start-up, after the ready line | Catches up on everything produced while nothing was indexing: sittings `watch` recorded, files copied onto the machine, a `library.db` the user deleted. It is after the ready line so a window connecting never waits for a walk. |
+| A recording finished, from the recording state | The session's record is final at that moment, and this is what puts a recording made from the window into the Library screen without a restart. |
+
+Requests **coalesce**: asking while a run is in flight schedules exactly one
+more, so a burst of recordings cannot queue a run each.
+
+There is deliberately **no protocol command** that asks for a rescan. Nothing in
+`clipped-ipc` offers one, adding one would be a protocol change, and the two
+moments above already keep the index correct for everything this build can
+produce. A rescan a person asks for belongs with claiming files the library has
+no record of, which is [#272].
+
+The indexer's connection is **its own**, not the reader's. A reconciliation holds
+its connection for the length of the run; a library screen that had to wait
+behind it would be exactly the stall this section is about. Two connections in
+one process is what write-ahead logging is for — and it is why migrating a
+database that does not exist yet has to be safe against two connections doing it
+at once (`docs/storage.md`).
+
+Which folders it walks is the recordings folder `record` and `watch` write into
+by default. A recording written somewhere else — an `output` a `start_recording`
+named — has its session record beside it, outside that root, and is not indexed.
+Letting somebody say which folders make up their library is [#272]'s.
 
 ### The walk is bounded
 

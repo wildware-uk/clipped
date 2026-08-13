@@ -130,6 +130,7 @@
 //! [ADR 0001]: ../../../docs/adr/0001-mkv-archival-container.md
 
 pub(crate) mod clock;
+mod manual;
 pub mod recovery;
 mod session;
 mod settings;
@@ -144,6 +145,7 @@ use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEve
 
 use crate::config::{Configuration, GameKey, ResolvedSettings};
 
+pub use manual::ManualSession;
 pub use session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEndReason, SessionEvent,
     SessionEventKind, SessionId, SessionRecording, UNATTRIBUTED,

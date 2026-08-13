@@ -35,6 +35,7 @@ mod support;
 
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Receiver;
@@ -75,11 +76,29 @@ struct ServedRecorder {
 impl ServedRecorder {
     /// Starts a recorder and waits until it says it is listening.
     fn start(label: &str) -> Self {
+        Self::start_under(label, None)
+    }
+
+    /// The same, with the recorder's idea of this user's directories pointed
+    /// somewhere of the test's own.
+    ///
+    /// `%LOCALAPPDATA%` is where the library index, the logs and the game
+    /// overlay live, and `%USERPROFILE%` is what the recordings folder hangs
+    /// off. A test that indexes anything has to move both, or it would walk the
+    /// recordings of whoever is running it and write to their library
+    /// (AGENTS.md section 25).
+    fn start_under(label: &str, home: Option<&Path>) -> Self {
         ensure_console();
 
         let name = unique_endpoint_name(label);
-        let mut child = Command::new(recorder_binary())
-            .args(["serve", "--endpoint", &name])
+        let mut command = Command::new(recorder_binary());
+        command.args(["serve", "--endpoint", &name]);
+        if let Some(home) = home {
+            command
+                .env("USERPROFILE", home)
+                .env("LOCALAPPDATA", home.join("AppData").join("Local"));
+        }
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(CREATE_NEW_PROCESS_GROUP)
@@ -1096,6 +1115,100 @@ fn a_recording_driven_entirely_over_the_protocol_produces_a_playable_file() {
 
     drop(client);
     recorder.stop();
+}
+
+#[test]
+fn a_real_recorder_indexes_the_recordings_folder_at_start_up_and_answers_from_it() {
+    // Issue #402's second half, against the real process rather than against a
+    // service built in a test: `serve` has to *call* the thing that fills the
+    // library index, and before this ticket nothing anywhere in the product
+    // did. A session record sitting in the recordings folder — the state a
+    // machine that has run `watch` is in — must be findable through
+    // `library_sessions` without anybody running a tool by hand.
+    //
+    // No GPU, no window and no encoder: the sitting is written by
+    // `clipped-session`'s own writer, which is what a real recording would have
+    // written, and what is under test is everything after that.
+    let home = scratch_home("start-up-index");
+    let recordings = home.join("Videos").join("Clipped");
+    std::fs::create_dir_all(&recordings).expect("the recordings folder can be made");
+
+    let output = recordings.join("clipped-earlier-sitting.mkv");
+    std::fs::write(&output, [0u8; 4096]).expect("the recording can be written");
+    let session = clipped_session::automatic::ManualSession::start(
+        &recordings,
+        output.clone(),
+        &clipped_session::config::Configuration::defaults(),
+        4_242,
+        "cs2.exe",
+        std::time::SystemTime::now(),
+    );
+    let identifier = session.id().as_str().to_owned();
+    let _ = session.finish(
+        &clipped_session::automatic::RecordingOutcome::Failed {
+            detail: "recorded before this recorder started".to_owned(),
+        },
+        std::time::SystemTime::now(),
+    );
+
+    let recorder = ServedRecorder::start_under("start-up-index", Some(&home));
+    let mut client = recorder.client();
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::LIBRARY),
+        "a recorder that indexes and answers has to advertise the library"
+    );
+
+    // Indexing runs on a thread of its own and nothing waits for it, so the
+    // window's own behaviour is what this does: ask again.
+    let deadline = std::time::Instant::now() + PATIENCE;
+    let page = loop {
+        let Reply::LibrarySessions { page } = client
+            .call(&IpcCommand::LibrarySessions(
+                clipped_ipc::LibrarySessions::default(),
+            ))
+            .expect("the library is readable")
+        else {
+            panic!("`library_sessions` was answered with something else");
+        };
+        if !page.sessions.is_empty() || std::time::Instant::now() >= deadline {
+            break page;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    assert_eq!(
+        page.sessions.len(),
+        1,
+        "the recorder never indexed the sitting sitting in its own recordings folder"
+    );
+    assert_eq!(page.sessions[0].session_id, identifier);
+    assert_eq!(
+        page.sessions[0].recordings[0].path,
+        output.to_string_lossy()
+    );
+    assert_eq!(
+        page.sessions[0].end_reason.as_deref(),
+        Some("recording-ended"),
+        "a session ended by its recording finishing has to survive the index's vocabulary"
+    );
+
+    drop(client);
+    recorder.stop();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A home directory of this test's own, for a recorder that must not touch the
+/// library or the recordings of whoever is running the tests.
+fn scratch_home(label: &str) -> std::path::PathBuf {
+    let home =
+        std::env::temp_dir().join(format!("clipped-ipc-home-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("a scratch home can be made");
+    home
 }
 
 /// Asserts the recorder is still answering, on a connection of its own.

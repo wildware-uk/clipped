@@ -7,12 +7,21 @@
 //! the database answers for it — which is this one
 //! ([issue #301](https://github.com/wildware-uk/clipped/issues/301)).
 //!
-//! This module is the join between two vocabularies and nothing else:
-//! `clipped_library::index` says what a row is, `clipped_ipc::library` says what
-//! goes on the wire, and neither knows about the other. Keeping the conversion
-//! here is what lets the protocol crate stay a leaf that the window can link
-//! (`crates/ipc/src/lib.rs`) and the library crate stay ignorant of the
-//! protocol.
+//! Two halves, and they are deliberately separate:
+//!
+//! - [`LibraryReader`] answers questions. It is the join between two
+//!   vocabularies and nothing else — `clipped_library::index` says what a row
+//!   is, `clipped_ipc::library` says what goes on the wire, and neither knows
+//!   about the other. Keeping the conversion here is what lets the protocol
+//!   crate stay a leaf that the window can link (`crates/ipc/src/lib.rs`) and
+//!   the library crate stay ignorant of the protocol.
+//! - [`LibraryIndexer`] keeps there being anything to answer *with*. Before
+//!   [issue #402](https://github.com/wildware-uk/clipped/issues/402) there was
+//!   no such half at all: `reconcile` had no caller anywhere in the product, so
+//!   every recording anybody made was on disk and in no index.
+//!
+//! They own a connection each, for the reason [`LibraryIndexer`] gives: a page
+//! of the library must not wait behind a reconciliation.
 //!
 //! # Opening is lazy, and a failure is not permanent
 //!
@@ -40,15 +49,17 @@
 //! encoder or recording thread ever waits on this lock.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+use std::time::SystemTime;
 
 use clipped_ipc::{
     ErrorCode, LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage,
     LibrarySessions, ProtocolError, MAX_FRAME_BYTES,
 };
 use clipped_library::index::{
-    cursor_of, game_summaries, list_sessions, GameSummary, IndexedClip, IndexedRecording,
-    IndexedSession, SessionListing,
+    cursor_of, game_summaries, list_sessions, reconcile, GameSummary, IndexControl, IndexReport,
+    IndexSettings, IndexedClip, IndexedRecording, IndexedSession, SessionListing,
 };
 use clipped_library::search::Query;
 use clipped_storage::Database;
@@ -343,6 +354,358 @@ fn game(summary: &GameSummary) -> LibraryGame {
 /// to "how large is this file" in that case; a wrapped enormous number is not.
 fn count(value: i64) -> u64 {
     value.max(0).unsigned_abs()
+}
+
+/// Keeps the index in step with what is on disk.
+///
+/// The counterpart to [`LibraryReader`], and the answer to the second half of
+/// [issue #402](https://github.com/wildware-uk/clipped/issues/402):
+/// `clipped_library::index::reconcile` was a well-tested subsystem with nothing
+/// in the product calling it, so a recording that had just been made never
+/// reached the library at all. This is the caller.
+///
+/// # When it runs, and why those moments
+///
+/// **At start-up**, once, after the endpoint is listening and the ready line has
+/// been printed — so it never delays a window being able to connect. This is
+/// what picks up everything produced while nothing was indexing: sessions
+/// `watch` recorded in a process of its own, recordings copied onto the machine,
+/// a library file the user deleted. It is cheap when there is nothing new,
+/// because reconciliation is an upsert against what is already there.
+///
+/// **After a recording finishes**, from `serve`'s recording state. That is the
+/// moment the recording's session record is final, and it is what makes the
+/// window's Library screen show a recording made from the window *in the same
+/// session, without a restart* — the acceptance criterion the ticket is about.
+///
+/// Deliberately **not** on a command from the window. Nothing in the protocol
+/// asks for a rescan, adding one would be a protocol change, and the two moments
+/// above already make the library correct for everything this build can produce.
+/// A rescan a user can ask for belongs with recovering sittings the library has
+/// no record of ([issue #272](https://github.com/wildware-uk/clipped/issues/272)).
+///
+/// # Where it runs
+///
+/// On a thread of its own, and never on the recording thread, a capture thread
+/// or a connection thread (AGENTS.md section 20). `reconcile` walks directories
+/// and opens transactions; a recording thread that did that between finishing
+/// its file and reporting its outcome would hold up the reply to
+/// `stop_recording` for as long as the walk took.
+///
+/// Requests **coalesce**: asking while a run is in flight schedules exactly one
+/// more, so a burst of recordings cannot queue a run each. The run itself is
+/// paced by `IndexPace::background`, which assumes a game may be recording.
+///
+/// # Its own connection
+///
+/// The indexer opens the database itself rather than borrowing
+/// [`LibraryReader`]'s. A reconciliation holds its connection for the length of
+/// the run, and a library screen that had to wait behind it would be the stall
+/// this design exists to avoid. SQLite in write-ahead logging mode is built for
+/// exactly this: readers are never blocked by a writer, and both connections are
+/// in this process, which is the one that owns the writing one
+/// (`docs/storage.md`).
+///
+/// # What happens to a recording no session claims
+///
+/// Nothing, and it is reported. `reconcile` never invents a row for a media file
+/// no sidecar names, and never deletes or moves one — the files stay exactly
+/// where they are, and the run says how many it found and names the first few.
+/// That is the state a user upgrading from a build whose `serve` wrote no
+/// session record is in: their recordings are on disk, playable, and reported at
+/// every run until [issue #272](https://github.com/wildware-uk/clipped/issues/272)
+/// offers to recover them.
+#[derive(Debug)]
+pub struct LibraryIndexer {
+    shared: Arc<Indexer>,
+    /// Joined by [`Self::shut_down`], so that a run in progress is given the
+    /// chance to stop before the process exits.
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// What the indexer thread and everything that pokes it share.
+#[derive(Debug)]
+struct Indexer {
+    /// Where the index is, or [`None`] when this machine describes no per-user
+    /// directory at all.
+    path: Option<PathBuf>,
+    settings: IndexSettings,
+    control: IndexControl,
+    state: Mutex<IndexerState>,
+    woken: Condvar,
+}
+
+/// The indexer's own state, which is all that a request touches.
+#[derive(Debug, Default)]
+struct IndexerState {
+    /// A run has been asked for and has not started yet.
+    requested: bool,
+    /// A run is in flight.
+    running: bool,
+    /// No further run will be started.
+    stopping: bool,
+    /// Runs that have finished, for a test to wait on.
+    completed: u64,
+}
+
+impl LibraryIndexer {
+    /// An indexer for this user's library and this user's recordings folder.
+    ///
+    /// The recordings folder is the one `record` and `watch` write into by
+    /// default (`crate::config::default_output_directory`). A recording written
+    /// somewhere else — an `output` the request named — has its session record
+    /// beside it and is *not* under this root, so it is not indexed; that is the
+    /// same answer `watch --output-directory` gets, and which folders make up a
+    /// library is issue #272's question rather than this one's.
+    #[must_use]
+    pub fn for_this_user() -> Self {
+        Self::at(
+            clipped_logging::application_directory().map(|directory| directory.join(LIBRARY_FILE)),
+            crate::config::default_output_directory()
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    /// An indexer for a named library and named recording folders.
+    ///
+    /// For tests, which must not read or write the library of whoever is
+    /// running them (AGENTS.md section 25).
+    #[must_use]
+    pub fn at(path: Option<PathBuf>, roots: Vec<PathBuf>) -> Self {
+        Self {
+            shared: Arc::new(Indexer {
+                path,
+                settings: IndexSettings::new(roots),
+                control: IndexControl::new(),
+                state: Mutex::new(IndexerState::default()),
+                woken: Condvar::new(),
+            }),
+            thread: Mutex::new(None),
+        }
+    }
+
+    /// Starts the thread, and asks it for the run that catches up on everything
+    /// produced while nothing was indexing.
+    ///
+    /// Called once, by `serve`. Calling it again is a no-op rather than a second
+    /// thread.
+    pub fn start(&self) {
+        let mut thread = match self.thread.lock() {
+            Ok(thread) => thread,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if thread.is_some() {
+            return;
+        }
+
+        let shared = Arc::clone(&self.shared);
+        *thread = Some(
+            std::thread::Builder::new()
+                .name("clipped-library-index".to_owned())
+                .spawn(move || shared.run())
+                .expect("a thread can be started to index on"),
+        );
+        drop(thread);
+        self.request();
+    }
+
+    /// Asks for the index to be brought up to date.
+    ///
+    /// Returns immediately. A request made while a run is in flight schedules
+    /// one more run rather than a run per request, so a caller may ask as often
+    /// as it likes.
+    pub fn request(&self) {
+        let Ok(mut state) = self.shared.state.lock() else {
+            tracing::error!(
+                "the library indexer was left in an unknown state by an earlier failure, so the \
+                 index was not brought up to date"
+            );
+            return;
+        };
+        if state.stopping {
+            return;
+        }
+        state.requested = true;
+        drop(state);
+        self.shared.woken.notify_all();
+    }
+
+    /// Stops indexing and waits for a run in progress to give up.
+    ///
+    /// Cancellation is cooperative and is checked between files and between
+    /// transactions, so what had been written stays written and the next run
+    /// carries on from there (`clipped_library::index`).
+    pub fn shut_down(&self) {
+        self.shared.control.cancel();
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.stopping = true;
+            state.requested = false;
+        }
+        self.shared.woken.notify_all();
+
+        let taken = match self.thread.lock() {
+            Ok(mut thread) => thread.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(thread) = taken {
+            let _ = thread.join();
+        }
+    }
+
+    /// Waits until nothing is queued and nothing is running, for a test that has
+    /// to look at what a run wrote.
+    ///
+    /// Answers whether it settled within `patience`. Nothing in the product
+    /// waits for the index: a run is background work by construction, and a
+    /// caller that blocked on one would be the stall this whole design avoids.
+    #[cfg(test)]
+    pub(crate) fn settled_within(&self, patience: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + patience;
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("a lock that is not held long");
+        loop {
+            if !state.requested && !state.running {
+                return true;
+            }
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            let (held, _) = self
+                .shared
+                .woken
+                .wait_timeout(state, left)
+                .expect("a lock that is not held long");
+            state = held;
+        }
+    }
+
+    /// How many runs have finished.
+    #[cfg(test)]
+    pub(crate) fn runs(&self) -> u64 {
+        self.shared
+            .state
+            .lock()
+            .expect("a lock that is not held long")
+            .completed
+    }
+}
+
+impl Indexer {
+    /// The indexer thread: wait to be asked, reconcile, repeat.
+    fn run(self: Arc<Self>) {
+        let mut database = None;
+
+        loop {
+            {
+                let Ok(mut state) = self.state.lock() else {
+                    tracing::error!("the library indexer stopped because its state was poisoned");
+                    return;
+                };
+                while !state.requested && !state.stopping {
+                    let Ok(held) = self.woken.wait(state) else {
+                        tracing::error!(
+                            "the library indexer stopped because its state was poisoned"
+                        );
+                        return;
+                    };
+                    state = held;
+                }
+                if state.stopping {
+                    return;
+                }
+                state.requested = false;
+                state.running = true;
+            }
+
+            self.reconcile_once(&mut database);
+
+            if let Ok(mut state) = self.state.lock() {
+                state.running = false;
+                state.completed += 1;
+            }
+            self.woken.notify_all();
+        }
+    }
+
+    /// One reconciliation, opening the database if this is the first run or if
+    /// the last attempt failed.
+    ///
+    /// A failure to open is reported and *retried* on the next run, for the
+    /// reason [`LibraryReader`] retries: the usual cause is a drive that is not
+    /// plugged in, and that stops being true without restarting anything.
+    fn reconcile_once(&self, database: &mut Option<Database>) {
+        let Some(path) = self.path.as_ref() else {
+            tracing::warn!(
+                "this machine describes no per-user application directory, so there is nowhere \
+                 to keep a library index and nothing was indexed"
+            );
+            return;
+        };
+        if self.settings.roots.is_empty() {
+            tracing::warn!("no recording folder could be worked out, so there is nothing to index");
+            return;
+        }
+
+        if database.is_none() {
+            match Database::open(path) {
+                Ok(opened) => *database = Some(opened),
+                Err(error) => {
+                    tracing::warn!(
+                        library = %clipped_logging::RedactedPath::new(path),
+                        %error,
+                        "the recording library could not be opened, so the index was not brought \
+                         up to date; the next recording will try again"
+                    );
+                    return;
+                }
+            }
+        }
+
+        let open = database.as_mut().expect("the database was just opened");
+        match reconcile(open, &self.settings, &self.control, SystemTime::now()) {
+            Ok(report) => report_unindexed(&report),
+            Err(error) => {
+                // The connection is dropped rather than kept: a database that
+                // refused may have gone with its drive, and the next run should
+                // open it again rather than reuse a handle to something that is
+                // no longer there.
+                *database = None;
+                tracing::warn!(
+                    %error,
+                    "the library index could not be brought up to date; the next recording will \
+                     try again"
+                );
+            }
+        }
+    }
+}
+
+/// Says what happened to media files no session claims.
+///
+/// `reconcile` logs everything else about a run. This is said here because it is
+/// the one part of the report that is about *the user's files* rather than about
+/// the index: recordings made by a build whose `serve` wrote no session record
+/// are exactly this case, and they are left alone rather than adopted, deleted or
+/// renamed (AGENTS.md section 56). Recovering them is
+/// [issue #272](https://github.com/wildware-uk/clipped/issues/272).
+fn report_unindexed(report: &IndexReport) {
+    if report.unindexed_media == 0 {
+        return;
+    }
+    tracing::info!(
+        files = report.unindexed_media,
+        first = ?report
+            .unindexed_sample
+            .iter()
+            .map(|path| clipped_logging::RedactedPath::new(path).to_string())
+            .collect::<Vec<String>>(),
+        "recordings under the recording folders belong to no session record, so the library \
+         cannot say what they are; they have been left exactly where they are (issue #272)"
+    );
 }
 
 #[cfg(test)]

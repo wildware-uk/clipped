@@ -76,7 +76,7 @@
 use std::error::Error;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -90,7 +90,9 @@ use clipped_ipc::{
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
+use clipped_session::automatic::{ManualSession, RecordingOutcome};
 use clipped_session::bookmarks::{BookmarkError, BookmarkLog, BookmarkRequest};
+use clipped_session::config::Configuration;
 use clipped_session::screenshot::{
     Screenshot, ScreenshotError, ScreenshotFormat, ScreenshotRequests, ScreenshotSettings,
     StillFrame,
@@ -101,7 +103,7 @@ use clipped_session::{
 
 use crate::cli::{RecordArgs, ServeArgs};
 use crate::config::{ConfigError, RecordingConfig};
-use crate::library::LibraryReader;
+use crate::library::{LibraryIndexer, LibraryReader};
 use crate::record::{resolve_window, settings_for};
 
 /// What this build tells every client it can do.
@@ -223,6 +225,13 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
     use std::io::Write as _;
     let _ = std::io::stdout().flush();
 
+    // After the ready line and before the accept loop. The index is brought up
+    // to date on a thread of its own, so nothing here waits for it: a window
+    // that connects immediately is answered immediately, and the run catches up
+    // on everything produced while nothing was indexing (`crate::library`,
+    // issue #402).
+    service.start_indexing();
+
     let server = Server::new(Arc::clone(&service), events.clone(), identity());
     let outcome = server.serve(&mut listener).map_err(ServeError::Serving);
 
@@ -256,26 +265,75 @@ pub struct RecorderService {
     /// The recording library, which this process reads on the window's behalf
     /// because the window cannot (`crate::library`, issue #301).
     library: LibraryReader,
+    /// What puts a recording *into* that library (`crate::library`, issue #402).
+    ///
+    /// Held here as well as by [`RecordingState`] so that start-up can ask for
+    /// the first run and shutdown can stop one, neither of which is a recording's
+    /// business.
+    indexer: Arc<LibraryIndexer>,
 }
 
 impl RecorderService {
-    /// A service with nothing recording, reading the library at Clipped's usual
+    /// A service with nothing recording, over the library at Clipped's usual
     /// place.
     #[must_use]
     pub fn new(events: EventPublisher) -> Self {
-        Self::with_library(events, LibraryReader::for_this_user())
+        Self::over(
+            events,
+            LibraryReader::for_this_user(),
+            LibraryIndexer::for_this_user(),
+            // The same file `watch` reads, through the same function, so that
+            // "what does this record at" has one answer whichever subcommand is
+            // asking (AGENTS.md sections 30 and 55). Read once, here: a
+            // recording resolves what it is made with when it starts, and
+            // nothing re-reads a file underneath a running encoder (issue #61).
+            crate::watch::load_configuration(
+                clipped_session::config::ConfigurationStore::default_path().as_deref(),
+            ),
+        )
     }
 
-    /// The same, reading a library named by the caller.
+    /// The same, over a library named by the caller and the shipped settings.
     ///
-    /// For tests, which must not read or create the library of whoever is
-    /// running them (AGENTS.md section 25).
+    /// For tests, which must not read, create or index the library of whoever is
+    /// running them, and must not be told what to record by their settings file
+    /// either (AGENTS.md section 25).
     #[must_use]
-    pub fn with_library(events: EventPublisher, library: LibraryReader) -> Self {
+    pub fn with_library(
+        events: EventPublisher,
+        library: LibraryReader,
+        indexer: LibraryIndexer,
+    ) -> Self {
+        Self::over(events, library, indexer, Configuration::defaults())
+    }
+
+    fn over(
+        events: EventPublisher,
+        library: LibraryReader,
+        indexer: LibraryIndexer,
+        configuration: Configuration,
+    ) -> Self {
+        let indexer = Arc::new(indexer);
         Self {
-            recordings: Arc::new(RecordingState::new(events)),
+            recordings: Arc::new(RecordingState::new(
+                events,
+                Arc::clone(&indexer),
+                configuration,
+            )),
             library,
+            indexer,
         }
+    }
+
+    /// Brings the index up to date with whatever happened while nothing was
+    /// indexing, on a thread of its own.
+    ///
+    /// Called once `serve` is listening, so that a window connecting is never
+    /// waiting on a walk of the recordings folder. What it catches is everything
+    /// no run has seen: sessions `watch` recorded in a process of its own, files
+    /// copied onto the machine, a library file the user deleted.
+    pub fn start_indexing(&self) {
+        self.indexer.start();
     }
 
     /// Stops anything still running, and waits for its file to be finished.
@@ -291,6 +349,19 @@ impl RecorderService {
             Err(error) if error.code == ErrorCode::NotRecording => {}
             Err(error) => tracing::error!(%error, "the recording did not stop cleanly"),
         }
+
+        // After the recording, deliberately: stopping it above wrote the
+        // session's final record, so a run that is still going has the whole
+        // sitting to find.
+        //
+        // A run in progress is *cancelled* rather than waited for, and a
+        // recording stopped by this shutdown may therefore not reach the index
+        // before the process ends. That costs nothing: what makes a session
+        // findable is its sidecar, which is already on disk, and the run at the
+        // next start-up indexes it. A recorder that would not close until it had
+        // walked a large library would be a far worse thing to ship
+        // (`clipped_library::index`, AGENTS.md section 17).
+        self.indexer.shut_down();
     }
 }
 
@@ -375,6 +446,16 @@ struct RecordingState {
     finished: Condvar,
     events: EventPublisher,
     next_id: AtomicU64,
+    /// Asked to bring the library up to date once a recording's session record
+    /// is final (`crate::library`, issue #402).
+    indexer: Arc<LibraryIndexer>,
+    /// The user's settings, as they stood when this process started
+    /// (`RecorderService::new`).
+    ///
+    /// Held rather than re-read, exactly as `watch` holds them: a recording
+    /// resolves what it is made with when it starts, and nothing re-reads a file
+    /// underneath a running encoder (`clipped_session::config`, issue #61).
+    configuration: Configuration,
 }
 
 /// A recording that has been started.
@@ -409,26 +490,112 @@ struct Running {
     /// [`RecordingState::current`] while it does — the recording thread stores
     /// its outcome through that same mutex.
     screenshots: ScreenshotRequests,
+    /// The session this recording is the whole of, and its record on disk.
+    ///
+    /// [`Some`] for the whole life of the recording. It is an [`Option`] for one
+    /// reason and no other: closing a session consumes it
+    /// ([`ManualSession::finish`]), and the outcome that closes this one arrives
+    /// while the recording is still held here.
+    ///
+    /// A recording started by this state cannot be made without one — `start`
+    /// builds the session before it builds this — and that is the point. Issue
+    /// #402 was a `serve` that wrote files and no session record at all, so
+    /// there was nothing for the library to index; the session being a field of
+    /// the recording rather than a step somebody has to remember is what stops
+    /// that returning.
+    session: Option<ManualSession>,
     /// [`None`] while it is still recording.
     outcome: Option<Result<RecordingReport, String>>,
 }
 
+impl Running {
+    /// A recording that has just been started, and the session record it opens.
+    ///
+    /// **The only way this type is built**, in the recorder and in its tests
+    /// alike, and that is the whole point of it existing. Issue #402 was a
+    /// `serve` that produced files and no session record, so nothing could
+    /// index them; making the session part of *constructing* a recording means
+    /// the way to write that defect again is to delete a line here, which the
+    /// tests notice, rather than to forget a line somewhere else, which nothing
+    /// would.
+    ///
+    /// The thread is filled in by the caller, because what a recording is made
+    /// with is resolved from [`Self::session`] — the settings this session
+    /// resolved — and there is nothing to spawn until that answer exists. The
+    /// stop signal is made here and handed out by cloning, so a recording and
+    /// the signal that ends it cannot be two different signals.
+    fn started(
+        id: String,
+        output: PathBuf,
+        target: String,
+        configuration: &Configuration,
+        pid: u32,
+        image_name: &str,
+        now: SystemTime,
+    ) -> Self {
+        // The directory is the recording's own, which is what "beside its
+        // recordings" means for an output the caller may have named itself.
+        let session = ManualSession::start(
+            output.parent().unwrap_or_else(|| Path::new(".")),
+            output.clone(),
+            configuration,
+            pid,
+            image_name,
+            now,
+        );
+
+        Self {
+            id,
+            bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
+            output,
+            target,
+            started: Instant::now(),
+            stop: crate::shutdown::ShutdownSignal::new(),
+            thread: None,
+            progress: RecordingProgress::new(),
+            screenshots: ScreenshotRequests::new(),
+            session: Some(session),
+            outcome: None,
+        }
+    }
+
+    /// The session this recording is the whole of, while it is still running.
+    ///
+    /// # Panics
+    ///
+    /// If the recording has already ended: [`RecordingState::finish`] takes the
+    /// session to close it, and nothing asks a recording that has stopped what
+    /// it is recording into.
+    fn session(&self) -> &ManualSession {
+        self.session
+            .as_ref()
+            .expect("a recording that has not ended still holds its session")
+    }
+}
+
 impl RecordingState {
-    fn new(events: EventPublisher) -> Self {
+    fn new(
+        events: EventPublisher,
+        indexer: Arc<LibraryIndexer>,
+        configuration: Configuration,
+    ) -> Self {
         Self {
             current: Mutex::new(None),
             finished: Condvar::new(),
             events,
             next_id: AtomicU64::new(1),
+            indexer,
+            configuration,
         }
     }
 
-    /// Validates the request, resolves the target, and starts recording.
+    /// Validates the request, resolves the target, opens a session and starts
+    /// recording.
     fn start(self: &Arc<Self>, request: &StartRecording) -> Result<Reply, ProtocolError> {
         let args = record_args(request)?;
         let config = RecordingConfig::resolve(&args).map_err(invalid_parameters)?;
         let window = resolve_window(&config.target).map_err(unrecordable_target)?;
-        let settings = settings_for(&config, &window);
+        let asked_for = settings_for(&config, &window);
 
         let mut current = self.lock()?;
         if current
@@ -442,8 +609,7 @@ impl RecordingState {
         }
 
         let id = format!("r-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
-        let stop = crate::shutdown::ShutdownSignal::new();
-        let output = settings.output().to_path_buf();
+        let output = asked_for.output().to_path_buf();
         let target = config.target.to_string();
 
         tracing::info!(
@@ -453,29 +619,39 @@ impl RecordingState {
             "starting a recording because the desktop application asked for one"
         );
 
-        let progress = RecordingProgress::new();
-        let screenshots = ScreenshotRequests::new();
-        let thread = spawn_recording(
+        // The session opens with the recording and before the encoder, so that
+        // a recorder killed during this recording still leaves something saying
+        // what the file beside it is (AGENTS.md section 17). `Running::started`
+        // is the only place a recording of this state is built, which is what
+        // makes that unforgettable rather than remembered.
+        let mut running = Running::started(
+            id.clone(),
+            output.clone(),
+            target,
+            &self.configuration,
+            window.process_id(),
+            window.process_name().unwrap_or_default(),
+            SystemTime::now(),
+        );
+
+        // What the request asked for, then what the user configured laid over
+        // it — `apply_configured_to` and not `apply_to`, for the reason `watch`
+        // gives at the same call: `apply_to` would put the shipped default over
+        // every parameter the request named, so a `start_recording` asking for
+        // 144 frames per second would record at 60 on every machine with no
+        // settings file. Two callers, one rule (AGENTS.md section 55).
+        let settings = running.session().settings().apply_configured_to(asked_for);
+
+        running.thread = Some(spawn_recording(
             self,
             &id,
             settings,
-            stop.clone(),
-            progress.clone(),
-            screenshots.clone(),
-        );
+            running.stop.clone(),
+            running.progress.clone(),
+            running.screenshots.clone(),
+        ));
 
-        *current = Some(Running {
-            id: id.clone(),
-            output: output.clone(),
-            target,
-            started: Instant::now(),
-            stop,
-            thread: Some(thread),
-            progress,
-            bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
-            screenshots,
-            outcome: None,
-        });
+        *current = Some(running);
         let status = status_of(current.as_ref());
         drop(current);
 
@@ -705,13 +881,16 @@ impl RecordingState {
 
         let screenshot = clipped_session::screenshot::write(
             &still, &settings,
-            // The game a screenshot belongs to is the session's, and no `serve`
-            // runs a session yet (`clipped_session::automatic` is driven by the
-            // `watch` subcommand). Until it does, a screenshot taken here is
-            // filed unattributed rather than under a game nobody identified —
-            // which is the same answer a session gives when the catalogue will
-            // not name one, and it is honest rather than invented (AGENTS.md
-            // section 27). Attributing it is issue #334.
+            // The game a screenshot belongs to is the session's, and `serve`
+            // does run a session now (`clipped_session::automatic::
+            // ManualSession`, issue #402) — but that session's game is
+            // `unidentified`, because nothing asked the catalogue about the
+            // window the user picked. So there is still no game to file a
+            // screenshot under, and filing it under one nobody identified would
+            // be invented data (AGENTS.md section 27). What changed is the
+            // reason, not the answer. Attributing it is issue #334, and the
+            // question of attributing the *session* is issue #403; the second
+            // is what would give the first something to read.
             "", now, position,
         )
         .map_err(screenshot_failed)?;
@@ -757,11 +936,17 @@ impl RecordingState {
     /// should be able to return.
     fn finish(&self, id: &str, outcome: Result<RecordingReport, String>) {
         let failure = outcome.as_ref().err().cloned();
+        // Built before the lock is taken, because it is the only part of
+        // closing the session that costs anything: what happens under the lock
+        // is a `take` and a store, exactly as it was before a session existed.
+        let for_the_session = session_outcome(&outcome);
+        let mut ending = None;
 
         match self.current.lock() {
             Ok(mut current) => {
                 if let Some(running) = current.as_mut() {
                     if running.id == id {
+                        ending = running.session.take();
                         running.outcome = Some(outcome);
                     }
                 }
@@ -772,6 +957,30 @@ impl RecordingState {
             ),
         }
         self.finished.notify_all();
+
+        if let Some(session) = ending {
+            // The sidecar is written here, with the lock released, for the
+            // reason `add_bookmark` releases it before writing one: this state
+            // is what a bookmark, a screenshot and `get_status` all take, and
+            // holding it across a file write would make each of them wait on a
+            // disk (AGENTS.md section 20).
+            //
+            // Nothing depends on this finishing before `stop_recording` is
+            // answered. What makes the recording *findable* is the index, and
+            // the run that fills it is asked for below — after the record it
+            // reads is on disk, which is the ordering that does matter.
+            let ended = session.finish(&for_the_session, SystemTime::now());
+
+            // Off this thread and on to the indexer's: this is the recording
+            // thread, and walking the recordings folder here would hold up the
+            // reply to whoever asked for the stop.
+            tracing::info!(
+                recording = id,
+                session = ended.id().as_str(),
+                "asking for the library to be brought up to date, because a session ended"
+            );
+            self.indexer.request();
+        }
 
         if let Some(message) = failure {
             tracing::error!(recording = id, message, "a recording ended in a failure");
@@ -834,6 +1043,28 @@ fn spawn_recording(
             state.finish(&id, outcome);
         })
         .expect("a thread can be started to record on")
+}
+
+/// What a finished recording is, in the vocabulary a session records.
+///
+/// The same three answers `watch` reports through
+/// [`RecordingOutcome`](clipped_session::automatic::RecordingOutcome), because
+/// they are the same three things that can happen and a session should not be
+/// able to tell which subcommand produced it.
+///
+/// There is no `NoWindow` here and there cannot be: `start_recording` resolves
+/// the window before it answers, so a recording that started had one. That is
+/// the one difference between the two drivers, and it is a difference in what
+/// can happen rather than in how it is written down — `watch` waits for a
+/// window belonging to a game it has only just seen launch, and this waits for
+/// nothing because the user is looking at the window.
+fn session_outcome(outcome: &Result<RecordingReport, String>) -> RecordingOutcome {
+    match outcome {
+        Ok(report) => RecordingOutcome::Recorded(Box::new(report.clone())),
+        Err(detail) => RecordingOutcome::Failed {
+            detail: detail.clone(),
+        },
+    }
 }
 
 /// The status a recording state describes.
@@ -1219,32 +1450,60 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725)
     }
 
+    /// An indexer over a library and recording folder of this test's own.
+    ///
+    /// Never the real ones: an indexer pointed at `for_this_user` would walk the
+    /// recordings of whoever is running the tests and write to their library
+    /// (AGENTS.md section 25).
+    fn indexer_over(directory: &Path) -> LibraryIndexer {
+        LibraryIndexer::at(
+            Some(directory.join("library.db")),
+            vec![directory.to_path_buf()],
+        )
+    }
+
+    /// A recording state with nothing recording, over a scratch library.
+    fn idle_state(directory: &Path) -> Arc<RecordingState> {
+        Arc::new(RecordingState::new(
+            EventPublisher::new(),
+            Arc::new(indexer_over(directory)),
+            Configuration::defaults(),
+        ))
+    }
+
     /// A state holding a recording that has reached `position`.
     ///
-    /// Built by hand rather than by starting one: what is under test is the
-    /// bookmark path, which needs a recording position and an output path and
-    /// nothing else. Capturing a real window would need a desktop, a GPU and an
-    /// encoder to test arithmetic and a file write.
+    /// Built by hand rather than by starting one: capturing a real window would
+    /// need a desktop, a GPU and an encoder. Everything the real `start` builds
+    /// is built here, **including the session** — it is not optional there and
+    /// it is not skipped here, so a test that exercises the end of a recording
+    /// exercises the end of a session record too.
     fn recording_at(output: &Path, position: Option<Duration>) -> Arc<RecordingState> {
-        let state = Arc::new(RecordingState::new(EventPublisher::new()));
-        let progress = RecordingProgress::new();
-        if let Some(position) = position {
-            progress.reached(position);
-        }
-
-        *state.current.lock().expect("a fresh lock") = Some(Running {
-            id: "r-1".to_owned(),
-            output: output.to_path_buf(),
-            target: "process cs2.exe".to_owned(),
-            started: Instant::now(),
-            stop: crate::shutdown::ShutdownSignal::new(),
-            thread: None,
-            progress,
-            bookmarks: Arc::new(BookmarkLog::for_recording(output)),
-            screenshots: ScreenshotRequests::new(),
-            outcome: None,
-        });
+        let directory = output.parent().expect("the output is in a directory");
+        let state = idle_state(directory);
+        *state.current.lock().expect("a fresh lock") = Some(started_recording(output, position));
         state
+    }
+
+    /// A recording as `start` builds one, through the same constructor.
+    ///
+    /// Never a `Running { … }` literal, deliberately: a test that assembled the
+    /// fields by hand could leave out the session and would then be testing a
+    /// recording the recorder cannot make.
+    fn started_recording(output: &Path, position: Option<Duration>) -> Running {
+        let running = Running::started(
+            "r-1".to_owned(),
+            output.to_path_buf(),
+            "process cs2.exe".to_owned(),
+            &Configuration::defaults(),
+            4_242,
+            "cs2.exe",
+            moment(),
+        );
+        if let Some(position) = position {
+            running.progress.reached(position);
+        }
+        running
     }
 
     #[test]
@@ -1328,7 +1587,7 @@ mod tests {
         let directory = scratch("refused");
         let output = directory.join("clipped-cs2.mkv");
 
-        let idle = Arc::new(RecordingState::new(EventPublisher::new()));
+        let idle = idle_state(&directory);
         let error = idle
             .bookmark(&AddBookmark::default(), moment())
             .expect_err("nothing is being recorded");
@@ -1425,7 +1684,8 @@ mod tests {
     /// The library is built here rather than reconciled, because what is under
     /// test is the path from a command to a reply, not indexing.
     fn service_over_a_library(name: &str) -> RecorderService {
-        let path = scratch(name).join("library.db");
+        let directory = scratch(name);
+        let path = directory.join("library.db");
         {
             let database = clipped_storage::Database::open(&path).expect("a database opens");
             let connection = database.connection();
@@ -1454,7 +1714,11 @@ mod tests {
                 .expect("a recording inserts");
         }
 
-        RecorderService::with_library(EventPublisher::new(), LibraryReader::at(Some(path)))
+        RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(path)),
+            indexer_over(&directory),
+        )
     }
 
     #[test]
@@ -1496,8 +1760,11 @@ mod tests {
         let directory = scratch("library-unreadable");
         let path = directory.join("library.db");
         std::fs::write(&path, b"not a database").expect("the file is written");
-        let service =
-            RecorderService::with_library(EventPublisher::new(), LibraryReader::at(Some(path)));
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(path)),
+            indexer_over(&directory),
+        );
 
         let refusal = service
             .call(Command::LibrarySessions(
@@ -1506,6 +1773,254 @@ mod tests {
             .expect_err("an unreadable library is not an empty one");
 
         assert_eq!(refusal.code, ErrorCode::LibraryUnavailable);
+    }
+
+    /// How long a test waits for the indexer thread. Generous: it is a walk of
+    /// a directory holding two files, and a bound tight enough to trip on a
+    /// busy machine is a failure nobody can tell from a real one.
+    const INDEXING_PATIENCE: Duration = Duration::from_secs(30);
+
+    /// A service over an empty library and an empty recordings folder, both of
+    /// this test's own, with a recording in progress.
+    ///
+    /// The recording is put in by hand for the reason `recording_at` gives —
+    /// there is no window, GPU or encoder here — and it carries the session the
+    /// real `start` builds, because that is the thing under test.
+    fn service_recording_into(directory: &Path, output: &Path) -> RecorderService {
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(directory),
+        );
+
+        *service.recordings.current.lock().expect("a fresh lock") =
+            Some(started_recording(output, None));
+        service
+    }
+
+    /// The sessions the window would be shown, through the real dispatch.
+    fn library_of(service: &RecorderService) -> Vec<clipped_ipc::LibrarySession> {
+        let Reply::LibrarySessions { page } = service
+            .call(Command::LibrarySessions(
+                clipped_ipc::LibrarySessions::default(),
+            ))
+            .expect("the library reads")
+        else {
+            panic!("`library_sessions` was answered with something else");
+        };
+        page.sessions
+    }
+
+    #[test]
+    fn a_recording_made_from_the_window_is_in_the_library_when_the_window_next_asks() {
+        // Issue #402's acceptance criterion, end to end and in one process: a
+        // recording started over the protocol, finished, and then found by the
+        // command the Library screen sends — with nothing restarted in between.
+        //
+        // The three links it holds together are the three that were missing.
+        // `serve` writes a session record at all; something calls
+        // `clipped_library::index::reconcile`; and the reply the window gets is
+        // built from what that run wrote. Break any one of them — drop the
+        // `session` from `Running`, take the `indexer.request()` out of
+        // `finish`, never start the indexer thread — and this fails.
+        let directory = scratch("indexed");
+        let output = directory.join("clipped-20260813-120000.mkv");
+        std::fs::write(&output, [0u8; 4096]).expect("the recording can be written");
+
+        let service = service_recording_into(&directory, &output);
+        assert!(
+            library_of(&service).is_empty(),
+            "nothing has indexed yet, so there is nothing for the library to show — and \
+             without this the assertions below could be about a row that was already there"
+        );
+
+        // The run start-up asks for is drained first, so that what is asserted
+        // below is the run *this recording* asked for. Without it a build that
+        // never asked for one after a recording could still pass, on the timing
+        // of a thread.
+        service.start_indexing();
+        assert!(service.indexer.settled_within(INDEXING_PATIENCE));
+        let runs_before = service.indexer.runs();
+
+        // What the recording thread does when its recording ends. The outcome
+        // is a failure rather than a report because `RecordingReport`'s fields
+        // belong to `clipped-session` and cannot be built from here; what
+        // differs is one column of one row, and the recorded case is held by
+        // `clipped_session::automatic`'s own comparison of the two session
+        // records.
+        service
+            .recordings
+            .finish("r-1", Err("the encoder went".to_owned()));
+
+        assert!(
+            service.indexer.settled_within(INDEXING_PATIENCE),
+            "the indexer never finished the run the recording asked for"
+        );
+        assert!(
+            service.indexer.runs() > runs_before,
+            "a recording that finished has to ask for the library to be brought up to date"
+        );
+
+        let sessions = library_of(&service);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a recording made from the window has to reach the library: {sessions:?}"
+        );
+        assert_eq!(sessions[0].recordings.len(), 1);
+        assert_eq!(
+            sessions[0].recordings[0].path,
+            output.to_string_lossy(),
+            "the row has to name the file that was recorded"
+        );
+        assert_eq!(
+            sessions[0].recordings[0].size_bytes,
+            Some(4096),
+            "the size comes from the file on disk, not from the session record"
+        );
+        assert_eq!(
+            sessions[0].game_id, None,
+            "nothing identified a game, and the library says so rather than inventing one"
+        );
+        assert_eq!(
+            sessions[0].end_reason.as_deref(),
+            Some("recording-ended"),
+            "the row has to be the *finished* session record rather than the one written when \
+             the recording started"
+        );
+        assert!(sessions[0].ended_at.is_some());
+
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_that_ends_closes_its_session_record_and_leaves_it_final() {
+        // The half of the path above that the library test cannot distinguish
+        // from luck: the record on disk is opened when the recording starts and
+        // *closed* when it ends, so what the index reads is a finished sitting
+        // rather than one that says a recording began and never ended. It is
+        // written with the recording state released, for the reason
+        // `add_bookmark` releases it — the write is on the recording thread and
+        // must not make a bookmark or a `get_status` wait on a disk.
+        let directory = scratch("ordering");
+        let output = directory.join("clipped-20260813-120000.mkv");
+        std::fs::write(&output, [0u8; 16]).expect("the recording can be written");
+
+        let service = service_recording_into(&directory, &output);
+        let sidecar = std::fs::read_dir(&directory)
+            .expect("the directory can be listed")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.to_string_lossy().ends_with(".session.json"))
+            .expect("the session's record is written when the recording starts");
+
+        let opened = std::fs::read_to_string(&sidecar).expect("it can be read");
+        assert!(
+            opened.contains("\"ended_at\": null"),
+            "a session that is still recording has not ended: {opened}"
+        );
+
+        service
+            .recordings
+            .finish("r-1", Err("the encoder went".to_owned()));
+
+        let closed = std::fs::read_to_string(&sidecar).expect("it can be read");
+        assert!(
+            closed.contains("recording-ended"),
+            "the session has to be closed once its recording is: {closed}"
+        );
+
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_session_recorded_before_this_process_started_is_indexed_at_start_up() {
+        // The other moment reconciliation runs, and the reason it has to: a
+        // sitting `watch` recorded in a process of its own, or a recording made
+        // by a build that was killed before its own run, is in the folder and in
+        // no index. Nothing but start-up would ever look at it.
+        let directory = scratch("start-up");
+        let output = directory.join("clipped-earlier.mkv");
+        std::fs::write(&output, [0u8; 2048]).expect("the recording can be written");
+        let earlier = ManualSession::start(
+            &directory,
+            output.clone(),
+            &Configuration::defaults(),
+            7,
+            "cs2.exe",
+            moment(),
+        );
+        let _ = earlier.finish(
+            &RecordingOutcome::Failed {
+                detail: "before this process existed".to_owned(),
+            },
+            moment(),
+        );
+
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+        );
+        service.start_indexing();
+        assert!(
+            service.indexer.settled_within(INDEXING_PATIENCE),
+            "the run start-up asks for never finished"
+        );
+
+        assert_eq!(
+            library_of(&service).len(),
+            1,
+            "a sitting recorded before this process started has to be picked up"
+        );
+
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_with_no_session_record_is_left_where_it_is_and_never_invented_into_a_row() {
+        // What happens to the files a user upgrading already has: a build whose
+        // `serve` wrote no session record left `.mkv` files nothing describes.
+        // The library refuses to guess what they are — inventing a session would
+        // be inventing a game, a start time and a sitting nobody recorded — and
+        // it refuses just as firmly to tidy them up. They are reported at every
+        // run (`crate::library::report_unindexed`) until issue #272 offers to
+        // recover them.
+        let directory = scratch("orphan");
+        let orphan = directory.join("clipped-20260812-171203.mkv");
+        std::fs::write(&orphan, [0u8; 1024]).expect("the recording can be written");
+
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+        );
+        service.start_indexing();
+        assert!(service.indexer.settled_within(INDEXING_PATIENCE));
+        assert!(
+            service.indexer.runs() >= 1,
+            "the file was never looked at, so this test proves nothing about it"
+        );
+
+        assert!(
+            library_of(&service).is_empty(),
+            "a file no session record names must not become a row the library made up"
+        );
+        assert!(
+            orphan.is_file(),
+            "indexing must never move, rename or delete a recording"
+        );
+        assert_eq!(
+            std::fs::metadata(&orphan).expect("it is still there").len(),
+            1024,
+            "and must never write to one"
+        );
+
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

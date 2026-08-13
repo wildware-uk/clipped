@@ -5,11 +5,11 @@ them in one SQLite database. This document covers what is in that database, how
 it changes shape without anybody being asked to delete it, who may write to it
 and when, and why a failure of any of it cannot cost somebody a recording.
 
-**Status: the database exists and nothing fills it yet.** `crates/storage` opens
-it, migrates it, enforces the schema and offers the write path
-([#55]). What writes rows is the library index that reads the session sidecars,
-which is M6's remaining work. Nothing here pretends otherwise, and the tables
-that have no producer say so by name below.
+**Status: the database exists and the library index fills part of it.**
+`crates/storage` opens it, migrates it, enforces the schema and offers the write
+path ([#55]). Since [#402] the recorder reconciles the index against the session
+sidecars on disk, so the tables a sitting produces — games, sessions, recordings,
+events — have a producer. The rest still do not, and say so by name below.
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
 [#46]: https://github.com/wildware-uk/clipped/issues/46
@@ -20,6 +20,7 @@ that have no producer say so by name below.
 [#94]: https://github.com/wildware-uk/clipped/issues/94
 [#107]: https://github.com/wildware-uk/clipped/issues/107
 [#111]: https://github.com/wildware-uk/clipped/issues/111
+[#402]: https://github.com/wildware-uk/clipped/issues/402
 
 ## The one rule
 
@@ -190,8 +191,9 @@ which owns the file and the schema and deliberately not their meaning.
 
 ## The schema
 
-Version 1, in `crates/storage/migrations/0001_initial.sql`. The file is heavily
-commented and is the authority; this is the shape of it.
+Version 2. `crates/storage/migrations/0001_initial.sql` is the whole of it and
+`0002_manual_session_end_reason.sql` adds one word to one vocabulary; both files
+are heavily commented and are the authority. This is the shape of them.
 
 ```text
 games ──┬── sessions ──┬── recordings ──┬── bookmarks
@@ -204,13 +206,13 @@ games ──┬── sessions ──┬── recordings ──┬── bookma
 
 | Table | What it holds | Producer today |
 | --- | --- | --- |
-| `games` | one row per game actually played, keyed by the catalogue's `game_id` | none |
-| `sessions` | one sitting with one game, keyed by the recorder's own session identifier | none |
-| `session_game_candidates` | the games the catalogue could not choose between, for an unattributed session | none |
-| `recordings` | one media file: path, timings, dimensions, outcome, size, whether it is still there | none |
+| `games` | one row per game actually played, keyed by the catalogue's `game_id` | the recorder's library indexer ([#402]) |
+| `sessions` | one sitting with one game, keyed by the recorder's own session identifier | the recorder's library indexer ([#402]) |
+| `session_game_candidates` | the games the catalogue could not choose between, for an unattributed session | the recorder's library indexer ([#402]) |
+| `recordings` | one media file: path, timings, dimensions, outcome, size, whether it is still there | the recorder's library indexer ([#402]) |
 | `clips` | a shorter file the user kept, and the window of the source it came from | nothing can create one |
 | `bookmarks` | a marked moment in a recording: offset, label, colour, duration | the recorder takes them ([#64](https://github.com/wildware-uk/clipped/issues/64)) and writes them to a sidecar beside each recording; nothing indexes them into this table yet (`docs/bookmarks.md`) |
-| `session_events` | what happened during a session, in the vocabulary the sidecar already writes | none |
+| `session_events` | what happened during a session, in the vocabulary the sidecar already writes | the recorder's library indexer ([#402]) |
 | `tags`, `recording_tags`, `clip_tags` | free-form labels, and what they are on | none |
 | `settings`, `game_settings` | global settings and per-game overrides, as JSON values under opaque keys | none |
 | `schema_migrations` | which migrations have run, and the checksum of each | the framework |
@@ -235,7 +237,10 @@ things in a format its user can open.
 `target-lost` or `target-resized`, because those are the Rust enumerations
 `clipped-session` already writes. A typo in a future writer is then a failed
 insert rather than a row no filter will ever match. Adding a token is a
-migration, which is the intended cost.
+migration, which is the intended cost — and migration 2 is that cost being paid:
+a session opened for one recording somebody asked for ends because that recording
+did, which is `recording-ended` and was not a reason any game launch could
+produce ([#402], `docs/sessions.md`).
 
 **Favourites are a nullable `favourited_at` column** on `sessions`, `recordings`
 and `clips` rather than a table of their own. SPEC.md section 29 says any of
@@ -315,7 +320,19 @@ on. So it is off, and `PRAGMA foreign_key_check` runs *inside the same
 transaction* afterwards. A rebuild that dropped rows out from under their
 children is rolled back rather than committed.
 
-**6. The file is claimed.** Clipped stamps `application_id` = `CLPD` into the
+**6. Two connections may migrate at once, and only one of them does.** A process
+holds more than one connection to its library — the recorder answers the window's
+questions from one and reconciles the index on another — so on a machine with no
+library yet they meet at the moment it is created. Each migration is applied in
+an **immediate** transaction and the version is read again *inside* it, so the
+second connection waits for the first and then finds there is nothing left to do.
+SQLite's deferred default would let both decide to create the same table, and the
+loser would fail with `table games already exists` on exactly the first run, for
+exactly the users who had never recorded anything.
+`two_connections_opening_the_same_new_database_both_get_a_working_schema` opens
+four at once and requires every one of them to end up with a usable schema.
+
+**7. The file is claimed.** Clipped stamps `application_id` = `CLPD` into the
 SQLite header. A file that already holds tables and does not carry that stamp is
 somebody else's database, and opening it returns
 `StorageError::NotAClippedDatabase` rather than writing a schema over it. The

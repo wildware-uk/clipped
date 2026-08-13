@@ -56,6 +56,17 @@
 //! same, and says that a file written by an older build has no `settings` on
 //! its recordings — which is not the same as a recording made at the defaults.
 //!
+//! # `game.kind` is an open vocabulary
+//!
+//! `known`, `ambiguous` and — since a recording could be started over the
+//! protocol ([issue #402](https://github.com/wildware-uk/clipped/issues/402)) —
+//! `unidentified`. The version is unchanged for that addition as well, and that
+//! is a promise the *reader* keeps rather than a hope: `clipped-library`'s
+//! reader files a `kind` it has never met as unattributed and says so, instead
+//! of refusing the session (`crates/library/src/index/sidecar.rs`). A session
+//! is worth more than the one field nobody could interpret, so adding a kind is
+//! an addition to the file rather than a change to its shape.
+//!
 //! `clips` and `bookmarks` are reserved and are **always empty in this build**.
 //! Nothing here can create either, and for two different reasons now. A clip
 //! needs a recording running a replay buffer to save from, which is
@@ -192,6 +203,11 @@ enum SidecarGame<'a> {
     Ambiguous {
         candidates: &'a [String],
     },
+    /// Nothing asked the catalogue, because the recording was of a window
+    /// somebody chose (`super::ManualSession`). Written as
+    /// `{ "kind": "unidentified" }` and carrying nothing else, because there is
+    /// nothing else to say.
+    Unidentified,
 }
 
 impl<'a> SidecarGame<'a> {
@@ -199,6 +215,7 @@ impl<'a> SidecarGame<'a> {
         match game {
             GameIdentity::Known { game_id, name } => Self::Known { game_id, name },
             GameIdentity::Ambiguous { candidates } => Self::Ambiguous { candidates },
+            GameIdentity::Unidentified => Self::Unidentified,
         }
     }
 }

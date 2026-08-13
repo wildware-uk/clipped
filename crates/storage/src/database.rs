@@ -329,7 +329,13 @@ mod tests {
 
         assert_eq!(database.schema_version(), SCHEMA_VERSION);
         assert_eq!(database.migration().from, 0);
-        assert_eq!(database.migration().applied, vec![1]);
+        // Every migration, because a new database starts at nothing. Written
+        // against the list rather than against a literal so that adding one is
+        // a migration to write and not also a number to remember here.
+        assert_eq!(
+            database.migration().applied,
+            (1..=SCHEMA_VERSION).collect::<Vec<u32>>()
+        );
         assert_eq!(database.migration().backup, None);
 
         let tables = table_names(database.connection());

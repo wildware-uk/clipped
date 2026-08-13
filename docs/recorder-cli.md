@@ -642,6 +642,21 @@ Read-Frame $pipe
 # {"type":"response","id":1,"outcome":{"ok":{"reply":"shutting_down"}}}
 ```
 
+**A recording started over the protocol produces a session record, and reaches
+the library.** `serve` opens a session for it and writes the same JSON sidecar
+`watch` writes, beside the recording, from the moment the recording starts
+([sessions.md](sessions.md)); when the recording ends, the session is closed and
+the library index is brought up to date on a thread of its own, so the Library
+screen shows it without anything being restarted ([library.md](library.md),
+[#402](https://github.com/wildware-uk/clipped/issues/402)). `serve` also
+reconciles once at start-up, after the ready line, which is what picks up
+sittings `watch` recorded in a process of its own.
+
+That also means `serve` reads the user's settings file, exactly as `watch` does:
+what a person configured is laid over what a `start_recording` asked for, and the
+session's record says which layer each answer came from
+([configuration.md](configuration.md)).
+
 Exit codes are the ordinary ones: 0 when it was stopped, 1 if the endpoint could
 not be taken or serving failed. A recording that fails while it is being served
 does not stop the recorder; it is reported to whoever is connected, on the
