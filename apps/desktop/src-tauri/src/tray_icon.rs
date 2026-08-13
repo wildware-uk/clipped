@@ -112,19 +112,25 @@ const BAR_GAP: f64 = 1.8;
 
 /// How far right and down of the centre the badge sits.
 ///
-/// Bottom right, the corner Windows badges in itself, and far enough out that
-/// the badge overhangs the ground's rounded corner instead of sitting inside the
-/// artwork — which is what leaves the disc and the bars readable underneath it.
-const BADGE_OFFSET: f64 = 7.9;
+/// Bottom right, the corner Windows badges in itself, and as far out as the ring
+/// can go while staying inside the canvas: `BADGE_OFFSET + BADGE_RING_RADIUS`
+/// is 31.8 of 32, so the badge is a whole circle rather than one flattened
+/// against the edge.
+///
+/// It does cover the third bar. That is the cost of a badge and it is worth
+/// paying: the disc, the ground and the two taller bars still read, which is
+/// enough to recognise the mark, and the state has to be legible at sixteen
+/// pixels where a subtler badge would not be.
+const BADGE_OFFSET: f64 = 7.4;
 
 /// The outer radius of the badge's dark ring.
 ///
 /// The ring is what separates the badge from the mark it sits on, and from a
 /// light taskbar behind the corner it overhangs.
-const BADGE_RING_RADIUS: f64 = 8.8;
+const BADGE_RING_RADIUS: f64 = 8.4;
 
 /// The radius of the badge's light face, inside that ring.
-const BADGE_FACE_RADIUS: f64 = 7.5;
+const BADGE_FACE_RADIUS: f64 = 7.15;
 
 /// Which mark the tray is wearing.
 ///
@@ -180,17 +186,17 @@ impl TrayMark {
                 // wider margin than that.
                 // `every_mark_reads_on_a_light_ground_and_on_a_dark_one`
                 // measures it rather than taking this comment's word.
-                paint(&mut canvas, ACCENT, |x, y| badge_disc(x, y, 5.1));
+                paint(&mut canvas, ACCENT, |x, y| badge_disc(x, y, 4.85));
             }
             Self::Connecting => {
                 // A ring rather than a filled disc, so that this and Recording
                 // differ in the middle and not only in colour.
                 paint(&mut canvas, OUTLINE, |x, y| {
-                    badge_disc(x, y, 5.4) && !badge_disc(x, y, 2.4)
+                    badge_disc(x, y, 5.15) && !badge_disc(x, y, 2.3)
                 });
             }
             Self::Unavailable => {
-                paint(&mut canvas, OUTLINE, |x, y| badge_slash(x, y, 5.1, 1.5));
+                paint(&mut canvas, OUTLINE, |x, y| badge_slash(x, y, 4.85, 1.45));
             }
         }
 
