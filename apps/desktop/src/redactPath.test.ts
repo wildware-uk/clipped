@@ -106,8 +106,8 @@ describe('redacting the paths inside a sentence', () => {
   /*
    * The sentence `SupervisorError::ExecutableMissing` produces, which is the most
    * likely thing in a report from a machine where nothing works: an installation
-   * with no recorder beside it (issue #226). It carries the account name in the
-   * middle of a sentence somebody needs to read.
+   * whose recorder is missing. It carries the account name in the middle of a
+   * sentence somebody needs to read.
    */
   it('redacts the path in the sentence a missing recorder produces', () => {
     const said = redactPathsIn(

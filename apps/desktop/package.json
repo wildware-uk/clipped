@@ -13,6 +13,7 @@
     "dev:web": "vite",
     "build": "vite build",
     "build:app": "tauri build",
+    "stage:installer-payload": "powershell -ExecutionPolicy Bypass -File ../../scripts/stage-installer-payload.ps1",
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "tauri"

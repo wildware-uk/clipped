@@ -128,6 +128,11 @@ From there:
   up by accident. Each copied file is declared as a build-script input, so
   deleting one is repaired by the next build rather than becoming a missing-DLL
   dialogue.
+- **Shipping.** An installed Clipped needs the same DLLs beside the recorder for
+  the same reason, and gets them a different way:
+  [`scripts/stage-installer-payload.ps1`](../scripts/stage-installer-payload.ps1)
+  copies them into the installer's payload, and the build refuses if they are not
+  installed ([packaging.md](packaging.md)).
 
 `crates/muxer` owns the link. `rusty_ffmpeg` is a `-sys` crate with no safe API,
 so the safe wrappers over FFmpeg live in `crates/muxer` too, and other crates

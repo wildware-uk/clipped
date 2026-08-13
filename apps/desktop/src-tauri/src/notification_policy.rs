@@ -62,8 +62,7 @@
 //! - The state the window *opened* in raises nothing either. A notification is
 //!   for something that happened while you were away; the state Clipped was
 //!   already in when it started is on screen in front of you. Without this, a
-//!   machine with no recorder installed (issue #226) would toast on every
-//!   launch.
+//!   machine whose recorder is missing would toast on every launch.
 
 use clipped_ipc::{
     ActiveRecording, ProtocolError, RecorderLinkEvent, RecorderLinkState, RecorderStatus,
@@ -733,8 +732,8 @@ mod tests {
 
     #[test]
     fn the_state_the_application_opened_in_is_not_announced() {
-        // An installation with no recorder beside it (issue #226) starts
-        // unavailable and stays there. The window is open, showing exactly that,
+        // An installation whose recorder has been deleted starts unavailable
+        // and stays there. The window is open, showing exactly that,
         // and a toast on every launch saying what is already on screen is how a
         // user learns to ignore them.
         let opening = unavailable("Clipped could not find clipped-recorder.exe");

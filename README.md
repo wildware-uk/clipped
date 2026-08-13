@@ -9,11 +9,12 @@ Clipped is local-first: no account, no cloud service and no telemetry.
 
 ## Status
 
-Early development, and **nothing is installable yet** — there is no installer,
-no signed build and no release. What follows is what a build from source does
-today. See [SPEC.md](SPEC.md) for the product this is being built towards, and
-the [issue tracker](https://github.com/wildware-uk/clipped/issues) for what is
-being worked on.
+Early development. **There is no release to download** — no published build and
+nothing signed — and a build from source is how you run Clipped today. What
+follows is what that build does. See [SPEC.md](SPEC.md) for the product this is
+being built towards, and the
+[issue tracker](https://github.com/wildware-uk/clipped/issues) for what is being
+worked on.
 
 **The recorder records.** `clipped-recorder record --process <name>` captures a
 window through Windows Graphics Capture, encodes it with the best hardware
@@ -31,7 +32,14 @@ and lists what has been recorded. It cannot yet play a recording
 draws no thumbnails yet. Recordings land in `%USERPROFILE%\Videos\Clipped\` and
 any player that handles Matroska will open them.
 
-Screenshots and installation instructions are pending a shippable build.
+**`npm run build:app` builds an installer that records.** It carries the
+recorder and the FFmpeg libraries beside the window, so an installed Clipped
+finds and starts its recorder with nothing set by hand
+([docs/packaging.md](docs/packaging.md)). It is not a shippable build: it is
+unsigned, and it does not yet carry the licence texts and third-party notices a
+distributed copy owes ([#123](https://github.com/wildware-uk/clipped/issues/123)).
+
+Screenshots are pending.
 
 ## Supported platforms
 
@@ -294,6 +302,7 @@ is not responsible for, and where it sits in this stack.
 | [docs/architecture.md](docs/architecture.md) | Subsystems, boundaries and ADRs |
 | [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
 | [docs/licensing.md](docs/licensing.md) | What a release has to carry, and the LGPL obligations FFmpeg brings |
+| [docs/packaging.md](docs/packaging.md) | What the installer carries beside the window, and how it gets there |
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |
 | [docs/ipc.md](docs/ipc.md) | The protocol between the desktop application and the recorder |

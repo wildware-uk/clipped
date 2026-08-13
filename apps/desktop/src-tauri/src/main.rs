@@ -779,11 +779,10 @@ fn supervisor_settings() -> Result<SupervisorSettings, String> {
 /// found on the `PATH` could be any build of any age, and the one thing a
 /// supervisor must not do is start a recorder it cannot account for.
 ///
-/// **The installer does not put one there yet**
-/// ([issue #226](https://github.com/wildware-uk/clipped/issues/226)), so an
-/// installed build reports that the recorder is missing — correctly, and every
-/// time. In development the recorder is in the workspace's own target
-/// directory, which is what [`RECORDER_OVERRIDE`] is for.
+/// The installer puts one there: `bundle.resources` in `tauri.conf.json`
+/// collects the recorder and the FFmpeg libraries beside this executable
+/// (`docs/packaging.md`, issue #226). In development they are in the workspace's
+/// own target directory instead, which is what [`RECORDER_OVERRIDE`] is for.
 fn recorder_executable() -> Result<PathBuf, String> {
     if let Some(named) = std::env::var_os(RECORDER_OVERRIDE) {
         return Ok(PathBuf::from(named));

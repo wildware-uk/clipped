@@ -346,6 +346,27 @@ jobs:
               exit 1
           }
 
+      # What the installer carries beside the window (issue #226): a release
+      # recorder and the FFmpeg DLLs it links. The staging script decides what
+      # goes in, so a regression in it is an installer that records nothing -
+      # which looks exactly like a working one until somebody installs it.
+      #
+      # In this job because the last case runs against the real pinned FFmpeg,
+      # which the fetch step above installed; the earlier cases use fixtures and
+      # need nothing. Nothing here builds an installer: the step in the `ui` job
+      # below is what runs `npm run build:app` itself.
+      - name: Check the installer payload staging
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $suite = 'scripts/test-stage-installer-payload.ps1'
+          $output = & powershell -ExecutionPolicy Bypass -File $suite 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          "## $suite`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit $code
+
   deny:
     name: Dependencies (licences and advisories)
     runs-on: windows-latest
@@ -490,3 +511,42 @@ jobs:
       # and the icon is bytes.
       - name: Test the desktop crate
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      # The third acceptance criterion of issue #226, exercised rather than
+      # asserted about: this job has never built the recorder and never fetched
+      # FFmpeg, so it is a checkout in exactly the state that used to produce an
+      # installer which could not record. `npm run build:app` has to refuse, and
+      # has to say which file is missing.
+      #
+      # It is the real command, not the staging script called directly, because
+      # what could regress is the wiring: tauri.conf.json's beforeBuildCommand is
+      # what makes the refusal reach every installer build, and a script nothing
+      # runs guards nothing.
+      #
+      # Cheap despite building nothing: `tauri build` runs beforeBuildCommand
+      # first, so this stops seconds in, before Vite and before cargo. The
+      # negation is deliberate - a zero exit code here means an installer was
+      # about to be built without a recorder in it, and that is the failure.
+      - name: The installer build refuses without a recorder
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $output = & npm run build:app 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          if ($code -eq 0) {
+              Write-Host 'npm run build:app succeeded with no recorder built. It must refuse (issue #226).' -ForegroundColor Red
+              exit 1
+          }
+          foreach ($expected in @('clipped-recorder.exe', 'cargo build --release -p clipped-recorder')) {
+              if ($output -notlike "*$expected*") {
+                  Write-Host "It refused, but without mentioning '$expected'." -ForegroundColor Red
+                  exit 1
+              }
+          }
+          Write-Host 'It refused, naming the recorder and how to build it.'
+          # Explicit, because GitHub ends a `powershell` step with
+          # `exit $LASTEXITCODE` and the last native command run above was the
+          # `npm` that was *supposed* to fail. Without this line the step reports
+          # that failure as its own and this check can never pass.
+          exit 0
