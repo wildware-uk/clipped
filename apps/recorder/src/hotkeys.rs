@@ -333,8 +333,9 @@ mod tests {
         ActiveRecording, Command, CommandHandler, ErrorCode, HotkeyState, ProtocolError,
         RecorderStatus, Reply,
     };
+    use clipped_session::config::{Configuration, HotkeyOverride, HotkeyOverrides};
 
-    use super::{command_for, handlers_for, perform, report_of, row_for};
+    use super::{command_for, handlers_for, perform, report_of, row_for, start};
 
     /// A recorder that records what it was asked, and answers.
     ///
@@ -567,6 +568,62 @@ mod tests {
             unbound > 0 && unbound < rows.len(),
             "the defaults bind some actions and not others, so both kinds of row must appear: \
              {rows:?}",
+        );
+    }
+
+    /// The wire the settings file reaches Windows down.
+    ///
+    /// `start` is the only production caller of
+    /// [`Configuration::resolve_hotkeys`], and the one line joining it to
+    /// `HotkeyService::start` is the whole of "Clipped reads your hotkeys". A
+    /// `start` that resolved the configuration and then registered
+    /// [`Bindings::defaults`] anyway would throw every override in
+    /// `settings.json` away in silence — the settings screen would still say the
+    /// file is read, the recorder would still report a full table, and the only
+    /// symptom would be that the combination the user chose does nothing and the
+    /// one they replaced still works.
+    ///
+    /// Asserted through `start` and not through `resolve_hotkeys`, because
+    /// `resolve_hotkeys` has its own tests in `clipped_session` and they pass
+    /// either way: what is unguarded is this process handing the answer on.
+    ///
+    /// The row is read back from the report rather than from the service,
+    /// because the report is also what `get_hotkeys` answers the settings screen
+    /// with, so one assertion covers both. It carries the combination that was
+    /// *asked for* whether or not Windows granted it, which is what keeps this
+    /// test from depending on what else on the machine holds a function key.
+    #[test]
+    fn the_combination_registered_is_the_one_the_settings_file_names() {
+        let recorder = Arc::new(AskedRecorder::idle());
+        let mut overrides = HotkeyOverrides::none();
+        overrides
+            .set(
+                HotkeyAction::AddBookmark,
+                Some(HotkeyOverride::Bound(
+                    "Ctrl+Shift+F7".parse().expect("Ctrl+Shift+F7 is a hotkey"),
+                )),
+            )
+            .expect("nothing else is bound to Ctrl+Shift+F7");
+        let mut configuration = Configuration::defaults();
+        configuration.set_hotkeys(overrides);
+
+        let (registered, report) = start(&handler(&recorder), &configuration);
+        let row = report
+            .as_ref()
+            .expect("the service starts, so the report is the list of rows")
+            .iter()
+            .find(|row| row.action == "add_bookmark")
+            .cloned()
+            .expect("every action has a row");
+        // Before the assertion, so that a failure does not leave the
+        // combination registered for the rest of the suite.
+        registered.stop();
+
+        assert_eq!(
+            row.hotkey.as_deref(),
+            Some("Ctrl+Shift+F7"),
+            "the recorder registered a combination the settings file does not name, so the \
+             overrides in it were thrown away and the user's own hotkey does nothing",
         );
     }
 
