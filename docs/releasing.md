@@ -236,12 +236,13 @@ repository is a distribution.
 You can run the gates locally against a checkout, which is what CI does:
 
 ```powershell
-gh api "repos/wildware-uk/clipped/milestones?state=all&per_page=100" > milestones.json
-gh api "repos/wildware-uk/clipped/releases?per_page=100" > releases.json
-gh api "repos/wildware-uk/clipped/actions/workflows/ci.yml/runs?head_sha=$(git rev-parse HEAD)" > ci-runs.json
+$sha = git rev-parse HEAD
+gh api "repos/wildware-uk/clipped/milestones?state=all&per_page=100" | Out-File milestones.json -Encoding utf8
+gh api "repos/wildware-uk/clipped/releases?per_page=100" | Out-File releases.json -Encoding utf8
+gh api "repos/wildware-uk/clipped/actions/workflows/ci.yml/runs?head_sha=$sha" | Out-File ci-runs.json -Encoding utf8
 
 powershell -ExecutionPolicy Bypass -File scripts/check-release-gates.ps1 `
-    -Tag v1.0.0 -CommitSha (git rev-parse HEAD) `
+    -Tag v1.0.0 -CommitSha $sha `
     -MilestonesJson milestones.json -ReleasesJson releases.json -CiRunsJson ci-runs.json
 ```
 

@@ -636,19 +636,21 @@ function Test-LicenceGate {
         )
     }
 
+    $declared = '`bundle.resources` names ' + ($bundle.Declared -join ', ')
+    if ($bundle.Declared.Count -eq 0) { $declared = 'tauri.conf.json declares no `bundle.resources` at all' }
+
     $lines = @('The installer would not carry what distributing it obliges Clipped to carry:', '')
     foreach ($file in $missing) {
         $lines += ("    {0,-30} {1}" -f $file.Name, $file.Why)
     }
     $lines += ''
     if ($bundle.Files.Count -eq 0) {
-        $lines += 'It would carry nothing at all. `bundle.resources` names ' + ($bundle.Declared -join ', ') + ','
+        $lines += "It would carry nothing at all. $declared,"
         $lines += 'and no file was found under it. If this ran before the build, the payload'
         $lines += 'has not been staged yet: scripts/stage-installer-payload.ps1 does that, and'
         $lines += 'tauri.conf.json runs it from beforeBuildCommand.'
     } else {
-        $lines += "It would carry $($bundle.Files.Count) files, none of which are those. " +
-        '`bundle.resources` names ' + ($bundle.Declared -join ', ') + '.'
+        $lines += "It would carry $($bundle.Files.Count) files, none of which are those. $declared."
     }
     $lines += ''
     $lines += 'This is issue #123, and it is the one gate here that is about somebody else'

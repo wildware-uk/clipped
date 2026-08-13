@@ -578,6 +578,20 @@ try {
         -ExpectedExitCode 1 `
         -Contains @('carry nothing at all', 'stage-installer-payload.ps1')
 
+    # Deleting `bundle.resources` would make the installer carry nothing at all
+    # while every other check still passed, so the gate has to notice the
+    # declaration is gone rather than reporting an empty list of resource names.
+    $noResources = New-Fixture -Name 'no-resources' -WithLicences
+    $stripped = Join-Path $noResources.Root 'apps\desktop\src-tauri\tauri.conf.json'
+    (Get-Content -LiteralPath $stripped -Raw).Replace('"resources": {
+      "installer-payload/": ""
+    }', '"active": true') | Set-Content -LiteralPath $stripped -Encoding Ascii
+    Assert-Case `
+        -Name 'a bundle declaring no resources at all is refused, and says so' `
+        -Result (Invoke-Gates -Fixture $noResources -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('It would carry nothing at all. tauri.conf.json declares no')
+
     # Robust to how issue #123 is discharged: the gate asks what the *bundle*
     # collects, not what one directory holds, so a payload declared as a second
     # resource satisfies it too.
