@@ -48,7 +48,7 @@ second copy of the pin to keep in step and would fail on a user's machine rather
 than in a build.
 
 **`ffmpeg.exe`, `ffplay.exe` and `ffprobe.exe` are not shipped.** They sit in the
-same `bin` directory and are test tools (docs/ffmpeg.md): nothing in Clipped
+same `bin` directory and are test tools ([docs/ffmpeg.md](ffmpeg.md)): nothing in Clipped
 shells out to them, and shipping a program nobody runs is a licence obligation
 taken on for nothing.
 
