@@ -145,7 +145,7 @@ use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEve
 
 use crate::config::{Configuration, GameKey, ResolvedSettings};
 
-pub use manual::ManualSession;
+pub use manual::{ManualSession, RecordedProcess};
 pub use session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEndReason, SessionEvent,
     SessionEventKind, SessionId, SessionRecording, UNATTRIBUTED,
@@ -1023,43 +1023,82 @@ impl SessionManager {
         None
     }
 
-    /// What the catalogue makes of one process.
+    /// What the catalogue makes of one process, when it makes anything of it.
+    ///
+    /// [`None`] is [`GameIdentity::Unidentified`]: a launch the catalogue does
+    /// not claim is not a game, so it never becomes a session and the search
+    /// moves on to the next process in the group. A *window* the catalogue does
+    /// not claim is the opposite case and is recorded anyway — see
+    /// [`ManualSession`], which is the other caller of [`identify_process`].
     fn identify(&self, process: &ProcessSnapshot) -> Option<(GameIdentity, BTreeSet<String>)> {
         let path = process
             .image_path
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
 
-        let mut candidate = ProcessCandidate::new(&process.image_name);
-        if let Some(path) = path.as_deref() {
-            candidate = candidate.with_path(path);
+        match identify_process(&self.catalogue, &process.image_name, path.as_deref()) {
+            (GameIdentity::Unidentified, _) => None,
+            identified => Some(identified),
         }
+    }
+}
 
-        match self.catalogue.match_process(&candidate) {
-            Match::None => None,
-            Match::One { entry, .. } => Some((
-                GameIdentity::Known {
-                    game_id: entry.game_id().as_str().to_owned(),
-                    name: entry.name().to_owned(),
-                },
-                lowered(entry.child_processes()),
-            )),
-            // The union of the candidates' children, because the question a
-            // child answers here is only "is anything of this game still
-            // running", and any of the tied entries could be the one.
-            Match::Ambiguous { entries, .. } => Some((
-                GameIdentity::Ambiguous {
-                    candidates: entries
-                        .iter()
-                        .map(|entry| entry.game_id().as_str().to_owned())
-                        .collect(),
-                },
-                entries
+/// Which game a process is, and the executables that count as part of it.
+///
+/// **The one translation from a catalogue answer into a session's game.** Both
+/// ways a session starts ask through here — [`SessionManager`] asking whether a
+/// launch is a game, and [`ManualSession`] asking whether the window somebody
+/// pointed at belongs to one — so the answer for a given process cannot depend
+/// on which of them asked (AGENTS.md section 55,
+/// [issue #403](https://github.com/wildware-uk/clipped/issues/403)).
+///
+/// Each of [`Match`]'s three answers becomes the [`GameIdentity`] that means the
+/// same thing, and none of them is a guess: a game the user excluded is never
+/// offered as a match at all ([`Catalogue::match_process`]), and
+/// [`Match::Ambiguous`] stays ambiguous rather than being narrowed to whichever
+/// entry came first.
+///
+/// `image_path` is what a caller could find out about where the executable
+/// lives, and [`None`] is an ordinary answer rather than a failure — Windows
+/// will not open a process running at a higher integrity level than the
+/// recorder. A catalogue entry qualified by a path cannot be checked without
+/// one and therefore does not match, which is deliberate: the qualifier is
+/// there because the file name alone is not enough to be sure
+/// (`clipped_game_detection::catalogue::matching`).
+fn identify_process(
+    catalogue: &Catalogue,
+    image_name: &str,
+    image_path: Option<&str>,
+) -> (GameIdentity, BTreeSet<String>) {
+    let mut candidate = ProcessCandidate::new(image_name);
+    if let Some(path) = image_path {
+        candidate = candidate.with_path(path);
+    }
+
+    match catalogue.match_process(&candidate) {
+        Match::None => (GameIdentity::Unidentified, BTreeSet::new()),
+        Match::One { entry, .. } => (
+            GameIdentity::Known {
+                game_id: entry.game_id().as_str().to_owned(),
+                name: entry.name().to_owned(),
+            },
+            lowered(entry.child_processes()),
+        ),
+        // The union of the candidates' children, because the question a
+        // child answers here is only "is anything of this game still
+        // running", and any of the tied entries could be the one.
+        Match::Ambiguous { entries, .. } => (
+            GameIdentity::Ambiguous {
+                candidates: entries
                     .iter()
-                    .flat_map(|entry| lowered(entry.child_processes()))
+                    .map(|entry| entry.game_id().as_str().to_owned())
                     .collect(),
-            )),
-        }
+            },
+            entries
+                .iter()
+                .flat_map(|entry| lowered(entry.child_processes()))
+                .collect(),
+        ),
     }
 }
 

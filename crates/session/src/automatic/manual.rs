@@ -7,6 +7,12 @@
 //! produces afterwards — a [`Session`] with its identity, its recording, its
 //! settings and its history, written into the sidecar the library indexes.
 //!
+//! The catalogue is still asked, and that is not a policy decision creeping
+//! back in. Whether to record was settled by the person; *what they recorded* is
+//! a question only the catalogue can answer, and answering it is what puts a
+//! sitting somebody started from the window beside the sittings `watch` made of
+//! the same game ([issue #403](https://github.com/wildware-uk/clipped/issues/403)).
+//!
 //! So this is a *second driver of the same model*, and deliberately not a
 //! second model. Every line below calls something
 //! [`SessionManager`](super::SessionManager) calls, in the order it calls it:
@@ -14,6 +20,7 @@
 //! ```text
 //!  SessionManager                      ManualSession
 //!  ──────────────                      ─────────────
+//!  identify_process(catalogue, …)      identify_process(catalogue, …)
 //!  Session::new                        Session::new
 //!  record(Started)                     record(Started)
 //!  resolve_for(configuration, game)    resolve_for(configuration, game)
@@ -50,10 +57,12 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use clipped_game_detection::catalogue::Catalogue;
+
 use crate::config::{Configuration, ResolvedSettings};
 
-use super::session::{GameIdentity, Session, SessionEndReason, SessionEventKind, SessionId};
-use super::{persist, resolve_for, RecordingOutcome};
+use super::session::{Session, SessionEndReason, SessionEventKind, SessionId};
+use super::{identify_process, persist, resolve_for, RecordingOutcome};
 
 /// Which recording of a manual session. There is only ever the one.
 ///
@@ -63,6 +72,46 @@ use super::{persist, resolve_for, RecordingOutcome};
 /// produces is therefore named by [`Session::recording_path`] without a suffix,
 /// exactly as the first recording of an automatic session is.
 const ONLY_RECORDING: u32 = 1;
+
+/// The process behind the window a recording was asked for.
+///
+/// Two things at once, and they are the same two an automatic session takes from
+/// the process watcher: what the session records as having started it, and what
+/// the catalogue is asked about ([`super::identify_process`]).
+///
+/// The image path is optional for the reason
+/// [`ProcessCandidate`](clipped_game_detection::catalogue::ProcessCandidate)
+/// makes it optional. Windows will not open a process running at a higher
+/// integrity level than the recorder, so an unelevated Clipped cannot always say
+/// where a window's executable lives; a catalogue entry qualified by a path then
+/// cannot be checked and does not match, and the sitting is filed under no game
+/// rather than under a name nothing established.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordedProcess<'a> {
+    process_id: u32,
+    image_name: &'a str,
+    image_path: Option<&'a str>,
+}
+
+impl<'a> RecordedProcess<'a> {
+    /// A process known by its identifier and the file name of its executable.
+    #[must_use]
+    pub const fn new(process_id: u32, image_name: &'a str) -> Self {
+        Self {
+            process_id,
+            image_name,
+            image_path: None,
+        }
+    }
+
+    /// The same process, with the full path of the running image where the
+    /// caller could find one out.
+    #[must_use]
+    pub const fn with_image_path(mut self, image_path: Option<&'a str>) -> Self {
+        self.image_path = image_path;
+        self
+    }
+}
 
 /// One recording somebody asked for, and the session record it produces.
 ///
@@ -83,11 +132,25 @@ pub struct ManualSession {
 impl ManualSession {
     /// Opens a session for a recording of `output`, and writes its sidecar.
     ///
-    /// `pid` and `image_name` are the window's process, which is what a session
-    /// records as having started it — the same two fields an automatic
-    /// session's `session-started` event carries, from the same field of the
-    /// same event, so that "what was this a recording of" is one question with
-    /// one answer.
+    /// `process` is the window's, which is what a session records as having
+    /// started it — the same fields an automatic session's `session-started`
+    /// event carries, from the same field of the same event, so that "what was
+    /// this a recording of" is one question with one answer.
+    ///
+    /// **The catalogue decides the game, exactly as it does for a launch.**
+    /// [`super::identify_process`] is the one lookup, so a sitting somebody
+    /// recorded by pointing at Counter-Strike is filed under Counter-Strike and
+    /// the library groups it with the sittings `watch` recorded of it
+    /// ([issue #403](https://github.com/wildware-uk/clipped/issues/403)). A
+    /// window the catalogue does not claim — a browser, an editor, a game
+    /// nobody has catalogued, a game the user excluded — is still recorded, and
+    /// its session stays [`GameIdentity::Unidentified`](super::GameIdentity)
+    /// rather than being filed under a guess (AGENTS.md section 27).
+    ///
+    /// A caller with no catalogue to offer passes an empty one and gets that
+    /// second answer for everything, which is what makes a catalogue that could
+    /// not be read cost attribution rather than the recording (AGENTS.md
+    /// section 16).
     ///
     /// The settings are resolved **here and once**, through
     /// [`Configuration`]'s single fold, exactly as
@@ -103,22 +166,26 @@ impl ManualSession {
         directory: &Path,
         output: PathBuf,
         configuration: &Configuration,
-        pid: u32,
-        image_name: &str,
+        catalogue: &Catalogue,
+        process: RecordedProcess<'_>,
         now: SystemTime,
     ) -> Self {
-        // Nothing asked the catalogue about this window, and saying so is not
-        // the same as saying the catalogue was unsure. See
-        // [`GameIdentity::Unidentified`].
-        let game = GameIdentity::Unidentified;
+        // The child processes the answer carries are the manager's business and
+        // not this session's: they are how a *game* is watched for having
+        // exited, and this session ends when its one recording does.
+        let (game, _children) = identify_process(catalogue, process.image_name, process.image_path);
+        // A game the catalogue named resolves that game's settings layer, so a
+        // frame rate somebody set for Counter-Strike applies to a recording of
+        // it however the recording was started. The same fold, the same lookup
+        // (`super::resolve_for`, docs/sessions.md).
         let settings = resolve_for(configuration, &game);
 
         let mut session = Session::new(game, now);
         session.record(
             now,
             SessionEventKind::Started {
-                pid,
-                image_name: image_name.to_owned(),
+                pid: process.process_id,
+                image_name: process.image_name.to_owned(),
             },
         );
         session.begin_recording(ONLY_RECORDING, output, settings.clone(), now);
@@ -128,12 +195,20 @@ impl ManualSession {
 
         tracing::info!(
             session = session.id().as_str(),
-            pid,
-            image = image_name,
+            pid = process.process_id,
+            image = process.image_name,
+            game = session.game().slug(),
+            // The path is deliberately absent: it is a user path that can carry
+            // an account name and a library layout, and it is here to be
+            // matched on rather than logged (`clipped_windows::
+            // process_image_path`, docs/logging.md). Whether one was available
+            // is the part worth knowing, because an entry qualified by a path
+            // cannot match without it.
+            image_path_known = process.image_path.is_some(),
             scope = %settings.scope(),
             settings = %settings,
             "a session was opened for a recording that was asked for, with the settings that \
-             apply to a game nothing identified"
+             apply to the game the catalogue made of its window"
         );
 
         Self {
@@ -204,8 +279,59 @@ impl ManualSession {
 mod tests {
     use std::time::Duration;
 
+    use clipped_game_detection::catalogue::EntrySource;
+
     use super::*;
-    use crate::automatic::{RecordingOutcomeSummary, UNATTRIBUTED};
+    use crate::automatic::{GameIdentity, RecordingOutcomeSummary, UNATTRIBUTED};
+
+    /// The three answers the catalogue can give, as four entries: one plain
+    /// game, one that only counts where it is installed, and two that tie on a
+    /// shared executable name.
+    const GAMES: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "test-game"
+name = "Test Game"
+[[game.executables]]
+name = "test-game.exe"
+
+[[game]]
+game_id = "installed-somewhere"
+name = "Installed Somewhere"
+[[game.executables]]
+name = "somewhere.exe"
+path_contains = "games/installed-somewhere"
+
+[[game]]
+game_id = "first-tie"
+name = "First Tie"
+[[game.executables]]
+name = "tied.exe"
+
+[[game]]
+game_id = "second-tie"
+name = "Second Tie"
+[[game.executables]]
+name = "tied.exe"
+"#;
+
+    fn catalogue() -> Catalogue {
+        Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue")
+    }
+
+    /// The same catalogue with a decision of the user's laid over it, as their
+    /// own file would.
+    fn catalogue_decided(decision: &str) -> Catalogue {
+        let overlay = Catalogue::parse(
+            &format!("schema_version = 1\n{decision}"),
+            EntrySource::Overlay {
+                path: PathBuf::from(r"C:\Users\somebody\games.toml"),
+            },
+        )
+        .expect("the fixture is a valid overlay");
+        catalogue().overlaid_with(overlay)
+    }
 
     fn moment(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
@@ -221,6 +347,162 @@ mod tests {
         directory
     }
 
+    /// A session opened for a recording of `process`, over the fixture
+    /// catalogue and nothing configured.
+    fn session_of(
+        directory: &Path,
+        catalogue: &Catalogue,
+        process: RecordedProcess<'_>,
+    ) -> ManualSession {
+        ManualSession::start(
+            directory,
+            directory.join("clipped-20260813-120000.mkv"),
+            &Configuration::defaults(),
+            catalogue,
+            process,
+            moment(1_786_458_725),
+        )
+    }
+
+    #[test]
+    fn a_window_belonging_to_a_game_the_catalogue_knows_is_filed_under_that_game() {
+        // Issue #403's first acceptance criterion, at the point the answer is
+        // decided: the sitting carries the same `game` an automatic session of
+        // the same process would, so the library groups the two together
+        // instead of showing one row of Test Game and one of nothing.
+        let directory = scratch("known");
+        let session = session_of(
+            &directory,
+            &catalogue(),
+            RecordedProcess::new(4_242, "test-game.exe"),
+        );
+
+        assert_eq!(
+            session.session().game(),
+            &GameIdentity::Known {
+                game_id: "test-game".to_owned(),
+                name: "Test Game".to_owned(),
+            }
+        );
+        assert!(
+            session.id().as_str().starts_with("test-game-"),
+            "a session of a game is named after it: {}",
+            session.id()
+        );
+
+        let written =
+            std::fs::read_to_string(session.sidecar_path()).expect("the sidecar is written");
+        assert!(
+            written.contains("\"test-game\"") && written.contains("\"Test Game\""),
+            "the record the library reads has to name the game: {written}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_game_that_only_counts_where_it_is_installed_needs_the_path_before_it_is_named() {
+        // Both halves, because they are one decision. Most shipped entries are
+        // qualified by an install directory — Counter-Strike 2 among them — so
+        // a caller that found out where the window's executable lives gets the
+        // game, and one that could not gets no game rather than the wrong one.
+        let directory = scratch("qualified");
+        let named = session_of(
+            &directory,
+            &catalogue(),
+            RecordedProcess::new(4_242, "somewhere.exe")
+                .with_image_path(Some(r"D:\games\installed-somewhere\bin\somewhere.exe")),
+        );
+        assert_eq!(named.session().game().slug(), "installed-somewhere");
+
+        let unqualified = session_of(
+            &directory,
+            &catalogue(),
+            RecordedProcess::new(4_242, "somewhere.exe"),
+        );
+        assert_eq!(
+            unqualified.session().game(),
+            &GameIdentity::Unidentified,
+            "an entry that asked where the game is installed must not match on the file name \
+             alone"
+        );
+
+        let elsewhere = session_of(
+            &directory,
+            &catalogue(),
+            RecordedProcess::new(4_242, "somewhere.exe")
+                .with_image_path(Some(r"D:\games\something-else\bin\somewhere.exe")),
+        );
+        assert_eq!(elsewhere.session().game(), &GameIdentity::Unidentified);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_game_the_user_excluded_is_not_the_game_a_window_recording_is_filed_under() {
+        // An exclusion is a decision about a game and not about a subcommand
+        // (issue #45). A user who told Clipped to leave Test Game alone and
+        // then pointed at its window still gets their recording — they asked
+        // for it — and it is not filed under the game they excluded.
+        let directory = scratch("excluded");
+        let session = session_of(
+            &directory,
+            &catalogue_decided("[[decision]]\ngame_id = \"test-game\"\nexcluded = true\n"),
+            RecordedProcess::new(4_242, "test-game.exe"),
+        );
+
+        assert_eq!(session.session().game(), &GameIdentity::Unidentified);
+        assert_eq!(session.session().game().slug(), UNATTRIBUTED);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_game_the_user_renamed_is_filed_under_the_name_they_chose() {
+        // The other half of the user's overlay, and the reason the lookup goes
+        // through the loaded catalogue rather than the shipped data: a rename
+        // is a decision that has to reach every place a game is named.
+        let directory = scratch("renamed");
+        let session = session_of(
+            &directory,
+            &catalogue_decided("[[decision]]\ngame_id = \"test-game\"\nname = \"TG\"\n"),
+            RecordedProcess::new(4_242, "test-game.exe"),
+        );
+
+        assert_eq!(
+            session.session().game(),
+            &GameIdentity::Known {
+                game_id: "test-game".to_owned(),
+                name: "TG".to_owned(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_window_two_entries_claim_equally_well_is_recorded_as_the_tie_it_is() {
+        // The catalogue does not choose, and neither does this: the sitting is
+        // filed under `unattributed` with both candidates written down, which
+        // is what somebody needs to decide it afterwards.
+        let directory = scratch("tie");
+        let session = session_of(
+            &directory,
+            &catalogue(),
+            RecordedProcess::new(4_242, "tied.exe"),
+        );
+
+        assert_eq!(
+            session.session().game(),
+            &GameIdentity::Ambiguous {
+                candidates: vec!["first-tie".to_owned(), "second-tie".to_owned()],
+            }
+        );
+        assert_eq!(session.session().game().slug(), UNATTRIBUTED);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[test]
     fn the_sidecar_is_on_disk_before_the_recording_has_produced_anything() {
         // The whole reason the file is written when the session opens rather
@@ -233,8 +515,8 @@ mod tests {
             &directory,
             output.clone(),
             &Configuration::defaults(),
-            4_242,
-            "cs2.exe",
+            &catalogue(),
+            RecordedProcess::new(4_242, "notepad.exe"),
             moment(1_786_458_725),
         );
 
@@ -261,8 +543,8 @@ mod tests {
             &directory,
             output,
             &Configuration::defaults(),
-            4_242,
-            "cs2.exe",
+            &catalogue(),
+            RecordedProcess::new(4_242, "test-game.exe"),
             moment(1_786_458_725),
         );
         let path = session.sidecar_path();
@@ -290,20 +572,20 @@ mod tests {
     }
 
     #[test]
-    fn a_session_nothing_identified_is_filed_under_the_same_name_a_tie_is() {
-        // Not because the two mean the same thing — they do not — but because
-        // the *filing* answer is the same one: a session with no single game
+    fn a_window_the_catalogue_does_not_claim_is_recorded_and_filed_under_no_game() {
+        // Issue #403's second acceptance criterion. A text editor is not a game
+        // and must not be filed as one, however much a user would like their
+        // library tidy: `Unidentified` is the honest answer and it is filed
+        // under the same name a tie is, because a session with no single game
         // has to be named after something that is not a game.
         let directory = scratch("slug");
-        let session = ManualSession::start(
+        let session = session_of(
             &directory,
-            directory.join("clipped-20260813-120000.mkv"),
-            &Configuration::defaults(),
-            1,
-            "notepad.exe",
-            moment(1_786_458_725),
+            &catalogue(),
+            RecordedProcess::new(1, "notepad.exe"),
         );
 
+        assert_eq!(session.session().game(), &GameIdentity::Unidentified);
         assert_eq!(session.session().game().slug(), UNATTRIBUTED);
         assert!(
             session.id().as_str().starts_with(UNATTRIBUTED),
@@ -331,8 +613,8 @@ mod tests {
             &directory,
             directory.join("clipped-20260813-120000.mkv"),
             &configuration,
-            1,
-            "cs2.exe",
+            &catalogue(),
+            RecordedProcess::new(1, "notepad.exe"),
             moment(1_786_458_725),
         );
 
@@ -343,6 +625,56 @@ mod tests {
             written.contains("\"144\""),
             "the session's record has to say what the recording was made with: {written}"
         );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_of_a_game_is_made_with_that_games_settings_rather_than_the_global_ones() {
+        // The behaviour change identifying the game brings with it, stated
+        // rather than discovered (docs/sessions.md): a session with a `known`
+        // game resolves that game's layer, so somebody who set Test Game to 144
+        // gets 144 whether the recording was started by `watch` or by pointing
+        // at the window. Before #403 every window recording resolved the global
+        // layer, because every window recording had no game.
+        let directory = scratch("per-game");
+        let mut configuration = Configuration::defaults();
+        let mut global = crate::config::Preferences::none();
+        global
+            .set_framerate(Some(30))
+            .expect("30 is an acceptable frame rate");
+        configuration.set_global(global);
+        let mut for_the_game = crate::config::Preferences::none();
+        for_the_game
+            .set_framerate(Some(144))
+            .expect("144 is an acceptable frame rate");
+        configuration.set_game(
+            crate::config::GameKey::parse("test-game").expect("a catalogue identifier is a key"),
+            for_the_game,
+        );
+
+        let identified = ManualSession::start(
+            &directory,
+            directory.join("clipped-20260813-120000.mkv"),
+            &configuration,
+            &catalogue(),
+            RecordedProcess::new(4_242, "test-game.exe"),
+            moment(1_786_458_725),
+        );
+        assert_eq!(identified.settings().framerate().get(), 144);
+
+        // And a window that is not that game is still the global layer, which
+        // is what makes the line above about the game rather than about the
+        // settings file having one entry in it.
+        let anonymous = ManualSession::start(
+            &directory,
+            directory.join("clipped-20260813-130000.mkv"),
+            &configuration,
+            &catalogue(),
+            RecordedProcess::new(4_242, "notepad.exe"),
+            moment(1_786_462_325),
+        );
+        assert_eq!(anonymous.settings().framerate().get(), 30);
 
         let _ = std::fs::remove_dir_all(&directory);
     }

@@ -262,7 +262,14 @@ fn output_directory(args: &WatchArgs) -> Result<PathBuf, WatchCommandError> {
 }
 
 /// The catalogue, with whatever happened to the user's overlay reported.
-fn load_catalogue() -> Result<Catalogue, WatchCommandError> {
+///
+/// `pub(crate)` for `serve`, which needs the same catalogue and the same report
+/// of what happened to the user's file: a game they registered, renamed or
+/// excluded has to mean the same thing to a recording they started from the
+/// window as it does to one detection started (AGENTS.md section 55, issue
+/// #403). What differs is what the two do with a failure, which is the caller's
+/// decision and not this function's — see `serve::catalogue_for_recordings`.
+pub(crate) fn load_catalogue() -> Result<Catalogue, WatchCommandError> {
     let loaded = Catalogue::load().map_err(WatchCommandError::Catalogue)?;
 
     match loaded.overlay() {

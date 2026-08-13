@@ -23,6 +23,15 @@
 //! refuses those before they reach this module at all, with the milestone and
 //! issue that build them.
 //!
+//! # What a recording is filed under
+//!
+//! The same thing `watch` files one under. This process loads the user's game
+//! catalogue at start-up and every recording it starts asks it about the
+//! window's process, so a sitting somebody recorded by pointing at
+//! Counter-Strike lands beside the sittings detection recorded of it, and a
+//! window that is not a game is recorded and filed under nothing rather than
+//! under a guess ([`RecordingState::begin`], `docs/sessions.md`, issue #403).
+//!
 //! The last two are answered from files rather than from anything this process
 //! is doing, on the connection thread the command arrived on: a library read is
 //! a bounded query over local data (`crate::library`) and an export is a copy of
@@ -82,6 +91,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
 
+use clipped_game_detection::catalogue::Catalogue;
 use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
     Endpoint, EventPublisher, HotkeyBinding, ProtocolError, RecorderStatus, RecordingSummary,
@@ -90,7 +100,7 @@ use clipped_ipc::{
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
-use clipped_session::automatic::{ManualSession, RecordingOutcome};
+use clipped_session::automatic::{ManualSession, RecordedProcess, RecordingOutcome};
 use clipped_session::bookmarks::{BookmarkError, BookmarkLog, BookmarkRequest};
 use clipped_session::config::Configuration;
 use clipped_session::screenshot::{
@@ -100,6 +110,7 @@ use clipped_session::screenshot::{
 use clipped_session::{
     CaptureTargetSettings, RecordingProgress, RecordingReport, RecordingSettings,
 };
+use clipped_windows::WindowInfo;
 
 use crate::cli::{RecordArgs, ServeArgs};
 use crate::config::{ConfigError, RecordingConfig};
@@ -277,6 +288,44 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
     outcome
 }
 
+/// The catalogue every recording this process makes is attributed through, or
+/// an empty one.
+///
+/// The same loader `watch` uses, so a game the user registered, renamed or
+/// excluded means the same thing to a recording they started from the window as
+/// it does to one detection started (AGENTS.md section 55, issue #45).
+///
+/// **A catalogue that cannot be read does not stop a recording**, which is the
+/// difference between this and `watch`. `watch` has nothing to do without a
+/// catalogue and refuses to start; here the user has pointed at a window and
+/// pressed record, and refusing them their footage over a malformed line in
+/// their games file would be protecting the wrong thing (AGENTS.md sections 16
+/// and 17).
+///
+/// What is lost instead is attribution, and the *empty* catalogue is why: the
+/// failure is almost always in the user's own overlay, which is where their
+/// exclusions and renames live, and falling back to the shipped data would file
+/// recordings under games they told Clipped to leave alone. Every sitting made
+/// while their file is unreadable is `unattributed`, which is honest, and the
+/// error names the file so they can fix it.
+fn catalogue_for_recordings() -> Catalogue {
+    match crate::watch::load_catalogue() {
+        Ok(catalogue) => catalogue,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "the game catalogue could not be read, so recordings made from the window will \
+                 not be filed under a game until it is fixed"
+            );
+            eprintln!(
+                "Your games file could not be read, so recordings will not be filed under a \
+                 game: {error}"
+            );
+            Catalogue::default()
+        }
+    }
+}
+
 /// How this recorder introduces itself in every handshake.
 fn identity() -> PeerIdentity {
     PeerIdentity {
@@ -332,21 +381,33 @@ impl RecorderService {
             crate::watch::load_configuration(
                 clipped_session::config::ConfigurationStore::default_path().as_deref(),
             ),
+            // And the same catalogue `watch` matches processes against, read
+            // once for the same reason (issue #403).
+            catalogue_for_recordings(),
         )
     }
 
-    /// The same, over a library named by the caller and the shipped settings.
+    /// The same, over a library and a catalogue named by the caller, and the
+    /// shipped settings.
     ///
     /// For tests, which must not read, create or index the library of whoever is
-    /// running them, and must not be told what to record by their settings file
-    /// either (AGENTS.md section 25).
+    /// running them, must not be told what to record by their settings file, and
+    /// must not be told what a game is by their games file either (AGENTS.md
+    /// section 25).
     #[must_use]
     pub fn with_library(
         events: EventPublisher,
         library: LibraryReader,
         indexer: LibraryIndexer,
+        catalogue: Catalogue,
     ) -> Self {
-        Self::over(events, library, indexer, Configuration::defaults())
+        Self::over(
+            events,
+            library,
+            indexer,
+            Configuration::defaults(),
+            catalogue,
+        )
     }
 
     fn over(
@@ -354,6 +415,7 @@ impl RecorderService {
         library: LibraryReader,
         indexer: LibraryIndexer,
         configuration: Configuration,
+        catalogue: Catalogue,
     ) -> Self {
         let indexer = Arc::new(indexer);
         Self {
@@ -361,6 +423,7 @@ impl RecorderService {
                 events,
                 Arc::clone(&indexer),
                 configuration,
+                catalogue,
             )),
             library,
             indexer,
@@ -550,6 +613,14 @@ struct RecordingState {
     /// resolves what it is made with when it starts, and nothing re-reads a file
     /// underneath a running encoder (`clipped_session::config`, issue #61).
     configuration: Configuration,
+    /// What Clipped knows about games, as it stood when this process started
+    /// ([`catalogue_for_recordings`]).
+    ///
+    /// Asked once per recording — when [`Self::begin`] opens its session — and
+    /// never per frame. Held for the same reason the settings are: the answer
+    /// belongs to the moment the recording started, and a games file edited
+    /// while a recording runs does not change what that recording is of.
+    catalogue: Catalogue,
 }
 
 /// A recording that has been started.
@@ -591,68 +662,18 @@ struct Running {
     /// ([`ManualSession::finish`]), and the outcome that closes this one arrives
     /// while the recording is still held here.
     ///
-    /// A recording started by this state cannot be made without one — `start`
-    /// builds the session before it builds this — and that is the point. Issue
-    /// #402 was a `serve` that wrote files and no session record at all, so
-    /// there was nothing for the library to index; the session being a field of
-    /// the recording rather than a step somebody has to remember is what stops
-    /// that returning.
+    /// A recording started by this state cannot be made without one —
+    /// [`RecordingState::begin`] builds the session before it builds this — and
+    /// that is the point. Issue #402 was a `serve` that wrote files and no
+    /// session record at all, so there was nothing for the library to index; the
+    /// session being a field of the recording rather than a step somebody has to
+    /// remember is what stops that returning.
     session: Option<ManualSession>,
     /// [`None`] while it is still recording.
     outcome: Option<Result<RecordingReport, String>>,
 }
 
 impl Running {
-    /// A recording that has just been started, and the session record it opens.
-    ///
-    /// **The only way this type is built**, in the recorder and in its tests
-    /// alike, and that is the whole point of it existing. Issue #402 was a
-    /// `serve` that produced files and no session record, so nothing could
-    /// index them; making the session part of *constructing* a recording means
-    /// the way to write that defect again is to delete a line here, which the
-    /// tests notice, rather than to forget a line somewhere else, which nothing
-    /// would.
-    ///
-    /// The thread is filled in by the caller, because what a recording is made
-    /// with is resolved from [`Self::session`] — the settings this session
-    /// resolved — and there is nothing to spawn until that answer exists. The
-    /// stop signal is made here and handed out by cloning, so a recording and
-    /// the signal that ends it cannot be two different signals.
-    fn started(
-        id: String,
-        output: PathBuf,
-        target: String,
-        configuration: &Configuration,
-        pid: u32,
-        image_name: &str,
-        now: SystemTime,
-    ) -> Self {
-        // The directory is the recording's own, which is what "beside its
-        // recordings" means for an output the caller may have named itself.
-        let session = ManualSession::start(
-            output.parent().unwrap_or_else(|| Path::new(".")),
-            output.clone(),
-            configuration,
-            pid,
-            image_name,
-            now,
-        );
-
-        Self {
-            id,
-            bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
-            output,
-            target,
-            started: Instant::now(),
-            stop: crate::shutdown::ShutdownSignal::new(),
-            thread: None,
-            progress: RecordingProgress::new(),
-            screenshots: ScreenshotRequests::new(),
-            session: Some(session),
-            outcome: None,
-        }
-    }
-
     /// The session this recording is the whole of, while it is still running.
     ///
     /// # Panics
@@ -672,6 +693,7 @@ impl RecordingState {
         events: EventPublisher,
         indexer: Arc<LibraryIndexer>,
         configuration: Configuration,
+        catalogue: Catalogue,
     ) -> Self {
         Self {
             current: Mutex::new(None),
@@ -680,6 +702,72 @@ impl RecordingState {
             next_id: AtomicU64::new(1),
             indexer,
             configuration,
+            catalogue,
+        }
+    }
+
+    /// A recording of `window`, and the session record it opens.
+    ///
+    /// **The only way a [`Running`] is built**, in the recorder and in its tests
+    /// alike, and that is the whole point of it existing. Issue #402 was a
+    /// `serve` that produced files and no session record, so nothing could index
+    /// them; issue #403 was a `serve` that asked nothing about the window it was
+    /// pointed at, so every sitting it produced was filed under no game. Both
+    /// answers are settled *here*, in the one place a recording of this state
+    /// comes from, so writing either defect again means deleting a line the
+    /// tests are looking at rather than forgetting one somewhere else.
+    ///
+    /// The thread is filled in by the caller, because what a recording is made
+    /// with is resolved from the settings the session resolved, and there is
+    /// nothing to spawn until that answer exists. The stop signal is made here
+    /// and handed out by cloning, so a recording and the signal that ends it
+    /// cannot be two different signals.
+    fn begin(
+        &self,
+        id: String,
+        output: PathBuf,
+        target: String,
+        window: &WindowInfo,
+        now: SystemTime,
+    ) -> Running {
+        // Asked of Windows here rather than carried on `WindowInfo`, which
+        // describes what enumeration saw and never opens a process twice
+        // (`clipped_windows::process`). It is one process handle per recording,
+        // and it is what most catalogue entries need: Counter-Strike 2 is
+        // `cs2.exe` *in the directory Steam installs it into*, and an entry
+        // qualified by a path cannot match a process nobody could locate
+        // (`clipped_game_detection::catalogue::matching`).
+        let image_path = clipped_windows::process_image_path(window.process_id())
+            .map(|path| path.to_string_lossy().into_owned());
+        let process = RecordedProcess::new(
+            window.process_id(),
+            window.process_name().unwrap_or_default(),
+        )
+        .with_image_path(image_path.as_deref());
+
+        // The directory is the recording's own, which is what "beside its
+        // recordings" means for an output the caller may have named itself.
+        let session = ManualSession::start(
+            output.parent().unwrap_or_else(|| Path::new(".")),
+            output.clone(),
+            &self.configuration,
+            &self.catalogue,
+            process,
+            now,
+        );
+
+        Running {
+            id,
+            bookmarks: Arc::new(BookmarkLog::for_recording(&output)),
+            output,
+            target,
+            started: Instant::now(),
+            stop: crate::shutdown::ShutdownSignal::new(),
+            thread: None,
+            progress: RecordingProgress::new(),
+            screenshots: ScreenshotRequests::new(),
+            session: Some(session),
+            outcome: None,
         }
     }
 
@@ -715,16 +803,15 @@ impl RecordingState {
 
         // The session opens with the recording and before the encoder, so that
         // a recorder killed during this recording still leaves something saying
-        // what the file beside it is (AGENTS.md section 17). `Running::started`
-        // is the only place a recording of this state is built, which is what
-        // makes that unforgettable rather than remembered.
-        let mut running = Running::started(
+        // what the file beside it is (AGENTS.md section 17). `begin` is the only
+        // place a recording of this state is built, which is what makes that —
+        // and asking the catalogue what the window is — unforgettable rather
+        // than remembered.
+        let mut running = self.begin(
             id.clone(),
             output.clone(),
             target,
-            &self.configuration,
-            window.process_id(),
-            window.process_name().unwrap_or_default(),
+            &window,
             SystemTime::now(),
         );
 
@@ -975,16 +1062,14 @@ impl RecordingState {
 
         let screenshot = clipped_session::screenshot::write(
             &still, &settings,
-            // The game a screenshot belongs to is the session's, and `serve`
-            // does run a session now (`clipped_session::automatic::
-            // ManualSession`, issue #402) — but that session's game is
-            // `unidentified`, because nothing asked the catalogue about the
-            // window the user picked. So there is still no game to file a
-            // screenshot under, and filing it under one nobody identified would
-            // be invented data (AGENTS.md section 27). What changed is the
-            // reason, not the answer. Attributing it is issue #334, and the
-            // question of attributing the *session* is issue #403; the second
-            // is what would give the first something to read.
+            // The game a screenshot belongs to is the session's, and a session
+            // `serve` opened now has one where the catalogue claims the window
+            // (issue #403). Reading it here is deliberately *not* part of that
+            // ticket: a screenshot taken with nothing recording has no session
+            // at all, so filing screenshots by game is a decision about both
+            // cases rather than about this one, and it is issue #334. What
+            // changed is that #334 now has something to read (AGENTS.md
+            // section 40).
             "", now, position,
         )
         .map_err(screenshot_failed)?;
@@ -1522,9 +1607,73 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use std::time::Duration;
 
+    use clipped_game_detection::catalogue::EntrySource;
     use clipped_session::bookmarks::{BookmarkFile, DEFAULT_LEAD};
+    use clipped_windows::{MonitorHandle, PixelSize, WindowGeometry, WindowHandle};
 
     use super::*;
+
+    /// A catalogue that claims **this test process** as a game, by the name and
+    /// the directory its executable really has.
+    ///
+    /// Built from `current_exe` rather than written out, and qualified by a
+    /// path, because that is what makes the lookup real: the recorder is told
+    /// to record a window belonging to a live process, and the only way the
+    /// qualifier can be checked is if the recorder really asked Windows where
+    /// that process's image lives. A build that dropped the image path answers
+    /// `unattributed` here and passes nothing.
+    ///
+    /// The shipped catalogue is deliberately not used: it would make these
+    /// tests depend on which games Clipped happens to ship, and the entries
+    /// that matter — Counter-Strike 2 among them — are path-qualified against
+    /// install directories no test machine has (AGENTS.md section 25).
+    fn catalogue_claiming_this_process() -> Catalogue {
+        let executable = std::env::current_exe().expect("a test process can name its executable");
+        let name = this_executable_name();
+        let directory = executable
+            .parent()
+            .and_then(Path::file_name)
+            .expect("an executable is in a directory")
+            .to_string_lossy()
+            .into_owned();
+
+        Catalogue::parse(
+            &format!(
+                "schema_version = 1\n\n[[game]]\ngame_id = \"a-test-game\"\nname = \"A Test \
+                 Game\"\n[[game.executables]]\nname = \"{name}\"\npath_contains = \
+                 \"{directory}\"\n"
+            ),
+            EntrySource::Seed,
+        )
+        .expect("the fixture is a valid catalogue")
+    }
+
+    /// The file name of the executable these tests are running as.
+    fn this_executable_name() -> String {
+        std::env::current_exe()
+            .expect("a test process can name its executable")
+            .file_name()
+            .expect("an executable has a file name")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// A window of this test's process, as the recorder would have resolved one.
+    ///
+    /// Constructed rather than enumerated — there is no desktop here — but its
+    /// process identifier is a real one, which is the half of the lookup a
+    /// fabricated number cannot exercise.
+    fn window_of(process_id: u32, image_name: &str) -> WindowInfo {
+        WindowInfo::new(
+            WindowHandle::from_raw(0x0001_04ac),
+            "A Test Game".to_owned(),
+            process_id,
+            Some(image_name.to_owned()),
+            WindowGeometry::new(PixelSize::new(2560, 1440), 96, MonitorHandle::from_raw(1)),
+            false,
+            None,
+        )
+    }
 
     /// A directory of this test's own; several of these run at once.
     fn scratch(name: &str) -> PathBuf {
@@ -1556,12 +1705,19 @@ mod tests {
         )
     }
 
-    /// A recording state with nothing recording, over a scratch library.
+    /// A recording state with nothing recording, over a scratch library and a
+    /// catalogue that claims nothing.
     fn idle_state(directory: &Path) -> Arc<RecordingState> {
+        state_over(directory, Catalogue::default())
+    }
+
+    /// The same, over a catalogue the caller chose.
+    fn state_over(directory: &Path, catalogue: Catalogue) -> Arc<RecordingState> {
         Arc::new(RecordingState::new(
             EventPublisher::new(),
             Arc::new(indexer_over(directory)),
             Configuration::defaults(),
+            catalogue,
         ))
     }
 
@@ -1575,23 +1731,27 @@ mod tests {
     fn recording_at(output: &Path, position: Option<Duration>) -> Arc<RecordingState> {
         let directory = output.parent().expect("the output is in a directory");
         let state = idle_state(directory);
-        *state.current.lock().expect("a fresh lock") = Some(started_recording(output, position));
+        let running = started_recording(&state, output, position);
+        *state.current.lock().expect("a fresh lock") = Some(running);
         state
     }
 
     /// A recording as `start` builds one, through the same constructor.
     ///
     /// Never a `Running { … }` literal, deliberately: a test that assembled the
-    /// fields by hand could leave out the session and would then be testing a
-    /// recording the recorder cannot make.
-    fn started_recording(output: &Path, position: Option<Duration>) -> Running {
-        let running = Running::started(
+    /// fields by hand could leave out the session, or the catalogue lookup that
+    /// gives it a game, and would then be testing a recording the recorder
+    /// cannot make.
+    fn started_recording(
+        state: &RecordingState,
+        output: &Path,
+        position: Option<Duration>,
+    ) -> Running {
+        let running = state.begin(
             "r-1".to_owned(),
             output.to_path_buf(),
             "process cs2.exe".to_owned(),
-            &Configuration::defaults(),
-            4_242,
-            "cs2.exe",
+            &window_of(4_242, "cs2.exe"),
             moment(),
         );
         if let Some(position) = position {
@@ -1812,6 +1972,7 @@ mod tests {
             EventPublisher::new(),
             LibraryReader::at(Some(path)),
             indexer_over(&directory),
+            Catalogue::default(),
         )
     }
 
@@ -1858,6 +2019,7 @@ mod tests {
             EventPublisher::new(),
             LibraryReader::at(Some(path)),
             indexer_over(&directory),
+            Catalogue::default(),
         );
 
         let refusal = service
@@ -1881,14 +2043,24 @@ mod tests {
     /// there is no window, GPU or encoder here — and it carries the session the
     /// real `start` builds, because that is the thing under test.
     fn service_recording_into(directory: &Path, output: &Path) -> RecorderService {
+        service_recording_into_over(directory, output, Catalogue::default())
+    }
+
+    /// The same, over a catalogue the caller chose.
+    fn service_recording_into_over(
+        directory: &Path,
+        output: &Path,
+        catalogue: Catalogue,
+    ) -> RecorderService {
         let service = RecorderService::with_library(
             EventPublisher::new(),
             LibraryReader::at(Some(directory.join("library.db"))),
             indexer_over(directory),
+            catalogue,
         );
 
-        *service.recordings.current.lock().expect("a fresh lock") =
-            Some(started_recording(output, None));
+        let running = started_recording(&service.recordings, output, None);
+        *service.recordings.current.lock().expect("a fresh lock") = Some(running);
         service
     }
 
@@ -1974,7 +2146,8 @@ mod tests {
         );
         assert_eq!(
             sessions[0].game_id, None,
-            "nothing identified a game, and the library says so rather than inventing one"
+            "the catalogue was asked about this window and claimed nothing, and the library \
+             says so rather than inventing a game"
         );
         assert_eq!(
             sessions[0].end_reason.as_deref(),
@@ -1985,6 +2158,147 @@ mod tests {
         assert!(sessions[0].ended_at.is_some());
 
         service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_of_a_window_the_catalogue_claims_reaches_the_library_under_that_game() {
+        // Issue #403's first acceptance criterion, along the whole path it has
+        // to survive: the window's process, the catalogue lookup, the session
+        // record, the index, and the reply the Library screen is drawn from. A
+        // sitting that arrives here with no game is a sitting the screen groups
+        // apart from the ones `watch` recorded of the same game, which is the
+        // defect.
+        //
+        // The window is this test process's own, so the image path the recorder
+        // reads is a real one and the catalogue's path qualifier is really
+        // checked (`catalogue_claiming_this_process`). Take the image path out
+        // of `begin`, hand `ManualSession` an empty catalogue, or stop asking
+        // it at all, and this fails while the test above still passes.
+        let directory = scratch("attributed");
+        let output = directory.join("clipped-20260813-120000.mkv");
+        std::fs::write(&output, [0u8; 4096]).expect("the recording can be written");
+
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            catalogue_claiming_this_process(),
+        );
+        let running = service.recordings.begin(
+            "r-1".to_owned(),
+            output.clone(),
+            format!("process {}", this_executable_name()),
+            &window_of(std::process::id(), &this_executable_name()),
+            moment(),
+        );
+        *service.recordings.current.lock().expect("a fresh lock") = Some(running);
+
+        service.start_indexing();
+        assert!(service.indexer.settled_within(INDEXING_PATIENCE));
+        service
+            .recordings
+            .finish("r-1", Err("the encoder went".to_owned()));
+        assert!(
+            service.indexer.settled_within(INDEXING_PATIENCE),
+            "the indexer never finished the run the recording asked for"
+        );
+
+        let sessions = library_of(&service);
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(
+            sessions[0].game_id.as_deref(),
+            Some("a-test-game"),
+            "a recording of a window the catalogue claims has to be filed under that game: \
+             {sessions:?}"
+        );
+        assert_eq!(sessions[0].game_name.as_deref(), Some("A Test Game"));
+        assert!(
+            sessions[0].session_id.starts_with("a-test-game-"),
+            "the sitting is named after the game as one `watch` recorded would be: {}",
+            sessions[0].session_id
+        );
+
+        // And the Library screen's own grouping, which is what the user sees:
+        // one game, with this sitting in it, rather than a row of sittings
+        // attributed to nothing.
+        let Reply::LibraryGames { games } =
+            service.call(Command::LibraryGames).expect("the games read")
+        else {
+            panic!("`library_games` was answered with something else");
+        };
+        assert_eq!(games.len(), 1, "{games:?}");
+        assert_eq!(games[0].game_id.as_deref(), Some("a-test-game"));
+        assert_eq!(games[0].sessions, 1);
+
+        service.shut_down();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_recorder_the_window_drives_holds_the_catalogue_watch_would_have_loaded() {
+        // The question the test above cannot ask, because it supplies the
+        // catalogue itself: does the recorder this product actually builds have
+        // one? `RecorderService::new` is what `serve` calls, and a build that
+        // loaded no catalogue — or loaded the shipped data while ignoring the
+        // user's own file — files recordings under nothing, or under games
+        // somebody excluded, however well everything below it works.
+        //
+        // The answer is compared against the loader rather than against a
+        // fixture, so this holds on any machine: one that has a games file of
+        // its own, one that has none, and one whose file cannot be read.
+        let service = RecorderService::new(EventPublisher::new());
+
+        match crate::watch::load_catalogue() {
+            Ok(expected) => {
+                assert!(
+                    !expected.entries().is_empty(),
+                    "the shipped catalogue is not empty, so this comparison is worth making"
+                );
+                assert_eq!(
+                    service.recordings.catalogue, expected,
+                    "`serve` has to file recordings through the same catalogue `watch` matches \
+                     processes against"
+                );
+            }
+            // The documented fallback rather than an untested branch: a games
+            // file that cannot be read costs attribution and must cost nothing
+            // else (`catalogue_for_recordings`).
+            Err(_) => assert!(
+                service.recordings.catalogue.entries().is_empty(),
+                "a catalogue that could not be read must not be replaced by the shipped one, \
+                 which would ignore what the user decided"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_recording_started_while_the_catalogue_is_unreadable_is_still_made_and_still_filed() {
+        // The third acceptance criterion. An empty catalogue is what a games
+        // file nobody can read leaves behind, and the recording has to go on
+        // regardless: the person pressed record, and their footage is what
+        // cannot be made again (AGENTS.md sections 16 and 17).
+        let directory = scratch("no-catalogue");
+        let output = directory.join("clipped-20260813-120000.mkv");
+        let state = state_over(&directory, Catalogue::default());
+
+        let running = state.begin(
+            "r-1".to_owned(),
+            output.clone(),
+            format!("process {}", this_executable_name()),
+            &window_of(std::process::id(), &this_executable_name()),
+            moment(),
+        );
+
+        assert_eq!(
+            running.session().session().game(),
+            &clipped_session::automatic::GameIdentity::Unidentified
+        );
+        assert!(
+            running.session().sidecar_path().is_file(),
+            "the sitting still has a record, so the recording still reaches the library"
+        );
+
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -2042,8 +2356,8 @@ mod tests {
             &directory,
             output.clone(),
             &Configuration::defaults(),
-            7,
-            "cs2.exe",
+            &Catalogue::default(),
+            RecordedProcess::new(7, "cs2.exe"),
             moment(),
         );
         let _ = earlier.finish(
@@ -2057,6 +2371,7 @@ mod tests {
             EventPublisher::new(),
             LibraryReader::at(Some(directory.join("library.db"))),
             indexer_over(&directory),
+            Catalogue::default(),
         );
         service.start_indexing();
         assert!(
@@ -2091,6 +2406,7 @@ mod tests {
             EventPublisher::new(),
             LibraryReader::at(Some(directory.join("library.db"))),
             indexer_over(&directory),
+            Catalogue::default(),
         );
         service.start_indexing();
         assert!(service.indexer.settled_within(INDEXING_PATIENCE));

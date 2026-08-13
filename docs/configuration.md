@@ -465,8 +465,10 @@ any game has launched. So is `apps/recorder/src/serve.rs`, for the same reason
 wearing different clothes: a `start_recording` may carry any of those parameters,
 and `apply_to` would replace every one of them with the shipped default on a
 machine with no settings file. The recording a window asks for resolves through
-the *global* layer, because nothing identified a game for it to have a layer of
-its own ([issue #403](https://github.com/wildware-uk/clipped/issues/403)).
+the game's layer where the catalogue claims the window's process, and through the
+global layer where it does not — the same rule an automatic recording follows,
+because it is the same lookup ([sessions.md](sessions.md),
+[issue #403](https://github.com/wildware-uk/clipped/issues/403)).
 
 ```rust
 // at start-up, from `%LOCALAPPDATA%\Clipped\settings.json`

@@ -46,16 +46,16 @@ pub const UNATTRIBUTED: &str = "unattributed";
 
 /// Which game a session is of.
 ///
-/// Automatic recording never asks about a process the catalogue does not claim
-/// — a launch it does not recognise never becomes a session at all — so for a
-/// session [`SessionManager`](super::SessionManager) opened, what varies is
-/// only whether the catalogue recognised *one* thing.
+/// The catalogue is asked the same question both ways a session starts
+/// (`super::identify_process`), and what differs is what the answer decides. A
+/// launch the catalogue does not claim never becomes a session at all, so a
+/// session [`SessionManager`](super::SessionManager) opened is never
+/// [`Self::Unidentified`]. A session somebody asked for by pointing at a window
+/// can be: the user chose the window, so there is a session and a recording
+/// whatever the catalogue said about it.
 ///
-/// A session somebody asked for by pointing at a window is the case that needs
-/// the third answer. The user chose the window, so there is a session and a
-/// recording whatever the catalogue would have said, and nothing has asked it:
-/// that is [`Self::Unidentified`], and it is a different statement from
-/// [`Self::Ambiguous`] — "nobody looked" against "several answers tied".
+/// The three are three different statements and none of them is a guess —
+/// "this game", "several tied", and "the catalogue claims nothing here".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GameIdentity {
     /// Exactly one catalogue entry claimed the process.
@@ -79,17 +79,16 @@ pub enum GameIdentity {
         candidates: Vec<String>,
     },
 
-    /// Nothing identified a game, because nothing was asked.
+    /// No catalogue entry claims the process, so there is no game to name.
     ///
     /// A recording started over the protocol names a *window*, and the person
     /// who pressed the button is the authority on it being worth recording
-    /// (`clipped_session::automatic::ManualSession`). The session is filed
-    /// under [`UNATTRIBUTED`] with no candidates, because there are none: this
-    /// is the absence of a question rather than an unresolved answer.
-    ///
-    /// Attributing such a recording to a game is
-    /// [issue #403](https://github.com/wildware-uk/clipped/issues/403). It is a
-    /// change to what fills this field and not to what the field is.
+    /// (`clipped_session::automatic::ManualSession`) — but nobody is an
+    /// authority on what a window *is*. A browser, an editor, a game nobody has
+    /// catalogued and a game the user excluded all reach here, and the session
+    /// is filed under [`UNATTRIBUTED`] with no candidates, because there are
+    /// none: this is an answer of "nothing" rather than an unresolved answer
+    /// between several (AGENTS.md section 27).
     Unidentified,
 }
 

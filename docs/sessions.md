@@ -458,8 +458,9 @@ session for it ([#402]).
 ```text
  clipped-session::automatic
  ──────────────────────────
- SessionManager   a game launched      ──▶ Session ──▶ sidecar::write
- ManualSession    somebody pressed record ─┘
+ SessionManager   a game launched      ──┐
+                                         ├─▶ identify_process ──▶ Session ──▶ sidecar::write
+ ManualSession    somebody pressed record ┘
 ```
 
 **One session, one recording, and it ends when that recording does.** There is no
@@ -468,25 +469,52 @@ the sitting is the recording. Its `session-ended` reason is `recording-ended`,
 which is a fourth value of that vocabulary and therefore a migration in
 `clipped-storage` (`docs/storage.md`).
 
-**Its game is `unidentified`.** Nothing asked the catalogue — the person chose
-the window, and the catalogue's opinion was not needed to decide whether to
-record it. That is a different statement from `ambiguous`, which means several
-catalogue entries tied, and it is filed under the same `unattributed` name for
-the same reason: a session needs something to be named after, and it must not be
-a game nobody established. Attributing such a recording to a game is [#403].
+**Its game comes from the catalogue, exactly as an automatic session's does**
+([#403]). The person chose the window and that settles whether to record; what
+they recorded is a question only the catalogue can answer, so `serve` asks it
+about the window's process — the executable's file name, and its full path where
+Windows will say — through the same `identify_process` the session manager uses.
+The three answers mean what they mean everywhere else:
+
+| The catalogue says | The session's game | Filed under |
+| --- | --- | --- |
+| one entry claims the process | `known` | that `game_id` |
+| several entries tie | `ambiguous`, with the candidates | `unattributed` |
+| nothing claims it | `unidentified` | `unattributed` |
+
+A window that is not a game — a browser, an editor, a game nobody has
+catalogued — is still recorded and its sitting is still `unidentified`, because
+that is the honest answer and a guess would be worse than none (AGENTS.md
+section 27). **A game the user excluded stays excluded here too**: an exclusion
+is a decision about a game rather than about a subcommand, so the recording
+happens — they asked for it — and it is not filed under the game they told
+Clipped to leave alone. A rename they made is the name that is recorded.
+
+**A catalogue that cannot be read does not stop a recording.** `watch` refuses
+to start without one, because it has nothing to do without one; `serve` reports
+the failure, names the file and carries on with an empty catalogue, so every
+sitting made until it is fixed is `unattributed`. The shipped data is
+deliberately *not* used as the fallback: the failure is almost always in the
+user's own overlay, which is where their exclusions and renames live, and
+falling back to what Clipped ships would file recordings under games they
+excluded.
 
 **Its settings are resolved through the same fold.** `serve` reads the user's
 settings file exactly as `watch` does and lays what the user configured over what
 the request asked for, so a frame rate somebody set applies to a recording they
 started from the window, and the session's record says where each answer came
-from. A session with no `known` game resolves the *global* layer, which is not a
-special case: it is what "this game has no overrides" means.
+from. Since the session has a game, it resolves *that game's* layer — a
+recording of Counter-Strike started from the window is made with the settings
+for Counter-Strike, however it was started — and a session with no `known` game
+resolves the global layer, which is not a special case but what "this game has no
+overrides" means.
 
 The two records are compared field for field by a test rather than described as
 similar: `clipped_session::automatic`'s
 `a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced`
-writes one of each and asserts the files are identical once the identifier, the
-game and the end reason — the only three things that *can* differ — are replaced.
+records one process both ways and asserts the two files are identical once the
+identifier and the end reason — the only two things that *can* differ — are
+replaced. The game is no longer one of them.
 
 [#402]: https://github.com/wildware-uk/clipped/issues/402
 [#403]: https://github.com/wildware-uk/clipped/issues/403
