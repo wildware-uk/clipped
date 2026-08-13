@@ -309,7 +309,7 @@ describe('the Library screen', () => {
    *
    * That distinction is the whole test. Walking the rendered rows and asserting
    * "two cells, and the second names some issue" is satisfied by a table holding
-   * one invented row. The claim is that *these five* are what the screen still
+   * one invented row. The claim is that *these six* are what the screen still
    * owes, and only a list kept independently of the implementation can make it.
    *
    * Three rows have gone since issue #301: the session list, the search and a
@@ -320,6 +320,7 @@ describe('the Library screen', () => {
     ['clips and highlights', /^clips, and the highlights/i, [74, 76, 91]],
     ['favourites', /^favourites, and filtering/i, [58]],
     ['thumbnails and waveforms', /^a thumbnail against each recording/i, [57, 66, 301]],
+    ['playing in this window', /^playing a recording inside this window/i, [392, 304]],
     ['playing a clip', /^playing a clip/i, [52]],
     ['restoring something deleted', /^restoring something deleted/i, [94]],
   ];
@@ -355,6 +356,264 @@ describe('the Library screen', () => {
         );
       }
     }
+  });
+
+  /*
+   * Issue #399: the library could say what you had recorded and nothing could be
+   * done with it. Each case below presses a control and asserts what left the
+   * window, because that is the only place these can be got wrong in a way that
+   * compiles — an Open that sent the destination, an Export that sent the
+   * suggestion instead of what the person chose, a Show in Explorer that sent
+   * `open_recording`.
+   */
+  it('opens a recording in the system player, naming the file the row was drawn for', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      openRecording: () => null,
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Open cs2-20260811-201400-1.mkv, Counter-Strike 2',
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'open_recording'),
+      ).toEqual([
+        {
+          command: 'open_recording',
+          args: { path: 'D:\\clips\\cs2-20260811-201400-1.mkv' },
+        },
+      ]);
+    });
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Opened cs2-20260811-201400-1.mkv.',
+    );
+  });
+
+  it('shows a recording in Explorer rather than opening it', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      revealRecording: () => null,
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Show cs2-20260811-201400-1.mkv, Counter-Strike 2 in Explorer',
+      }),
+    );
+
+    await waitFor(() => {
+      expect(runtime.invocations.map((invocation) => invocation.command)).toContain(
+        'reveal_recording',
+      );
+    });
+    expect(
+      runtime.invocations.filter((invocation) => invocation.command === 'open_recording'),
+      'showing a file in Explorer must not also launch a player',
+    ).toEqual([]);
+  });
+
+  /*
+   * The whole of the export path from the window's side: the dialog is opened
+   * with the recording's own name suggested, and what the *person* chose is what
+   * the recorder is sent. An export that sent the suggestion instead would write
+   * the right file for every user who accepted the default and the wrong one for
+   * everybody else, and no other test in the repository would notice.
+   */
+  it('exports to the file the person chose, not to the one it suggested', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: (args) => ({
+        source: args['source'],
+        destination: args['destination'],
+        duration_ms: 6_540_000,
+        packets: 588_120,
+        bytes: 9_811_204_112,
+        elapsed_ms: 4_182,
+        lossless: true,
+      }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        runtime.invocations.filter((invocation) => invocation.command === 'export_recording'),
+      ).toEqual([
+        {
+          command: 'export_recording',
+          args: {
+            source: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+            destination: 'E:\\share\\ace on mirage.mp4',
+          },
+        },
+      ]);
+    });
+
+    const dialog = runtime.invocations.find(
+      (invocation) => invocation.command === 'plugin:dialog|save',
+    );
+    expect(
+      JSON.stringify(dialog?.args),
+      'the dialog opens on the recording, under the recording’s own name',
+    ).toContain('D:\\\\clips\\\\cs2-20260811-201400-1.mp4');
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /Exported ace on mirage\.mp4 .* 9\.1 GB copied in 4\.2 s, without re-encoding\./,
+    );
+  });
+
+  it('says nothing at all when the Save As dialog is dismissed', async () => {
+    // Dismissing a dialog is somebody changing their mind, not a failure, and a
+    // screen that reported it would be noise (AGENTS.md section 28). The
+    // assertion that matters is that no export was sent.
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => null,
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    await waitFor(() => {
+      expect(runtime.invocations.map((invocation) => invocation.command)).toContain(
+        'plugin:dialog|save',
+      );
+    });
+    expect(runtime.invocations.map((invocation) => invocation.command)).not.toContain(
+      'export_recording',
+    );
+    expect(screen.getByRole('status')).toBeEmptyDOMElement();
+  });
+
+  /*
+   * Issue #399's fifth and sixth acceptance criteria on the screen. Both are
+   * about *wording*: the heading has to say the name is taken rather than that
+   * the export failed, and the sentence has to be the recorder's own — a screen
+   * that wrote its own would leave somebody unable to tell a name that is taken
+   * from a recording MP4 cannot hold.
+   */
+  it('says a destination that is taken is taken, and that nothing was written over', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => {
+        throw {
+          code: 'destination_exists',
+          message:
+            'there is already a file at ace on mirage.mp4, and Clipped does not overwrite one; choose another name',
+        };
+      },
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    const status = await screen.findByRole('status');
+    await waitFor(() => {
+      expect(status).toHaveTextContent('That name is already taken');
+    });
+    expect(status).toHaveTextContent('choose another name');
+    expect(status).toHaveTextContent('nothing was changed');
+  });
+
+  it('reports a refusal from the muxer in the muxer’s own wording', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      saveDialog: () => 'E:\\share\\ace on mirage.mp4',
+      exportRecording: () => {
+        throw {
+          code: 'export_failed',
+          message:
+            'match.mkv cannot be remuxed to MP4 without losing part of the recording: audio track 1 (wavpack). Nothing was written; the recording is unchanged and still playable as it is',
+        };
+      },
+    });
+    renderApp();
+    await openLibrary(user);
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Export cs2-20260811-201400-1.mkv, Counter-Strike 2 as MP4',
+      }),
+    );
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'audio track 1 (wavpack). Nothing was written',
+    );
+  });
+
+  /*
+   * A recording whose file has gone can have none of the three done to it, and
+   * a control that would fail must not be offered as one that would work
+   * (AGENTS.md section 27). Disabled and saying why, rather than hidden, because
+   * a row with nothing on it explains nothing.
+   */
+  it('offers none of the three against a recording whose file has gone', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () =>
+        Promise.resolve(
+          page([
+            session({
+              recordings: [
+                {
+                  recording_id: 12,
+                  session_index: 1,
+                  path: 'D:\\clips\\gone.mkv',
+                  started_at: '2026-08-11T20:14:00+01:00',
+                  duration_seconds: 6540,
+                  size_bytes: 9_812_009_112,
+                  missing_since: '2026-08-12T09:00:00+01:00',
+                  favourite: false,
+                  tags: [],
+                },
+              ],
+            }),
+          ]),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    for (const name of [
+      'Open gone.mkv, Counter-Strike 2',
+      'Show gone.mkv, Counter-Strike 2 in Explorer',
+      'Export gone.mkv, Counter-Strike 2 as MP4',
+    ]) {
+      expect(await screen.findByRole('button', { name })).toBeDisabled();
+    }
+    expect(screen.getByRole('table', { name: 'Sessions' })).toHaveTextContent('file missing');
   });
 
   /*

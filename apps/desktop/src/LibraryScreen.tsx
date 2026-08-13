@@ -1,6 +1,12 @@
 import { type ReactNode, useState } from 'react';
 
 import { describeProblem, headlineProblem, useSessions } from './library';
+import {
+  describeActionProblem,
+  fileName,
+  headlineActionProblem,
+  useRecordingActions,
+} from './recordingActions';
 import { SessionList } from './SessionList';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -64,6 +70,11 @@ const WAITING: readonly Waiting[] = [
       'Thumbnails (#57) and waveforms (#66) are generated beside the files. This window can load neither, having no file-system permission, and how the bytes should reach it is issue #301',
   },
   {
+    shows: 'Playing a recording inside this window, rather than in your own player',
+    needs:
+      'WebView2 cannot decode the uncompressed sound the archival file carries (#392), and three other blockers. Issue #304. Open plays it in whatever you already use',
+  },
+  {
     shows: 'Playing a clip, from the list',
     needs: 'The playback screen. Issue #52',
   },
@@ -85,6 +96,7 @@ export function LibraryScreen(): ReactNode {
   const [typed, setTyped] = useState('');
   const [query, setQuery] = useState('');
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
+  const actions = useRecordingActions();
 
   return (
     <>
@@ -164,7 +176,23 @@ export function LibraryScreen(): ReactNode {
 
       {read.state === 'read' && read.value.length > 0 && (
         <section aria-label="Sessions">
-          <SessionList sessions={read.value} label="Sessions" />
+          <SessionList sessions={read.value} label="Sessions" actions={actions} />
+          {/*
+           * One region for the outcome of the last thing somebody asked for,
+           * announced rather than only drawn: opening a recording and showing
+           * one in Explorer both happen in another application, and a window
+           * that said nothing would leave somebody unsure whether the button
+           * did anything at all (AGENTS.md sections 45 and 46).
+           */}
+          <p role="status" className="clipped-panel__body">
+            {actions.outcome.state === 'working' &&
+              `${actions.outcome.what} ${fileName(actions.outcome.path)}…`}
+            {actions.outcome.state === 'done' && actions.outcome.message}
+            {actions.outcome.state === 'failed' &&
+              `${headlineActionProblem(actions.outcome.problem)}. ${describeActionProblem(
+                actions.outcome.problem,
+              )}`}
+          </p>
           {hasMore && (
             <button
               type="button"

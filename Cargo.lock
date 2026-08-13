@@ -410,6 +410,7 @@ dependencies = [
  "clipped-library",
  "clipped-logging",
  "clipped-media-validation",
+ "clipped-muxer",
  "clipped-plugins",
  "clipped-session",
  "clipped-storage",

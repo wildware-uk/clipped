@@ -61,6 +61,43 @@ tauri-build = { version = "2", features = [] }
 # is what re-adds the icon when Explorer restarts, by listening for the
 # `TaskbarCreated` message every application has to handle for itself.
 tauri = { version = "2", features = ["tray-icon"] }
+# Opening a file in whatever application the user has chosen for it, and showing
+# one in Explorer with it selected (issue #399). Tauri's own plugin, dual
+# MIT/Apache-2.0.
+#
+# Written by hand instead, this would be `ShellExecuteW` and
+# `SHOpenFolderAndSelectItems` — the second of which needs COM initialised on
+# the calling thread and an item identifier list built and freed correctly — so
+# it is a page of `unsafe` in the process that draws the window, to do something
+# a maintained plugin already does on three platforms (AGENTS.md section 10).
+#
+# It is used from **Rust only**, inside the two commands in `src/main.rs`, and
+# deliberately: reaching it from the interface would mean granting the window
+# `opener:allow-open-path` over a scope, and the only scope that would work is
+# every path, because a recording lives wherever the recorder's output directory
+# points. A Tauri command instead means the window can ask this process to open
+# a file and nothing else, and `capabilities/default.json` grows by nothing
+# (`src/main.rs`, "What the window can ask this process to do").
+tauri-plugin-opener = "2"
+# The native Save As dialog an export's destination is chosen through (issue
+# #399). Tauri's own plugin, dual MIT/Apache-2.0.
+#
+# The one plugin the interface calls directly, which is why
+# `capabilities/default.json` gains `dialog:allow-save` and nothing else. That
+# permission is exactly what it needs: the window may ask the operating system
+# to show a Save As dialog, and the path that comes back is a path the person
+# in front of the machine typed. It grants no file-system access — the window
+# still cannot read, write or list anything — and the export it feeds is
+# performed by the recorder, which refuses a destination that already exists
+# (AGENTS.md section 56).
+#
+# It brings `tauri-plugin-fs` in as a Rust dependency, which it uses to widen
+# that plugin's scope to a file the user picked *when that plugin is
+# registered*. It is not registered here, so none of its commands exist in this
+# build's invoke handler, and `capabilities/default.json` grants none of its
+# permissions either — two independent reasons the window still cannot read or
+# write a file (`src/playbackReach.test.ts` asserts the second).
+tauri-plugin-dialog = "2"
 # The recorder control protocol and the supervision built on it: the named pipe,
 # the handshake, and deciding whether a recorder is running
 # (docs/ipc.md, docs/adr/0006-recorder-lifetime-and-supervision.md).

@@ -331,7 +331,7 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`.
+`shutdown`, `library`, `export`.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
@@ -343,6 +343,12 @@ recorder built before [`library_sessions`](#library_sessions) existed refuses it
 with `unknown_command`, and without the check the window would have no way to
 tell that from a library with nothing in it — which is exactly the confusion
 those commands are shaped to avoid.
+
+`export` is the same check in front of an Export control. A recorder built
+before [`export_recording`](#export_recording) refuses it with
+`unknown_command`, and the cost of finding that out late is worse than for a
+library: the person has already chosen a file name for a file that was never
+going to be written.
 
 ## Compatibility policy
 
@@ -467,6 +473,7 @@ when a command's parameters are all optional.
 | `take_screenshot` | all optional, below | `screenshot_taken` | yes |
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
+| `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 | `save_replay` | not yet defined | — | no — M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
@@ -583,7 +590,7 @@ recordings and clips each produced ([library.md](library.md), issue
 
 It exists because the desktop window cannot read the index any other way. It has
 no file-system permission for `library.db` — `capabilities/default.json` grants
-three `core:` permissions and nothing else — and it may not link
+three `core:` permissions and `dialog:allow-save`, none of which opens a file — and it may not link
 `clipped-library`, because `tests/integration/tests/workspace_layering.rs`
 permits `apps/desktop/src-tauri` exactly one member of the workspace, this one.
 That is [ADR 0002](adr/0002-separate-recorder-process.md): the process that owns
@@ -684,6 +691,60 @@ nothing — the space it is not occupying is not being used — and is counted i
 `missing` instead. Anything in the trash contributes to neither.
 
 Refused with `library_unavailable` on the same terms as `library_sessions`.
+
+### `export_recording`
+
+Copies a finished recording into MP4 without decoding it. Clipped records
+Matroska because it survives an interrupted recording
+([ADR 0001](adr/0001-use-mkv-for-recording.md)); MP4 is what everything else
+accepts, and a **stream copy** is how a file becomes one without a re-encode
+([muxing.md](muxing.md)).
+
+```json
+{"type":"request","id":11,"command":"export_recording",
+ "params":{"source":"D:\clips\cs2-20260811-201400-1.mkv",
+           "destination":"E:\share\ace on mirage.mp4"}}
+```
+
+Both parameters are required, and neither has a default — unlike every other
+command's, which is deliberate. There is no sensible recording to export and
+nowhere sensible to put one, so "you did not say" is a refusal
+(`invalid_parameters` naming the field) rather than a value something further
+down has to recognise as absent.
+
+The reply does not arrive until the MP4's index has been written, so a window
+told an export finished is pointing at a playable file:
+
+```json
+{"type":"response","id":11,"outcome":{"ok":{
+  "reply":"recording_exported",
+  "export":{"source":"D:\clips\cs2-20260811-201400-1.mkv",
+            "destination":"E:\share\ace on mirage.mp4",
+            "duration_ms":6540000,"packets":588120,"bytes":9811204112,
+            "elapsed_ms":4182,"lossless":true}}}}
+```
+
+`elapsed_ms` is measured rather than estimated, and is worth reporting: the
+whole argument for remuxing instead of re-encoding is that it is small
+(AGENTS.md section 18). `lossless` is false when something *beside* the
+recording was left out — chapter marks, an attached font — and `losses` then
+says what, in words. It is never a picture or a sound track: a container that
+cannot carry one of those is a refusal, because a file missing one of its audio
+tracks looks exactly like a file that never had it.
+
+Two refusals, and they are deliberately different codes because the useful
+action differs:
+
+- `destination_exists` — there is already a file there. **Nothing is written and
+  the file that is there is not touched** (AGENTS.md section 56). The one thing
+  to do is choose another name, and the message says so.
+- `export_failed` — the recording could not be read, or MP4 has no way to store
+  one of its tracks. The message is the muxer's own sentence, naming the track
+  and the codec, because a generic failure gives nobody anything to act on
+  (AGENTS.md section 15).
+
+The recording itself is opened for reading and is never modified, on either
+path.
 
 ### `stop_recording`
 
@@ -892,6 +953,8 @@ person reads, written to AGENTS.md section 28.
 | `recording_failed` | Capture, encoding or muxing refused. Whatever was written before the failure is still a finished file. |
 | `too_many_connections` | The recorder is serving as many connections as it will. |
 | `shutting_down` | The recorder has accepted a [`shutdown`](#shutdown) and will not start a recording. |
+| `destination_exists` | Something is already where a file was going to be written, and Clipped does not overwrite (AGENTS.md section 56). Choose another name; nothing was changed. |
+| `export_failed` | A finished recording could not be copied into the container asked for. The message is the muxer's own, naming what stopped it. |
 | `library_unavailable` | The recording library could not be read, and the message says why. **Never an empty library**, which is a successful reply carrying no sessions. |
 | `internal` | The recorder is at fault and cannot say more usefully. |
 
@@ -1098,7 +1161,7 @@ cargo run -p clipped-ipc --bin protocol-schema
 | --- | --- |
 | `crates/ipc/src/*.rs` unit tests | Message round trips, the frozen handshake shape, unknown versions, unknown fields, unknown codes, unknown error details, unknown events, framing including a hostile length prefix, dispatch, event routing |
 | `crates/ipc/src/transport/windows.rs` tests | A real pipe: a round trip, endpoint exclusivity, connecting to nothing, stopping a blocked listener |
-| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, and Ctrl+C |
+| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C — and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
 | `apps/recorder/tests/supervision.rs` | Supervision against real processes that are really killed: a recorder outliving the process that started it, a second launch attaching rather than competing, a killed recorder reported and replaced, and a bounded restart policy |
 | `crates/ipc/src/schema.rs` tests | That the description of the protocol the TypeScript is checked against is derived rather than asserted — a tag is never reported as optional because a catch-all absorbed it, every sample records what the real deserialiser did with it — and that the committed schema is still what this build produces |
 | `packages/shared/src/ipc/conformance.test.ts` | The TypeScript mirror against that schema: every enumeration both ways, every field of every object, and every sample frame parsed to the same verdict the recorder reached |

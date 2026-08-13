@@ -139,7 +139,7 @@ process**. Two of the three ways into it are still shut, and always will be:
 
 | The way in | Where it stands |
 | --- | --- |
-| Reading `library.db` from the window | Shut. `capabilities/default.json` grants three `core:` permissions and no file-system access, and Tauri denies what is not listed |
+| Reading `library.db` from the window | Shut. `capabilities/default.json` grants three `core:` permissions and `dialog:allow-save`, none of which reaches the file system, and Tauri denies what is not listed |
 | Linking `clipped-library` into the Tauri host | Shut. `tests/integration/tests/workspace_layering.rs` permits it exactly one member of the workspace, `clipped-ipc` — which is what keeps the recording engine out of the window's process ([ADR 0002](adr/0002-separate-recorder-process.md)) |
 | A protocol command | **Open.** [Issue #301](https://github.com/wildware-uk/clipped/issues/301) added `library_sessions` and `library_games`; the recorder reads the index and answers, and `library.ts` asks through a Tauri command in front of each ([ipc.md](ipc.md)) |
 
@@ -183,6 +183,62 @@ What each screen still owes is a row in `WaitingOn.tsx`, the table both share
 with Games, naming the work that lands it: clips and highlights wait on
 something creating one (#91, #76), favourites on anything being favouritable
 (#58), and thumbnails and waveforms on a transport for bytes rather than rows.
+
+### Watching it, finding it, sharing it
+
+[Issue #399](https://github.com/wildware-uk/clipped/issues/399). The Library
+listed what had been recorded and nothing could be done with it: the core loop of
+a recorder is record, find, watch, share, and two of the four were missing. Each
+recording in the Library now carries three controls, and the answer to "where
+does this actually happen" is different for each.
+
+| Control | Where it happens | What the window is allowed |
+| --- | --- | --- |
+| **Open** | `open_recording` in `src-tauri/src/main.rs`, through `tauri-plugin-opener`. Windows opens the file with whatever the user opens video with | Nothing new. It is a `#[tauri::command]` |
+| **Show in Explorer** | `reveal_recording`, the same way, with the file selected | Nothing new |
+| **Export MP4** | The **recorder**: `export_recording` over the control protocol, answered by `clipped_muxer::remux_to_mp4` ([ipc.md](ipc.md), [muxing.md](muxing.md)) | `dialog:allow-save`, so the interface can ask the operating system where the MP4 should go |
+
+`dialog:allow-save` is the whole of what this added to
+`capabilities/default.json`, and it is not file-system reach: it lets the window
+ask for a Save As dialog, and what comes back is a path a person typed. The
+window still cannot read, write or list anything.
+
+Open and Show in Explorer are commands here rather than the opener plugin's own
+because the permission that would let the interface call those is
+`opener:allow-open-path` over a scope — and a recording lives wherever the
+recorder's output directory points, so the only scope that would work is every
+path on the machine. Granting the webview "open anything with its default
+application" to open one MKV is the opposite of what that file's comment asks
+for.
+
+Three rules the controls follow:
+
+- **An export is a stream copy, and says so.** The recording's own coded packets
+  in a different container: no decode, no encode, no quality traded for the
+  change. The sentence on screen quotes the measurement, because that is the
+  whole argument for it (AGENTS.md section 18).
+- **A destination that is taken is refused, not overwritten.** The recorder
+  answers `destination_exists`, the screen heads it "That name is already taken"
+  rather than "export failed", and says nothing was changed (AGENTS.md section
+  56). The heading matters: nothing is wrong with the library or the recording,
+  and a heading implying otherwise sends somebody looking for a fault that is
+  not there.
+- **A refusal from the muxer arrives in the muxer's own wording.** "That
+  recording has an audio track MP4 cannot store: audio track 1 (wavpack)" is
+  something to act on; "export failed" is not (AGENTS.md section 15). Nothing
+  between the muxer and the screen rewrites it.
+
+A recording whose file the index could not find gets all three **disabled**,
+with the reason on each, rather than hidden: a control that would fail must not
+be offered as one that would work, and a row with nothing on it explains nothing
+(AGENTS.md sections 27 and 45).
+
+**Playing a recording inside this window is still not offered**, and Open is why
+that is acceptable rather than a gap: watching your own footage works today, in
+the player you already have. The window's own playback is
+[#304](https://github.com/wildware-uk/clipped/issues/304), blocked on four
+things including WebView2 being unable to decode the uncompressed sound the
+archival file carries ([#392](https://github.com/wildware-uk/clipped/issues/392)).
 
 ### What is being recorded right now, and the button that changes it
 
@@ -322,7 +378,7 @@ them is about a game. Against that:
 
 | The screen would show | Where it would come from | Why it cannot, yet |
 | --- | --- | --- |
-| The list of games | `clipped-game-detection`'s catalogue: the compiled-in `games.toml` plus the user's overlay ([game-detection.md](game-detection.md)) | No protocol command lists it, and the window has no file-system permission to read it — `capabilities/default.json` grants three `core:` permissions and nothing else. [Issue #245](https://github.com/wildware-uk/clipped/issues/245) |
+| The list of games | `clipped-game-detection`'s catalogue: the compiled-in `games.toml` plus the user's overlay ([game-detection.md](game-detection.md)) | No protocol command lists it, and the window has no file-system permission to read it — `capabilities/default.json` grants three `core:` permissions and `dialog:allow-save`, and none of the four reaches a file. [Issue #245](https://github.com/wildware-uk/clipped/issues/245) |
 | Add an executable, rename, exclude, disable capture | The same overlay, written | Same. [#45](https://github.com/wildware-uk/clipped/issues/45) owns the behaviour, #245 the way to reach it |
 | Sessions, clips, favourites, storage per game | The library index | Reachable since [#301](https://github.com/wildware-uk/clipped/issues/301): `library_games` carries exactly these figures and Home draws them. Bringing them onto *this* screen, beside the catalogue entry each belongs to, needs the catalogue itself, which is #245 |
 | Which game is being recorded now | A `status` that can name a game | [#241](https://github.com/wildware-uk/clipped/issues/241): the protocol describes a recording by its capture target, `process 4242` |
@@ -770,7 +826,7 @@ contract the unbuilt screens keep.
 
 | What stops it | Where it can be checked |
 | --- | --- |
-| **This window cannot load a file from the disk.** | `src-tauri/tauri.conf.json` does not enable the asset protocol; `capabilities/default.json` grants three `core:` permissions and none reaches the file system; the content-security policy declares no `media-src`, so it falls back to `default-src 'self'` — the bundle Vite built, and nothing else. |
+| **This window cannot load a file from the disk.** | `src-tauri/tauri.conf.json` does not enable the asset protocol; `capabilities/default.json` grants three `core:` permissions and `dialog:allow-save`, and none of the four reaches the file system — a Save As dialog returns a path a person typed, not a handle to anything; the content-security policy declares no `media-src`, so it falls back to `default-src 'self'` — the bundle Vite built, and nothing else. |
 | **A recording is Matroska, and WebView2 does not demux it.** | [ADR 0001](adr/0001-mkv-archival-container.md) writes recordings into MKV so a killed recorder still leaves a playable file. WebView2 is Chromium, whose Matroska support is WebM: a strict subset restricted to Opus or Vorbis audio and VP8, VP9 or AV1 video. |
 | **The audio is uncompressed PCM, and nothing in Clipped encodes audio.** | [muxing.md](muxing.md): every track is 16-bit PCM because no crate in the workspace encodes audio ([#28](https://github.com/wildware-uk/clipped/issues/28)). No browser decodes PCM in MP4. |
 | **A media element cannot choose an audio track.** | `HTMLMediaElement.audioTracks` is not implemented in Chromium, so a multi-track file gives whichever track the demuxer lands on and no way off it. |

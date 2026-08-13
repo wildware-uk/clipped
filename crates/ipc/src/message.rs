@@ -156,6 +156,17 @@ pub mod features {
         /// empty library, which is exactly the confusion the library commands
         /// are shaped to avoid.
         LIBRARY = "library";
+        /// The recorder can copy a finished recording into MP4:
+        /// `export_recording`.
+        ///
+        /// A UI asks for this before drawing an Export control against a
+        /// recording, for the reason the four above give: a recorder built
+        /// before [issue #399](https://github.com/wildware-uk/clipped/issues/399)
+        /// has no `export_recording` command and would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand) —
+        /// after the user had chosen a file name for a file that was never
+        /// going to be written.
+        EXPORT = "export";
     }
 }
 

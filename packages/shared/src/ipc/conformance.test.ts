@@ -48,6 +48,8 @@ import type {
   ErrorDetail,
   ErrorOutcome,
   EventStream,
+  ExportRecordingParams,
+  ExportSummary,
   Feature,
   Hello,
   IdleStatus,
@@ -72,6 +74,7 @@ import type {
   RecorderResponse,
   RecorderState,
   RecorderStatus,
+  RecordingExportedReply,
   RecordingFailedEvent,
   RecordingStartedReply,
   RecordingStatus,
@@ -372,6 +375,20 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     bytes: 'required',
     missing: 'required',
   }),
+  export_recording: fields<ExportRecordingParams>({
+    source: 'required',
+    destination: 'required',
+  }),
+  export_summary: fields<ExportSummary>({
+    source: 'required',
+    destination: 'required',
+    duration_ms: 'required',
+    packets: 'required',
+    bytes: 'required',
+    elapsed_ms: 'required',
+    lossless: 'required',
+    losses: 'optional',
+  }),
   'outcome.ok': fields<OkOutcome>({ ok: 'required' }),
   'outcome.error': fields<ErrorOutcome>({ error: 'required' }),
   'reply.pong': fields<PongReply>({ reply: 'required' }),
@@ -400,6 +417,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.library_games': fields<LibraryGamesReply>({
     reply: 'required',
     games: 'required',
+  }),
+  'reply.recording_exported': fields<RecordingExportedReply>({
+    reply: 'required',
+    export: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -489,6 +510,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'export_recording',
+    params: 'export_recording',
+    reply: 'reply.recording_exported',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
@@ -534,6 +561,12 @@ function replyDiscriminant(reply: Reply): string {
       return reply.page.next_cursor === undefined ? 'library_sessions' : 'library_sessions.more';
     case 'library_games':
       return 'library_games';
+    case 'recording_exported':
+      // Whether the copy is complete is part of the path, because it is the one
+      // thing the window has to say differently: a mirror that dropped
+      // `lossless` would reach the same discriminant for an MP4 that holds the
+      // whole recording and one that quietly does not.
+      return reply.export.lossless ? 'recording_exported' : 'recording_exported.lossy';
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise

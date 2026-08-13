@@ -65,7 +65,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::command::{Command, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand};
+use crate::command::{
+    Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand,
+};
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 use crate::library::{
@@ -76,7 +78,7 @@ use crate::message::{
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use crate::server::MAX_CONCURRENT_CONNECTIONS;
-use crate::status::{ActiveRecording, EndReason, RecorderStatus, RecordingSummary};
+use crate::status::{ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary};
 
 /// The shape of the schema document itself.
 ///
@@ -467,6 +469,14 @@ fn structures() -> BTreeMap<String, Structure> {
             "library_game".to_owned(),
             structure_of(&exemplar_library_game(), &[]),
         ),
+        (
+            "export_recording".to_owned(),
+            structure_of(&exemplar_export_recording(), &[]),
+        ),
+        (
+            "export_summary".to_owned(),
+            structure_of(&exemplar_export(), &[]),
+        ),
     ]);
 
     for outcome in every_outcome() {
@@ -516,6 +526,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::AddBookmark(_) => Some("add_bookmark".to_owned()),
                 Command::TakeScreenshot(_) => Some("take_screenshot".to_owned()),
                 Command::LibrarySessions(_) => Some("library_sessions".to_owned()),
+                Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
                 | Command::GetStatus
@@ -531,6 +542,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::TakeScreenshot(_) => Some("reply.screenshot_taken".to_owned()),
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
+                Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
                 Command::Unbuilt(_) => None,
             },
@@ -608,6 +620,15 @@ fn samples() -> Vec<Sample> {
                 id: 10,
                 command: "library_games".to_owned(),
                 params: Value::Null,
+            }),
+        ),
+        (
+            "asking for a recording to be copied into MP4",
+            ClientMessage::Request(Request {
+                id: 11,
+                command: "export_recording".to_owned(),
+                params: serde_json::to_value(exemplar_export_recording())
+                    .expect("the export options serialise"),
             }),
         ),
         (
@@ -791,6 +812,48 @@ fn samples() -> Vec<Sample> {
                         },
                     ],
                 }),
+            }),
+        ),
+        (
+            "a recording copied into MP4 whole",
+            ServerMessage::Response(Response {
+                id: 11,
+                outcome: Outcome::Ok(Reply::RecordingExported {
+                    export: ExportSummary {
+                        lossless: true,
+                        losses: Vec::new(),
+                        ..exemplar_export()
+                    },
+                }),
+            }),
+        ),
+        (
+            "a recording copied into MP4 without everything it held",
+            ServerMessage::Response(Response {
+                id: 11,
+                outcome: Outcome::Ok(Reply::RecordingExported {
+                    export: exemplar_export(),
+                }),
+            }),
+        ),
+        (
+            "an export refused because the file it would write already exists",
+            ServerMessage::Response(Response {
+                id: 11,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::DestinationExists,
+                    "there is already a file at cs2-20260811-201400-1.mp4, and Clipped does not                      overwrite one; choose another name",
+                )),
+            }),
+        ),
+        (
+            "an export refused because MP4 cannot carry one of the recording's tracks",
+            ServerMessage::Response(Response {
+                id: 11,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::ExportFailed,
+                    "cs2-20260811-201400-1.mkv cannot be remuxed to MP4 without losing part of                      the recording: audio track 1 (wavpack). Nothing was written; the recording                      is unchanged and still playable as it is",
+                )),
             }),
         ),
         (
@@ -1070,6 +1133,14 @@ fn reply_discriminant(reply: &Reply) -> String {
             Some(_) => "library_sessions.more".to_owned(),
         },
         Reply::LibraryGames { .. } => "library_games".to_owned(),
+        // Whether the copy is complete is part of the path, because it is the
+        // one thing a window has to say differently: a mirror that dropped
+        // `lossless` would reach the same discriminant for an MP4 that holds
+        // the whole recording and one that quietly does not.
+        Reply::RecordingExported { export } => match export.lossless {
+            true => "recording_exported".to_owned(),
+            false => "recording_exported.lossy".to_owned(),
+        },
         // Whether a recording is being finished is the whole of what this reply
         // says, so it is part of the path: a mirror that dropped the field would
         // otherwise reach the same discriminant either way.
@@ -1419,6 +1490,29 @@ fn exemplar_library_game() -> LibraryGame {
     }
 }
 
+/// Every `export_recording` parameter at once.
+fn exemplar_export_recording() -> ExportRecording {
+    ExportRecording {
+        source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        destination: r"D:\clips\cs2-20260811-201400-1.mp4".to_owned(),
+    }
+}
+
+/// A finished export, with every optional field present so the schema sees
+/// them.
+fn exemplar_export() -> ExportSummary {
+    ExportSummary {
+        source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        destination: r"D:\clips\cs2-20260811-201400-1.mp4".to_owned(),
+        duration_ms: 6_540_000,
+        packets: 588_120,
+        bytes: 9_811_204_112,
+        elapsed_ms: 4_182,
+        lossless: false,
+        losses: vec!["4 chapter marks are not carried into MP4".to_owned()],
+    }
+}
+
 /// A bookmark, with every optional field present so the schema sees them.
 fn exemplar_bookmark() -> crate::status::BookmarkSummary {
     crate::status::BookmarkSummary {
@@ -1535,6 +1629,7 @@ fn every_built_command() -> Vec<Command> {
         Command::TakeScreenshot(exemplar_take_screenshot()),
         Command::LibrarySessions(exemplar_library_sessions()),
         Command::LibraryGames,
+        Command::ExportRecording(exemplar_export_recording()),
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -1547,6 +1642,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::TakeScreenshot(_)
             | Command::LibrarySessions(_)
             | Command::LibraryGames
+            | Command::ExportRecording(_)
             | Command::Shutdown(_)
             | Command::Unbuilt(_) => {}
         }
@@ -1570,6 +1666,8 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::RecordingFailed,
         ErrorCode::TooManyConnections,
         ErrorCode::ShuttingDown,
+        ErrorCode::DestinationExists,
+        ErrorCode::ExportFailed,
         ErrorCode::LibraryUnavailable,
         ErrorCode::Internal,
     ];
@@ -1588,6 +1686,8 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::RecordingFailed
             | ErrorCode::TooManyConnections
             | ErrorCode::ShuttingDown
+            | ErrorCode::DestinationExists
+            | ErrorCode::ExportFailed
             | ErrorCode::LibraryUnavailable
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
@@ -1700,6 +1800,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::LibraryGames {
             games: vec![exemplar_library_game()],
         },
+        Reply::RecordingExported {
+            export: exemplar_export(),
+        },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
@@ -1715,6 +1818,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::ScreenshotTaken { .. }
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
+            | Reply::RecordingExported { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }

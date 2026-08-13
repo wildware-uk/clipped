@@ -62,14 +62,29 @@ describe('what the window may load', () => {
   it('grants no permission that reaches the file system', () => {
     // The whole of the window's privilege. Tauri denies what is not listed, so
     // this list is the answer to "what can the interface ask for" - and every
-    // entry of it is accounted for here by name, so that a fourth permission
-    // has to be looked at rather than added quietly.
+    // entry of it is accounted for here by name, so that a fifth permission has
+    // to be looked at rather than added quietly.
+    //
+    // `dialog:allow-save` is the one issue #399 added, and it is deliberately
+    // not file-system reach: it lets the interface ask the operating system to
+    // show a Save As dialog, and what comes back is a path a person typed. The
+    // window still cannot read, write or list anything - the export it feeds is
+    // performed by the recorder, over the control protocol, and the recorder
+    // refuses a destination that already exists (AGENTS.md section 56).
+    //
+    // What is *not* here is the reason `open_recording` and `reveal_recording`
+    // are `#[tauri::command]`s rather than the opener plugin's own commands:
+    // the permission that would allow those from the interface is
+    // `opener:allow-open-path` over a scope, and a recording lives wherever the
+    // recorder's output directory points, so the only scope that would work is
+    // every path on the machine (`src-tauri/src/main.rs`).
     const capability = readConfig('capabilities/default.json');
 
     expect(capability['permissions']).toEqual([
       'core:window:allow-set-title',
       'core:event:allow-listen',
       'core:event:allow-unlisten',
+      'dialog:allow-save',
     ]);
   });
 
