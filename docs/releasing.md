@@ -167,10 +167,19 @@ them:
 | `ffmpeg/LGPL-3.0.txt` | LGPL v3 section 4(b) |
 | `ffmpeg/GPL-3.0.txt` | LGPL v3 section 4(b) — the GPL text the LGPL is written on top of |
 
-[`scripts/collect-notices.ps1`](../scripts/collect-notices.ps1) already produces
-every one of them. What is missing is putting the payload into the bundle, which
-is #123's remaining work; when that lands, this gate starts passing on its own,
-with no change here.
+The paths above are where
+[`scripts/collect-notices.ps1`](../scripts/collect-notices.ps1) writes them
+today. The gate matches on the **file name** rather than on the path, anywhere
+under a declared resource, so that it does not assume how
+[#123](https://github.com/wildware-uk/clipped/issues/123) is discharged — staged
+into `installer-payload`, or declared as a second resource, either satisfies it.
+It checks that the six texts are *present*, and nothing more: not their
+contents, not that `NOTICE.md` is FFmpeg's rather than somebody else's. Whoever
+publishes the draft is still the one who has read them.
+
+`collect-notices.ps1` already produces every one of them. What is missing is
+putting the payload into the bundle, which is #123's remaining work; when that
+lands, this gate starts passing on its own, with no change here.
 
 The gate checks the artefact rather than the issue tracker deliberately. #123
 being closed is somebody's opinion; a bundle without `GPL-3.0.txt` in it is a

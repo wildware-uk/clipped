@@ -195,12 +195,20 @@ function Test-IsBuildOutput {
         with versions in them, and every one of those versions belongs to
         somebody else. Matched on path segments rather than as substrings, so a
         crate legitimately called `dist-something` is not skipped.
+
+        Matched on the part *below* the repository root, too. Against the
+        absolute path, a checkout that happens to live under a directory called
+        `dist` - or `target`, or `.git`, none of which are far-fetched names for
+        a directory somebody keeps checkouts in - skips every manifest in the
+        tree. The version gate then finds no declaration anywhere and refuses a
+        correct tag, telling whoever pushed it that this check has a bug. It
+        does, and this is it.
     #>
     param(
         [Parameter(Mandatory)] [string] $Path
     )
 
-    $segments = $Path -split '[\\/]'
+    $segments = (Get-RelativePath $Path) -split '[\\/]'
     foreach ($segment in $segments) {
         if (@('target', 'node_modules', 'dist', 'third-party', '.git') -contains $segment) { return $true }
     }

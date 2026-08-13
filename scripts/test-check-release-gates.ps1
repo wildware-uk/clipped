@@ -414,6 +414,21 @@ try {
         -ExpectedExitCode 1 `
         -Contains @('Cargo.toml', 'clipped-muxer (path dependency)', 'says 0.1.0')
 
+    # Where the checkout happens to live is not the tree's business. The gate
+    # skips `target`, `node_modules`, `dist` and `third-party` because the
+    # manifests under them declare somebody else's versions - but matched
+    # against the absolute path, a checkout sitting in a directory with one of
+    # those names skips *everything*, and the gate refuses a correct tag while
+    # reporting that it has a bug in it. This fixture is deliberately created
+    # below a directory called `dist`.
+    $belowDist = New-Fixture -Name 'dist\a-checkout' -WithLicences -Disagreeing @{ 'package.json' = '0.1.0' }
+    Assert-Case `
+        -Name 'a checkout below a directory called dist is still read, not skipped whole' `
+        -Result (Invoke-Gates -Fixture $belowDist -Tag 'v1.0.0') `
+        -ExpectedExitCode 1 `
+        -Contains @('package.json', 'says 0.1.0') `
+        -DoesNotContain @('No version declaration was found')
+
     # The refusal has to leave the tree alone. A workflow that edited these to
     # agree with the tag would be choosing the version itself, and the tag would
     # stop being evidence of anything.
