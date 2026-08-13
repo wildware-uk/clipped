@@ -189,9 +189,7 @@ fn record_frames(
     // sized from, and the track description a clip saved from it has to declare
     // (`crate::replay`). A buffer that could not be configured leaves the
     // recording untouched.
-    if let Some(replay) = replay {
-        replay.begin(layout.video(), bitrate);
-    }
+    let replay_buffer = crate::replay::start_buffer(&layout, bitrate, replay);
 
     let writer = open_output(settings, &layout)?;
     let muxing = MuxingThread::start(
@@ -201,7 +199,7 @@ fn record_frames(
     )?;
     let sinks = PacketSinks {
         muxing: &muxing,
-        replay: replay.and_then(crate::replay::ReplayRecording::buffer),
+        replay: replay_buffer,
     };
 
     let mut counters = Counters::default();

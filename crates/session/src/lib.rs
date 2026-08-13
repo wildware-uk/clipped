@@ -254,7 +254,7 @@ pub use error::SessionError;
 pub use failure::{FailureKind, FootageKept, RecordingFailure};
 pub use pacing::FrameGate;
 pub use progress::RecordingProgress;
-pub use replay::{ReplayRecording, ReplaySaveError};
+pub use replay::{start_buffer, ReplayRecording, ReplaySaveError};
 pub use report::{AudioSyncReport, AudioTrackReport, EndReason, RecordingReport};
 pub use settings::{
     AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,

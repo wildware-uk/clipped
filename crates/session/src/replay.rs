@@ -56,11 +56,40 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use clipped_encoder::BitRate;
-use clipped_muxer::VideoTrack;
+use clipped_muxer::{RecordingLayout, VideoTrack};
 use clipped_replay::{
     save_clip, ConfigError, LeaseError, ReplayBuffer, ReplayConfig, ReplayStats, SaveError,
     SavedClip, MAXIMUM_WINDOW, MINIMUM_WINDOW,
 };
+
+/// Attaches `replay` to a recording whose encoder has just opened, and hands
+/// back the buffer its packets are to be copied into.
+///
+/// The join in one place, because it is two steps that are only correct
+/// together: the buffer is built from the track this recording will declare and
+/// the bitrate its encoder was given ([`ReplayRecording::begin`]), and the thing
+/// the packet loop pushes into is the buffer *that* built
+/// ([`ReplayRecording::buffer`]). Doing the first and not the second is a
+/// recording that keeps an empty buffer; doing the second against a different
+/// handle is a clip declaring a track it does not contain. Both are silent, and
+/// neither shows up until somebody presses the key.
+///
+/// [`None`] means no clip can be saved from this recording — either it was not
+/// asked for a buffer, or one could not be configured for it, which
+/// [`ReplayRecording::begin`] reports and does not fail the recording over.
+///
+/// Called once per recording, from `crate::recording`, after the encoder is open
+/// and before the first packet.
+#[must_use]
+pub fn start_buffer<'replay>(
+    layout: &RecordingLayout,
+    bitrate: BitRate,
+    replay: Option<&'replay ReplayRecording>,
+) -> Option<&'replay ReplayBuffer> {
+    let replay = replay?;
+    replay.begin(layout.video(), bitrate);
+    replay.buffer()
+}
 
 /// A rolling window of the last few minutes of a recording, and what it takes
 /// to save a clip from it.

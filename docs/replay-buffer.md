@@ -561,6 +561,16 @@ the recording fills in the rest when its encoder opens, and
 `ReplayRecording::save_last` is what a caller calls. A save runs on another
 thread while the recording carries on.
 
+The filling-in is `clipped_session::start_buffer`, one function rather than two
+statements inside the recording loop, because the two are only correct together:
+the buffer is built from the track the recording will declare and the bitrate
+its encoder was given, and the thing every packet is copied into has to be the
+buffer *that* built. Doing the first and not the second is a recording keeping
+an empty buffer; pushing into a buffer some other handle owns is a clip
+declaring a track it does not contain. Both are silent until somebody presses
+the key, and both are asserted in `apps/recorder/tests/replay_clip.rs` with
+coded video instead of a graphics device.
+
 **A saved clip is written down where the recording is.** `apps/recorder`'s
 `replay` subcommand and its `serve` both go through one routine
 (`apps/recorder/src/replay.rs`): write the clip, then enter it in the session's

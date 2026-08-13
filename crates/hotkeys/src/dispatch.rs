@@ -311,6 +311,11 @@ impl Handlers {
     /// Runs the handler registered for `action`, on the calling thread, as
     /// though `hotkey` had been pressed.
     ///
+    /// **This is not how a press is delivered.** A real press goes through the
+    /// message loop and [`Dispatcher::press`], which never runs a handler on
+    /// the thread that received it; this runs the handler right here and blocks
+    /// for as long as it takes, so nothing in a running service may call it.
+    ///
     /// This is the only way to reach a registered handler without a keyboard.
     /// [`handled`](Self::handled) says *that* an action has one, and
     /// [`crate::HotkeyService::start`] consumes the whole set into worker
@@ -327,6 +332,12 @@ impl Handlers {
     /// Unlike a real press this runs the handler **here**, not on that action's
     /// thread, and so it neither queues nor drops: the concurrency rules this
     /// module documents belong to [`Dispatcher`] and are tested against it.
+    ///
+    /// `hotkey` is what the handler is told the user pressed. It is only ever
+    /// read by the handler — nothing is registered and nothing is looked up by
+    /// it. `apps/recorder/src/hotkeys.rs` and
+    /// `apps/recorder/tests/replay_clip.rs` are the worked examples, one per
+    /// action each of those callers performs.
     ///
     /// # Errors
     ///
@@ -516,7 +527,9 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use super::{
@@ -614,6 +627,41 @@ mod tests {
             .expect_err("nothing was registered for it");
 
         assert_eq!(unhandled, Unhandled::for_action(HotkeyAction::SaveReplay));
+    }
+
+    /// The seam a caller building a map of closures is tested through: what the
+    /// closure *does* rather than only which action it is filed under.
+    ///
+    /// The two above take the registered handler apart; this one holds the
+    /// property they cannot see between them — that a press of an action with
+    /// no handler runs **nothing**, rather than the one handler that happens to
+    /// be in the map.
+    #[test]
+    fn a_handler_can_be_run_on_the_calling_thread_and_a_missing_one_runs_nothing() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&ran);
+        let mut handlers = Handlers::new().on(HotkeyAction::SaveReplay, move |press| {
+            assert_eq!(press.action(), HotkeyAction::SaveReplay);
+            assert_eq!(press.hotkey(), hotkey());
+            counted.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(handlers.press(HotkeyAction::SaveReplay, hotkey()).is_ok());
+        assert_eq!(
+            ran.load(Ordering::Relaxed),
+            1,
+            "the handler registered for the action has to be the one that ran",
+        );
+
+        assert!(
+            handlers.press(HotkeyAction::AddBookmark, hotkey()).is_err(),
+            "an action with no handler must say so rather than look like it ran one",
+        );
+        assert_eq!(
+            ran.load(Ordering::Relaxed),
+            1,
+            "and it must not have reached the one handler that is registered",
+        );
     }
 
     /// AGENTS.md section 54: an action with nothing behind it says so.

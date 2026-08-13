@@ -63,7 +63,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use clipped_hotkeys::{Bindings, Handlers, HotkeyAction, HotkeyError, HotkeyService};
+use clipped_hotkeys::{Bindings, Handlers, HotkeyAction, HotkeyError, HotkeyService, Registration};
 use clipped_logging::RedactedPath;
 use clipped_replay::SavedClip;
 use clipped_session::automatic::ManualSession;
@@ -228,21 +228,14 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
         || "the replay hotkey".to_owned(),
         |hotkey| hotkey.to_string(),
     );
-    let (hotkeys, _presses) = HotkeyService::start(
-        &bindings,
-        Handlers::new().on(HotkeyAction::SaveReplay, {
-            let replay = Arc::clone(&replay);
-            let session = Arc::clone(&session);
-            let keep = config.save;
-            move |_press| report_save(&save(&replay, &session, keep, None, SystemTime::now()))
-        }),
-    )?;
+    let (hotkeys, _presses) =
+        HotkeyService::start(&bindings, handlers_for(&replay, &session, config.save))?;
 
     // Every conflict, before the recording starts rather than when a press does
     // nothing. A combination another application owns costs the user that
     // hotkey and not the recording (AGENTS.md section 45, issue #39).
-    for conflict in hotkeys.registration().conflicts() {
-        eprintln!("{conflict}");
+    for line in conflict_report(hotkeys.registration()) {
+        eprintln!("{line}");
     }
 
     eprintln!(
@@ -326,6 +319,53 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
     Err(ReplayCommandError::Recording(RecordError::Session(
         clipped_session::SessionError::UnsupportedPlatform,
     )))
+}
+
+/// What a `replay` invocation gives the hotkey service: a save, on the replay
+/// key, and nothing else.
+///
+/// The absence is deliberate. `replay` records one window until Ctrl+C, so it
+/// has nothing to toggle and nowhere to put a screenshot; those actions belong
+/// to `serve`, which owns a protocol and the recordings behind it (issue #232).
+/// An action with no handler here is reported as
+/// [`Unhandled`](clipped_hotkeys::Unhandled) when its key is pressed rather than
+/// silently doing nothing (AGENTS.md section 54).
+///
+/// `keep` is how much of the buffer one press saves — the `--save` window, which
+/// may be shorter than the window being kept.
+///
+/// Separate from [`run`] because [`run`] needs a window, an encoder and a
+/// capture session before it reaches this, and the question this answers —
+/// *which key does what, and what does it do* — needs none of them
+/// (`apps/recorder/tests/replay_clip.rs`).
+#[must_use]
+pub fn handlers_for(
+    replay: &Arc<ReplayRecording>,
+    session: &Arc<Mutex<ManualSession>>,
+    keep: Duration,
+) -> Handlers {
+    let replay = Arc::clone(replay);
+    let session = Arc::clone(session);
+    Handlers::new().on(HotkeyAction::SaveReplay, move |_press| {
+        report_save(&save(&replay, &session, keep, None, SystemTime::now()));
+    })
+}
+
+/// The lines a `replay` invocation prints for the combinations Windows would not
+/// give it.
+///
+/// One per refused combination and none at all in the ordinary case, each the
+/// conflict's own sentence: it names the combination, names the action that
+/// wanted it, says who is likely to have it and says what to do next, and only
+/// the process that asked Windows knows any of that (AGENTS.md section 45).
+/// Repeating any of it here would be a second copy to go stale.
+///
+/// Separate from [`run`] because a conflict depends on what else is installed on
+/// the machine, so the case that matters cannot be arranged by a test that
+/// registers anything real — only by building the report
+/// ([`Registration::of`](clipped_hotkeys::Registration::of)).
+fn conflict_report(registration: &Registration) -> Vec<String> {
+    registration.conflicts().map(ToString::to_string).collect()
 }
 
 /// Saves the last `keep` of `replay` and enters it in `session`.
@@ -466,7 +506,63 @@ fn plural(count: u64, unit: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use clipped_hotkeys::ConflictCause;
+
     use super::*;
+
+    /// The report for a machine where something else already owns `Ctrl`+`F10`.
+    ///
+    /// Built rather than registered: whether Windows refuses the combination
+    /// depends on what else is installed, so a test that tried to arrange a real
+    /// conflict would pass or fail by accident.
+    fn a_registration_with_a_conflict() -> Registration {
+        Registration::of(
+            &Bindings::defaults(),
+            &BTreeSet::from([HotkeyAction::SaveReplay]),
+            &BTreeMap::from([(HotkeyAction::SaveReplay, ConflictCause::AlreadyRegistered)]),
+        )
+    }
+
+    /// The failure this reporting exists to prevent: the key does nothing, and
+    /// nothing ever said why (AGENTS.md section 45).
+    #[test]
+    fn a_combination_windows_refused_is_reported_by_name_before_the_recording_starts() {
+        let lines = conflict_report(&a_registration_with_a_conflict());
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "one line per refused combination: {lines:?}"
+        );
+        let line = &lines[0];
+        assert!(
+            line.contains("Ctrl+F10"),
+            "the line has to name the combination, or there is nothing to change: {line}"
+        );
+        assert!(
+            line.contains("Save replay"),
+            "and the action, so it is clear what was lost: {line}"
+        );
+        assert!(
+            line.contains("Choose a different combination"),
+            "and what to do next: {line}"
+        );
+    }
+
+    /// The ordinary case, which must be silent: a recorder that printed a line
+    /// about every hotkey it did get would bury the one that matters.
+    #[test]
+    fn a_registration_windows_accepted_reports_nothing() {
+        let clean = Registration::of(
+            &Bindings::defaults(),
+            &BTreeSet::from([HotkeyAction::SaveReplay]),
+            &BTreeMap::new(),
+        );
+
+        assert!(conflict_report(&clean).is_empty());
+    }
 
     #[test]
     fn a_duration_is_described_in_the_units_somebody_would_say_it_in() {

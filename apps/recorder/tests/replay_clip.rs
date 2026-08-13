@@ -39,13 +39,15 @@
 #![cfg(windows)]
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use clipped_hotkeys::HotkeyAction;
 use clipped_media_validation::{
     require_media_tools, CodedVideo, Media, TemporaryDirectory, VideoStream,
 };
-use clipped_recorder::replay::save;
+use clipped_muxer::RecordingLayout;
+use clipped_recorder::replay::{handlers_for, save};
 use clipped_session::automatic::ManualSession;
 use clipped_session::config::Configuration;
 use clipped_session::ReplayRecording;
@@ -81,24 +83,26 @@ fn presentation_time(index: u64) -> Duration {
     Duration::from_nanos(index * 1_000_000_000 / FRAMES_PER_SECOND)
 }
 
-/// A replay handle with `seconds` of real coded video already in it.
-///
-/// [`None`] when the FFmpeg programs are not on this machine, which
-/// `require_media_tools` turns into a failure where `CLIPPED_REQUIRE_MEDIA` is
-/// set.
-fn buffered(seconds: u64) -> Option<ReplayRecording> {
+/// The fixture's coded video, or [`None`] when the FFmpeg programs are not on
+/// this machine — which `require_media_tools` turns into a failure where
+/// `CLIPPED_REQUIRE_MEDIA` is set.
+fn coded_video() -> Option<CodedVideo> {
     require_media_tools()?;
-    let video = CodedVideo::encode(
+    CodedVideo::encode(
         WIDTH,
         HEIGHT,
         u32::try_from(FRAMES_PER_SECOND).expect("60 fits"),
         u32::try_from(KEYFRAME_INTERVAL).expect("120 fits"),
         FIXTURE_SECONDS,
-    )?;
+    )
+}
 
-    let replay = ReplayRecording::new(WINDOW).expect("thirty seconds is a supported window");
-    replay.begin(
-        &clipped_muxer::VideoTrack::new(clipped_muxer::VideoCodec::H264, WIDTH, HEIGHT)
+/// The layout a recording of that video would declare, as
+/// `crates/session/src/audio.rs` builds one — video only, because nothing puts
+/// audio in a replay buffer yet (issue #40).
+fn layout(video: &CodedVideo) -> RecordingLayout {
+    RecordingLayout::new(
+        clipped_muxer::VideoTrack::new(clipped_muxer::VideoCodec::H264, WIDTH, HEIGHT)
             .with_frame_rate(
                 clipped_muxer::FrameRate::per_second(
                     u32::try_from(FRAMES_PER_SECOND).expect("60 fits"),
@@ -110,12 +114,12 @@ fn buffered(seconds: u64) -> Option<ReplayRecording> {
             // catch.
             .with_codec_private(video.parameter_sets().to_vec())
             .with_name("Gameplay"),
-        generous_rate(),
-    );
+    )
+}
 
-    let buffer = replay
-        .buffer()
-        .expect("the buffer exists once it has begun");
+/// Pushes `seconds` of `video` into `buffer`, as the recording's packet loop
+/// does one packet at a time (`crates/session/src/recording.rs`).
+fn push(video: &CodedVideo, buffer: &clipped_replay::ReplayBuffer, seconds: u64) {
     for frame in 0..seconds * FRAMES_PER_SECOND {
         buffer.push(&clipped_encoder::EncodedPacket::new(
             video.picture(frame),
@@ -128,6 +132,22 @@ fn buffered(seconds: u64) -> Option<ReplayRecording> {
             },
         ));
     }
+}
+
+/// A replay handle with `seconds` of real coded video already in it.
+///
+/// Attached through `clipped_session::start_buffer`, which is the same join a
+/// real recording makes when its encoder opens, so every test below is saving
+/// out of a buffer wired up the way the recorder wires one.
+///
+/// [`None`] when the FFmpeg programs are not on this machine.
+fn buffered(seconds: u64) -> Option<ReplayRecording> {
+    let video = coded_video()?;
+
+    let replay = ReplayRecording::new(WINDOW).expect("thirty seconds is a supported window");
+    let buffer = clipped_session::start_buffer(&layout(&video), generous_rate(), Some(&replay))
+        .expect("a recording asked for a buffer has one once its encoder is open");
+    push(&video, buffer, seconds);
 
     Some(replay)
 }
@@ -224,6 +244,130 @@ fn a_saved_replay_is_the_last_n_seconds_and_every_picture_of_it_decodes() {
         "the clip's bounds in the recording have to be the ones it really covers: {sidecar}"
     );
     assert_eq!(recorded["complete"], serde_json::Value::from(true));
+}
+
+#[test]
+fn pressing_the_replay_key_saves_a_clip_and_no_other_key_does_anything() {
+    // The wiring between "a key was pressed" and everything the test above
+    // checks. `run` builds this map behind a window, an encoder and a capture
+    // session, so the map is built here instead and its handler run directly —
+    // no keyboard, no desktop session, and no dependence on `Ctrl`+`F10` being
+    // free on the machine (`clipped_hotkeys::Handlers::press`).
+    let Some(replay) = buffered(35) else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("replay-hotkey");
+    let replay = Arc::new(replay);
+    let session = Arc::new(session(directory.path()));
+
+    let mut handlers = handlers_for(&replay, &session, Duration::from_secs(5));
+
+    assert_eq!(
+        handlers.handled().collect::<Vec<_>>(),
+        vec![HotkeyAction::SaveReplay],
+        "a `replay` invocation performs a save and nothing else, and an action \
+         with a handler that does nothing is worse than one with none",
+    );
+
+    let hotkey = "Ctrl+F10".parse().expect("Ctrl+F10 is a hotkey");
+    handlers
+        .press(HotkeyAction::SaveReplay, hotkey)
+        .expect("the replay key has a handler");
+    assert!(
+        handlers
+            .press(HotkeyAction::TakeScreenshot, hotkey)
+            .is_err(),
+        "`replay` takes no screenshots, so that press must report itself \
+         unhandled rather than look like it did something",
+    );
+
+    // What the press produced: a clip on disk, entered in the session's record
+    // — which is the whole of what the handler is for.
+    let recorded = session.lock().expect("a fresh lock");
+    let clips = recorded.session().clips();
+    assert_eq!(clips.len(), 1, "one press, one clip");
+    let clip = clips[0].path().to_path_buf();
+    assert_eq!(
+        clips[0].requested(),
+        Duration::from_secs(5),
+        "a press saves the window `handlers_for` was given, not the thirty \
+         seconds the buffer keeps",
+    );
+    assert!(clips[0].is_complete());
+    drop(recorded);
+
+    Media::open(&clip)
+        .expect("the press wrote a clip that opens")
+        .validate()
+        .stream_count(1)
+        .video(
+            VideoStream::codec("h264")
+                .resolution(WIDTH, HEIGHT)
+                // Five seconds at 60 fps, and never the thirty-five pushed.
+                .decoded_frames_at_least(300),
+        )
+        .monotonic_timestamps()
+        .assert_valid();
+}
+
+#[test]
+fn a_recording_pushes_into_the_buffer_it_started_and_a_clip_declares_that_recordings_video() {
+    // The join between an encoder opening and a buffer existing: two steps that
+    // are only correct together, four lines behind a GPU in
+    // `crates/session/src/recording.rs`, and now one function that can be called
+    // with coded video instead of a graphics device.
+    let Some(video) = coded_video() else {
+        return;
+    };
+    let replay = ReplayRecording::new(WINDOW).expect("thirty seconds is a supported window");
+
+    assert!(
+        clipped_session::start_buffer(&layout(&video), generous_rate(), None).is_none(),
+        "a recording that was not asked for a replay buffer must not be given one",
+    );
+    assert!(
+        replay.buffer().is_none(),
+        "and nothing has a buffer before its encoder opened",
+    );
+
+    let buffer = clipped_session::start_buffer(&layout(&video), generous_rate(), Some(&replay))
+        .expect("a recording asked for a buffer has one once its encoder is open");
+    assert!(
+        std::ptr::eq(
+            buffer,
+            replay.buffer().expect("the recording started a buffer"),
+        ),
+        "the packets have to go into the buffer this recording will save from, \
+         not into one nothing can reach",
+    );
+
+    push(&video, buffer, 6);
+
+    // And what a clip out of it declares is the recording's own video track. A
+    // buffer begun without it holds the same pictures and produces a file with a
+    // video stream nothing can decode, which passes every check short of
+    // decoding it.
+    let directory = TemporaryDirectory::new("replay-join");
+    let session = session(directory.path());
+    let saved = save(
+        &replay,
+        &session,
+        Duration::from_secs(2),
+        None,
+        SystemTime::now(),
+    )
+    .expect("two of the six seconds pushed");
+
+    Media::open(saved.clip.path())
+        .expect("the clip opens")
+        .validate()
+        .stream_count(1)
+        .video(
+            VideoStream::codec("h264")
+                .resolution(WIDTH, HEIGHT)
+                .decoded_frames_at_least(120),
+        )
+        .assert_valid();
 }
 
 #[test]

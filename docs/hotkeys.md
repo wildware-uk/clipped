@@ -206,8 +206,8 @@ the subsystem exists and this process simply was not given a handler. Which of
 the two a given action gets depends on the process: `serve` supplies a handler
 for the first four rows above, `clipped-recorder replay` supplies one for Save
 replay alone, and every other subcommand registers nothing at all. Nothing is
-ever swallowed, and no
-handler is ever faked to make a key appear to work (AGENTS.md section 54).
+ever swallowed, and no handler is ever faked to make a key appear to work
+(AGENTS.md section 54).
 
 ## Conflicts
 
@@ -325,22 +325,34 @@ The dispatch rules need no keyboard and no desktop, and are unit tests in
 what a full queue does, what a panicking handler does. They run everywhere,
 including on a machine that is not Windows.
 
-### Asserting what a handler does
+### Testing what a caller wires into it
 
-`Handlers::press(action, hotkey)` runs the handler registered for an action on
-the calling thread, and is how the process that registered the handlers checks
-that each one performs the action it was registered against. It exists because
-that is otherwise unobservable: `handled()` says only *which* actions have a
-handler, `HotkeyService::start` consumes the set into worker threads, and a
-closure is opaque from the moment it goes in. The failure it catches is not a
-dead key but a key wired to the wrong action — the screenshot combination
-stopping a recording, which is worse than the screenshot combination doing
-nothing, and which every other test in the repository would call correct.
-`apps/recorder/src/hotkeys.rs` uses it once per action the recorder performs.
+A process that uses this crate has two things worth checking that neither its
+own tests nor the ones above would otherwise reach, so the crate exposes the
+seam for each rather than leaving both to be hoped about:
 
-It is not a way to test the dispatcher: it runs the handler where it is called,
-so it neither queues nor drops, and the concurrency rules above are asserted
-against `Dispatcher` instead.
+| The question | The seam | Why a real service cannot answer it |
+| --- | --- | --- |
+| Does this key do what the caller thinks it does? | `Handlers::press`, which runs one action's handler on the calling thread | A press needs a keyboard, a desktop session and the combination to be free on the machine |
+| What does the caller show when Windows refuses a combination? | `Registration::of`, which builds the report from what was asked for and what was refused | Whether `Ctrl`+`F10` is taken depends on what else is installed, so a real conflict passes or fails by accident |
+
+`Handlers::press(action, hotkey)` exists because a closure is otherwise opaque
+from the moment it goes in: `handled()` says only *which* actions have a
+handler, and `HotkeyService::start` consumes the set into worker threads. The
+failure it catches is not a dead key but a key wired to the wrong action — the
+screenshot combination stopping a recording, which is worse than the screenshot
+combination doing nothing, and which every other test in the repository would
+call correct. It refuses with the same `Unhandled` a real press would carry, so
+an action nothing performs reads the same either way.
+
+`Registration::of` is the construction `HotkeyService::start` itself uses, so
+there is one of it rather than a production path and a test-shaped imitation of
+it. `Handlers::press` is **not** how a press is delivered — it runs the handler
+where it is called, so it neither queues nor drops, and the concurrency rules
+above are asserted against `Dispatcher` instead; nothing in a running service
+may use it. `apps/recorder/src/hotkeys.rs` uses it once per action `serve`
+performs, and `apps/recorder/src/replay.rs` with
+`apps/recorder/tests/replay_clip.rs` are the worked example of both seams.
 
 Everything that needs Windows is in `crates/hotkeys/tests/windows_hotkeys.rs`,
 which registers real combinations and presses real keys with `SendInput`. It
