@@ -14,7 +14,7 @@
     libraries it links - into the bundle.
 
     It stages rather than merely checking, because two different kinds of file
-    have to end up in one directory beside Clipped.exe:
+    have to end up in one directory beside clipped-desktop.exe:
 
     - clipped-recorder.exe, built by `cargo build --release -p clipped-recorder`;
     - the FFmpeg DLLs from the pinned build that scripts/fetch-ffmpeg.ps1
@@ -191,7 +191,7 @@ foreach ($source in @($RecorderExecutable) + $ffmpegLibraries.FullName) {
     $staged += Get-Item -LiteralPath (Join-Path $PayloadDirectory $name)
 }
 
-Write-Host "Staged for the installer, beside Clipped.exe, in $PayloadDirectory"
+Write-Host "Staged for the installer, beside clipped-desktop.exe, in $PayloadDirectory"
 Write-Host ''
 Write-Host ("  {0,-24} {1,12}  {2}" -f 'File', 'Bytes', 'From')
 foreach ($file in $staged) {
