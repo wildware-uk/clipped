@@ -73,7 +73,7 @@ component of that operating system or a file in the directory beside it.
 | **Not needed** | The **Microsoft Visual C++ 2015-2022 redistributable**. Neither executable imports `VCRUNTIME140.dll`; both link the compiler runtime statically and the universal CRT dynamically ([ADR 0007](adr/0007-visual-c-runtime-linkage.md)). |
 | **Installed if absent** | **WebView2**, which the window draws the interface in. It is present on Windows 11 and on current Windows 10; `tauri.conf.json` leaves `webviewInstallMode` at Tauri's default, so the installer runs Microsoft's bootstrapper where it is not. |
 
-That last row is the one that used to be false. `clipped-recorder.exe` imported
+The **Not needed** row is the one that used to be false. `clipped-recorder.exe` imported
 `VCRUNTIME140.dll` and `clipped-desktop.exe` did not, so on a machine without the
 redistributable the window opened, looked healthy and recorded nothing: the
 recorder was ended by the loader with `STATUS_DLL_NOT_FOUND` before `main`, with
