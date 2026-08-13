@@ -711,6 +711,81 @@ mod tests {
     /// Generous on purpose: it bounds a hang rather than asserting a latency.
     const PATIENCE: Duration = Duration::from_secs(20);
 
+    /// How far a track's length may sit from the time that passed while it was
+    /// read.
+    ///
+    /// A track is as long as the *device* says: what a read hands over is what
+    /// the audio engine had captured by the moment it was asked for it, and the
+    /// engine holds up to [`BUFFER_DURATION`] that nobody has asked for yet. So
+    /// a length measured across an interval is the time that interval took, give
+    /// or take how much the engine happened to be holding at each end of it.
+    ///
+    /// Every length below is asserted against a *measured* elapsed time plus
+    /// this, and never against the duration a `sleep` or a read loop was asked
+    /// for. `std::thread::sleep` is a floor rather than a duration, and a read
+    /// loop leaves when its deadline has passed rather than when it arrives; a
+    /// thread descheduled on a shared runner comes back long after either, and
+    /// the audio engine goes on capturing the whole time it is away. A bound
+    /// written against the nominal duration therefore fails on a busy machine
+    /// with nothing having regressed — which
+    /// [issue #387](https://github.com/wildware-uk/clipped/issues/387) is about,
+    /// and which `stopping_a_capture_hands_over_the_audio_the_engine_was_still_holding`
+    /// did on a commit that changed an icon (AGENTS.md section 25).
+    ///
+    /// Two other tests in this module failed in that same run and are **not**
+    /// this: `a_process_tree_that_plays_nothing_still_produces_a_track_of_the_right_length`
+    /// failed its *lower* bound with 0.1 s of track in 1.2 s of reading
+    /// ([issue #425](https://github.com/wildware-uk/clipped/issues/425)), and
+    /// `a_game_that_re_executes_itself_is_followed_onto_the_process_that_survived`
+    /// failed on one nanosecond of contiguity in a helper this does not touch
+    /// ([issue #424](https://github.com/wildware-uk/clipped/issues/424)). Three
+    /// tests failing together is not three tests failing for one reason, and
+    /// reading it that way would have closed #387 over two live defects.
+    const ENGINE_BACKLOG: Duration = Duration::from_nanos(BUFFER_DURATION as u64 * 100);
+
+    /// How long the consumer stops reading for in the drain test.
+    ///
+    /// Long enough that what the drain has to produce is still bounded from
+    /// below once [`ENGINE_BACKLOG`] is allowed for either side of it. The 150 ms
+    /// this stalled for previously is shorter than the engine's own buffer, so
+    /// the only honest lower bound on it would have been zero.
+    const STALL: Duration = Duration::from_millis(500);
+
+    /// What a stretch of reading produced, and how long it really took.
+    #[derive(Debug)]
+    struct Reading {
+        /// Every buffer that arrived, checked contiguous with the one before it
+        /// as it did.
+        timeline: Contiguity,
+        /// Of those frames, the ones the client delivered — as opposed to the
+        /// ones this crate invented to cover a period the client said nothing
+        /// about.
+        from_the_client: u64,
+        /// The wall-clock time this really occupied. See [`ENGINE_BACKLOG`] for
+        /// why it is measured rather than assumed.
+        elapsed: Duration,
+    }
+
+    impl Reading {
+        /// Asserts that the audio is as long as the time it was read over.
+        ///
+        /// The property every downstream stage depends on: a second of
+        /// recording is a second of audio, contiguous, whether or not the tree
+        /// played anything in it. A capture that only produced samples while the
+        /// game made a noise would slide against the video by exactly the amount
+        /// of quiet in the recording.
+        fn assert_as_long_as_it_took(&self, what: &str) {
+            let took = self.elapsed.as_secs_f64();
+            let slack = ENGINE_BACKLOG.as_secs_f64();
+            let seconds = self.timeline.seconds();
+            assert!(
+                (took - slack..=took + slack).contains(&seconds),
+                "{what}: {took:.3} s passed, so there should be about {took:.3} s of audio, \
+                 give or take the {slack:.3} s the audio engine holds; got {seconds:.3} s"
+            );
+        }
+    }
+
     /// Opens a capture of a process tree, or reports why this machine cannot.
     ///
     /// **These tests make no sound.** They capture a process tree that renders
@@ -735,16 +810,23 @@ mod tests {
         }
     }
 
-    /// Reads for `duration`, returning what arrived.
+    /// Reads for at least `duration`, returning what arrived and how long it
+    /// took.
     ///
     /// Answers the frames handed over — asserting on the way that every buffer
     /// was exactly contiguous with the one before it, which is the property
-    /// everything downstream depends on — and how many of those frames the
-    /// client produced rather than this crate inventing them.
-    fn read_for(capture: &mut ProcessLoopbackCapture, duration: Duration) -> (Contiguity, u64) {
+    /// everything downstream depends on — how many of those frames the client
+    /// produced rather than this crate inventing them, and the elapsed time the
+    /// length is judged against.
+    ///
+    /// The elapsed time is not `duration`. This leaves when the deadline has
+    /// *passed*, which is one read later at best and however long the thread was
+    /// descheduled for at worst (see [`ENGINE_BACKLOG`]).
+    fn read_for(capture: &mut ProcessLoopbackCapture, duration: Duration) -> Reading {
         let mut timeline = Contiguity::new(capture.format());
         let mut from_the_client = 0u64;
-        let until = Instant::now() + duration;
+        let started = Instant::now();
+        let until = started + duration;
         while Instant::now() < until {
             match capture
                 .read(Duration::from_millis(100))
@@ -759,7 +841,11 @@ mod tests {
                 Capture::Idle | Capture::FormatChanged(_) => {}
             }
         }
-        (timeline, from_the_client)
+        Reading {
+            timeline,
+            from_the_client,
+            elapsed: started.elapsed(),
+        }
     }
 
     /// A process that does nothing until its standard input closes, and the
@@ -856,12 +942,8 @@ mod tests {
             return;
         };
 
-        let (timeline, from_the_client) = read_for(&mut capture, Duration::from_millis(1_200));
-        let seconds = timeline.seconds();
-        assert!(
-            (1.0..=1.5).contains(&seconds),
-            "1.2 seconds of reading should produce about 1.2 seconds of audio, got {seconds:.3}"
-        );
+        let reading = read_for(&mut capture, Duration::from_millis(1_200));
+        reading.assert_as_long_as_it_took("reading a tree that plays nothing");
 
         // And the length has to come from the client rather than from silence
         // invented to cover a client that produced nothing, or this would pass
@@ -876,9 +958,9 @@ mod tests {
         // stopped holding would fail here rather than quietly changing what
         // this crate is built on.
         assert!(
-            from_the_client > 0,
+            reading.from_the_client > 0,
             "every one of the {} frames was silence this crate invented, and the client              delivered nothing",
-            timeline.frames
+            reading.timeline.frames
         );
         assert!(
             capture.target_is_running(),
@@ -889,9 +971,10 @@ mod tests {
 
     #[test]
     fn stopping_a_capture_hands_over_the_audio_the_engine_was_still_holding() {
-        // Issue #26's third scope item. The audio engine holds up to 200 ms of
-        // captured audio; a capture that is simply closed throws it away, which
-        // is the last fraction of a second before somebody stopped recording.
+        // Issue #26's third scope item. The audio engine holds captured audio
+        // nobody has asked for yet; a capture that is simply closed throws it
+        // away, which is the last fraction of a second before somebody stopped
+        // recording.
         //
         // The consumer stops reading for long enough to leave a real backlog,
         // and the drain then has to produce it — after the client has been
@@ -902,16 +985,28 @@ mod tests {
         };
         let format = capture.format();
 
-        let _ = read_for(&mut capture, Duration::from_millis(300));
-        std::thread::sleep(Duration::from_millis(150));
+        read_for(&mut capture, Duration::from_millis(300));
+
+        // Measured, not assumed: `sleep` guarantees only that it does not
+        // return early, and the engine goes on capturing for however long this
+        // thread is really away (see `ENGINE_BACKLOG`).
+        let stall_began = Instant::now();
+        std::thread::sleep(STALL);
+        let stalled = stall_began.elapsed();
 
         let before = capture.stats().frames;
         capture.finish();
 
-        let mut drained = Contiguity::new(format);
+        let mut timeline = Contiguity::new(format);
+        let mut from_the_client = 0u64;
         loop {
             match capture.read(Duration::from_millis(100)) {
-                Ok(Capture::Samples(samples)) => drained.accept(&samples),
+                Ok(Capture::Samples(samples)) => {
+                    if samples.origin() == SampleOrigin::Endpoint {
+                        from_the_client += samples.frames() as u64;
+                    }
+                    timeline.accept(&samples);
+                }
                 Ok(Capture::Idle | Capture::FormatChanged(_)) => break,
                 // The drain has handed over everything and closed itself, which
                 // is how a caller knows there is no more.
@@ -919,21 +1014,36 @@ mod tests {
                 Err(error) => panic!("a drain does not fail: {error}"),
             }
         }
+        let drain = Reading {
+            timeline,
+            from_the_client,
+            elapsed: stalled,
+        };
 
-        let seconds = drained.frames as f64 / f64::from(format.sample_rate().get());
         assert!(
-            drained.frames > 0,
-            "a 150 ms stall leaves audio in the engine, and stopping the capture must hand it \
-             over rather than lose it"
+            drain.timeline.frames > 0,
+            "a {stalled:.3?} stall leaves audio in the engine, and stopping the capture must \
+             hand it over rather than lose it"
         );
+        // Not just *a* length: the audio the engine was holding. The rest of
+        // what a drain hands over is silence covering the gap between where the
+        // recording had got to and where the surviving packets sit, and a drain
+        // that had lost the packets and kept only the gap would still be the
+        // right length — measured on Windows 11 build 26200, a stall of any
+        // length from 50 ms to 1.5 s leaves the same 30 ms of real audio in the
+        // engine and the rest of the drain is that silence.
         assert!(
-            (0.05..=0.30).contains(&seconds),
-            "a 150 ms stall should drain about 150 ms of audio, and the engine holds at most \
-             200 ms; got {seconds:.3} s"
+            drain.from_the_client > 0,
+            "every one of the {} frames the drain handed over was silence this crate invented; \
+             what a drain is for is the audio the engine had captured and not been asked for",
+            drain.timeline.frames
         );
+        // And the recording does not lose the period the reader was away for:
+        // the drain covers it, however long it really was.
+        drain.assert_as_long_as_it_took("draining after a stall");
         assert_eq!(
             capture.stats().frames - before,
-            drained.frames,
+            drain.timeline.frames,
             "everything the drain handed over is on the same timeline as the recording"
         );
         assert!(
@@ -961,7 +1071,7 @@ mod tests {
             capture.target_is_running(),
             "the process the capture was opened for is running"
         );
-        let _ = read_for(&mut capture, Duration::from_millis(200));
+        read_for(&mut capture, Duration::from_millis(200));
 
         chain.kill_root();
         drop(chain);
@@ -971,12 +1081,9 @@ mod tests {
             "the capture has to notice that every process of the game has exited"
         );
 
-        let (after, _) = read_for(&mut capture, Duration::from_millis(600));
-        let seconds = after.seconds();
-        assert!(
-            (0.4..=0.9).contains(&seconds),
-            "the track has to keep its place on the timeline after the game exits, and 600 ms \
-             of reading produced {seconds:.3} s"
+        let after = read_for(&mut capture, Duration::from_millis(600));
+        after.assert_as_long_as_it_took(
+            "the track has to keep its place on the timeline after the game exits",
         );
     }
 
@@ -1000,7 +1107,7 @@ mod tests {
             read_until(&mut capture, |capture| capture.target_is_running()),
             "the chain is running"
         );
-        let _ = read_for(&mut capture, Duration::from_millis(1_100));
+        read_for(&mut capture, Duration::from_millis(1_100));
 
         chain.kill_root();
 
@@ -1023,14 +1130,10 @@ mod tests {
         );
 
         // And the recording carries on across it, contiguously.
-        let (after, from_the_client) = read_for(&mut capture, Duration::from_millis(600));
-        let seconds = after.seconds();
+        let after = read_for(&mut capture, Duration::from_millis(600));
+        after.assert_as_long_as_it_took("reading after a re-scoping");
         assert!(
-            (0.4..=0.9).contains(&seconds),
-            "600 ms of reading after a re-scoping produced {seconds:.3} s of audio"
-        );
-        assert!(
-            from_the_client > 0,
+            after.from_the_client > 0,
             "the client activated on the surviving process has to be delivering packets, and              everything after the re-scoping was invented silence"
         );
     }

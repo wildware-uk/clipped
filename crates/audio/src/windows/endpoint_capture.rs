@@ -1770,6 +1770,7 @@ pub(super) mod testing {
     /// not. That is arithmetic in the test rather than drift in the capture,
     /// and this way of asking is both exact and stricter: it fails on
     /// cumulative drift as well as on a single bad buffer.
+    #[derive(Debug)]
     pub(in crate::windows) struct Contiguity {
         format: AudioFormat,
         anchor: Option<AudioTimestamp>,
