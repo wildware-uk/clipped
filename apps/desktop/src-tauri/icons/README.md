@@ -29,7 +29,7 @@ the accent disc and the tall centre bar rather than the number of bars.
 It also has to say whether a recording is running, and a tray icon carries no
 label. So the state rides on top of the mark as a badge in the bottom-right
 corner — a filled disc for recording, a ring for connecting, a slash for
-unavailable, and no badge at all when idle. It is the badge's *shape* that
+unavailable, and no badge at all when idle. It is the badge's _shape_ that
 carries the state, not its colour, so the state survives being printed in black
 and white; that is what AGENTS.md section 46 asks for, and
 `every_mark_is_a_different_shape_and_not_only_a_different_colour` measures it
