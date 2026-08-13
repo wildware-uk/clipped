@@ -388,7 +388,14 @@ that a person made.
   has patent-pool implications regardless of whether the encoder is LGPL, BSD or
   GPL. That risk exists for any recorder and is out of scope here, but it should
   be looked at properly before Clipped is distributed as a signed release rather
-  than discovered then.
+  than discovered then. **It has since been looked at, in
+  [ADR 0008](0008-codec-patent-position.md)
+  ([#257](https://github.com/wildware-uk/clipped/issues/257))**, which
+  inventories what this pin can encode and decode, separates hardware encoding
+  from the software encoders these DLLs carry, and reaches a position on the
+  `libopenh264` fallback the consequence above chose. Nothing in the decision
+  recorded here changes as a result; what changes is that the exposure is
+  written down instead of deferred.
 - **`av1_nvenc` being present is not the same as AV1 encoding working.** The
   pinned build exposes it; whether a given machine can use it is a runtime
   question for [issue #14](https://github.com/wildware-uk/clipped/issues/14).
