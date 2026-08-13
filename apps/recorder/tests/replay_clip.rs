@@ -98,8 +98,8 @@ fn coded_video() -> Option<CodedVideo> {
 }
 
 /// The layout a recording of that video would declare, as
-/// `crates/session/src/audio.rs` builds one — video only, because nothing puts
-/// audio in a replay buffer yet (issue #40).
+/// `crates/session/src/audio/mod.rs` builds one — video only, because nothing
+/// puts audio in a replay buffer yet (issue #40).
 fn layout(video: &CodedVideo) -> RecordingLayout {
     RecordingLayout::new(
         clipped_muxer::VideoTrack::new(clipped_muxer::VideoCodec::H264, WIDTH, HEIGHT)
