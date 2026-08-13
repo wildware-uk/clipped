@@ -40,6 +40,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, ProtocolError};
+use crate::hotkeys::HotkeyBinding;
 use crate::library::{LibraryGame, LibrarySessionPage, LibrarySessions};
 use crate::message::Request;
 use crate::status::{
@@ -68,6 +69,12 @@ pub enum Command {
     LibraryGames,
     /// Copy a finished recording into MP4, without re-encoding it.
     ExportRecording(ExportRecording),
+    /// What every global hotkey is bound to, and whether it works.
+    ///
+    /// Asked rather than pushed because registration happens when the recorder
+    /// starts, which is usually before any window exists to be told
+    /// (`crate::hotkeys`).
+    GetHotkeys,
     /// Stop serving, finish anything still being recorded, and exit.
     ///
     /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
@@ -98,6 +105,7 @@ impl Command {
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
             Self::ExportRecording(_) => "export_recording",
+            Self::GetHotkeys => "get_hotkeys",
             Self::Shutdown(_) => "shutdown",
             Self::Unbuilt(command) => command.name(),
         }
@@ -122,6 +130,7 @@ impl Command {
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
+            "get_hotkeys" => Ok(Self::GetHotkeys),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => match UnbuiltCommand::from_name(name) {
                 Some(command) => Ok(Self::Unbuilt(command)),
@@ -144,7 +153,9 @@ impl Command {
     /// these from user input.
     pub fn to_request(&self, id: u64) -> Result<Request, ProtocolError> {
         let params = match self {
-            Self::Ping | Self::GetStatus | Self::LibraryGames => Ok(serde_json::Value::Null),
+            Self::Ping | Self::GetStatus | Self::LibraryGames | Self::GetHotkeys => {
+                Ok(serde_json::Value::Null)
+            }
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
@@ -544,6 +555,16 @@ pub enum Reply {
     RecordingExported {
         /// The copy, and what it turned out to hold.
         export: ExportSummary,
+    },
+    /// Every action a global hotkey can perform, and where each one stands.
+    Hotkeys {
+        /// One row per action, in the order a configuration screen lists them.
+        ///
+        /// Always the whole list, including the actions bound to nothing: a
+        /// screen that showed only the bound ones could not offer the rest, and
+        /// an action missing from the list is indistinguishable from an action
+        /// the recorder has never heard of.
+        hotkeys: Vec<HotkeyBinding>,
     },
     /// The recorder has stopped listening and is winding up.
     ///

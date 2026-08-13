@@ -167,6 +167,19 @@ pub mod features {
         /// after the user had chosen a file name for a file that was never
         /// going to be written.
         EXPORT = "export";
+        /// The recorder registers the global hotkeys and can report where each
+        /// one stands: `get_hotkeys`.
+        ///
+        /// A UI asks for this before drawing a hotkey list, for the reason the
+        /// five above give: a recorder built before
+        /// [issue #232](https://github.com/wildware-uk/clipped/issues/232)
+        /// registers nothing at all and has no `get_hotkeys` command, so it
+        /// would refuse the request with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand). The
+        /// difference matters more here than elsewhere: "this recorder does not
+        /// register hotkeys" and "every hotkey registered cleanly" are opposite
+        /// answers, and an empty list would be drawn as the second.
+        HOTKEYS = "hotkeys";
     }
 }
 

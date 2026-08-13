@@ -42,6 +42,7 @@
         "library_sessions",
         "library_games",
         "export_recording",
+        "get_hotkeys",
         "shutdown",
         "save_replay",
         "apply_settings"
@@ -115,9 +116,18 @@
         "screenshots",
         "shutdown",
         "library",
-        "export"
+        "export",
+        "hotkeys"
       ],
       "tolerates_unrecognised": true
+    },
+    "hotkey_state": {
+      "values": [
+        "unbound",
+        "registered",
+        "conflict"
+      ],
+      "tolerates_unrecognised": false
     },
     "outcome": {
       "values": [
@@ -144,6 +154,7 @@
         "library_sessions",
         "library_games",
         "recording_exported",
+        "hotkeys",
         "shutting_down"
       ],
       "tolerates_unrecognised": false
@@ -256,6 +267,37 @@
         "role",
         "streams"
       ]
+    },
+    "hotkey_binding": {
+      "required": [
+        "action",
+        "handled",
+        "label",
+        "state"
+      ],
+      "optional": [
+        "hotkey",
+        "unavailable"
+      ]
+    },
+    "hotkey_state.conflict": {
+      "required": [
+        "reason",
+        "state"
+      ],
+      "optional": []
+    },
+    "hotkey_state.registered": {
+      "required": [
+        "state"
+      ],
+      "optional": []
+    },
+    "hotkey_state.unbound": {
+      "required": [
+        "state"
+      ],
+      "optional": []
     },
     "library_clip": {
       "required": [
@@ -403,6 +445,13 @@
     "reply.bookmark_added": {
       "required": [
         "bookmark",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.hotkeys": {
+      "required": [
+        "hotkeys",
         "reply"
       ],
       "optional": []
@@ -606,6 +655,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "get_hotkeys",
+      "params": null,
+      "reply": "reply.hotkeys",
+      "available_in_this_build": true
+    },
+    {
       "name": "shutdown",
       "params": "shutdown",
       "reply": "reply.shutting_down",
@@ -778,7 +833,8 @@
           "screenshots",
           "shutdown",
           "library",
-          "export"
+          "export",
+          "hotkeys"
         ],
         "protocol_version": 1,
         "recorder": {
@@ -1272,6 +1328,51 @@
       },
       "parses": true,
       "discriminant": "response.error.invalid_parameters"
+    },
+    {
+      "name": "the hotkeys, one of which another application already owns",
+      "direction": "server",
+      "frame": {
+        "id": 12,
+        "outcome": {
+          "ok": {
+            "hotkeys": [
+              {
+                "action": "save_replay",
+                "handled": false,
+                "hotkey": "Ctrl+F10",
+                "label": "Save replay",
+                "state": {
+                  "reason": "Ctrl+F10 could not be Clipped's shortcut for Save                                          replay: another application already uses it. Choose a                                          different combination, or close the application that                                          has this one and try again",
+                  "state": "conflict"
+                },
+                "unavailable": "Save replay is not in this build: a recording with a replay buffer arrives in M3              (issue #38)"
+              },
+              {
+                "action": "add_bookmark",
+                "handled": true,
+                "hotkey": "Ctrl+F9",
+                "label": "Add bookmark",
+                "state": {
+                  "state": "registered"
+                }
+              },
+              {
+                "action": "take_screenshot",
+                "handled": true,
+                "label": "Take screenshot",
+                "state": {
+                  "state": "unbound"
+                }
+              }
+            ],
+            "reply": "hotkeys"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.hotkeys"
     },
     {
       "name": "a shutdown accepted, with nothing being recorded",

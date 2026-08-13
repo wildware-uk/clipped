@@ -46,6 +46,8 @@ import type {
   ErrorDetail,
   ExportSummary,
   Hello,
+  HotkeyBinding,
+  HotkeyState,
   JsonObject,
   JsonValue,
   LibraryClip,
@@ -346,6 +348,11 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'recording_exported':
       return { reply: 'recording_exported', export: readExport(reply['export']) };
+    case 'hotkeys':
+      return {
+        reply: 'hotkeys',
+        hotkeys: arrayField(reply['hotkeys'], 'a hotkey list', readHotkeyBinding),
+      };
     case 'shutting_down': {
       const finalising = reply['finalising'];
       return {
@@ -372,6 +379,42 @@ function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
     target: stringField(recording, 'target', 'a recording'),
     elapsed_ms: numberField(recording, 'elapsed_ms', 'a recording'),
   };
+}
+
+function readHotkeyBinding(value: JsonValue | undefined): HotkeyBinding {
+  const binding = object(value, 'a hotkey');
+  const what = 'a hotkey';
+  const hotkey = optionalStringField(binding, 'hotkey', what);
+  const unavailable = optionalStringField(binding, 'unavailable', what);
+  return {
+    action: stringField(binding, 'action', what),
+    label: stringField(binding, 'label', what),
+    // Absent means the action is bound to nothing, which is a row rather than
+    // a gap: most actions start unbound.
+    ...(hotkey === undefined ? {} : { hotkey }),
+    state: readHotkeyState(binding['state']),
+    handled: booleanField(binding, 'handled', what),
+    ...(unavailable === undefined ? {} : { unavailable }),
+  };
+}
+
+function readHotkeyState(value: JsonValue | undefined): HotkeyState {
+  const state = object(value, 'a hotkey state');
+  const tag = stringField(state, 'state', 'a hotkey state');
+  switch (tag) {
+    case 'unbound':
+      return { state: 'unbound' };
+    case 'registered':
+      return { state: 'registered' };
+    case 'conflict':
+      return { state: 'conflict', reason: stringField(state, 'reason', 'a hotkey conflict') };
+    default:
+      // Not tolerated, for the reason a recorder state is not: the three states
+      // this build knows all say the key either works or plainly does not, so a
+      // fourth drawn as one of them would be a hotkey reported as working that
+      // is not.
+      return unreadable(`\`${tag}\` is not a hotkey state this build knows`);
+  }
 }
 
 function readStatus(value: JsonValue | undefined): RecorderStatus {
