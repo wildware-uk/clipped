@@ -225,11 +225,14 @@ will collect.
   configuration file: the recorder does not read the settings API at the moment a
   command arrives, which is
   [#61](https://github.com/wildware-uk/clipped/issues/61).
-- **A hotkey that reaches it.** `clipped-hotkeys` defines the action and
-  `take_screenshot` performs it; supplying the handler that joins them in the
-  desktop process is
-  [#232](https://github.com/wildware-uk/clipped/issues/232), the same ticket that
-  owes bookmarks one.
+- **A default combination.** The recorder registers a `take_screenshot` hotkey
+  and a press sends the same command the window does
+  ([#232](https://github.com/wildware-uk/clipped/issues/232),
+  `docs/hotkeys.md`) — but nothing is bound to it out of the box, because
+  SPEC.md names only two defaults and taking a third combination from every
+  other application on the machine is not this ticket's to do. Binding one means
+  editing the settings file until
+  [#54](https://github.com/wildware-uk/clipped/issues/54) draws the screen.
 - **HDR.** [#99](https://github.com/wildware-uk/clipped/issues/99), above.
 
 ## How it is tested

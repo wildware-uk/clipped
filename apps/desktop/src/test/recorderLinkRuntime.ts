@@ -49,6 +49,15 @@ export interface CommandAnswers {
   /** What `record_target` answers: the process the button would record. */
   readonly recordTarget?: () => unknown;
   /**
+   * What `recorder_hotkeys` answers: where every global hotkey stands.
+   *
+   * The default is a rejection, as the recorder commands' are. A stub that
+   * quietly answered with an empty list would let a screen test pass while the
+   * screen drew "no hotkey has a problem" over a recorder nobody asked, which is
+   * the one thing the hotkey list exists to prevent (AGENTS.md section 27).
+   */
+  readonly recorderHotkeys?: () => unknown;
+  /**
    * What `get_status` answers, once per ask.
    *
    * Called again for every round of asking, so a case can move the recorder
@@ -182,6 +191,9 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'record_target') {
         return Promise.resolve(commands.recordTarget?.() ?? null);
+      }
+      if (command === 'recorder_hotkeys') {
+        return answered(commands.recorderHotkeys);
       }
       if (command === 'recorder_status') {
         return answered(commands.recorderStatus);

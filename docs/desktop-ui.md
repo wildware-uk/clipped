@@ -725,7 +725,7 @@ the screen says how:
 | Recording | `clipped-recorder watch --framerate 60 --codec auto …`, per run; #61 is what makes the settings file reach a recording |
 | Audio | The same options, with the recorder's own warning that a recording has no audio track yet (#180) |
 | Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
-| Hotkeys | Nothing: the hotkey service is written and no process installs it (#232) |
+| Hotkeys | The `hotkeys` section of `settings.json`, read when the recorder starts. The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232); binding one from here is #54 |
 | Notifications | **The one thing this window's own behaviour follows**: the three switches in `notifications.json`, named with their keys and their file |
 | Startup | `clipped-recorder start-at-login enable`, which no protocol command can reach — [#308](https://github.com/wildware-uk/clipped/issues/308) |
 

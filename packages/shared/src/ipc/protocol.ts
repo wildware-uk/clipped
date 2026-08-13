@@ -114,6 +114,7 @@ export const FEATURES = [
   'shutdown',
   'library',
   'export',
+  'hotkeys',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -140,6 +141,7 @@ export const COMMANDS = [
   'library_sessions',
   'library_games',
   'export_recording',
+  'get_hotkeys',
   'shutdown',
   'save_replay',
   'apply_settings',
@@ -219,6 +221,7 @@ export const REPLIES = [
   'library_sessions',
   'library_games',
   'recording_exported',
+  'hotkeys',
   'shutting_down',
 ] as const;
 
@@ -761,6 +764,75 @@ export interface RecordingExportedReply {
 }
 
 /**
+ * The states one hotkey binding can be in.
+ *
+ * Closed, like {@link RecorderState} and for the same reason: a state this
+ * build cannot read would be drawn as one it can, and every one it can read
+ * says the key works.
+ */
+export const HOTKEY_STATES = ['unbound', 'registered', 'conflict'] as const;
+
+/** What Windows said about one binding. There is no unrecognised state. */
+export type HotkeyStateName = (typeof HOTKEY_STATES)[number];
+
+/** The action has no combination, so nothing was registered. */
+export interface UnboundHotkey {
+  /** The tag. */
+  readonly state: 'unbound';
+}
+
+/** Windows accepted it, and presses are being delivered. */
+export interface RegisteredHotkey {
+  /** The tag. */
+  readonly state: 'registered';
+}
+
+/** Windows refused it, most often because another application owns it. */
+export interface ConflictingHotkey {
+  /** The tag. */
+  readonly state: 'conflict';
+  /**
+   * What to tell the user, in the recorder's own words.
+   *
+   * Shown as it arrives: only the recorder knows what failed and who is likely
+   * to have the combination, so the window invents no wording of its own.
+   */
+  readonly reason: string;
+}
+
+/** What Windows said about one binding. */
+export type HotkeyState = UnboundHotkey | RegisteredHotkey | ConflictingHotkey;
+
+/** One action, what it is bound to, and whether pressing it would do anything. */
+export interface HotkeyBinding {
+  /** The action's stable name, such as `save_replay`. */
+  readonly action: string;
+  /** The action's name in the words a person reads, such as `Save replay`. */
+  readonly label: string;
+  /** The combination, written as `Ctrl+F10`. Absent when nothing is bound. */
+  readonly hotkey?: string;
+  /** What Windows said about it. */
+  readonly state: HotkeyState;
+  /**
+   * Whether anything in the recorder performs the action.
+   *
+   * A registered combination with no handler is still a key that does nothing,
+   * so this is read as well as the state before a row is drawn as working.
+   */
+  readonly handled: boolean;
+  /** Why pressing it would do nothing, when that is the case. */
+  readonly unavailable?: string;
+}
+
+/** Every action a global hotkey can perform, and where each one stands. */
+export interface HotkeysReply {
+  /** The tag. */
+  readonly reply: 'hotkeys';
+  /** One row per action, in the order a configuration screen lists them. */
+  readonly hotkeys: readonly HotkeyBinding[];
+}
+
+/**
  * The recorder has stopped listening and is winding up.
  *
  * Sent before it exits, because a reply written afterwards would never arrive.
@@ -795,6 +867,7 @@ export type Reply =
   | LibrarySessionsReply
   | LibraryGamesReply
   | RecordingExportedReply
+  | HotkeysReply
   | ShuttingDownReply;
 
 /** Nothing is being recorded. */

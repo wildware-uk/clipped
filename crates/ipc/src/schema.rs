@@ -70,6 +70,7 @@ use crate::command::{
 };
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
+use crate::hotkeys::{HotkeyBinding, HotkeyState};
 use crate::library::{
     LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
 };
@@ -368,6 +369,16 @@ fn enumerations() -> BTreeMap<String, Enumeration> {
             },
         ),
         (
+            "hotkey_state".to_owned(),
+            Enumeration {
+                values: every_hotkey_state().iter().map(hotkey_state_tag).collect(),
+                // The same asymmetry as `recorder_state` below, and for the same
+                // reason: a hotkey state this build cannot read would be drawn
+                // as one it can, and every one it can says the key works.
+                tolerates_unrecognised: false,
+            },
+        ),
+        (
             "recorder_state".to_owned(),
             Enumeration {
                 values: every_recorder_status().iter().map(state_tag).collect(),
@@ -491,6 +502,16 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&reply, &["reply"]),
         );
     }
+    structures.insert(
+        "hotkey_binding".to_owned(),
+        structure_of(&exemplar_hotkey_binding(), &[]),
+    );
+    for state in every_hotkey_state() {
+        structures.insert(
+            format!("hotkey_state.{}", hotkey_state_tag(&state)),
+            structure_of(&state, &["state"]),
+        );
+    }
     for status in every_recorder_status() {
         structures.insert(
             format!("recorder_status.{}", state_tag(&status)),
@@ -531,6 +552,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::Ping
                 | Command::GetStatus
                 | Command::LibraryGames
+                | Command::GetHotkeys
                 | Command::Unbuilt(_) => None,
             },
             reply: match command {
@@ -543,6 +565,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
+                Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
                 Command::Unbuilt(_) => None,
             },
@@ -879,6 +902,45 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "the hotkeys, one of which another application already owns",
+            ServerMessage::Response(Response {
+                id: 12,
+                outcome: Outcome::Ok(Reply::Hotkeys {
+                    hotkeys: vec![
+                        // The row this reply exists for: a combination the user
+                        // cannot have, carrying the sentence a window shows.
+                        HotkeyBinding {
+                            state: HotkeyState::Conflict {
+                                reason: "Ctrl+F10 could not be Clipped's shortcut for Save                                          replay: another application already uses it. Choose a                                          different combination, or close the application that                                          has this one and try again"
+                                    .to_owned(),
+                            },
+                            ..exemplar_hotkey_binding()
+                        },
+                        // A hotkey that works: registered, and something behind
+                        // it. `unavailable` is absent, which is what tells the
+                        // two rows apart.
+                        HotkeyBinding {
+                            action: "add_bookmark".to_owned(),
+                            label: "Add bookmark".to_owned(),
+                            hotkey: Some("Ctrl+F9".to_owned()),
+                            state: HotkeyState::Registered,
+                            handled: true,
+                            unavailable: None,
+                        },
+                        // An action nobody has bound, which is most of them.
+                        HotkeyBinding {
+                            action: "take_screenshot".to_owned(),
+                            label: "Take screenshot".to_owned(),
+                            hotkey: None,
+                            state: HotkeyState::Unbound,
+                            handled: true,
+                            unavailable: None,
+                        },
+                    ],
+                }),
+            }),
+        ),
+        (
             "a shutdown accepted, with nothing being recorded",
             ServerMessage::Response(Response {
                 id: 8,
@@ -1133,6 +1195,7 @@ fn reply_discriminant(reply: &Reply) -> String {
             Some(_) => "library_sessions.more".to_owned(),
         },
         Reply::LibraryGames { .. } => "library_games".to_owned(),
+        Reply::Hotkeys { .. } => "hotkeys".to_owned(),
         // Whether the copy is complete is part of the path, because it is the
         // one thing a window has to say differently: a mirror that dropped
         // `lossless` would reach the same discriminant for an MP4 that holds
@@ -1630,6 +1693,7 @@ fn every_built_command() -> Vec<Command> {
         Command::LibrarySessions(exemplar_library_sessions()),
         Command::LibraryGames,
         Command::ExportRecording(exemplar_export_recording()),
+        Command::GetHotkeys,
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -1643,6 +1707,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibrarySessions(_)
             | Command::LibraryGames
             | Command::ExportRecording(_)
+            | Command::GetHotkeys
             | Command::Shutdown(_)
             | Command::Unbuilt(_) => {}
         }
@@ -1803,6 +1868,15 @@ fn every_reply() -> Vec<Reply> {
         Reply::RecordingExported {
             export: exemplar_export(),
         },
+        Reply::Hotkeys {
+            hotkeys: every_hotkey_state()
+                .into_iter()
+                .map(|state| HotkeyBinding {
+                    state,
+                    ..exemplar_hotkey_binding()
+                })
+                .collect(),
+        },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
@@ -1818,11 +1892,50 @@ fn every_reply() -> Vec<Reply> {
             | Reply::ScreenshotTaken { .. }
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
+            | Reply::Hotkeys { .. }
             | Reply::RecordingExported { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }
     replies
+}
+
+/// Every state a binding can be in.
+fn every_hotkey_state() -> Vec<HotkeyState> {
+    let states = vec![
+        HotkeyState::Unbound,
+        HotkeyState::Registered,
+        HotkeyState::Conflict {
+            reason: "another application already uses it".to_owned(),
+        },
+    ];
+    for state in &states {
+        match state {
+            HotkeyState::Unbound | HotkeyState::Registered | HotkeyState::Conflict { .. } => {}
+        }
+    }
+    states
+}
+
+/// One row of the hotkey list, with every optional field present so that the
+/// schema sees it.
+fn exemplar_hotkey_binding() -> HotkeyBinding {
+    HotkeyBinding {
+        action: "save_replay".to_owned(),
+        label: "Save replay".to_owned(),
+        hotkey: Some("Ctrl+F10".to_owned()),
+        state: HotkeyState::Registered,
+        handled: false,
+        unavailable: Some(
+            "Save replay is not in this build: a recording with a replay buffer arrives in M3              (issue #38)"
+                .to_owned(),
+        ),
+    }
+}
+
+/// The `state` tag of one hotkey state.
+fn hotkey_state_tag(state: &HotkeyState) -> String {
+    tag_of(state, "state")
 }
 
 /// Every state a recorder reports.

@@ -95,6 +95,16 @@ export const SETTINGS_FILE = String.raw`%LOCALAPPDATA%\Clipped\settings.json`;
 export const NOTIFICATIONS_FILE = String.raw`%APPDATA%\uk.wildware.clipped\notifications.json`;
 
 /**
+ * The one section with something live in it.
+ *
+ * Named here rather than spelled in the screen, so that renaming the section
+ * cannot silently stop the hotkey list being drawn — the list would simply
+ * vanish, and a section that quietly lost its only real content is exactly the
+ * kind of regression nobody notices.
+ */
+export const HOTKEYS_SECTION = 'hotkeys';
+
+/**
  * Why no control on this screen changes anything, in the words the screen says
  * it in.
  *
@@ -278,35 +288,54 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     ],
   },
   {
-    id: 'hotkeys',
+    id: HOTKEYS_SECTION,
     label: 'Hotkeys',
     lead:
       'Hotkeys are global and never per game: Windows registers a combination once for a ' +
-      'process, so a per-game binding is one that could not be honoured.',
+      'process, so a per-game binding is one that could not be honoured. The recorder is that ' +
+      'process, and the table above is what it registered when it started.',
     rows: [
       {
-        label: 'Save replay',
+        label: 'Which combination an action has',
         today:
-          'Nothing registers it. The hotkey service is written and no process installs it, so ' +
-          'Ctrl+F10 is a default in the settings file and not a key that does anything.',
+          `The hotkeys section of ${SETTINGS_FILE}, read once when the recorder starts. Two ` +
+          'actions are bound out of the box — Ctrl+F10 to save a replay and Ctrl+F9 to bookmark ' +
+          '— and editing the file takes effect the next time Clipped starts.',
         needs:
-          'Issue #232 to register the hotkeys, issue #233 to rebind one without a restart, and ' +
-          'issue #54 for the screen that binds them and reports a conflict.',
+          'Issue #54 for the screen that binds a combination, and issue #233 to change one ' +
+          'without restarting the recorder.',
       },
       {
-        label: 'Add bookmark',
-        today: 'The same, for Ctrl+F9.',
-        needs: 'Issues #232, #233 and #54, as above.',
+        label: 'A combination another application owns',
+        today:
+          'Shown above, in the recorder’s own words: Discord, Steam and NVIDIA’s overlay all ' +
+          'claim function keys, and a combination Windows would not give Clipped is a key that ' +
+          'does nothing. Choosing another one means editing the file above.',
+        needs: 'Issue #417 to interrupt you with it rather than waiting for you to look here.',
       },
       {
-        label: 'Mute and toggle the microphone',
-        today: 'Nothing. The actions SPEC.md section 34 lists have nothing behind them to call.',
-        needs: 'Issue #234.',
+        label: 'An action nothing performs yet',
+        today:
+          'Also shown above, with the milestone and issue that would build it. The key is still ' +
+          'registered and the press still reports itself, so it is never a key that silently ' +
+          'does nothing: saving a replay waits on issue #38, and the overlay on issue #53.',
+        needs:
+          'Issue #38 for the replay buffer, issue #53 for the overlay, issue #234 for the microphone.',
       },
       {
-        label: 'Take a screenshot',
-        today: 'Nothing. Screenshot capture is not built.',
-        needs: 'Issue #67.',
+        label: 'Starting a recording from a key',
+        today:
+          'Not possible. Bound, the start-or-stop key stops the recording that is running; with ' +
+          'nothing recording it refuses, because a key press does not say which window to record.',
+        needs: 'Issue #416.',
+      },
+      {
+        label: 'A hotkey for one game only',
+        today:
+          'Not offered, and it will not be: Windows registers a combination once for a process, ' +
+          'so a per-game binding could not be honoured and would be a control that did nothing.',
+        needs:
+          'Nothing. SPEC.md section 31 does not list hotkeys as a per-game override (issue #232).',
       },
     ],
   },

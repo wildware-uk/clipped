@@ -223,11 +223,18 @@ impl fmt::Display for Conflict {
         )?;
 
         match self.cause {
+            // Clipped is named first because it is the one culprit the reader
+            // would not think of and the one they can do something about
+            // immediately. A recorder already running holds these combinations,
+            // and the sentence that listed only overlays sent somebody looking
+            // for a Discord setting to change (issue #232).
             ConflictCause::AlreadyRegistered => formatter.write_str(
-                "another application already uses it. Discord, Steam, NVIDIA's overlay \
-                 and GeForce Experience all claim function-key combinations, and Windows \
-                 reserves a few of its own. Choose a different combination, or close the \
-                 application that has this one and try again",
+                "another application already uses it, and that includes another copy of \
+                 Clipped: only one process can hold a combination. Discord, Steam, \
+                 NVIDIA's overlay and GeForce Experience all claim function-key \
+                 combinations too, and Windows reserves a few of its own. Choose a \
+                 different combination, or close the application that has this one and \
+                 try again",
             ),
             ConflictCause::Refused { code } => write!(
                 formatter,
@@ -376,6 +383,24 @@ mod tests {
         assert!(
             message.contains("Choose a different combination"),
             "the message has to say what to do next: {message}",
+        );
+    }
+
+    /// The one culprit a list of overlays cannot cover, because it is us.
+    ///
+    /// A recorder that finds a combination taken by another Clipped recorder —
+    /// which is what a second `serve` on its own endpoint is — used to be told
+    /// to go and look at Discord's settings. The cause this type documents has
+    /// always included "another copy of Clipped"; the sentence the user reads
+    /// is what did not.
+    #[test]
+    fn a_taken_combination_admits_that_clipped_itself_may_be_holding_it() {
+        let message = conflict(ConflictCause::AlreadyRegistered).to_string();
+
+        assert!(
+            message.contains("another copy of Clipped"),
+            "a user whose combination is held by Clipped must not be sent looking through \
+             another application's settings: {message}",
         );
     }
 

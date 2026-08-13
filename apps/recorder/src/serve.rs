@@ -78,14 +78,14 @@ use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
 
 use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
-    Endpoint, EventPublisher, ProtocolError, RecorderStatus, RecordingSummary, Reply,
-    ScreenshotSummary, Server, ServerError, StartRecording, StopRecording, TakeScreenshot,
+    Endpoint, EventPublisher, HotkeyBinding, ProtocolError, RecorderStatus, RecordingSummary,
+    Reply, ScreenshotSummary, Server, ServerError, StartRecording, StopRecording, TakeScreenshot,
     TransportError,
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
@@ -125,6 +125,11 @@ fn features_of_this_build() -> Vec<String> {
         // asked to choose a file name for a file an older recorder was never
         // going to write (issue #399).
         features::EXPORT.to_owned(),
+        // And for this before it draws a hotkey list, so that a recorder built
+        // before issue #232 — which registered nothing at all — is told apart
+        // from a machine on which every combination registered cleanly. The two
+        // are opposite answers and the second is what an empty list looks like.
+        features::HOTKEYS.to_owned(),
     ]
 }
 
@@ -219,6 +224,21 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
         })
         .expect("a thread can be started to watch for Ctrl+C");
 
+    // After the endpoint has been taken and before the ready line, which is the
+    // ordering the "exactly one process registers" requirement rests on:
+    // `Listener::bind` above is what makes a second recorder exit, so by the
+    // time anything here asks Windows for a combination this process is
+    // demonstrably the only recorder in the session (ADR 0009, issue #232).
+    //
+    // Before the ready line as well, so that a window connecting the instant it
+    // sees that line already has an answer to `get_hotkeys` rather than a race
+    // with registration.
+    let (hotkeys, registered) = crate::hotkeys::start(
+        &(Arc::clone(&service) as Arc<dyn CommandHandler>),
+        service.configuration(),
+    );
+    service.publish_hotkeys(registered);
+
     println!("ready endpoint={}", endpoint.path());
     // Flushed explicitly: whatever started this process is very likely blocked
     // reading that line, and standard output to a pipe is buffered.
@@ -234,6 +254,13 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
 
     let server = Server::new(Arc::clone(&service), events.clone(), identity());
     let outcome = server.serve(&mut listener).map_err(ServeError::Serving);
+
+    // The hotkeys first, and deliberately before the recording is stopped: a
+    // press arriving while the recording was being finalised would ask this
+    // service for something halfway through happening. Stopping gives every
+    // combination back to Windows and waits for the handler that is running, so
+    // by the line below no press can be in flight.
+    hotkeys.stop();
 
     // The listener has stopped, so nothing new can arrive. What is left is the
     // recording, which is the only thing in this process that must be finished
@@ -271,6 +298,21 @@ pub struct RecorderService {
     /// the first run and shutdown can stop one, neither of which is a recording's
     /// business.
     indexer: Arc<LibraryIndexer>,
+    /// What became of the global hotkeys, once `serve` has registered them
+    /// (`crate::hotkeys`, issue #232).
+    ///
+    /// Filled in after this service exists rather than built with it, because
+    /// the registration's handlers call *into* this service: a press is turned
+    /// into the same [`Command`] the window would have sent, so the service has
+    /// to exist before there is anything to register. Set once and never
+    /// changed — rebinding without a restart is
+    /// [issue #233](https://github.com/wildware-uk/clipped/issues/233).
+    ///
+    /// The [`Err`] is a registration that did not happen at all, kept as a
+    /// sentence rather than collapsed into an empty list: "this recorder
+    /// registered no hotkeys" and "every hotkey registered cleanly" are opposite
+    /// answers (AGENTS.md section 27).
+    hotkeys: OnceLock<Result<Vec<HotkeyBinding>, String>>,
 }
 
 impl RecorderService {
@@ -322,6 +364,52 @@ impl RecorderService {
             )),
             library,
             indexer,
+            hotkeys: OnceLock::new(),
+        }
+    }
+
+    /// The settings this process resolved when it started.
+    ///
+    /// Read once, here, for the reason [`Self::new`] gives: a recording resolves
+    /// what it is made with when it starts, and nothing re-reads a file
+    /// underneath a running encoder. `serve` asks for it to resolve the hotkey
+    /// bindings, so that "what is Save Replay bound to" has one answer in this
+    /// process (AGENTS.md section 30).
+    #[must_use]
+    pub fn configuration(&self) -> &Configuration {
+        &self.recordings.configuration
+    }
+
+    /// Records what became of the global hotkeys, so `get_hotkeys` can answer.
+    ///
+    /// Called once, by `serve`, immediately after registering them. A second
+    /// call is ignored rather than overwriting the first: nothing re-registers
+    /// today, and a report that could change under a window reading it would be
+    /// a promise this build cannot keep (issue #233).
+    pub fn publish_hotkeys(&self, registered: Result<Vec<HotkeyBinding>, String>) {
+        if self.hotkeys.set(registered).is_err() {
+            tracing::warn!("the hotkey registration was reported twice; the first one stands");
+        }
+    }
+
+    /// Where every global hotkey stands.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::Internal`] when no hotkey was registered, carrying the
+    /// sentence that says why — a refusal rather than an empty list, because an
+    /// empty list reads as "nothing conflicted".
+    fn hotkeys(&self) -> Result<Vec<HotkeyBinding>, ProtocolError> {
+        match self.hotkeys.get() {
+            Some(Ok(hotkeys)) => Ok(hotkeys.clone()),
+            Some(Err(reason)) => Err(ProtocolError::new(ErrorCode::Internal, reason.clone())),
+            // Reachable only from a `RecorderService` nothing registered hotkeys
+            // for, which today means a test. Saying so beats an empty list that
+            // would be drawn as seven working hotkeys.
+            None => Err(ProtocolError::new(
+                ErrorCode::Internal,
+                "this recorder has not registered any global hotkeys",
+            )),
         }
     }
 
@@ -403,6 +491,12 @@ impl CommandHandler for RecorderService {
             // the one thing that must never wait.
             Command::ExportRecording(request) => Ok(Reply::RecordingExported {
                 export: crate::export::export(&request)?,
+            }),
+            // Answered from what registration produced when this process
+            // started, which is a clone of a small `Vec` and touches nothing a
+            // recording touches (`crate::hotkeys`, issue #232).
+            Command::GetHotkeys => Ok(Reply::Hotkeys {
+                hotkeys: self.hotkeys()?,
             }),
             // Refused by `clipped-ipc` before dispatch, so that no handler can
             // answer a command whose subsystem does not exist (AGENTS.md

@@ -331,7 +331,7 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`.
+`shutdown`, `library`, `export`, `hotkeys`.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
@@ -349,6 +349,13 @@ before [`export_recording`](#export_recording) refuses it with
 `unknown_command`, and the cost of finding that out late is worse than for a
 library: the person has already chosen a file name for a file that was never
 going to be written.
+
+`hotkeys` is the one where the two answers are *opposites*. A recorder built
+before [`get_hotkeys`](#get_hotkeys) registers no global hotkey at all, so every
+one of the user's keys does nothing; a recorder that answers with no conflicts
+has registered them all cleanly. Both would be drawn as an untroubled list by a
+window that did not check, which is the worst available reading of the same
+empty screen.
 
 ## Compatibility policy
 
@@ -474,6 +481,7 @@ when a command's parameters are all optional.
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
+| `get_hotkeys` | none | `hotkeys` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 | `save_replay` | not yet defined | — | no — M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
@@ -738,6 +746,53 @@ recording was left out — chapter marks, an attached font — and `losses` then
 says what, in words. It is never a picture or a sound track: a container that
 cannot carry one of those is a refusal, because a file missing one of its audio
 tracks looks exactly like a file that never had it.
+
+### `get_hotkeys`
+
+Where every global hotkey stands. The recorder registers them —
+[ADR 0009](adr/0009-the-recorder-registers-global-hotkeys.md) says why it and
+not the window — so this is the only way a window can see what happened when it
+did.
+
+```json
+{"type":"request","id":12,"command":"get_hotkeys"}
+```
+
+```json
+{"type":"response","id":12,"outcome":{"ok":{
+  "reply":"hotkeys",
+  "hotkeys":[
+    {"action":"save_replay","label":"Save replay","hotkey":"Ctrl+F10",
+     "state":{"state":"conflict",
+              "reason":"Ctrl+F10 could not be Clipped's shortcut for Save replay: another application already uses it. Choose a different combination, or close the application that has this one and try again"},
+     "handled":false,
+     "unavailable":"Save replay is not in this build: a recording with a replay buffer arrives in M3 (issue #38)"},
+    {"action":"add_bookmark","label":"Add bookmark","hotkey":"Ctrl+F9",
+     "state":{"state":"registered"},"handled":true}]}}}
+```
+
+Always every action, including the ones bound to nothing: a screen sent a subset
+could not offer the rest, and an action missing from the list is
+indistinguishable from one the recorder has never heard of.
+
+**`state` and `handled` are two questions, and a client that reads only one of
+them will be wrong half the time.** `state` is what Windows said —
+`unbound`, `registered`, or `conflict` carrying the sentence to show. `handled`
+is whether anything in the recorder performs the action, and `unavailable` is
+the recorder's own words for why not. `Ctrl`+`F10` registers cleanly on most
+machines and no build saves a replay, so a row drawn from `state` alone would
+report a working hotkey for a key that reports itself as unbuilt when pressed
+(AGENTS.md section 27).
+
+`state` is a **closed** enumeration and tolerates no stranger, unlike an event
+or an error code and for the same reason [`recorder_status`](#get_status) does
+not: a state a client cannot read would be drawn as one it can, and every one it
+can read says the key either works or plainly does not.
+
+This is asked for rather than pushed. Registration happens once, when the
+recorder starts, which is usually long before any window exists — so an event
+would be published to nobody, and the window that opened an hour later would
+show a clean list.
 
 Two refusals, and they are deliberately different codes because the useful
 action differs:

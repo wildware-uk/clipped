@@ -189,6 +189,7 @@ fn main() {
             library_games,
             record_target,
             recorder_status,
+            recorder_hotkeys,
             start_recording,
             stop_recording,
             export_recording,
@@ -473,6 +474,34 @@ fn recorder_status(
     match link.call(&clipped_ipc::Command::GetStatus)? {
         clipped_ipc::Reply::Status { status } => Ok(status),
         _ => Err(wrong_reply("get_status")),
+    }
+}
+
+/// Where every global hotkey stands, asked of the recorder.
+///
+/// The window registers none of them. `RegisterHotKey` gives a combination to
+/// exactly one process and that process is the recorder, because it is the one
+/// that outlives this window and the one that can act on a press
+/// ([ADR 0009](../../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)).
+/// So this window is not where a conflict is discovered — the recorder found out
+/// when it started, which may have been days ago — and asking is the only way to
+/// see it.
+///
+/// Asking matters more here than it does for most commands. A combination
+/// another application owns is a hotkey that does nothing, and without this it
+/// would exist only as a line in the recorder's log; interrupting somebody with
+/// it is [issue #417](https://github.com/wildware-uk/clipped/issues/417), and
+/// this is what that would read.
+///
+/// `async` for the reason [`recorder_status`] is: it opens a pipe and waits for
+/// an answer, and the thread drawing the window may not.
+#[tauri::command(async)]
+fn recorder_hotkeys(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<Vec<clipped_ipc::HotkeyBinding>, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetHotkeys)? {
+        clipped_ipc::Reply::Hotkeys { hotkeys } => Ok(hotkeys),
+        _ => Err(wrong_reply("get_hotkeys")),
     }
 }
 
@@ -897,6 +926,9 @@ mod tests {
                 clipped_ipc::Command::GetStatus => Ok(clipped_ipc::Reply::Status {
                     status: a_running_recording(),
                 }),
+                clipped_ipc::Command::GetHotkeys => Ok(clipped_ipc::Reply::Hotkeys {
+                    hotkeys: vec![a_hotkey_the_user_cannot_have()],
+                }),
                 clipped_ipc::Command::StartRecording(_) => {
                     Ok(clipped_ipc::Reply::RecordingStarted {
                         recording_id: "rec-1".to_owned(),
@@ -944,6 +976,29 @@ mod tests {
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 754_000,
         })
+    }
+
+    /// The row [`AskedRecorder`] answers `get_hotkeys` with.
+    ///
+    /// A conflict deliberately, because that is the row this command exists to
+    /// carry: an empty answer and a table of registered rows both read as "no
+    /// hotkey has a problem", and the one thing the window cannot find out for
+    /// itself is that Windows refused one.
+    fn a_hotkey_the_user_cannot_have() -> clipped_ipc::HotkeyBinding {
+        clipped_ipc::HotkeyBinding {
+            action: "save_replay".to_owned(),
+            label: "Save replay".to_owned(),
+            hotkey: Some("Ctrl+F10".to_owned()),
+            state: clipped_ipc::HotkeyState::Conflict {
+                reason: "Ctrl+F10 could not be Clipped's shortcut for Save replay: another \
+                         application already uses it"
+                    .to_owned(),
+            },
+            handled: false,
+            unavailable: Some(
+                "Save replay is not in this build: it arrives in M3 (issue #38)".to_owned(),
+            ),
+        }
     }
 
     /// The summary [`AskedRecorder`] answers `stop_recording` with.
@@ -1322,6 +1377,33 @@ mod tests {
             status,
             a_running_recording(),
             "and the recorder's own status has to reach the caller whole, elapsed time included"
+        );
+    }
+
+    #[test]
+    fn the_hotkey_table_the_window_draws_is_the_recorders_own_answer() {
+        // The wire this command is: `get_hotkeys` out, the recorder's rows
+        // back, unchanged. A `recorder_hotkeys` that answered with an empty list
+        // would draw an empty hotkey table, and an empty table reads as "no
+        // hotkey has a problem" — the exact thing the conflict row exists to
+        // prevent (AGENTS.md section 27, issue #232). The window registers
+        // nothing itself, so there is no second place this could come from and
+        // nothing that would notice it had gone.
+        let recorder = FakeRecorder::listening("recorder-hotkeys", AskedRecorder::default());
+        let window = recorder.window();
+
+        let hotkeys =
+            recorder_hotkeys(window.state::<RecorderLink>()).expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::GetHotkeys],
+            "where the hotkeys stand has to be asked of the recorder that registered them"
+        );
+        assert_eq!(
+            hotkeys,
+            vec![a_hotkey_the_user_cannot_have()],
+            "and the recorder's rows have to reach the window whole, the conflict included"
         );
     }
 

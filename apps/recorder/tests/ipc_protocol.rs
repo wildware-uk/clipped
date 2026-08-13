@@ -45,9 +45,9 @@ use clipped_ipc::frame::{read_message, write_message};
 use clipped_ipc::transport::connect;
 use clipped_ipc::{
     features, Client, ClientError, ClientMessage, Command as IpcCommand, ConnectionRole, Endpoint,
-    ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello, PeerIdentity, RecorderStatus,
-    Reply, ServerMessage, StartRecording, StopRecording, MAX_CONCURRENT_CONNECTIONS,
-    PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, UNBUILT_COMMANDS,
+    ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello, HotkeyBinding, PeerIdentity,
+    RecorderStatus, Reply, ServerMessage, StartRecording, StopRecording,
+    MAX_CONCURRENT_CONNECTIONS, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, UNBUILT_COMMANDS,
 };
 
 use support::{
@@ -639,6 +639,148 @@ fn a_second_recorder_on_the_same_endpoint_refuses_to_compete_with_the_first() {
 
     assert_still_serving(&recorder);
     recorder.stop();
+}
+
+/// The question issue #232 exists to answer: does a shipped recorder register
+/// the global hotkeys at all.
+///
+/// `crates/hotkeys` had a full test suite and no production caller for two
+/// milestones, and every one of those tests passed the whole time. So this one
+/// deliberately asks nothing of the hotkey service and everything of the
+/// recorder somebody actually runs: a real `serve`, over a real pipe, answering
+/// the question the window asks. Deleting the registration from `serve::run`
+/// leaves every unit test in this repository green and fails here.
+#[test]
+fn a_real_recorder_registers_the_global_hotkeys_and_says_where_each_one_stands() {
+    let recorder = ServedRecorder::start("hotkeys");
+    let mut client = recorder.client();
+
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|have| have == features::HOTKEYS),
+        "a recorder that registers hotkeys has to say so, or a window cannot tell it from one \
+         built before it did: {:?}",
+        client.welcome().features,
+    );
+
+    let hotkeys = hotkey_report(&mut client);
+
+    // Every action, not only the bound ones: a screen sent a subset could not
+    // offer the rest.
+    let names: Vec<&str> = hotkeys.iter().map(|row| row.action.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "save_replay",
+            "add_bookmark",
+            "take_screenshot",
+            "toggle_recording",
+            "mute_microphone",
+            "toggle_microphone",
+            "open_overlay",
+        ],
+        "the report is the whole of SPEC.md section 34, in the order a screen lists it",
+    );
+
+    // Which combination each action has depends on the settings file of whoever
+    // is running this, so nothing here asserts one. What does not depend on that
+    // is which actions this build can perform — and that is the half a user
+    // otherwise finds out about by pressing a key and watching nothing happen.
+    let bookmark = row(&hotkeys, "add_bookmark");
+    assert!(
+        bookmark.handled && bookmark.unavailable.is_none(),
+        "this recorder answers `add_bookmark`, so its row must not read as unavailable: \
+         {bookmark:?}",
+    );
+
+    let save = row(&hotkeys, "save_replay");
+    assert!(!save.handled, "no build saves a replay yet: {save:?}");
+    let reason = save
+        .unavailable
+        .as_deref()
+        .expect("an action nothing performs has to say why");
+    assert!(
+        reason.contains("Save replay") && reason.contains("M3") && reason.contains("#38"),
+        "the refusal has to name the action, the milestone and the issue: {reason}",
+    );
+
+    drop(client);
+    recorder.stop();
+}
+
+/// The third acceptance criterion of issue #232: a second copy of Clipped must
+/// not silently take the user's hotkeys away.
+///
+/// It cannot, and the reason is an ordering rather than a lock of its own.
+/// `serve` binds the endpoint before it registers anything, so a second recorder
+/// in the same session has already exited by the time it could have asked
+/// Windows for a combination — which is what makes the endpoint's exclusivity
+/// (ADR 0005, ADR 0006) the hotkeys' exclusivity too.
+///
+/// The evidence is that the first recorder's report is the same afterwards as
+/// before. A second recorder that had reached `RegisterHotKey` would have turned
+/// the first's rows into conflicts or its own, and either would show here.
+#[test]
+fn a_second_recorder_never_reaches_the_first_ones_hotkeys() {
+    let recorder = // Not "hotkeys": the label becomes the pipe's name, the name appears in
+    // the second recorder's complaint, and the assertion below is about what
+    // that complaint does *not* mention.
+    ServedRecorder::start("second-copy");
+    let mut client = recorder.client();
+    let before = hotkey_report(&mut client);
+
+    let second = Command::new(recorder_binary())
+        .args(["serve", "--endpoint", recorder.endpoint().name()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("a second recorder can be started");
+
+    assert!(
+        !second.status.success(),
+        "a second recorder on a taken endpoint should fail rather than serve"
+    );
+    let complaint = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        complaint.contains("already listening"),
+        "the second recorder should say why it stopped: {complaint}"
+    );
+    assert!(
+        !complaint.contains("hotkey"),
+        "a recorder that exited because the endpoint was taken should never have got as far as a \
+         hotkey: {complaint}",
+    );
+
+    assert_eq!(
+        hotkey_report(&mut client),
+        before,
+        "the second recorder cost the first one its hotkeys",
+    );
+
+    drop(client);
+    recorder.stop();
+}
+
+/// Where every hotkey stands, as the recorder reports it.
+fn hotkey_report(client: &mut Client) -> Vec<HotkeyBinding> {
+    match client
+        .call(&IpcCommand::GetHotkeys)
+        .expect("a recorder that registered its hotkeys can say where they stand")
+    {
+        Reply::Hotkeys { hotkeys } => hotkeys,
+        other => panic!("`get_hotkeys` was answered with {other:?}"),
+    }
+}
+
+/// One action's row, or a failure naming the action that is missing.
+fn row<'a>(hotkeys: &'a [HotkeyBinding], action: &str) -> &'a HotkeyBinding {
+    hotkeys
+        .iter()
+        .find(|row| row.action == action)
+        .unwrap_or_else(|| panic!("`{action}` should be in the report: {hotkeys:?}"))
 }
 
 #[test]

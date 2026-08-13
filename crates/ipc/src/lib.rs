@@ -116,6 +116,7 @@ pub mod client;
 pub mod command;
 pub mod error;
 pub mod frame;
+pub mod hotkeys;
 pub mod library;
 pub mod message;
 pub mod schema;
@@ -131,6 +132,7 @@ pub use command::{
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
+pub use hotkeys::{HotkeyBinding, HotkeyState};
 pub use library::{
     LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
 };

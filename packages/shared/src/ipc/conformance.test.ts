@@ -50,8 +50,12 @@ import type {
   EventStream,
   ExportRecordingParams,
   ExportSummary,
+  ConflictingHotkey,
   Feature,
   Hello,
+  HotkeyBinding,
+  HotkeysReply,
+  HotkeyStateName,
   IdleStatus,
   KnownCommandName,
   KnownErrorDetailName,
@@ -80,6 +84,7 @@ import type {
   RecordingStatus,
   RecordingStoppedReply,
   RecordingSummary,
+  RegisteredHotkey,
   Reply,
   ReplyName,
   ServerMessage,
@@ -89,6 +94,7 @@ import type {
   ShuttingDownReply,
   StatusReply,
   StopRecordingParams,
+  UnboundHotkey,
   UnsupportedProtocolVersionDetail,
   Welcome,
 } from './protocol';
@@ -103,6 +109,7 @@ import {
   EVENTS,
   EVENT_STREAMS,
   FEATURES,
+  HOTKEY_STATES,
   MAX_CONCURRENT_CONNECTIONS,
   OUTCOMES,
   PROTOCOL_VERSION,
@@ -224,6 +231,7 @@ const TYPESCRIPT_ENUMERATIONS: Readonly<Record<string, EnumerationMirror>> = {
   outcome: enumeration<'ok' | 'error'>(OUTCOMES, false),
   reply: enumeration<ReplyName>(REPLIES, false),
   recorder_state: enumeration<RecorderState>(RECORDER_STATES, false),
+  hotkey_state: enumeration<HotkeyStateName>(HOTKEY_STATES, false),
 };
 
 const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
@@ -426,6 +434,21 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     finalising: 'optional',
   }),
+  hotkey_binding: fields<HotkeyBinding>({
+    action: 'required',
+    label: 'required',
+    hotkey: 'optional',
+    state: 'required',
+    handled: 'required',
+    unavailable: 'optional',
+  }),
+  'hotkey_state.unbound': fields<UnboundHotkey>({ state: 'required' }),
+  'hotkey_state.registered': fields<RegisteredHotkey>({ state: 'required' }),
+  'hotkey_state.conflict': fields<ConflictingHotkey>({
+    state: 'required',
+    reason: 'required',
+  }),
+  'reply.hotkeys': fields<HotkeysReply>({ reply: 'required', hotkeys: 'required' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
   'recorder_status.recording': fields<RecordingStatus>({
     state: 'required',
@@ -516,6 +539,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'get_hotkeys',
+    params: null,
+    reply: 'reply.hotkeys',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
@@ -561,6 +590,8 @@ function replyDiscriminant(reply: Reply): string {
       return reply.page.next_cursor === undefined ? 'library_sessions' : 'library_sessions.more';
     case 'library_games':
       return 'library_games';
+    case 'hotkeys':
+      return 'hotkeys';
     case 'recording_exported':
       // Whether the copy is complete is part of the path, because it is the one
       // thing the window has to say differently: a mirror that dropped
