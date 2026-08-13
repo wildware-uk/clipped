@@ -545,3 +545,8 @@ jobs:
               }
           }
           Write-Host 'It refused, naming the recorder and how to build it.'
+          # Explicit, because GitHub ends a `powershell` step with
+          # `exit $LASTEXITCODE` and the last native command run above was the
+          # `npm` that was *supposed* to fail. Without this line the step reports
+          # that failure as its own and this check can never pass.
+          exit 0
