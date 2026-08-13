@@ -131,7 +131,7 @@ The Clipped installer cannot be built.
   Missing: clipped-recorder.exe, the recording process the desktop application starts
   Looked in: ...\target\release\clipped-recorder.exe
 
-  Build it first:
+  Run this first:
 
       cargo build --release -p clipped-recorder
 

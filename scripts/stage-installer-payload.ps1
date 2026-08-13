@@ -133,7 +133,7 @@ function Write-Refusal {
     Write-Host "  Missing: $Missing"
     Write-Host "  Looked in: $LookedIn"
     Write-Host ''
-    Write-Host '  Build it first:'
+    Write-Host '  Run this first:'
     Write-Host ''
     Write-Host "      $Remedy"
     Write-Host ''
