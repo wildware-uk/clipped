@@ -312,7 +312,7 @@ impl Handlers {
     /// though `hotkey` had been pressed.
     ///
     /// **This is not how a press is delivered.** A real press goes through the
-    /// message loop and [`Dispatcher::press`], which never runs a handler on
+    /// message loop and `Dispatcher::press`, which never runs a handler on
     /// the thread that received it; this runs the handler right here and blocks
     /// for as long as it takes, so nothing in a running service may call it.
     ///
