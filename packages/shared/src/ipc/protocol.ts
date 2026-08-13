@@ -113,6 +113,7 @@ export const FEATURES = [
   'screenshots',
   'shutdown',
   'library',
+  'export',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -138,6 +139,7 @@ export const COMMANDS = [
   'take_screenshot',
   'library_sessions',
   'library_games',
+  'export_recording',
   'shutdown',
   'save_replay',
   'apply_settings',
@@ -170,6 +172,8 @@ export const ERROR_CODES = [
   'recording_failed',
   'too_many_connections',
   'shutting_down',
+  'destination_exists',
+  'export_failed',
   'library_unavailable',
   'internal',
 ] as const;
@@ -214,6 +218,7 @@ export const REPLIES = [
   'screenshot_taken',
   'library_sessions',
   'library_games',
+  'recording_exported',
   'shutting_down',
 ] as const;
 
@@ -437,6 +442,60 @@ export type LibrarySessionsParams = {
    */
   readonly query?: string;
 };
+
+/**
+ * Which recording to copy into MP4, and where to put the copy. A type alias for
+ * the reason {@link StartRecordingParams} is one.
+ *
+ * Neither field has a default. The source is a file the caller already knows
+ * about, because it read it out of the library; the destination is chosen by
+ * whoever asked, and one that already exists is **refused** rather than
+ * replaced (`destination_exists`).
+ */
+export type ExportRecordingParams = {
+  /** The recording to copy, as {@link LibraryRecording.path} reported it. */
+  readonly source: string;
+  /** Where to write the MP4. */
+  readonly destination: string;
+};
+
+/**
+ * A recording copied into another container, and what the copy turned out to
+ * be.
+ *
+ * An export is a **stream copy**: the recording's own coded packets, in a
+ * different box. Nothing is decoded and nothing is re-encoded, which is why
+ * {@link ExportSummary.elapsed_ms} is worth showing.
+ */
+export interface ExportSummary {
+  /** The recording that was copied, unchanged by the copy. */
+  readonly source: string;
+  /** The file that was written. */
+  readonly destination: string;
+  /** How much media the result holds. */
+  readonly duration_ms: number;
+  /** How many coded packets were copied, across every track. */
+  readonly packets: number;
+  /** How many bytes of coded media were copied, before container overhead. */
+  readonly bytes: number;
+  /** How long the copy took, measured. */
+  readonly elapsed_ms: number;
+  /**
+   * Whether the destination holds everything the source did.
+   *
+   * `false` means something was left out and {@link ExportSummary.losses} says
+   * what. It is never a picture or a sound track: a container that cannot carry
+   * one of those is a refusal rather than a quiet loss.
+   */
+  readonly lossless: boolean;
+  /**
+   * Everything the destination does not contain, phrased for somebody to read.
+   *
+   * Absent when nothing was lost, rather than an empty array, because that is
+   * what the recorder puts on the wire.
+   */
+  readonly losses?: readonly string[];
+}
 
 /** One media file a sitting produced. */
 export interface LibraryRecording {
@@ -693,6 +752,14 @@ export interface LibraryGamesReply {
   readonly games: readonly LibraryGame[];
 }
 
+/** A recording was copied into MP4, and the file is finished. */
+export interface RecordingExportedReply {
+  /** The tag. */
+  readonly reply: 'recording_exported';
+  /** The copy, and what it turned out to hold. */
+  readonly export: ExportSummary;
+}
+
 /**
  * The recorder has stopped listening and is winding up.
  *
@@ -727,6 +794,7 @@ export type Reply =
   | ScreenshotTakenReply
   | LibrarySessionsReply
   | LibraryGamesReply
+  | RecordingExportedReply
   | ShuttingDownReply;
 
 /** Nothing is being recorded. */

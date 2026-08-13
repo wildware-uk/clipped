@@ -30,10 +30,16 @@ recording session yet**, which is
 [issue #180](https://github.com/wildware-uk/clipped/issues/180). What is here is
 the container side of it: the tracks, their order and their metadata, and the
 conversion from captured samples to packets, exercised by this crate's own tests
-against real files. Nothing calls `remux_to_mp4` yet either: the setting that
-offers it (SPEC.md section 15, "Allow automatic remux") and the retention policy
-for the MKV it was made from belong to the session and library work, and are not
-in this crate.
+against real files.
+
+`remux_to_mp4` is reached from the desktop application, over the control
+protocol: the Library's Export MP4 sends `export_recording`, the recorder answers
+it in `apps/recorder/src/export.rs`, and the refusals below arrive at the window
+in this crate's own wording ([ipc.md](ipc.md), [desktop-ui.md](desktop-ui.md),
+[issue #399](https://github.com/wildware-uk/clipped/issues/399)). What is still
+not wired is the *automatic* one — the setting that offers it (SPEC.md section
+15, "Allow automatic remux") and the retention policy for the MKV it was made
+from belong to the session and library work, and are not in this crate.
 
 ## Writing a recording
 

@@ -320,7 +320,7 @@ in its final component.
 **The bundle.** SPEC.md section 36 asks for `Diagnostics → Export Support
 Bundle`, and a bundle worth sending is this report *plus the log files*. The log
 files are at `%LOCALAPPDATA%\Clipped\logs` and this window cannot reach them:
-`capabilities/default.json` grants three `core:` permissions, none of which
+`capabilities/default.json` grants three `core:` permissions and `dialog:allow-save`, none of which
 touches the file system, and there is no command that would read a log or open a
 folder. Writing one archive with both in it is
 [issue #303](https://github.com/wildware-uk/clipped/issues/303).

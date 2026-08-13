@@ -26,20 +26,40 @@
 //!
 //! # What the window can ask this process to do
 //!
-//! Eight `#[tauri::command]`s, and no other way in. Two are about this process —
-//! [`recorder_link_state`] and [`startup_notice`]; two read the recording
-//! library through the recorder — [`library_sessions`] and [`library_games`]
-//! (issue #301); and four are the record control — [`record_target`] says what
-//! would be recorded, [`recorder_status`] asks the recorder what it is doing,
-//! and [`start_recording`] and [`stop_recording`] do the two things the button
-//! does (issue #389).
+//! Eleven `#[tauri::command]`s, and no other way in. Two are about this
+//! process — [`recorder_link_state`] and [`startup_notice`]; two read the
+//! recording library through the recorder — [`library_sessions`] and
+//! [`library_games`] (issue #301); four are the record control —
+//! [`record_target`] says what would be recorded, [`recorder_status`] asks the
+//! recorder what it is doing, and [`start_recording`] and [`stop_recording`] do
+//! the two things the button does (issue #389); and three act on a recording
+//! the library listed — [`export_recording`], [`open_recording`] and
+//! [`reveal_recording`] (issue #399).
 //!
-//! All but `record_target` are a round trip over the control protocol, and each
-//! returns either the recorder's own answer or a [`RecorderProblem`] carrying
-//! the recorder's own words. **The window keeps no recording state of its
-//! own**: it asks [`recorder_status`] and draws the answer, so a recorder that
-//! has died stops being reported as recording rather than going on being
-//! claimed (`docs/desktop-ui.md`, AGENTS.md section 27).
+//! All but `record_target`, `open_recording` and `reveal_recording` are a round
+//! trip over the control protocol, and each returns either the recorder's own
+//! answer or a [`RecorderProblem`] carrying the recorder's own words. **The
+//! window keeps no recording state of its own**: it asks [`recorder_status`]
+//! and draws the answer, so a recorder that has died stops being reported as
+//! recording rather than going on being claimed (`docs/desktop-ui.md`,
+//! AGENTS.md section 27).
+//!
+//! # Why opening and revealing are commands rather than a permission
+//!
+//! `capabilities/default.json` is the whole of the window's privilege, and it
+//! grows by exactly one line for this ticket: `dialog:allow-save`, so that the
+//! interface can ask the operating system where an export should go.
+//!
+//! Opening a recording and revealing it in Explorer could have been the same
+//! shape — `tauri-plugin-opener` has commands the interface can call — and are
+//! deliberately not. The permission that would allow it is
+//! `opener:allow-open-path` over a **scope**, and there is no scope that would
+//! work: a recording lives wherever the recorder's output directory points,
+//! which is a setting, so the scope would have to be every path on the machine.
+//! Granting the webview "open anything with its default application" to open
+//! one MKV is the opposite of what that file's own comment asks for. Two
+//! commands here mean the window can ask *this process* to open a file, and
+//! this process is the one that decides.
 //!
 //! # Closing, and quitting
 //!
@@ -156,6 +176,12 @@ fn main() {
 
     tauri::Builder::default()
         .manage(link)
+        // The interface calls neither of these directly. `opener` is reached
+        // from `open_recording` and `reveal_recording` below, and `dialog` is
+        // reached from the interface through `dialog:allow-save` and nothing
+        // else — see the header, and `capabilities/default.json`.
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             recorder_link_state,
             startup_notice,
@@ -164,7 +190,10 @@ fn main() {
             record_target,
             recorder_status,
             start_recording,
-            stop_recording
+            stop_recording,
+            export_recording,
+            open_recording,
+            reveal_recording
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -530,6 +559,155 @@ fn stop_recording(
     }
 }
 
+/// Copies a recording into MP4, and waits for the file.
+///
+/// The window has read `source` out of the library and the person at the
+/// keyboard has chosen `destination` through a Save As dialog
+/// (`recordingActions.ts`). Both are passed on exactly as given: a command that
+/// substituted a destination of its own would write somewhere nobody chose, and
+/// one that resolved the source would export a file the library never listed.
+///
+/// Nothing here checks either path. That is not an oversight — the recorder is
+/// the process that will open them, and a check here would be a second answer to
+/// a question only the muxer can settle, made a moment earlier and therefore
+/// against a different state of the disk (AGENTS.md section 55). What the window
+/// gets back is the recorder's own refusal: `destination_exists` for a file that
+/// is already there, which the interface offers "choose another name" on, and
+/// `export_failed` carrying the muxer's own sentence about a recording MP4
+/// cannot hold.
+///
+/// The reply arrives **after the MP4's index has been written**, so a window
+/// that has been told the export finished is pointing at a playable file — the
+/// same promise `stop_recording` makes (AGENTS.md section 22).
+///
+/// `async` for the reason [`recorder_status`] is, and much more so: a copy of a
+/// long recording is bounded by the disk, and the thread drawing the window may
+/// not wait on one.
+#[tauri::command(async)]
+fn export_recording(
+    link: tauri::State<'_, RecorderLink>,
+    source: String,
+    destination: String,
+) -> Result<clipped_ipc::ExportSummary, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::ExportRecording(
+        clipped_ipc::ExportRecording {
+            source,
+            destination,
+        },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::RecordingExported { export } => Ok(export),
+        _ => Err(wrong_reply("export_recording")),
+    }
+}
+
+/// Something this process was asked to do with a file, and could not.
+///
+/// A shape of its own rather than a [`RecorderProblem`], because no recorder was
+/// involved and saying one refused would send somebody looking at the wrong
+/// thing. It carries the same two fields so that the interface reads every
+/// failure the same way (`library.ts`, `asProblem`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct FileProblem {
+    /// [`FILE_MISSING`] or [`SHELL_REFUSED`].
+    code: String,
+    /// One sentence for a person, which is the part that is always shown.
+    message: String,
+}
+
+/// The code a file that is not where the library said it was carries.
+const FILE_MISSING: &str = "file_missing";
+
+/// The code Windows refusing the request carries.
+const SHELL_REFUSED: &str = "shell_refused";
+
+/// Checks the file is still there, and says so usefully if it is not.
+///
+/// Worth doing before either action below, because the alternative is Windows's
+/// own answer to opening a path that does not exist, which is a dialog this
+/// process did not raise and cannot word. The library already knows a file can
+/// go — it records `missing_since` for one it could not find — but that is
+/// as of the last reconciliation, and a file deleted since then is a real case
+/// (`docs/library.md`, AGENTS.md section 16).
+///
+/// The check is not a guarantee and is not meant to be: the file can go between
+/// this and the shell opening it. What it buys is that the common failure gets
+/// the sentence it deserves.
+fn still_there(path: &str) -> Result<PathBuf, FileProblem> {
+    let file = PathBuf::from(path);
+    if matches!(file.try_exists(), Ok(true)) {
+        return Ok(file);
+    }
+    Err(FileProblem {
+        code: FILE_MISSING.to_owned(),
+        message: format!(
+            "{} is not there any more. It may have been moved or deleted, or the drive it is on \
+             may not be connected.",
+            file.file_name().map_or_else(
+                || path.to_owned(),
+                |name| name.to_string_lossy().into_owned()
+            )
+        ),
+    })
+}
+
+/// Opens a recording in whatever application the user opens video with.
+///
+/// The honest answer to "let me watch it" until Clipped can play one itself:
+/// playing a recording *inside* the window is
+/// [issue #304](https://github.com/wildware-uk/clipped/issues/304) and is
+/// blocked on four separate things, including that WebView2 cannot decode the
+/// uncompressed sound the archival file carries
+/// ([issue #392](https://github.com/wildware-uk/clipped/issues/392)). Handing
+/// the file to the player somebody already has works today and loses nothing.
+///
+/// No default application is named, so this is whatever the user chose for
+/// `.mkv`. A machine with nothing associated is Windows's "how do you want to
+/// open this file" prompt, which is the right answer and not a failure.
+///
+/// `async` because opening an application is a shell call that can block for as
+/// long as the shell takes.
+#[tauri::command(async)]
+fn open_recording<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: String,
+) -> Result<(), FileProblem> {
+    use tauri_plugin_opener::OpenerExt as _;
+
+    let file = still_there(&path)?;
+    app.opener()
+        .open_path(file.to_string_lossy(), None::<&str>)
+        .map_err(|error| FileProblem {
+            code: SHELL_REFUSED.to_owned(),
+            message: format!("Windows would not open that recording: {error}"),
+        })
+}
+
+/// Shows a recording in Explorer, with the file selected.
+///
+/// The permanent answer to "where did it go?". Selected rather than merely
+/// opening the folder, because a recordings folder holds hundreds of files and
+/// an unselected one is a folder somebody now has to search
+/// (SPEC.md section 17).
+///
+/// `async` for the reason [`open_recording`] is.
+#[tauri::command(async)]
+fn reveal_recording<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: String,
+) -> Result<(), FileProblem> {
+    use tauri_plugin_opener::OpenerExt as _;
+
+    let file = still_there(&path)?;
+    app.opener()
+        .reveal_item_in_dir(&file)
+        .map_err(|error| FileProblem {
+            code: SHELL_REFUSED.to_owned(),
+            message: format!("Windows would not show that recording in Explorer: {error}"),
+        })
+}
+
 /// Something that went wrong before the window existed to be told about it.
 ///
 /// Written during `setup` and read by the window when it mounts. It cannot be
@@ -731,6 +909,15 @@ mod tests {
                         summary: a_summary(),
                     })
                 }
+                clipped_ipc::Command::ExportRecording(request) => {
+                    Ok(clipped_ipc::Reply::RecordingExported {
+                        // Built from the request rather than from a constant,
+                        // so that a command which sent the wrong paths — or the
+                        // right ones the wrong way round — shows up in what
+                        // comes back.
+                        export: an_export(&request),
+                    })
+                }
                 other => Err(clipped_ipc::ProtocolError::new(
                     clipped_ipc::ErrorCode::UnknownCommand,
                     format!(
@@ -774,6 +961,20 @@ mod tests {
             codec: "av1".to_owned(),
             width: 2_560,
             height: 1_392,
+        }
+    }
+
+    /// The export [`AskedRecorder`] answers `export_recording` with.
+    fn an_export(request: &clipped_ipc::ExportRecording) -> clipped_ipc::ExportSummary {
+        clipped_ipc::ExportSummary {
+            source: request.source.clone(),
+            destination: request.destination.clone(),
+            duration_ms: 754_000,
+            packets: 45_240,
+            bytes: 9_811_204_112,
+            elapsed_ms: 4_182,
+            lossless: true,
+            losses: Vec::new(),
         }
     }
 
@@ -1150,6 +1351,152 @@ mod tests {
             "the recorder's own sentence is the one worth showing: {}",
             problem.message
         );
+    }
+
+    #[test]
+    fn the_export_command_asks_the_recorder_for_the_two_files_the_window_named() {
+        // The middle hop of the round trip an export is: window → Tauri command
+        // → control protocol → recorder. An `export_recording` that swapped the
+        // two paths would ask the recorder to read the MP4 the user had just
+        // named and write over the recording; one that substituted a
+        // destination of its own would write somewhere nobody chose. Both
+        // compile, both leave every TypeScript test green — they stub `invoke`
+        // — and both are caught here and nowhere else (issue #399).
+        let recorder = FakeRecorder::listening("export", AskedRecorder::default());
+        let window = recorder.window();
+
+        let summary = export_recording(
+            window.state::<RecorderLink>(),
+            r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+            r"E:\share\ace on mirage.mp4".to_owned(),
+        )
+        .expect("the recorder answered");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![clipped_ipc::Command::ExportRecording(
+                clipped_ipc::ExportRecording {
+                    source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+                    destination: r"E:\share\ace on mirage.mp4".to_owned(),
+                }
+            )],
+            "the recorder has to be given the recording the window listed and the destination \
+             the person chose, the right way round"
+        );
+        assert_eq!(
+            summary.source, r"D:\clips\cs2-20260811-201400-1.mkv",
+            "and the recorder's own summary has to reach the caller whole"
+        );
+        assert_eq!(summary.destination, r"E:\share\ace on mirage.mp4");
+        assert!(summary.lossless);
+    }
+
+    #[test]
+    fn an_export_onto_a_file_that_exists_reaches_the_window_as_its_own_code_and_sentence() {
+        // Issue #399's fifth and sixth acceptance criteria at the window's
+        // edge. `destination_exists` is what the interface offers "choose
+        // another name" on, and the sentence is the recorder's — a command that
+        // flattened every export failure into one message would leave somebody
+        // unable to tell a name that is taken from a recording MP4 cannot hold
+        // (AGENTS.md section 45).
+        let recorder = FakeRecorder::listening(
+            "export-refused",
+            AskedRecorder::refusing(clipped_ipc::ProtocolError::new(
+                clipped_ipc::ErrorCode::DestinationExists,
+                "there is already a file at ace on mirage.mp4, and Clipped does not overwrite \
+                 one; choose another name",
+            )),
+        );
+        let window = recorder.window();
+
+        let problem = export_recording(
+            window.state::<RecorderLink>(),
+            r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+            r"E:\share\ace on mirage.mp4".to_owned(),
+        )
+        .expect_err("a destination that is taken is a refusal");
+
+        assert_eq!(problem.code, "destination_exists");
+        assert!(
+            problem.message.contains("choose another name"),
+            "the recorder's own sentence is the one worth showing: {}",
+            problem.message
+        );
+    }
+
+    /// An application with the opener plugin in it, which is what
+    /// [`open_recording`] and [`reveal_recording`] are handed.
+    ///
+    /// No window is ever asked for, so nothing is drawn: `mock_builder` builds
+    /// on `MockRuntime`, and these commands only need the handle the plugin
+    /// hangs off.
+    fn window_with_the_opener() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .plugin(tauri_plugin_opener::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("a mock application builds")
+    }
+
+    #[test]
+    fn a_recording_that_is_not_there_is_never_handed_to_the_shell_by_either_command() {
+        // Through the commands themselves rather than through `still_there`
+        // beside them, because a check that exists and is not called is exactly
+        // the defect this is for. Without it the failure is Windows's own
+        // dialog, raised by a process the user did not ask and worded by
+        // nobody — and the library cannot cover it: `missing_since` is as of the
+        // last reconciliation, and a file deleted since then is a real case
+        // (AGENTS.md sections 16 and 45).
+        //
+        // Only the refusing direction goes through the commands, and
+        // deliberately: the accepting one ends in `ShellExecute`, and a test
+        // that launched somebody's media player would be a test that opened a
+        // window on a build agent. What holds the check honest in the other
+        // direction is `a_file_that_is_there_is_not_refused_as_missing` below.
+        let gone = std::env::temp_dir().join("clipped-no-such-recording-399.mkv");
+        let _ = std::fs::remove_file(&gone);
+        let window = window_with_the_opener();
+
+        for problem in [
+            open_recording(window.handle().clone(), gone.to_string_lossy().into_owned())
+                .expect_err("a file that is not there cannot be opened"),
+            reveal_recording(window.handle().clone(), gone.to_string_lossy().into_owned())
+                .expect_err("a file that is not there cannot be revealed"),
+        ] {
+            assert_eq!(
+                problem.code, FILE_MISSING,
+                "a file that was never handed to the shell must not be reported as one the shell \
+                 refused: {problem:?}"
+            );
+            assert!(
+                problem
+                    .message
+                    .contains("clipped-no-such-recording-399.mkv"),
+                "the sentence has to name the file: {}",
+                problem.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_there_is_not_refused_as_missing() {
+        // The other direction, and what makes the test above mean something:
+        // without it a check that refused everything would pass just as well,
+        // and Open would never work for anybody.
+        let directory = std::env::temp_dir().join(format!(
+            "clipped-desktop-open-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
+        let recording = directory.join("match.mkv");
+        std::fs::write(&recording, b"a recording").expect("the file is written");
+
+        assert_eq!(
+            still_there(&recording.to_string_lossy()).expect("the file is there"),
+            recording
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

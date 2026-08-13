@@ -24,10 +24,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clipped_media_validation::{
-    require_media_tools, AudioStream, Media, MediaTools, Stream, TemporaryDirectory, VideoStream,
+    require_media_tools, AudioStream, Media, Stream, TemporaryDirectory, VideoStream,
 };
 use clipped_muxer::{remux_to_mp4, Carriage, Mp4Plan, RemuxError, TrackKind};
-use support::{build_fixture_with_ffmpeg, packet_payload_hashes, run_synthetic_recording};
+use support::{build_fixture_with_ffmpeg, run_synthetic_recording};
 
 /// How long a recording these tests write.
 ///
@@ -331,7 +331,7 @@ fn the_recording_is_byte_for_byte_unchanged_by_a_remux() {
 
 #[test]
 fn no_packet_is_re_encoded_on_the_way_into_the_mp4() {
-    let Some(tools) = require_media_tools() else {
+    let Some(_tools) = require_media_tools() else {
         return;
     };
     let directory = TemporaryDirectory::new("muxer-remux-lossless");
@@ -344,8 +344,8 @@ fn no_packet_is_re_encoded_on_the_way_into_the_mp4() {
     // duration, a frame count and a stream layout are all satisfied by a file
     // that went through an encoder and came out looking worse; identical coded
     // bytes are not.
-    let recorded = payloads_by_stream(&tools, &source);
-    let remuxed = payloads_by_stream(&tools, &destination);
+    let recorded = payloads_by_stream(&source);
+    let remuxed = payloads_by_stream(&destination);
 
     assert_eq!(
         remuxed.len(),
@@ -362,16 +362,17 @@ fn no_packet_is_re_encoded_on_the_way_into_the_mp4() {
 }
 
 /// Every packet payload of a file, grouped by stream and kept in order.
-fn payloads_by_stream(tools: &MediaTools, file: &Path) -> Vec<Vec<String>> {
-    let mut streams: Vec<Vec<String>> = Vec::new();
-    for (index, hash) in packet_payload_hashes(tools.ffprobe(), file) {
-        let index = usize::try_from(index).expect("a stream index is not negative");
-        while streams.len() <= index {
-            streams.push(Vec::new());
-        }
-        streams[index].push(hash);
-    }
-    streams
+///
+/// The comparison this crate's remux tests are built on, and it lives in
+/// `clipped-media-validation` rather than here because
+/// `apps/recorder/tests/ipc_protocol.rs` makes the same one about the export
+/// the desktop application asks for (issue #399). One harness answering "were
+/// these the same coded bytes" is the point of that crate (AGENTS.md section
+/// 55).
+fn payloads_by_stream(file: &Path) -> Vec<Vec<String>> {
+    Media::open(file)
+        .expect("a file being compared for coded bytes opens")
+        .packet_payloads_by_stream()
 }
 
 #[test]

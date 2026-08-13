@@ -63,6 +63,22 @@ export interface CommandAnswers {
   readonly startRecording?: (args: Record<string, unknown>) => unknown;
   /** What `stop_recording` answers, given the arguments it was sent. */
   readonly stopRecording?: (args: Record<string, unknown>) => unknown;
+  /** What `export_recording` answers, given the two paths it was sent. */
+  readonly exportRecording?: (args: Record<string, unknown>) => unknown;
+  /** What `open_recording` answers, given the path it was sent. */
+  readonly openRecording?: (args: Record<string, unknown>) => unknown;
+  /** What `reveal_recording` answers, given the path it was sent. */
+  readonly revealRecording?: (args: Record<string, unknown>) => unknown;
+  /**
+   * Where the Save As dialog says the MP4 should go, given what it was opened
+   * with.
+   *
+   * `null` is the dialog being dismissed, which is a real answer and not a
+   * failure. The default is a **rejection**, for the reason the recorder
+   * commands' default is: a stub that quietly answered with a path would let an
+   * export test pass over a dialog the screen never opened.
+   */
+  readonly saveDialog?: (args: Record<string, unknown>) => unknown;
 }
 
 /** What an unstubbed library command rejects with. */
@@ -178,6 +194,30 @@ export function stubRecorderLinkRuntime(
       if (command === 'stop_recording') {
         return answered(
           commands.stopRecording === undefined ? undefined : () => commands.stopRecording?.(args),
+        );
+      }
+      if (command === 'export_recording') {
+        return answered(
+          commands.exportRecording === undefined
+            ? undefined
+            : () => commands.exportRecording?.(args),
+        );
+      }
+      if (command === 'open_recording') {
+        return answered(
+          commands.openRecording === undefined ? undefined : () => commands.openRecording?.(args),
+        );
+      }
+      if (command === 'reveal_recording') {
+        return answered(
+          commands.revealRecording === undefined
+            ? undefined
+            : () => commands.revealRecording?.(args),
+        );
+      }
+      if (command === 'plugin:dialog|save') {
+        return answered(
+          commands.saveDialog === undefined ? undefined : () => commands.saveDialog?.(args),
         );
       }
       if (command === 'plugin:event|listen') {

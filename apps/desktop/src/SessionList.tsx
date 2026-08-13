@@ -1,4 +1,4 @@
-import type { LibrarySession } from '@clipped/shared';
+import type { LibraryRecording, LibrarySession } from '@clipped/shared';
 import type { ReactNode } from 'react';
 
 import {
@@ -9,6 +9,7 @@ import {
   missingCount,
   presentBytes,
 } from './library';
+import { canActOn, fileName, type RecordingActions } from './recordingActions';
 
 /**
  * The list of sittings, shared by Home and Library.
@@ -26,6 +27,20 @@ import {
  * used. That is the whole reason the field crosses the process boundary
  * (AGENTS.md section 27).
  *
+ * # Why the recordings are only listed when there is something to do with them
+ *
+ * `actions` is what turns a sitting into a sitting **and its files** (issue
+ * #399). Home passes none: it is a summary of what has been recorded lately,
+ * and a list of file names under each sitting would bury it. The Library passes
+ * the three things a recording can have done to it, and each one is drawn
+ * against the file it acts on, because "Export" with no subject exports
+ * something the user did not choose.
+ *
+ * A recording whose file has gone gets the same three controls **disabled**,
+ * rather than hidden: hiding them would leave a row with nothing on it and no
+ * explanation, and a disabled control that says why is what AGENTS.md sections
+ * 27 and 45 ask for.
+ *
  * # No thumbnails
  *
  * The deck draws a grid of them. Thumbnails are generated beside the recordings
@@ -39,10 +54,16 @@ export interface SessionListProps {
   readonly sessions: readonly LibrarySession[];
   /** What to call the list, for a screen reader. */
   readonly label: string;
+  /**
+   * What can be done with each recording, where anything can.
+   *
+   * Absent draws the sittings alone, which is what Home wants.
+   */
+  readonly actions?: RecordingActions;
 }
 
-/** The sittings, one row each. */
-export function SessionList({ sessions, label }: SessionListProps): ReactNode {
+/** The sittings, one row each, and their recordings under them. */
+export function SessionList({ sessions, label, actions }: SessionListProps): ReactNode {
   return (
     <table className="clipped-table" aria-label={label}>
       <thead>
@@ -54,9 +75,9 @@ export function SessionList({ sessions, label }: SessionListProps): ReactNode {
           <th scope="col">Files</th>
         </tr>
       </thead>
-      <tbody>
-        {sessions.map((session) => (
-          <tr key={session.session_id}>
+      {sessions.map((session) => (
+        <tbody key={session.session_id}>
+          <tr>
             {/*
              * The catalogue refused to attribute this sitting to a game rather
              * than guessing, and so does this: what to call that group on
@@ -68,9 +89,94 @@ export function SessionList({ sessions, label }: SessionListProps): ReactNode {
             <td>{formatBytes(presentBytes(session))}</td>
             <td>{describeFiles(session)}</td>
           </tr>
-        ))}
-      </tbody>
+          {actions !== undefined &&
+            session.recordings.map((recording) => (
+              <RecordingRow
+                key={recording.recording_id}
+                recording={recording}
+                actions={actions}
+                session={session}
+              />
+            ))}
+        </tbody>
+      ))}
     </table>
+  );
+}
+
+/** One recording of a sitting, and what can be done with it. */
+function RecordingRow({
+  recording,
+  actions,
+  session,
+}: {
+  readonly recording: LibraryRecording;
+  readonly actions: RecordingActions;
+  readonly session: LibrarySession;
+}): ReactNode {
+  const available = canActOn(recording);
+  const busy =
+    actions.outcome.state === 'working' && actions.outcome.path === recording.path
+      ? actions.outcome.what
+      : undefined;
+  /*
+   * Every control names the file it acts on. Three buttons reading "Open" in a
+   * table of forty recordings are three buttons a screen reader announces
+   * identically, and a keyboard user cannot tell apart (AGENTS.md section 46).
+   */
+  const of = `${fileName(recording.path)}, ${session.game_name ?? 'not recognised'}`;
+  const why = available
+    ? undefined
+    : 'This file could not be found the last time Clipped looked for it.';
+
+  return (
+    <tr>
+      <td colSpan={4}>
+        {fileName(recording.path)}
+        {recording.duration_seconds !== undefined && (
+          <span className="clipped-muted"> · {formatDuration(recording.duration_seconds)}</span>
+        )}
+        {recording.size_bytes !== undefined && available && (
+          <span className="clipped-muted"> · {formatBytes(recording.size_bytes)}</span>
+        )}
+        {!available && <span className="clipped-muted"> · file missing</span>}
+      </td>
+      <td>
+        <button
+          type="button"
+          disabled={!available || busy !== undefined}
+          title={why}
+          aria-label={`Open ${of}`}
+          onClick={() => {
+            actions.open(recording);
+          }}
+        >
+          Open
+        </button>{' '}
+        <button
+          type="button"
+          disabled={!available || busy !== undefined}
+          title={why}
+          aria-label={`Show ${of} in Explorer`}
+          onClick={() => {
+            actions.reveal(recording);
+          }}
+        >
+          Show in Explorer
+        </button>{' '}
+        <button
+          type="button"
+          disabled={!available || busy !== undefined}
+          title={why}
+          aria-label={`Export ${of} as MP4`}
+          onClick={() => {
+            actions.exportToMp4(recording);
+          }}
+        >
+          {busy === 'Exporting' ? 'Exporting…' : 'Export MP4'}
+        </button>
+      </td>
+    </tr>
   );
 }
 

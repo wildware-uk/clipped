@@ -41,6 +41,7 @@
         "take_screenshot",
         "library_sessions",
         "library_games",
+        "export_recording",
         "shutdown",
         "save_replay",
         "apply_settings"
@@ -77,6 +78,8 @@
         "recording_failed",
         "too_many_connections",
         "shutting_down",
+        "destination_exists",
+        "export_failed",
         "library_unavailable",
         "internal"
       ],
@@ -111,7 +114,8 @@
         "bookmarks",
         "screenshots",
         "shutdown",
-        "library"
+        "library",
+        "export"
       ],
       "tolerates_unrecognised": true
     },
@@ -139,6 +143,7 @@
         "screenshot_taken",
         "library_sessions",
         "library_games",
+        "recording_exported",
         "shutting_down"
       ],
       "tolerates_unrecognised": false
@@ -220,6 +225,27 @@
         "status"
       ],
       "optional": []
+    },
+    "export_recording": {
+      "required": [
+        "destination",
+        "source"
+      ],
+      "optional": []
+    },
+    "export_summary": {
+      "required": [
+        "bytes",
+        "destination",
+        "duration_ms",
+        "elapsed_ms",
+        "lossless",
+        "packets",
+        "source"
+      ],
+      "optional": [
+        "losses"
+      ]
     },
     "hello": {
       "required": [
@@ -401,6 +427,13 @@
       ],
       "optional": []
     },
+    "reply.recording_exported": {
+      "required": [
+        "export",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.recording_started": {
       "required": [
         "output",
@@ -567,6 +600,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "export_recording",
+      "params": "export_recording",
+      "reply": "reply.recording_exported",
+      "available_in_this_build": true
+    },
+    {
       "name": "shutdown",
       "params": "shutdown",
       "reply": "reply.shutting_down",
@@ -686,6 +725,21 @@
       "discriminant": "request.library_games"
     },
     {
+      "name": "asking for a recording to be copied into MP4",
+      "direction": "client",
+      "frame": {
+        "command": "export_recording",
+        "id": 11,
+        "params": {
+          "destination": "D:\\clips\\cs2-20260811-201400-1.mp4",
+          "source": "D:\\clips\\cs2-20260811-201400-1.mkv"
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.export_recording"
+    },
+    {
       "name": "asking the recorder to exit",
       "direction": "client",
       "frame": {
@@ -723,7 +777,8 @@
           "bookmarks",
           "screenshots",
           "shutdown",
-          "library"
+          "library",
+          "export"
         ],
         "protocol_version": 1,
         "recorder": {
@@ -1102,6 +1157,89 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_games"
+    },
+    {
+      "name": "a recording copied into MP4 whole",
+      "direction": "server",
+      "frame": {
+        "id": 11,
+        "outcome": {
+          "ok": {
+            "export": {
+              "bytes": 9811204112,
+              "destination": "D:\\clips\\cs2-20260811-201400-1.mp4",
+              "duration_ms": 6540000,
+              "elapsed_ms": 4182,
+              "lossless": true,
+              "packets": 588120,
+              "source": "D:\\clips\\cs2-20260811-201400-1.mkv"
+            },
+            "reply": "recording_exported"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.recording_exported"
+    },
+    {
+      "name": "a recording copied into MP4 without everything it held",
+      "direction": "server",
+      "frame": {
+        "id": 11,
+        "outcome": {
+          "ok": {
+            "export": {
+              "bytes": 9811204112,
+              "destination": "D:\\clips\\cs2-20260811-201400-1.mp4",
+              "duration_ms": 6540000,
+              "elapsed_ms": 4182,
+              "losses": [
+                "4 chapter marks are not carried into MP4"
+              ],
+              "lossless": false,
+              "packets": 588120,
+              "source": "D:\\clips\\cs2-20260811-201400-1.mkv"
+            },
+            "reply": "recording_exported"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.recording_exported.lossy"
+    },
+    {
+      "name": "an export refused because the file it would write already exists",
+      "direction": "server",
+      "frame": {
+        "id": 11,
+        "outcome": {
+          "error": {
+            "code": "destination_exists",
+            "message": "there is already a file at cs2-20260811-201400-1.mp4, and Clipped does not                      overwrite one; choose another name"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.destination_exists"
+    },
+    {
+      "name": "an export refused because MP4 cannot carry one of the recording's tracks",
+      "direction": "server",
+      "frame": {
+        "id": 11,
+        "outcome": {
+          "error": {
+            "code": "export_failed",
+            "message": "cs2-20260811-201400-1.mkv cannot be remuxed to MP4 without losing part of                      the recording: audio track 1 (wavpack). Nothing was written; the recording                      is unchanged and still playable as it is"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.export_failed"
     },
     {
       "name": "a library that could not be read",

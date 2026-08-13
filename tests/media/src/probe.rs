@@ -168,6 +168,87 @@ impl Media {
         self.packets.get_or_init(|| self.read_packets())
     }
 
+    /// The payload of every packet, as a hash, grouped by stream and kept in
+    /// the order the container stores them.
+    ///
+    /// This is what proves a **stream copy**: the coded bytes of the source and
+    /// the coded bytes of the result are the same bytes, so the picture and the
+    /// sound are identical and nothing was traded for the change of container.
+    /// Counting packets, comparing durations or even comparing decoded frames
+    /// would all pass just as happily on a file that had been through an
+    /// encoder (`crates/muxer/src/remux.rs`, `docs/muxing.md`).
+    ///
+    /// Hashes rather than the bytes themselves because a four-second recording
+    /// is megabytes and a mismatch is answered by which packet, not by which
+    /// byte.
+    ///
+    /// The outer index is the container's stream index, so a file whose first
+    /// stream is video and whose second is audio comes back as two vectors in
+    /// that order. A stream with no packets is an empty vector rather than a
+    /// gap, so the two files being compared line up.
+    ///
+    /// # Panics
+    ///
+    /// When `ffprobe` cannot read the file, or reads no packets at all — a
+    /// comparison against nothing would pass whatever the two files held.
+    pub fn packet_payloads_by_stream(&self) -> Vec<Vec<String>> {
+        let output = Command::new(self.tools.ffprobe())
+            .args([
+                "-hide_banner",
+                "-v",
+                "error",
+                "-show_packets",
+                "-show_data_hash",
+                "MD5",
+                "-show_entries",
+                "packet=stream_index,data_hash",
+                "-of",
+                "compact=p=0:nk=0",
+            ])
+            .arg(&self.path)
+            .output()
+            .expect("the ffprobe that opened this file can be run again");
+
+        assert!(
+            output.status.success(),
+            "ffprobe could not read the packets of {}: {}",
+            self.path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut streams: Vec<Vec<String>> = Vec::new();
+        let mut counted = 0_usize;
+        for line in text.lines() {
+            let mut index = None;
+            let mut hash = None;
+            for field in line.trim().split('|') {
+                match field.split_once('=') {
+                    Some(("stream_index", value)) => index = value.parse::<usize>().ok(),
+                    Some(("data_hash", value)) => hash = Some(value.to_owned()),
+                    _ => {}
+                }
+            }
+            let (Some(index), Some(hash)) = (index, hash) else {
+                continue;
+            };
+            while streams.len() <= index {
+                streams.push(Vec::new());
+            }
+            streams[index].push(hash);
+            counted += 1;
+        }
+
+        assert!(
+            counted > 0,
+            "no packet hashes came back for {}, so a comparison against them would prove \
+             nothing\n{}",
+            self.path.display(),
+            self.inventory()
+        );
+        streams
+    }
+
     /// Decodes one audio stream to mono samples, for the tone assertions.
     ///
     /// `index` counts audio streams, not container streams, so `0` is the first

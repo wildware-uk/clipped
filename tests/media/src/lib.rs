@@ -14,6 +14,14 @@
 //! questions in its own way, which meant a third way arrived with every ticket
 //! and none of them was ever tested against a file that was actually broken.
 //!
+//! An eighth answer arrived with the export command in
+//! [issue #399](https://github.com/wildware-uk/clipped/issues/399), and for the
+//! same reason: **were these the same coded bytes**. It is what tells a stream
+//! copy from a re-encode, `crates/muxer` had it and
+//! `apps/recorder/tests/ipc_protocol.rs` needed it, and two `ffprobe` wrappers
+//! answering one question is what this crate exists to prevent. See
+//! [`Media::packet_payloads_by_stream`].
+//!
 //! # How a test uses it
 //!
 //! ```no_run

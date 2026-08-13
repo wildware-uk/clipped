@@ -671,6 +671,307 @@ fn starting_a_recording_of_something_that_is_not_there_is_refused_by_the_real_ha
     recorder.stop();
 }
 
+/// How long the recording the export tests copy runs for.
+const EXPORT_FIXTURE_SECONDS: &str = "3";
+
+/// Builds a recording for the export tests with the pinned build's own
+/// `ffmpeg`, and returns it.
+///
+/// Not recorded, because a recording needs a window, a GPU and an encoder, and
+/// what an export does is copy coded packets between containers — which cares
+/// about neither the picture nor how it got there. What it does care about is
+/// the **shape** of a Clipped recording, and that is what this reproduces: one
+/// picture track and one track of **uncompressed** sound, which is what Clipped
+/// writes and what MP4 only gained a mapping for in FFmpeg 8 (`ipcm`,
+/// `clipped_muxer::remux`). A fixture with AAC in it would exercise the easy
+/// half and leave the interesting one untested.
+///
+/// This is the same program `clipped-media-validation` inspects with, used the
+/// same way: as a test tool. Nothing in the recorder shells out to FFmpeg
+/// (`docs/ffmpeg.md`).
+fn recording_to_export(ffmpeg: &std::path::Path, into: &std::path::Path) {
+    let output = Command::new(ffmpeg)
+        .arg("-nostdin")
+        .args([
+            "-hide_banner",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            EXPORT_FIXTURE_SECONDS,
+            "-c:v",
+            "mpeg4",
+            "-c:a",
+            "pcm_s16le",
+        ])
+        .arg(into)
+        .output()
+        .expect("the pinned ffmpeg can be run");
+
+    assert!(
+        output.status.success(),
+        "the recording to export could not be built: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Sends `export_recording` and returns what the recorder answered with.
+fn export(client: &mut Client, source: &std::path::Path, destination: &std::path::Path) -> Reply {
+    client
+        .call(&IpcCommand::ExportRecording(clipped_ipc::ExportRecording {
+            source: source.to_string_lossy().into_owned(),
+            destination: destination.to_string_lossy().into_owned(),
+        }))
+        .unwrap_or_else(|error| panic!("the export was refused: {error}"))
+}
+
+#[test]
+fn a_recording_exported_over_the_protocol_decodes_from_first_frame_to_last_and_keeps_its_sound() {
+    // Issue #399's third and fourth acceptance criteria, over a real recorder
+    // process and a real file. Everything here is asserted against the
+    // **source**, measured from the same file in the same run, rather than
+    // against numbers written down: an export that dropped every other frame
+    // would satisfy a hard-coded count chosen to match it and cannot satisfy
+    // the source's.
+    //
+    // `decoded_frames`, never a packet count on its own: a container can list
+    // ninety packets, have monotonic timestamps and one video stream, and still
+    // decode to nothing at all (`tests/media`).
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-export");
+    let source = directory.file("match.mkv");
+    let destination = directory.file("match.mp4");
+    recording_to_export(tools.ffmpeg(), &source);
+
+    let recorded = clipped_media_validation::Media::open(&source).expect("the recording opens");
+    let recorded_video = recorded.video_streams();
+    let recorded_video = recorded_video.first().expect("the fixture has a picture");
+    let video_codec = recorded_video
+        .field("codec_name")
+        .expect("the fixture's picture has a codec")
+        .to_owned();
+    let frames = recorded_video
+        .number("nb_read_frames")
+        .expect("the fixture's pictures can be counted") as u64;
+    let seconds = recorded
+        .duration_seconds()
+        .expect("a finished recording records its duration");
+
+    let recorder = ServedRecorder::start("export");
+    let mut client = recorder.client();
+
+    let summary = match export(&mut client, &source, &destination) {
+        Reply::RecordingExported { export } => export,
+        other => panic!("expected an export, got {other:?}"),
+    };
+
+    assert_eq!(summary.source, source.to_string_lossy());
+    assert_eq!(summary.destination, destination.to_string_lossy());
+    assert!(
+        summary.packets > 0 && summary.bytes > 0,
+        "an export that copied nothing is not an export: {summary:?}"
+    );
+    assert!(
+        summary.lossless && summary.losses.is_empty(),
+        "a recording of one picture and one uncompressed sound track fits in MP4 whole: \
+         {summary:?}"
+    );
+
+    clipped_media_validation::Media::open(&destination)
+        .unwrap_or_else(|error| panic!("the export is not usable at all: {error}"))
+        .validate()
+        .stream_count(2)
+        .video_stream_count(1)
+        .video(
+            clipped_media_validation::VideoStream::codec(&video_codec)
+                .resolution(320, 240)
+                // The whole of "decodes cleanly from first frame to last": the
+                // decoder is run over the MP4 and has to produce exactly the
+                // pictures the recording holds, not merely some of them.
+                .decoded_frames(frames),
+        )
+        .audio_stream_count(1)
+        .audio(
+            0,
+            clipped_media_validation::AudioStream::codec("pcm_s16le")
+                .sample_rate(48_000)
+                .channels(1),
+        )
+        .duration_seconds(seconds, 0.2)
+        .monotonic_timestamps()
+        .assert_valid();
+
+    // And the recording it was made from is untouched, which is the promise a
+    // refusal makes and a success has to keep as well (AGENTS.md section 56).
+    clipped_media_validation::Media::open(&source)
+        .expect("the recording still opens")
+        .validate()
+        .stream_count(2)
+        .video(clipped_media_validation::VideoStream::codec(&video_codec).decoded_frames(frames))
+        .assert_valid();
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn an_export_over_the_protocol_copies_the_recordings_coded_bytes_rather_than_re_encoding_them() {
+    // Issue #399's fourth acceptance criterion — "a stream copy, not a
+    // re-encode, verified rather than assumed" — and the only assertion that
+    // can carry it. A duration, a frame count and a stream layout are all
+    // satisfied by a file that went through an encoder and came out looking
+    // worse; identical coded bytes are not.
+    //
+    // Separate from the test above deliberately: that one proves the MP4 is
+    // playable media, this one proves it is the *same* media. A regression that
+    // put an encoder in the path would leave the first test green.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-export-lossless");
+    let source = directory.file("match.mkv");
+    let destination = directory.file("match.mp4");
+    recording_to_export(tools.ffmpeg(), &source);
+
+    let recorded = clipped_media_validation::Media::open(&source)
+        .expect("the recording opens")
+        .packet_payloads_by_stream();
+
+    let recorder = ServedRecorder::start("export-lossless");
+    let mut client = recorder.client();
+    export(&mut client, &source, &destination);
+
+    let exported = clipped_media_validation::Media::open(&destination)
+        .expect("the export opens")
+        .packet_payloads_by_stream();
+
+    assert_eq!(
+        exported.len(),
+        recorded.len(),
+        "the MP4 has a different number of streams to the recording"
+    );
+    for (stream, expected) in recorded.iter().enumerate() {
+        assert_eq!(
+            &exported[stream], expected,
+            "stream {stream} of the MP4 does not hold the recording's coded bytes; the media was \
+             re-encoded or reordered rather than copied"
+        );
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn an_export_onto_a_file_that_is_already_there_is_refused_and_that_file_is_left_alone() {
+    // Issue #399's fifth acceptance criterion, over the wire. The refusal has
+    // to arrive as `destination_exists` rather than as a general failure,
+    // because that is the code the window offers "choose another name" on — and
+    // the file that was there has to still hold what it held, because it is
+    // somebody's footage (AGENTS.md section 56).
+    //
+    // No media tools are needed: the refusal happens before anything is read,
+    // which is itself part of the claim.
+    let directory = support::unique_path("export-taken");
+    std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
+    let source = directory.join("match.mkv");
+    let destination = directory.join("match.mp4");
+    std::fs::write(&source, b"a recording").expect("the source is written");
+    std::fs::write(&destination, b"somebody else's footage").expect("the file is written");
+
+    let recorder = ServedRecorder::start("export-taken");
+    let mut client = recorder.client();
+
+    let error = client
+        .call(&IpcCommand::ExportRecording(clipped_ipc::ExportRecording {
+            source: source.to_string_lossy().into_owned(),
+            destination: destination.to_string_lossy().into_owned(),
+        }))
+        .expect_err("a destination that already exists is refused");
+
+    match error {
+        ClientError::Refused(refusal) => {
+            assert_eq!(refusal.code, ErrorCode::DestinationExists);
+            assert!(
+                refusal.message.contains("match.mp4")
+                    && refusal.message.contains("choose another name"),
+                "the refusal has to name the file and the one thing to do about it, or there is                  nothing to act on: {}",
+                refusal.message
+            );
+        }
+        other => panic!("expected a refusal, got {other}"),
+    }
+
+    assert_eq!(
+        std::fs::read(&destination).expect("the file is still there"),
+        b"somebody else's footage",
+        "a refused export must not have written over what was already there"
+    );
+
+    drop(client);
+    recorder.stop();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn an_export_of_something_that_is_not_a_recording_says_so_in_the_muxers_own_words() {
+    // Issue #399's sixth acceptance criterion: a refusal from the muxer reaches
+    // the window with its own wording. A recorder that mapped every export
+    // failure onto one sentence would leave somebody unable to tell a file that
+    // has been moved from a recording MP4 cannot hold — two problems with two
+    // different answers (AGENTS.md sections 15 and 45).
+    let directory = support::unique_path("export-unreadable");
+    std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
+    let source = directory.join("not-a-recording.mkv");
+    std::fs::write(&source, b"this is not media").expect("the source is written");
+
+    let recorder = ServedRecorder::start("export-unreadable");
+    let mut client = recorder.client();
+
+    let error = client
+        .call(&IpcCommand::ExportRecording(clipped_ipc::ExportRecording {
+            source: source.to_string_lossy().into_owned(),
+            destination: directory
+                .join("not-a-recording.mp4")
+                .to_string_lossy()
+                .into_owned(),
+        }))
+        .expect_err("a file that is not media cannot be exported");
+
+    match error {
+        ClientError::Refused(refusal) => {
+            assert_eq!(refusal.code, ErrorCode::ExportFailed);
+            assert!(
+                refusal.message.contains("not-a-recording.mkv")
+                    && refusal.message.contains("could not be read"),
+                "the muxer's own sentence has to survive the whole round trip: {}",
+                refusal.message
+            );
+        }
+        other => panic!("expected a refusal, got {other}"),
+    }
+
+    assert!(
+        !directory.join("not-a-recording.mp4").exists(),
+        "a refused export must not leave a stub behind"
+    );
+
+    drop(client);
+    recorder.stop();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// The rate the pattern application presents at, matching
 /// `tests/record_end_to_end.rs`.
 const SOURCE_FPS: u32 = 30;

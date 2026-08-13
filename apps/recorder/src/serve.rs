@@ -15,12 +15,19 @@
 //!
 //! # What it can actually do
 //!
-//! Start a recording, stop one, mark a moment in one, and say what it is doing.
-//! The recording is the one `record` makes, through the same `clipped-session`
+//! Start a recording, stop one, mark a moment in one, say what it is doing,
+//! read the recording library, and copy a finished recording into MP4. The
+//! recording is the one `record` makes, through the same `clipped-session`
 //! call, validated by the same code (AGENTS.md section 55). Every other command
 //! in the protocol belongs to a subsystem that is not built, and `clipped-ipc`
 //! refuses those before they reach this module at all, with the milestone and
 //! issue that build them.
+//!
+//! The last two are answered from files rather than from anything this process
+//! is doing, on the connection thread the command arrived on: a library read is
+//! a bounded query over local data (`crate::library`) and an export is a copy of
+//! coded packets between two containers (`crate::export`). Neither shares a
+//! lock, a queue or a file with a recording.
 //!
 //! # Bookmarks, and what they are not allowed to cost
 //!
@@ -112,6 +119,10 @@ fn features_of_this_build() -> Vec<String> {
         // so that a recorder built before issue #301 is told apart from a
         // library with nothing in it.
         features::LIBRARY.to_owned(),
+        // And for this before it draws an Export control, so that nobody is
+        // asked to choose a file name for a file an older recorder was never
+        // going to write (issue #399).
+        features::EXPORT.to_owned(),
     ]
 }
 
@@ -312,6 +323,15 @@ impl CommandHandler for RecorderService {
             }),
             Command::LibraryGames => Ok(Reply::LibraryGames {
                 games: self.library.games()?,
+            }),
+            // Also on the connection thread, and for the same reason a library
+            // read is: it touches no recording, takes no lock a recording takes
+            // and opens a file of its own (`crate::export`). It is the slower
+            // of the two by far — a copy of a long recording is bounded by the
+            // disk — and it still may not run on the recording thread, which is
+            // the one thing that must never wait.
+            Command::ExportRecording(request) => Ok(Reply::RecordingExported {
+                export: crate::export::export(&request)?,
             }),
             // Refused by `clipped-ipc` before dispatch, so that no handler can
             // answer a command whose subsystem does not exist (AGENTS.md
@@ -1495,6 +1515,52 @@ mod tests {
         // and does not advertise it is one whose Library screen stays empty for
         // no reason anybody can see.
         assert!(features_of_this_build().contains(&clipped_ipc::features::LIBRARY.to_owned()));
+    }
+
+    #[test]
+    fn an_export_is_routed_to_the_muxer_through_the_real_dispatch() {
+        // Deliberately through `CommandHandler::call` rather than through
+        // `crate::export` beside it. What issue #399 is about is a command
+        // reaching the muxer at all; an export function that works while
+        // nothing routes a command to it is exactly the gap this ticket exists
+        // to close, and a command wired to the wrong handler — or left in
+        // `UNBUILT_COMMANDS` and refused before dispatch — fails here and
+        // nowhere else.
+        //
+        // The source is deliberately not media: what is under test is the
+        // route, and a refusal in the muxer's own words is proof the muxer was
+        // reached. Whether the copy is a real MP4 that decodes is
+        // `apps/recorder/tests/ipc_protocol.rs`, over a real recorder process
+        // and a real file.
+        let directory = scratch("export-dispatch");
+        let source = directory.join("match.mkv");
+        std::fs::write(&source, b"this is not media").expect("the source is written");
+        let service = RecorderService::new(EventPublisher::new());
+
+        let refusal = service
+            .call(Command::ExportRecording(clipped_ipc::ExportRecording {
+                source: source.to_string_lossy().into_owned(),
+                destination: directory.join("match.mp4").to_string_lossy().into_owned(),
+            }))
+            .expect_err("a file that is not media cannot be remuxed");
+
+        assert_eq!(refusal.code, ErrorCode::ExportFailed);
+        assert!(
+            refusal.message.contains("match.mkv"),
+            "the muxer's own sentence has to survive the dispatch: {}",
+            refusal.message
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recorder_that_can_export_says_so_in_its_handshake() {
+        // The same rule the library follows: the window asks here before it
+        // draws an Export control, so a build that can copy a recording into
+        // MP4 and does not advertise it is one whose library offers no way to
+        // share anything, for no reason anybody can see.
+        assert!(features_of_this_build().contains(&clipped_ipc::features::EXPORT.to_owned()));
     }
 
     #[test]

@@ -32,6 +32,7 @@
 //! | [`cli`] | The shape of the command line, and where a new subcommand goes |
 //! | [`options`] | The typed values options parse into, and their bounds |
 //! | [`config`] | Validating arguments into a [`config::RecordingConfig`] |
+//! | [`export`] | The `export_recording` command: a recording copied into MP4 |
 //! | [`record`] | The `record` subcommand |
 //! | [`list_windows`] | The `list-windows` subcommand |
 //! | [`capabilities`] | The `capabilities` subcommand |
@@ -44,6 +45,7 @@
 pub mod capabilities;
 pub mod cli;
 pub mod config;
+pub mod export;
 pub mod library;
 pub mod list_windows;
 pub mod options;

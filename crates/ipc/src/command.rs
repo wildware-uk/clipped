@@ -42,7 +42,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::library::{LibraryGame, LibrarySessionPage, LibrarySessions};
 use crate::message::Request;
-use crate::status::{BookmarkSummary, RecorderStatus, RecordingSummary, ScreenshotSummary};
+use crate::status::{
+    BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ScreenshotSummary,
+};
 
 /// A command, parsed and known to be one this build understands.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +66,8 @@ pub enum Command {
     LibrarySessions(LibrarySessions),
     /// Read what the library holds per game (SPEC.md section 17).
     LibraryGames,
+    /// Copy a finished recording into MP4, without re-encoding it.
+    ExportRecording(ExportRecording),
     /// Stop serving, finish anything still being recorded, and exit.
     ///
     /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
@@ -93,6 +97,7 @@ impl Command {
             Self::TakeScreenshot(_) => "take_screenshot",
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
+            Self::ExportRecording(_) => "export_recording",
             Self::Shutdown(_) => "shutdown",
             Self::Unbuilt(command) => command.name(),
         }
@@ -116,6 +121,7 @@ impl Command {
             "take_screenshot" => Ok(Self::TakeScreenshot(parse_params(request)?)),
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
+            "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => match UnbuiltCommand::from_name(name) {
                 Some(command) => Ok(Self::Unbuilt(command)),
@@ -144,6 +150,7 @@ impl Command {
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
             Self::TakeScreenshot(screenshot) => serde_json::to_value(screenshot),
+            Self::ExportRecording(export) => serde_json::to_value(export),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
             Self::Unbuilt(_) => Ok(serde_json::Value::Null),
         }
@@ -415,6 +422,42 @@ pub struct TakeScreenshot {
     pub format: Option<String>,
 }
 
+/// Which recording to copy into MP4, and where to put the copy.
+///
+/// Both fields are required, and neither has a default. That is deliberate on
+/// both counts:
+///
+/// - **The source** is a file the caller already knows about, because it read it
+///   out of the library ([`LibraryRecording::path`](crate::LibraryRecording)).
+///   There is no "the recording you just made" shorthand, because the thing
+///   somebody exports is usually not the thing they just recorded, and a
+///   command that guessed would export the wrong file in the one case where
+///   nobody would check.
+/// - **The destination** is chosen by whoever asked. The recorder has a default
+///   place for a recording and for a screenshot, because it creates those
+///   without being asked; an export is a thing a person asked for, at a moment
+///   they were looking at a screen, and the place it goes is theirs to say. A
+///   destination that already exists is **refused** rather than replaced
+///   ([`ErrorCode::DestinationExists`]), which is AGENTS.md section 56: a file
+///   nobody can get back must not be destroyed to save a dialog.
+///
+/// Neither carries a `serde` default either, which is the same decision on the
+/// wire: a request that omits one is [`ErrorCode::InvalidParameters`] naming the
+/// field it left out, rather than a request carrying an empty path that
+/// something further down has to recognise as "not given". The recorder still
+/// refuses a path that is only whitespace, because an empty string is a value
+/// `serde` accepts and a file name it is not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportRecording {
+    /// The recording to copy, as the library reported its path.
+    ///
+    /// It is opened for reading and is not modified, whether the export
+    /// succeeds or fails.
+    pub source: String,
+    /// Where to write the MP4.
+    pub destination: String,
+}
+
 /// How far a shutdown may go.
 ///
 /// The parameter exists because the two answers to "the user asked to exit and a
@@ -492,6 +535,15 @@ pub enum Reply {
         /// One row per game, and one for the sittings nothing was attributed
         /// to.
         games: Vec<LibraryGame>,
+    },
+    /// A recording was copied into MP4, and the file is finished.
+    ///
+    /// Sent **after** the container's index has been written, for the reason
+    /// [`Self::RecordingStopped`] is: a window that said "exported" before that
+    /// would be pointing at a file that is not yet playable.
+    RecordingExported {
+        /// The copy, and what it turned out to hold.
+        export: ExportSummary,
     },
     /// The recorder has stopped listening and is winding up.
     ///
@@ -845,6 +897,103 @@ mod tests {
                 "{name} should parse"
             );
         }
+    }
+
+    #[test]
+    fn both_halves_of_an_export_survive_the_request_they_are_carried_in() {
+        // Distinct values on purpose, and distinguishable ones: a round trip
+        // whose two paths could be confused passes while the code swaps them —
+        // and an export that swapped source for destination would read the MP4
+        // that is not there and refuse, or, far worse, be handed a source that
+        // already exists as a destination and refuse a copy nobody could then
+        // explain.
+        let export = Command::ExportRecording(ExportRecording {
+            source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+            destination: r"E:\share\ace on mirage.mp4".to_owned(),
+        });
+
+        let request = export.to_request(11).expect("it can be represented");
+        assert_eq!(request.command, "export_recording");
+
+        let json = serde_json::to_string(&request).expect("it serialises");
+        let back: Request = serde_json::from_str(&json).expect("and deserialises");
+        let Command::ExportRecording(parsed) = Command::from_request(&back).expect("it parses")
+        else {
+            panic!("an export_recording request parsed as something else");
+        };
+
+        assert_eq!(parsed.source, r"D:\clips\cs2-20260811-201400-1.mkv");
+        assert_eq!(parsed.destination, r"E:\share\ace on mirage.mp4");
+    }
+
+    #[test]
+    fn an_export_that_names_neither_file_is_refused_naming_the_one_it_was_not_given() {
+        // Unlike every other command's parameters, these two have no `serde`
+        // default: there is no sensible recording to export and nowhere
+        // sensible to put it, so "you did not say" has to be a refusal rather
+        // than a value. A default here would send the recorder an empty path,
+        // and the failure would surface four calls further on as a file that
+        // could not be read.
+        let error = Command::from_request(&request(
+            "export_recording",
+            serde_json::json!({"source": r"D:\clips\match.mkv"}),
+        ))
+        .expect_err("an export has to say where the MP4 goes");
+
+        assert_eq!(error.code, ErrorCode::InvalidParameters);
+        assert!(
+            error.message.contains("export_recording") && error.message.contains("destination"),
+            "the refusal should name the command and the field: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn exporting_is_a_command_this_build_performs_rather_than_one_it_refuses() {
+        // The mistake `add_bookmark` and the library commands above record: a
+        // command left in `UNBUILT_COMMANDS` after its subsystem landed refuses
+        // every request with a plausible sentence about a milestone, and nobody
+        // questions it.
+        assert_eq!(UnbuiltCommand::from_name("export_recording"), None);
+        assert!(
+            !UNBUILT_COMMANDS
+                .iter()
+                .any(|unbuilt| unbuilt.name() == "export_recording"),
+            "export_recording is still listed as unbuilt: {UNBUILT_COMMANDS:?}"
+        );
+    }
+
+    #[test]
+    fn an_export_reply_says_what_the_copy_holds_and_not_only_that_one_was_made() {
+        // The figures are what let a window say "4.2 s, 9.8 GB copied, nothing
+        // lost" instead of "done", and `losses` is the half that has to survive
+        // an empty vector without becoming a null the window has to guard.
+        let reply = Reply::RecordingExported {
+            export: crate::status::ExportSummary {
+                source: r"D:\clips\match.mkv".to_owned(),
+                destination: r"D:\clips\match.mp4".to_owned(),
+                duration_ms: 6_540_000,
+                packets: 588_120,
+                bytes: 9_811_204_112,
+                elapsed_ms: 4_182,
+                lossless: true,
+                losses: Vec::new(),
+            },
+        };
+
+        let json = serde_json::to_string(&reply).expect("it serialises");
+        assert_eq!(
+            serde_json::from_str::<Reply>(&json).expect("and deserialises"),
+            reply
+        );
+        assert!(
+            !json.contains("\"losses\""),
+            "an export that lost nothing should not carry an empty list: {json}"
+        );
+        assert!(
+            json.contains("\"lossless\":true") && json.contains("\"elapsed_ms\":4182"),
+            "both the verdict and the measurement have to reach the wire: {json}"
+        );
     }
 
     #[test]

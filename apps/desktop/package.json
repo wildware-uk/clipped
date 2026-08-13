@@ -21,6 +21,7 @@
     "@clipped/shared": "*",
     "@clipped/ui": "*",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.4.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router": "^7.9.5"

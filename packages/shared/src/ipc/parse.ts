@@ -44,6 +44,7 @@ import type {
   BookmarkSummary,
   ClientMessage,
   ErrorDetail,
+  ExportSummary,
   Hello,
   JsonObject,
   JsonValue,
@@ -343,6 +344,8 @@ function readReply(value: JsonValue | undefined): Reply {
         reply: 'library_games',
         games: arrayField(reply['games'], 'a games list', readLibraryGame),
       };
+    case 'recording_exported':
+      return { reply: 'recording_exported', export: readExport(reply['export']) };
     case 'shutting_down': {
       const finalising = reply['finalising'];
       return {
@@ -444,6 +447,24 @@ function readScreenshot(value: JsonValue | undefined): ScreenshotSummary {
     bytes: numberField(screenshot, 'bytes', what),
     ...(recording === undefined ? {} : { recording_id: recording }),
     ...(at === undefined ? {} : { at_seconds: at }),
+  };
+}
+
+function readExport(value: JsonValue | undefined): ExportSummary {
+  const summary = object(value, 'an export');
+  const what = 'an export';
+  const losses = optionalStringArrayField(summary, 'losses', what);
+  return {
+    source: stringField(summary, 'source', what),
+    destination: stringField(summary, 'destination', what),
+    duration_ms: numberField(summary, 'duration_ms', what),
+    packets: numberField(summary, 'packets', what),
+    bytes: numberField(summary, 'bytes', what),
+    elapsed_ms: numberField(summary, 'elapsed_ms', what),
+    lossless: booleanField(summary, 'lossless', what),
+    // Absent is "nothing was lost", which is an answer rather than a gap: the
+    // recorder skips the field entirely when the copy holds everything.
+    ...(losses === undefined ? {} : { losses }),
   };
 }
 

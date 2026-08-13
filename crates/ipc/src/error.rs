@@ -153,6 +153,23 @@ pub enum ErrorCode {
     /// read and the reply would begin a recording the decision never covered
     /// (`crate::server::accept_shutdown`, AGENTS.md section 17).
     ShuttingDown,
+    /// `destination_exists` — there is already a file where the caller asked
+    /// for one to be written, and Clipped does not overwrite.
+    ///
+    /// A code of its own rather than [`InvalidParameters`](Self::InvalidParameters)
+    /// because the useful action is specific and the UI can offer it: pick
+    /// another name. It is the protocol's expression of AGENTS.md section 56 —
+    /// the file that is already there is somebody's footage, and the one
+    /// certain way to destroy it is to write over it.
+    DestinationExists,
+    /// `export_failed` — a recording could not be written into the container
+    /// that was asked for, and the message says which part of it stopped it.
+    ///
+    /// Distinct from [`RecordingFailed`](Self::RecordingFailed), which is about
+    /// a recording in progress. This is about a finished file being copied into
+    /// a different container, and the recording it was made from is untouched
+    /// on every path that produces it (`clipped_muxer::remux`).
+    ExportFailed,
     /// `library_unavailable` — the recording library could not be read, and the
     /// message says why.
     ///
@@ -191,6 +208,8 @@ impl ErrorCode {
             Self::RecordingFailed => "recording_failed",
             Self::TooManyConnections => "too_many_connections",
             Self::ShuttingDown => "shutting_down",
+            Self::DestinationExists => "destination_exists",
+            Self::ExportFailed => "export_failed",
             Self::LibraryUnavailable => "library_unavailable",
             Self::Internal => "internal",
             Self::Other(code) => code,
@@ -220,6 +239,8 @@ impl From<String> for ErrorCode {
             "recording_failed" => Self::RecordingFailed,
             "too_many_connections" => Self::TooManyConnections,
             "shutting_down" => Self::ShuttingDown,
+            "destination_exists" => Self::DestinationExists,
+            "export_failed" => Self::ExportFailed,
             "library_unavailable" => Self::LibraryUnavailable,
             "internal" => Self::Internal,
             _ => Self::Other(code),
@@ -303,6 +324,10 @@ mod tests {
             ErrorCode::TargetNotCapturable,
             ErrorCode::RecordingFailed,
             ErrorCode::TooManyConnections,
+            ErrorCode::ShuttingDown,
+            ErrorCode::DestinationExists,
+            ErrorCode::ExportFailed,
+            ErrorCode::LibraryUnavailable,
             ErrorCode::Internal,
         ];
 

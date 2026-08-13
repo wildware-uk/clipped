@@ -174,6 +174,49 @@ pub struct ScreenshotSummary {
     pub at_seconds: Option<f64>,
 }
 
+/// A recording copied into another container, and what the copy turned out to
+/// be.
+///
+/// The reply to `export_recording`. Clipped records Matroska because it survives
+/// an interrupted recording (ADR 0001), and MP4 is what the rest of the world
+/// accepts — so an export is a **stream copy**: the coded packets of the
+/// recording, in a different box (`clipped_muxer::remux`, `docs/muxing.md`).
+///
+/// The figures are here so that a window can say what happened rather than only
+/// that something did. [`Self::elapsed_ms`] in particular is the whole argument
+/// for remuxing instead of re-encoding, and a claim about it should be a
+/// measurement (AGENTS.md section 18).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportSummary {
+    /// The recording that was copied, unchanged by the copy.
+    pub source: String,
+    /// The file that was written.
+    pub destination: String,
+    /// How much media the result holds, from its earliest packet to the end of
+    /// its latest one.
+    pub duration_ms: u64,
+    /// How many coded packets were copied, across every track.
+    pub packets: u64,
+    /// How many bytes of coded media were copied, before the container's own
+    /// overhead.
+    pub bytes: u64,
+    /// How long the copy took, measured.
+    pub elapsed_ms: u64,
+    /// Whether the destination holds everything the source did.
+    ///
+    /// `false` means something was left out — chapter marks, an attached font —
+    /// and [`Self::losses`] says what. It is never a picture or a sound track:
+    /// a container that cannot carry one of those is a refusal rather than a
+    /// quiet loss, because a file missing one of its audio tracks looks exactly
+    /// like a file that never had it (`clipped_muxer::remux`, AGENTS.md
+    /// section 15).
+    pub lossless: bool,
+    /// Everything the destination does not contain, phrased for somebody to
+    /// read. Empty when [`Self::lossless`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub losses: Vec<String>,
+}
+
 /// Why a recording ended.
 ///
 /// Mirrors `clipped_session::EndReason`. It is restated here rather than
