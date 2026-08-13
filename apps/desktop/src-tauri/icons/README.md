@@ -21,7 +21,7 @@ regenerating.
 The notification-area icon is **not** this image, and should not be changed to
 it. It is four drawn marks — one per state, in `src/tray_icon.rs` — because a
 tray icon is sixteen pixels wide, carries no label, and has to say whether a
-recording is running. Each state is a different *shape* so that it survives
+recording is running. Each state is a different _shape_ so that it survives
 being printed in black and white, which is what AGENTS.md section 46 asks and
 what a single brand mark in four colours would fail.
 
