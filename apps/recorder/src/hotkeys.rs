@@ -4,7 +4,7 @@
 //!
 //! `RegisterHotKey` gives a combination to exactly one process, so somebody had
 //! to choose which one. It is this one, and
-//! [ADR 0007](../../../docs/adr/0007-the-recorder-registers-global-hotkeys.md)
+//! [ADR 0009](../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)
 //! is the argument: the recorder is what starts at login and outlives every
 //! window (ADR 0002), it is what can act on a press without a round trip, and
 //! its exclusivity is already decided by the endpoint — `serve` binds the named

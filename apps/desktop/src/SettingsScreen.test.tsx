@@ -237,7 +237,8 @@ describe('the Settings screen', () => {
     ['Audio', 'Audio tracks, enable and level', /nothing produces the tracks/, [180, 81, 33]],
     ['Storage', 'Recording directory', /--output-directory/, [307]],
     ['Storage', 'Trash and recovery', /no trash to recover from/, [94]],
-    ['Hotkeys', 'Save replay', /Nothing registers it/, [232, 233, 54]],
+    ['Hotkeys', 'Which combination an action has', /Ctrl\+F9 to bookmark/, [54, 233]],
+    ['Hotkeys', 'A combination another application owns', /a key that does nothing/, [417]],
     ['Notifications', 'A recording failed', /"recording_failed": false/, [252]],
     [
       'Startup',

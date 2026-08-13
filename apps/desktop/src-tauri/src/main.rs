@@ -189,6 +189,7 @@ fn main() {
             library_games,
             record_target,
             recorder_status,
+            recorder_hotkeys,
             start_recording,
             stop_recording,
             export_recording,
@@ -473,6 +474,34 @@ fn recorder_status(
     match link.call(&clipped_ipc::Command::GetStatus)? {
         clipped_ipc::Reply::Status { status } => Ok(status),
         _ => Err(wrong_reply("get_status")),
+    }
+}
+
+/// Where every global hotkey stands, asked of the recorder.
+///
+/// The window registers none of them. `RegisterHotKey` gives a combination to
+/// exactly one process and that process is the recorder, because it is the one
+/// that outlives this window and the one that can act on a press
+/// ([ADR 0009](../../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)).
+/// So this window is not where a conflict is discovered — the recorder found out
+/// when it started, which may have been days ago — and asking is the only way to
+/// see it.
+///
+/// Asking matters more here than it does for most commands. A combination
+/// another application owns is a hotkey that does nothing, and without this it
+/// would exist only as a line in the recorder's log; interrupting somebody with
+/// it is [issue #417](https://github.com/wildware-uk/clipped/issues/417), and
+/// this is what that would read.
+///
+/// `async` for the reason [`recorder_status`] is: it opens a pipe and waits for
+/// an answer, and the thread drawing the window may not.
+#[tauri::command(async)]
+fn recorder_hotkeys(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<Vec<clipped_ipc::HotkeyBinding>, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetHotkeys)? {
+        clipped_ipc::Reply::Hotkeys { hotkeys } => Ok(hotkeys),
+        _ => Err(wrong_reply("get_hotkeys")),
     }
 }
 

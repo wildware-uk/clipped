@@ -415,8 +415,10 @@ filling either is an addition rather than a change of shape (AGENTS.md section
 43). Their presence is not a claim that a session has none: no build can make a
 clip at all ([#38]), and a session's bookmarks are in its recordings' own files
 (`docs/bookmarks.md`). Nothing can take a bookmark during an automatic session
-yet either — `watch` serves no protocol, so no `add_bookmark` can reach it, and
-joining the two is [#232](https://github.com/wildware-uk/clipped/issues/232).
+yet either: `watch` serves no protocol, so no `add_bookmark` can reach it, and
+it registers no hotkey either — the global hotkeys belong to `serve`
+([ADR 0009](adr/0009-the-recorder-registers-global-hotkeys.md)). Joining the two
+is [#421](https://github.com/wildware-uk/clipped/issues/421).
 
 An ambiguous session writes its candidates instead of a name it did not earn:
 

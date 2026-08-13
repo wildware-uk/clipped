@@ -3,7 +3,7 @@
 //! # Why this is on the protocol at all
 //!
 //! `RegisterHotKey` gives a combination to exactly one process, and
-//! [ADR 0007](../../../docs/adr/0007-the-recorder-registers-global-hotkeys.md)
+//! [ADR 0009](../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)
 //! made that process the recorder: it is the one that outlives every window, and
 //! the one that can act on a press. So the window is not the process that finds
 //! out that Discord already owns `Ctrl`+`F10` — the recorder is, at the moment it

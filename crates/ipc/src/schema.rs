@@ -69,8 +69,8 @@ use crate::command::{
     Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording, UnbuiltCommand,
 };
 use crate::error::{ErrorCode, ErrorDetail, ProtocolError};
-use crate::hotkeys::{HotkeyBinding, HotkeyState};
 use crate::frame::{LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
+use crate::hotkeys::{HotkeyBinding, HotkeyState};
 use crate::library::{
     LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
 };

@@ -107,12 +107,15 @@
 //! # What exists today
 //!
 //! The service, its registration report and the dispatch model
-//! ([issue #39](https://github.com/wildware-uk/clipped/issues/39)). Nothing
-//! calls it yet: wiring it into the recorder and the desktop application is
-//! [issue #232](https://github.com/wildware-uk/clipped/issues/232), the screen
-//! that configures it is
+//! ([issue #39](https://github.com/wildware-uk/clipped/issues/39)), and the
+//! caller: `clipped-recorder serve` starts one and turns a press into the
+//! command the desktop application would have sent
+//! ([issue #232](https://github.com/wildware-uk/clipped/issues/232),
+//! `apps/recorder/src/hotkeys.rs`,
+//! [ADR 0009](../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)).
+//! The screen that *binds* a combination is
 //! [issue #54](https://github.com/wildware-uk/clipped/issues/54), and changing
-//! a binding without restarting the service is
+//! one without restarting the service is
 //! [issue #233](https://github.com/wildware-uk/clipped/issues/233).
 
 mod action;

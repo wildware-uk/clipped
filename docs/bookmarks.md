@@ -15,11 +15,15 @@ that is.
 **What does not exist yet.** Drawing bookmarks on a timeline and jumping to one
 is [issue #65](https://github.com/wildware-uk/clipped/issues/65). Indexing them
 into the SQLite library is M6's job and the `bookmarks` table is already there
-waiting for it (`docs/storage.md`). And `Ctrl`+`F9` does not yet reach the
-recorder: `clipped-hotkeys` registers the combination but nothing in any process
-plugs a handler in, which is
-[issue #232](https://github.com/wildware-uk/clipped/issues/232) — until it
-lands, the tray's **Add Bookmark** item is the way to take one.
+waiting for it (`docs/storage.md`).
+
+**`Ctrl`+`F9` reaches the recorder** as of
+[issue #232](https://github.com/wildware-uk/clipped/issues/232). The recorder
+registers the combination and a press sends the same `add_bookmark` the tray's
+menu item and the window send — one command, one set of rules, one kind of
+failure (`docs/hotkeys.md`). Binding it to something else still means editing
+the settings file and restarting Clipped, which is
+[issue #233](https://github.com/wildware-uk/clipped/issues/233).
 
 ## When is a bookmark?
 
@@ -287,9 +291,11 @@ and the honest answer today is that this build cannot be in that state.
   takes the same bare mark a hotkey would. What happened is reported only when
   it failed; a mark that succeeded changes nothing on screen worth interrupting
   a game for.
-- **Hotkey.** `Ctrl`+`F9` is bound by default (`docs/hotkeys.md`) and no process
-  handles it yet — [issue #232](https://github.com/wildware-uk/clipped/issues/232).
-  A press is reported as unhandled rather than silently swallowed.
+- **Hotkey.** `Ctrl`+`F9` is bound by default and the recorder registers it
+  (`docs/hotkeys.md`). A press sends the same `add_bookmark` the tray sends, so
+  the two cannot differ. It reaches a recording `serve` is making; an
+  automatically started one is
+  [issue #421](https://github.com/wildware-uk/clipped/issues/421).
 - **Overlay and toast.** SPEC.md section 25 asks for feedback that does not
   interrupt gameplay. The overlay is M5,
   [issue #53](https://github.com/wildware-uk/clipped/issues/53); a "bookmark

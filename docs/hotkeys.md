@@ -1,11 +1,15 @@
 # Global hotkeys
 
-**Status: the service exists and is tested; nothing calls it yet.**
+**Status: the recorder registers them, and a press reaches the recorder.**
 `crates/hotkeys` registers combinations, reports the ones another application
-already owns, and delivers presses to handlers without making anything wait.
-Wiring it into the recorder and the desktop application is
-[issue #232](https://github.com/wildware-uk/clipped/issues/232); the screen that
-configures it is [issue #54](https://github.com/wildware-uk/clipped/issues/54).
+already owns, and delivers presses to handlers without making anything wait;
+`clipped-recorder serve` is what starts it
+([issue #232](https://github.com/wildware-uk/clipped/issues/232)). The screen
+that *binds* a combination is still
+[issue #54](https://github.com/wildware-uk/clipped/issues/54), and changing one
+without restarting the recorder is
+[issue #233](https://github.com/wildware-uk/clipped/issues/233); until then the
+bindings come from the settings file, read once when the recorder starts.
 
 A hotkey is the only part of Clipped a user touches while they are playing. It
 has to work through a fullscreen game, it has to say something useful when it
@@ -92,9 +96,81 @@ document exists to prevent.
   for it, and building one is not obviously worth it before somebody reports the
   problem.
 - **Only one process can hold a combination.** Two copies of Clipped are the
-  most likely thing to conflict with Clipped. `HotkeyService` reports it as any
-  other conflict; deciding which process registers is
-  [issue #232](https://github.com/wildware-uk/clipped/issues/232).
+  most likely thing to conflict with Clipped, and they cannot: see
+  [Which process registers](#which-process-registers) below.
+
+## Which process registers
+
+**The recorder**, and the desktop application registers nothing
+([ADR 0009](adr/0009-the-recorder-registers-global-hotkeys.md)). It is the
+process that starts at login and outlives every window (ADR 0002), and it is the
+only one that can perform what a hotkey asks for: a bookmark is a position in a
+recording it is making, and stopping a recording is a container it has open.
+
+The part worth reading carefully is the **ordering**, because it is what makes
+"exactly one process registers" true rather than hoped for:
+
+```text
+clipped-recorder serve
+  |
+  |-- Listener::bind(endpoint)   <- a second recorder fails here and exits
+  |
+  |-- register the hotkeys       <- so only one process ever reaches this
+  |
+  '-- ready endpoint=...
+```
+
+The named pipe is already exclusive — `FILE_FLAG_FIRST_PIPE_INSTANCE`,
+[ADR 0005](adr/0005-named-pipe-control-protocol.md) — so a second copy of
+Clipped in the same session has exited saying the name was taken *before* it
+could ask Windows for a combination. There is no hotkey lock of its own, because
+there is nothing left for one to decide.
+`a_second_recorder_never_reaches_the_first_ones_hotkeys` in
+`apps/recorder/tests/ipc_protocol.rs` is what holds that ordering in place.
+
+## What a press does
+
+**Exactly what the equivalent button does.** A press is turned into the
+`Command` the desktop application would have sent and handed to the same
+`CommandHandler` the protocol dispatches to, so there is one implementation of
+"add a bookmark", one set of validation rules and one kind of failure
+(AGENTS.md section 55):
+
+```text
+  the window                        a key press
+      |                                  |
+  add_bookmark over the pipe        WM_HOTKEY --> that action's handler thread
+      |                                  |                    |
+      '--------> RecorderService::call <-'--------------------'
+```
+
+The only difference is where the answer goes. A command that arrived over IPC is
+answered to the client that sent it; a press has no client, so its outcome goes
+to the recorder's log — `info` for what happened, `warn` for what did not, with
+the action, the combination and the recorder's own refusal. That is what a
+support bundle needs in order to answer "the hotkey does nothing"
+(AGENTS.md section 15).
+
+| Action | What a press sends | With nothing being recorded |
+| --- | --- | --- |
+| `add_bookmark` | `add_bookmark`, naming no recording | Refused: there is no recording to mark a moment in |
+| `take_screenshot` | `take_screenshot`, naming no target | Refused: there is no window to photograph |
+| `toggle_recording` | `stop_recording`, naming no recording | Refused: a key press does not say which window to record ([#416](https://github.com/wildware-uk/clipped/issues/416)) |
+| everything else | nothing: no handler is registered | Reported as unhandled, naming the milestone and the issue |
+
+## Where a conflict is shown
+
+Settings → Hotkeys, in the desktop application. The window asks the recorder
+`get_hotkeys` (`docs/ipc.md`) and draws a row per action: the combination, what
+Windows said about it, and whether anything in this build performs it. The last
+two are separate questions, and a row that ran them together would be wrong half
+the time — `Ctrl`+`F10` registers cleanly and no build saves a replay.
+
+Asking rather than being told is deliberate. Registration happens when the
+recorder starts, which is usually long before a window exists, so a conflict
+published as an event would reach nobody. Interrupting the user with one is
+[issue #417](https://github.com/wildware-uk/clipped/issues/417); until that
+lands, a conflict is visible to somebody who looks and to nobody who does not.
 
 ## The actions
 
@@ -105,9 +181,9 @@ line and will appear in a configuration file.
 | Action | Name | Default | What is behind it today |
 | --- | --- | --- | --- |
 | Save replay | `save_replay` | `Ctrl`+`F10` | Nothing: the buffer and its save exist ([#37](https://github.com/wildware-uk/clipped/issues/37)), but no build runs a recording with one, which is M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
-| Add bookmark | `add_bookmark` | `Ctrl`+`F9` | Bookmarks exist ([#64](https://github.com/wildware-uk/clipped/issues/64), docs/bookmarks.md); a handler has to be supplied |
-| Take screenshot | `take_screenshot` | — | Screenshots exist ([#67](https://github.com/wildware-uk/clipped/issues/67), docs/screenshots.md); a handler has to be supplied |
-| Start or stop recording | `toggle_recording` | — | Recording exists; a handler has to be supplied |
+| Add bookmark | `add_bookmark` | `Ctrl`+`F9` | **The recorder marks the moment**, through `add_bookmark` ([#64](https://github.com/wildware-uk/clipped/issues/64), docs/bookmarks.md) |
+| Take screenshot | `take_screenshot` | — | **The recorder writes a still**, through `take_screenshot` ([#67](https://github.com/wildware-uk/clipped/issues/67), docs/screenshots.md) |
+| Start or stop recording | `toggle_recording` | — | **The recorder stops the recording that is running.** Starting one needs a window a key press cannot name, [#416](https://github.com/wildware-uk/clipped/issues/416) |
 | Mute microphone | `mute_microphone` | — | Nothing mutes a microphone mid-recording, [#234](https://github.com/wildware-uk/clipped/issues/234) |
 | Toggle microphone | `toggle_microphone` | — | As above |
 | Open overlay | `open_overlay` | — | Nothing: the overlay is M5, [#53](https://github.com/wildware-uk/clipped/issues/53) |
@@ -118,7 +194,9 @@ start unbound on purpose: binding all seven would take five more combinations
 away from every other application on the machine before the user has asked for
 any of them.
 
-**A press with nothing behind it says so.** It is reported as `Unhandled`,
+**A press with nothing behind it says so**, and it says so twice: once in the
+row `get_hotkeys` reports before anybody presses anything, and once when they
+do. It is reported as `Unhandled`,
 carrying the milestone and issue where there is one — "Save replay is not in
 this build: a recording with a replay buffer arrives in M3 (issue #38)" — and as "nothing in
 this process handles Start or stop recording" where the subsystem exists and

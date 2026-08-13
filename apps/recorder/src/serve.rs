@@ -228,7 +228,7 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
     // ordering the "exactly one process registers" requirement rests on:
     // `Listener::bind` above is what makes a second recorder exit, so by the
     // time anything here asks Windows for a combination this process is
-    // demonstrably the only recorder in the session (ADR 0007, issue #232).
+    // demonstrably the only recorder in the session (ADR 0009, issue #232).
     //
     // Before the ready line as well, so that a window connecting the instant it
     // sees that line already has an answer to `get_hotkeys` rather than a race

@@ -29,7 +29,7 @@ clipped-encoder.workspace = true
 # resolution the policy deliberately does not do (docs/sessions.md).
 clipped-game-detection.workspace = true
 # The global hotkeys this process registers, and the threads their handlers run
-# on (docs/hotkeys.md, ADR 0007). The recorder is the process that registers
+# on (docs/hotkeys.md, ADR 0009). The recorder is the process that registers
 # them because it is the one that outlives every window and the one that can act
 # on a press; `crate::hotkeys` is the handler side, and turns a press into the
 # same command the desktop application would have sent.

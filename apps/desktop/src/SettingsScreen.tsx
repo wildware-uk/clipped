@@ -1,7 +1,9 @@
 import { railPanelId, railTabId, SectionRail, type RailSection } from '@clipped/ui';
 import { useState, type ReactNode } from 'react';
 
+import { HotkeyList } from './HotkeyList';
 import {
+  HOTKEYS_SECTION,
   NOTHING_IS_EDITABLE,
   SETTINGS_SECTIONS,
   type SettingRow,
@@ -84,6 +86,14 @@ function Pane({ section }: { readonly section: SettingsSection }): ReactNode {
     >
       <h2 className="clipped-screen__heading">{section.label}</h2>
       <p className="clipped-screen__lead clipped-muted">{section.lead}</p>
+
+      {/*
+       * The one section with live state behind it. A hotkey the user cannot have
+       * is a key that does nothing and says nothing, and the recorder is the only
+       * process that knows — so unlike every other setting on this screen, this
+       * one has an answer worth asking for (issue #232).
+       */}
+      {section.id === HOTKEYS_SECTION ? <HotkeyList /> : null}
 
       <table className="clipped-table">
         <thead>
