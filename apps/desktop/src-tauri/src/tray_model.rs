@@ -26,7 +26,7 @@
 //! quoted no longer exists, so the item is a control, disabled only while there
 //! is no recording to put a bookmark in.
 
-use clipped_ipc::{RecorderLinkState, RecorderStatus, UnbuiltCommand};
+use clipped_ipc::{ActiveRecording, RecorderLinkState, RecorderStatus};
 
 use crate::foreground::ForegroundWindow;
 use crate::tray_icon::TrayMark;
@@ -60,20 +60,6 @@ impl MenuEntry {
             label: label.into(),
             enabled: false,
         }
-    }
-
-    /// The label for a command the protocol defines and this build refuses.
-    ///
-    /// Built from [`UnbuiltCommand`]'s own subsystem and tracking issue, which
-    /// are the same two facts the recorder puts in the `not_implemented` refusal
-    /// it would send. One source, so the menu cannot go on claiming a subsystem
-    /// is missing after it has been built.
-    fn unbuilt(name: &str, command: UnbuiltCommand) -> Self {
-        Self::refused(format!(
-            "{name} — needs {} (#{})",
-            command.subsystem(),
-            command.tracking_issue()
-        ))
     }
 }
 
@@ -150,7 +136,7 @@ pub(crate) fn tray_model(
         // Not a control. It is the sentence SPEC.md section 33 puts at the top
         // of the menu, and there is nothing to click.
         status: MenuEntry::refused(status),
-        save_replay: MenuEntry::unbuilt("Save Replay", UnbuiltCommand::SaveReplay),
+        save_replay: replay_entry(recording),
         add_bookmark: bookmark_entry(recording.is_some()),
         record,
         record_action,
@@ -253,6 +239,33 @@ pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str
     )
 }
 
+/// The Save Replay item.
+///
+/// Live only while a recording with a **replay buffer** is running, which is
+/// two conditions rather than one: `save_replay` is refused with
+/// `not_recording` when nothing is being recorded, and refused again — with a
+/// different sentence — when the recording that is running keeps no buffer to
+/// save from ([issue #38](https://github.com/wildware-uk/clipped/issues/38),
+/// `docs/ipc.md`). Offering a control whose command is about to be refused is
+/// what AGENTS.md section 27 rules out, so each refusal is a label.
+///
+/// It said `needs a recording with a replay buffer (#38)` until that issue,
+/// which built the buffer's driver and the command. **In practice it is still
+/// always disabled**, and the reason has changed rather than gone: nothing in
+/// this window asks `start_recording` for a buffer, so no recording it started
+/// has one ([issue #427](https://github.com/wildware-uk/clipped/issues/427)).
+/// Saying *that* is the difference between a stale claim about the build and a
+/// true one about this recording.
+fn replay_entry(recording: Option<&ActiveRecording>) -> MenuEntry {
+    match recording {
+        Some(active) if active.replay_seconds.is_some() => MenuEntry::live("Save Replay"),
+        Some(_) => {
+            MenuEntry::refused("Save Replay — this recording is not keeping a replay buffer")
+        }
+        None => MenuEntry::refused("Save Replay — nothing is being recorded"),
+    }
+}
+
 /// The Add Bookmark item.
 ///
 /// Live only while something is being recorded, because a bookmark is an offset
@@ -324,12 +337,22 @@ mod tests {
     }
 
     fn recording() -> RecorderLinkState {
-        attached(RecorderStatus::Recording(ActiveRecording {
+        attached(RecorderStatus::Recording(active(None)))
+    }
+
+    /// A recording that is keeping `seconds` of replay buffer.
+    fn recording_with_replay(seconds: u32) -> RecorderLinkState {
+        attached(RecorderStatus::Recording(active(Some(seconds))))
+    }
+
+    fn active(replay_seconds: Option<u32>) -> ActiveRecording {
+        ActiveRecording {
             recording_id: "r-1".to_owned(),
             output: r"D:\clips\session.mkv".to_owned(),
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 4_200,
-        }))
+            replay_seconds,
+        }
     }
 
     fn game() -> ForegroundWindow {
@@ -361,14 +384,24 @@ mod tests {
     fn no_enabled_item_has_nothing_behind_it() {
         // The acceptance criterion, as a property rather than as five
         // assertions: whatever the application knows, an item a user can click
-        // does something. Save Replay has no subsystem and is never enabled;
-        // Add Bookmark has one, and is enabled exactly when there is a
-        // recording to put a bookmark in.
+        // does something. Each of the two that depend on a recording is enabled
+        // exactly when its command would be performed rather than refused.
         for link in every_link_state() {
             for foreground in [None, Some(game())] {
                 let model = tray_model(&link, foreground.as_ref());
 
-                assert!(!model.save_replay.enabled, "{link:?}");
+                assert_eq!(
+                    model.save_replay.enabled,
+                    matches!(
+                        &link,
+                        RecorderLinkState::Attached {
+                            status: RecorderStatus::Recording(active),
+                            ..
+                        } if active.replay_seconds.is_some()
+                    ),
+                    "{link:?}: a replay comes out of a buffer, so the item may only be clickable \
+                     while a recording is keeping one"
+                );
                 assert_eq!(
                     model.add_bookmark.enabled,
                     matches!(
@@ -425,16 +458,34 @@ mod tests {
     }
 
     #[test]
-    fn the_unbuilt_items_name_the_subsystem_and_the_issue_that_builds_it() {
-        let model = tray_model(&attached(RecorderStatus::Idle), Some(&game()));
-
-        // #38 and not #37: #37 built the replay buffer and its save, so a menu
-        // that still named it would be telling a user a shipped feature is
-        // unbuilt. What is missing is a recording running one.
+    fn save_replay_stopped_claiming_the_feature_is_unbuilt_and_became_a_control() {
+        // Issue #38 built the `replay` subcommand and the `save_replay`
+        // command, so the menu must stop saying "needs a recording with a
+        // replay buffer (#38)". A ticket closed while the product still says
+        // the feature is unbuilt is the failure AGENTS.md sections 27 and 54
+        // name, and it is invisible from the recorder's side — the refusal
+        // simply stops being sent while the menu goes on quoting it.
+        let idle = tray_model(&attached(RecorderStatus::Idle), Some(&game()));
+        assert!(!idle.save_replay.label.contains("#38"), "{idle:?}");
         assert_eq!(
-            model.save_replay.label,
-            "Save Replay — needs a recording with a replay buffer (#38)"
+            idle.save_replay.label,
+            "Save Replay — nothing is being recorded"
         );
+
+        // A recording with no buffer is the case a user will actually meet, and
+        // it is a different sentence: something *is* being recorded, and there
+        // is still nothing to save (#427).
+        let plain = tray_model(&recording(), Some(&game()));
+        assert_eq!(
+            plain.save_replay.label,
+            "Save Replay — this recording is not keeping a replay buffer"
+        );
+        assert!(!plain.save_replay.enabled);
+
+        // And one that is keeping a buffer is a control.
+        let buffered = tray_model(&recording_with_replay(300), Some(&game()));
+        assert_eq!(buffered.save_replay.label, "Save Replay");
+        assert!(buffered.save_replay.enabled);
     }
 
     #[test]

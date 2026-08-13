@@ -970,7 +970,7 @@ only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
 ```text
   Recording process `cs2.exe`          the status, not a control
   ─────────────────────────────
-  Save Replay — needs a recording with a replay buffer (#38)   disabled
+  Save Replay — this recording is not keeping a replay buffer   disabled
   Add Bookmark
   Stop Recording
   ─────────────────────────────
@@ -1047,11 +1047,18 @@ reason in its own label**. A notification-area menu has no tooltip and no help
 text, so the label is the only place a reason can go, and "greyed out with no
 explanation" is the failure AGENTS.md section 27 names.
 
-- **Save Replay** is a command the protocol defines and the recorder refuses.
-  Its label is built from `UnbuiltCommand`'s own subsystem and tracking issue —
-  the same two facts the recorder puts in the `not_implemented` refusal — so the
-  day it is built, the menu stops claiming it has not.
-- **Add Bookmark** is what that looked like the day it happened. Issue #64 built
+- **Save Replay** was a command the protocol defined and the recorder refused,
+  labelled from `UnbuiltCommand`'s own subsystem and tracking issue so that the
+  day it was built the menu would stop claiming it had not. That day was
+  [#38](https://github.com/wildware-uk/clipped/issues/38). It is now live
+  exactly when the running recording is keeping a replay buffer, and disabled
+  with the true reason otherwise: `— nothing is being recorded`, or `— this
+  recording is not keeping a replay buffer`. **In practice it is still always
+  the second**, because nothing in this window asks `start_recording` for a
+  buffer ([#427](https://github.com/wildware-uk/clipped/issues/427)) — which is
+  a fact about this recording rather than a stale claim about the build, and
+  that is the whole difference.
+- **Add Bookmark** is what that looked like the first time. Issue #64 built
   the bookmark store and the `add_bookmark` command, the refusal it quoted
   stopped existing, and the item became a control: live while something is being
   recorded, and disabled with `— nothing is being recorded` otherwise, because a

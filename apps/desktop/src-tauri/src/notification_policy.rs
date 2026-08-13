@@ -511,6 +511,7 @@ mod tests {
             output: r"D:\clips\cs2-2026-08-11.mkv".to_owned(),
             target: "process cs2.exe".to_owned(),
             elapsed_ms: 90_000,
+            replay_seconds: None,
         }
     }
 
