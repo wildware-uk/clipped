@@ -248,14 +248,36 @@ is a third thing again, recorded by hand in
 [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) as CONTRIBUTING.md requires.
 That file is copied into the payload as it stands.
 
-## Out of scope: codec patents
+## Codec patents: a different question, answered elsewhere
 
 Copyright licences are not patent licences. Distributing an application that
 encodes H.264 or HEVC has patent-pool implications regardless of whether the
-encoder is LGPL, BSD or GPL, and none of the above touches that.
-[#257](https://github.com/wildware-uk/clipped/issues/257) records it; it needs an
-answer before Clipped is distributed as a signed public release, and it is not an
-LGPL question.
+encoder is LGPL, BSD or GPL, and nothing on this page touches that: everything
+above is discharged by shipping a file or a notice, and no notice buys a patent
+licence.
+
+[**ADR 0008**](adr/0008-codec-patent-position.md) is the position
+([#257](https://github.com/wildware-uk/clipped/issues/257)). It inventories what
+the pinned build can encode and decode against what Clipped actually calls,
+separates encoding done by GPU silicon the vendor licensed from encoding done by
+software Clipped ships, and sets out what it constrains — AV1 stays the first
+choice, no second software encoder for a pool codec, Opus rather than AAC for
+[#392](https://github.com/wildware-uk/clipped/issues/392), and a release that
+states its codec position rather than leaving a reader to infer one from a
+directory of licence texts. It is `Proposed` rather than `Accepted`, because part
+of it is four questions for a lawyer that nobody in this repository can answer.
+
+Two things it decides that belong on this page:
+
+- **A release has to say what it can encode and decode, and that no patent
+  licence comes with it.** `scripts/collect-notices.ps1` names the FFmpeg build
+  today; naming the codecs, and disclaiming any patent grant over them, is part
+  of [#123](https://github.com/wildware-uk/clipped/issues/123) rather than a
+  separate ticket.
+- **MPL-2.0's patent grant does not reach codec patents.** Section 2.1(b) grants
+  rights from contributors over their contributions. It grants nothing over a
+  third party's standard-essential patents, and a payload full of licence files
+  should not be allowed to imply otherwise.
 
 ## The release checklist
 
