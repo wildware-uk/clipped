@@ -571,6 +571,26 @@ declaring a track it does not contain. Both are silent until somebody presses
 the key, and both are asserted in `apps/recorder/tests/replay_clip.rs` with
 coded video instead of a graphics device.
 
+There is a third way for it to be silently wrong, and it is the one neither of
+those tests can see: **the recording never calling `start_buffer` at all.**
+`record_frames` hands it `outputs.replay` once the encoder is open, and a
+version that hands it `None` instead records exactly the same file, keeps every
+test on either side of the join green, and answers "this recording is not
+keeping a replay buffer" for every recording there will ever be. So that hand-off
+is asserted where it is made rather than around it:
+`crates/session/src/recording.rs`'s
+`a_recording_given_a_replay_handle_starts_that_handle_and_fills_it_from_its_own_encoder`
+runs the real recording loop — a WARP Direct3D device, the software H.264
+encoder, a real Matroska file, no window and no GPU required — with a handle in
+the outputs, and then asks the handle what happened to it: started, holding
+exactly the packets the recording encoded, covering a stretch of the timeline,
+attached before the first keyframe rather than after it.
+
+What that test does **not** pin down is the bitrate the buffer is sized from.
+The ceiling only governs eviction, so a wrong rate costs history rather than
+correctness — a clip out of a buffer sized from four times the real rate still
+decodes, and nothing in the workspace tells the two apart.
+
 **A saved clip is written down where the recording is.** `apps/recorder`'s
 `replay` subcommand and its `serve` both go through one routine
 (`apps/recorder/src/replay.rs`): write the clip, then enter it in the session's
