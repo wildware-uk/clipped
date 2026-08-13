@@ -985,48 +985,71 @@ Left-clicking the icon raises the window; right-clicking opens the menu.
 | --- | --- |
 | `src-tauri/src/tray_model.rs` | What the tray should show and what each item does. Pure — no Tauri, no Windows, no I/O — and therefore the part with tests. |
 | `src-tauri/src/tray.rs` | The menu, the redraws, and turning a click into a command on the recorder. |
-| `src-tauri/src/tray_icon.rs` | The four marks, drawn in code. |
+| `src-tauri/src/tray_icon.rs` | The brand mark and the badge each state wears on it, drawn in code. |
 | `src-tauri/src/foreground.rs` | Which application the user was last in, which is what Start Recording records. |
 | `src-tauri/src/this_application.rs` | Which processes are Clipped — this one and the WebView2 host it starts — so that the record control never offers to record Clipped itself (issue #390). |
 
-### Four marks, and why they are shapes
+### Four marks, and why the state is a badge
+
+All four are Clipped's brand mark — the same one as the installer, the window
+and the taskbar, drawn in code rather than loaded from
+`src-tauri/icons/source.png`, and with three waveform bars instead of that
+file's five because five turn into a smear at sixteen pixels.
 
 AGENTS.md section 46 asks that state is never colour alone, and a tray icon is
 the hardest place in the application to honour that: sixteen pixels, no label.
-So each state is a different **shape**, legible in a greyscale screenshot:
+So the state does not replace the mark; it sits on it, as a badge in the
+bottom-right corner whose **shape** is the signal, legible in a greyscale
+screenshot:
 
-| State | Mark | Tooltip |
+| State | Badge | Tooltip |
 | --- | --- | --- |
-| Attached, nothing recording | an open square | `Clipped — not recording` |
+| Attached, nothing recording | none — the brand mark alone | `Clipped — not recording` |
 | Recording | a filled disc, in the accent | ``Clipped — recording process `cs2.exe` `` |
-| Connecting | four corner brackets — an outline that has not closed | `Clipped — looking for the recorder` |
-| Reconnecting | the same four corner brackets | `Clipped — reconnecting to the recorder, attempt 2 of 4` |
-| No recorder | a struck-through square | `Clipped — no recorder. <reason>` |
+| Connecting | a ring — the recording disc with its middle not filled in | `Clipped — looking for the recorder` |
+| Reconnecting | the same ring | `Clipped — reconnecting to the recorder, attempt 2 of 4` |
+| No recorder | a slash struck through the badge | `Clipped — no recorder. <reason>` |
 
 Five states and four marks: connecting and reconnecting are drawn the same,
 because they are the same thing to look at — nothing is attached and something
 is trying. The words are not the same, and that is the point of there being a
 tooltip: it is where "which attempt, out of how many" fits.
 
+Idle carries no badge, because a badge means something is going on and at rest
+nothing is; a mark that is badged even when idle has nothing left to say when a
+recording starts. `idle_wears_the_brand_mark_and_nothing_else` holds it to that.
+
+The close pair is recording against connecting — a filled disc and a ring, both
+dark shapes on the same light badge face. They differ in the middle, which is a
+difference that survives having the colour taken away, and
+`every_mark_is_a_different_shape_and_not_only_a_different_colour` measures that
+by printing each mark to a black-and-white bitmap and counting the pixels that
+differ. The closest pair differs in 27 of 1,024.
+
 Colour is carried as well and is the reinforcement rather than the signal. The
 tooltip says the same thing in words, and the menu's first line says it again,
 so the state reaches a screen reader too.
 
-The marks are drawn as a light fill inside a dark outline, because Windows draws
-the notification area dark by default and light on some machines and an icon is
-not given a choice. `every_mark_reads_on_a_light_ground_and_on_a_dark_one`
-measures every drawn colour against both grounds and holds the best of them to
-WCAG 1.4.11's 3:1, rather than asserting that an outline exists:
+The mark brings its own ground and the badge is a light face inside a dark ring,
+because Windows draws the notification area dark by default and light on some
+machines and an icon is not given a choice.
+`every_mark_reads_on_a_light_ground_and_on_a_dark_one` measures every drawn
+colour against both grounds and holds the best of them to WCAG 1.4.11's 3:1,
+rather than asserting that an outline exists:
 
 | Drawn colour | On a dark taskbar (`#202020`) | On a light one (`#f3f3f3`) |
 | --- | --- | --- |
-| the fill, `#f3f2f2` | 14.58:1 | 1.01:1 |
-| the outline, `#111111` | 1.16:1 | 17.02:1 |
+| the bars and badge face, `#f3f2f2` | 14.58:1 | 1.01:1 |
+| the ground, `#2d2b2b` | 1.16:1 | 12.68:1 |
+| the badge ring, `#111111` | 1.16:1 | 17.02:1 |
 | the accent, `#ec3013` | 3.88:1 | 3.79:1 |
 
-Which is why the outline is not decoration: the fill alone would be invisible on
-a light taskbar and nothing else in the application would notice. The recording
-disc is the one mark whose fill carries both grounds by itself.
+Which is why carrying both is not decoration: the near-white bars would be
+invisible on a light taskbar and the near-black ground on a dark one, and
+nothing else in the application would notice. Note also what the table shows
+about that test's reach — the accent disc alone clears 3:1 on *both* grounds, and
+it is drawn on every mark, so no change to the bars or the badge can make this
+test fail. It fires only if the palette itself moves.
 
 **There is no "buffering" mark**, which SPEC.md section 33's own list implies.
 The recorder cannot report one: `RecorderStatus` is `idle` or `recording`, the
