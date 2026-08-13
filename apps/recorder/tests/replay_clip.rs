@@ -294,6 +294,12 @@ fn pressing_the_replay_key_saves_a_clip_and_no_other_key_does_anything() {
          seconds the buffer keeps",
     );
     assert!(clips[0].is_complete());
+    assert!(
+        clips[0].duration() >= Duration::from_secs(5)
+            && clips[0].duration() < Duration::from_secs(8),
+        "and the clip is that window rather than the thirty-five seconds pushed: {:?}",
+        clips[0].duration(),
+    );
     drop(recorded);
 
     Media::open(&clip)
@@ -303,7 +309,8 @@ fn pressing_the_replay_key_saves_a_clip_and_no_other_key_does_anything() {
         .video(
             VideoStream::codec("h264")
                 .resolution(WIDTH, HEIGHT)
-                // Five seconds at 60 fps, and never the thirty-five pushed.
+                // Five seconds at 60 fps. The upper bound is the length
+                // asserted above, which this cannot express.
                 .decoded_frames_at_least(300),
         )
         .monotonic_timestamps()
