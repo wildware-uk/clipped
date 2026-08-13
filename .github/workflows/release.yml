@@ -1,0 +1,383 @@
+# Builds a release of Clipped from a tag, and refuses to more often than not.
+#
+# Nothing here is expected to run for a long time. Clipped has never been
+# released, the rule is that it will not be until every milestone is finished
+# (docs/releasing.md), and the `gate` job below enforces that rather than
+# trusting it. This workflow exists now, while there is no pressure, so that the
+# first real tag is boring: the day somebody has a reason to release, the thing
+# that decides whether they may is a script with tests rather than a judgement
+# made at the time.
+#
+# Two jobs, and the split is the point:
+#
+#   gate     Asks scripts/check-release-gates.ps1 whether this tag may become a
+#            release. Cheap, reads the repository and three GitHub answers, and
+#            builds nothing. Every gate is evaluated even after one refuses, so
+#            a tag that is wrong in four ways says so once.
+#   release  Builds the installer and drafts the release. It `needs: gate`, so
+#            it does not start unless every gate passed.
+#
+# `workflow_dispatch` is a rehearsal. The gates report and the run continues,
+# because the gates all refuse today and a mechanism nobody can watch working is
+# a mechanism nobody trusts. It cannot publish: the step that creates a release
+# runs only for a tag push, and a rehearsal never reaches it.
+#
+# Every `uses:` is pinned to a full commit SHA for the reason ci.yml gives at
+# length: a tag is not a pin, and whoever controls an action repository can move
+# one.
+name: Release
+
+on:
+  push:
+    # Deliberately loose. A strict glob would make a malformed tag - `v1.2`,
+    # `1.0.0` - do nothing at all, and "nothing happened" is the one outcome
+    # that leaves somebody wondering whether the release is still building. The
+    # version gate refuses those by name instead.
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to rehearse, leading v included (e.g. v0.1.0). Nothing is tagged or published.'
+        required: true
+        default: v0.1.0
+      build:
+        description: 'Also build the installer, to prove the build works. It is never uploaded anywhere.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Two runs for one tag would race to create the same release. Never cancelled
+# in flight: a half-finished release build is worse than a slow one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  gate:
+    name: Release gates
+    runs-on: windows-latest
+
+    permissions:
+      contents: read
+      # The milestone rule reads milestones, which live under the issues API,
+      # and the CI gate reads workflow runs. Neither is granted by contents.
+      issues: read
+      actions: read
+
+    outputs:
+      tag: ${{ steps.subject.outputs.tag }}
+      version: ${{ steps.subject.outputs.version }}
+      prerelease: ${{ steps.subject.outputs.prerelease }}
+
+    steps:
+      - name: Keep git from rewriting line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      # fetch-depth: 0 because the branch gate asks git whether the tagged
+      # commit is an ancestor of main, and a shallow checkout cannot answer
+      # that. It would answer "no", which is a refusal for a reason that is not
+      # true - the worst kind.
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch main, so ancestry can be established
+        run: git fetch --no-tags origin main
+
+      - name: Work out what is being released
+        id: subject
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+              $tag = '${{ inputs.tag }}'
+          } else {
+              $tag = '${{ github.ref_name }}'
+          }
+          $version = $tag -replace '^v', ''
+          # A pre-release version carries a hyphenated part: 1.0.0-rc.1. GitHub
+          # marks those differently, and a release candidate presented as a
+          # stable release is a promise nobody made.
+          $prerelease = 'false'
+          if ($version -match '-') { $prerelease = 'true' }
+          Write-Host "tag=$tag version=$version prerelease=$prerelease"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # The licence gate asks what the installer would bundle, and the answer
+      # only exists once the payload has been staged. Staging needs the pinned
+      # FFmpeg, and - depending on how issue #123 is discharged - may generate
+      # the notices from `cargo metadata`, so the toolchain is here too. Both
+      # are minutes; the alternative is finding out that a release may not be
+      # published after spending half an hour building it.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Read the pinned FFmpeg asset name
+        id: ffmpeg-pin
+        run: |
+          $printed = & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PrintPin
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'scripts/fetch-ffmpeg.ps1 -PrintPin failed.' -ForegroundColor Red
+              exit 1
+          }
+          $asset = ($printed | Select-String -Pattern '^asset=(.+)$' | Select-Object -First 1)
+          if (-not $asset) {
+              Write-Host 'scripts/fetch-ffmpeg.ps1 -PrintPin printed no asset name.' -ForegroundColor Red
+              exit 1
+          }
+          $asset = $asset.Matches[0].Groups[1].Value
+          "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Cache the pinned FFmpeg build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third-party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg-pin.outputs.asset }}
+
+      - name: Fetch FFmpeg
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # A file called clipped-recorder.exe that is not a recorder. The staging
+      # script copies files and reads their names; it never loads one, so the
+      # recorder's bytes cannot change which licence texts end up in the bundle.
+      # Building the real one here would cost twenty minutes to answer a
+      # question that does not depend on it. This job builds no installer and
+      # produces no artefact, so the stand-in reaches nothing.
+      - name: Stage the installer payload with a stand-in recorder
+        run: |
+          New-Item -ItemType Directory -Path stand-in -Force | Out-Null
+          Set-Content -LiteralPath stand-in/clipped-recorder.exe -Value 'not a recorder; see release.yml' -Encoding Ascii
+          & powershell -ExecutionPolicy Bypass -File scripts/stage-installer-payload.ps1 -RecorderExecutable stand-in/clipped-recorder.exe
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'The payload could not be staged, so what the installer would carry cannot be established.' -ForegroundColor Red
+              exit 1
+          }
+
+      # The three questions this repository cannot answer about itself. Asked
+      # here, in the open, rather than inside the script, so that the network
+      # is visible to a reader and absent from the tests.
+      - name: Ask GitHub what has been released, what CI said, and which milestones are finished
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path evidence -Force | Out-Null
+          # One page of 100, not --paginate: gh concatenates pages into a stream
+          # of JSON arrays, which is not JSON and would leave the gate reading
+          # only the first page while believing it had them all. The script
+          # refuses a full page for the same reason.
+          gh api "repos/${{ github.repository }}/milestones?state=all&per_page=100" |
+              Out-File -FilePath evidence/milestones.json -Encoding utf8
+          gh api "repos/${{ github.repository }}/releases?per_page=100" |
+              Out-File -FilePath evidence/releases.json -Encoding utf8
+          gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${{ github.sha }}" |
+              Out-File -FilePath evidence/ci-runs.json -Encoding utf8
+
+      # The decision. Its exit code is this job's verdict, and `needs: gate`
+      # below is what makes the verdict binding.
+      - name: Decide whether this tag may become a release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $rehearse = @()
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') { $rehearse = @('-Rehearse') }
+          $output = & powershell -ExecutionPolicy Bypass -File scripts/check-release-gates.ps1 `
+              -Tag '${{ steps.subject.outputs.tag }}' `
+              -CommitSha '${{ github.sha }}' `
+              -MilestonesJson evidence/milestones.json `
+              -ReleasesJson evidence/releases.json `
+              -CiRunsJson evidence/ci-runs.json `
+              @rehearse 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          "## Release gates for ${{ steps.subject.outputs.tag }}`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit $code
+
+  release:
+    name: Build the installer and draft the release
+    needs: gate
+    # A rehearsal builds only when it was asked to. A tag push that got past the
+    # gate always does.
+    if: github.event_name == 'push' || inputs.build
+    runs-on: windows-latest
+
+    # The only write this workflow performs is creating the draft release, and
+    # only the step at the bottom of this job performs it.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Keep git from rewriting line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      # crates/muxer generates its FFmpeg FFI with bindgen, which loads
+      # libclang.dll at build time. ci.yml has the same problem and solves it
+      # with a longer step that also asks vswhere about Visual Studio's copy;
+      # this is the short form, and it fails naming LLVM rather than letting a
+      # dependency's build script fail several minutes later with a message
+      # that mentions neither. If the runner image ever stops shipping LLVM,
+      # both of these break, and both say so.
+      - name: Locate libclang for bindgen
+        run: |
+          $found = @('C:\Program Files\LLVM\bin', 'C:\Program Files (x86)\LLVM\bin') |
+              Where-Object { Test-Path -LiteralPath (Join-Path $_ 'libclang.dll') } |
+              Select-Object -First 1
+          if (-not $found) {
+              Write-Host 'libclang.dll was not found. crates/muxer cannot build without it.' -ForegroundColor Red
+              Write-Host 'See the longer discovery step in .github/workflows/ci.yml.'
+              exit 1
+          }
+          "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "LIBCLANG_PATH=$found"
+
+      - name: Read the pinned FFmpeg asset name
+        id: ffmpeg-pin
+        run: |
+          $printed = & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1 -PrintPin
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $asset = ($printed | Select-String -Pattern '^asset=(.+)$' | Select-Object -First 1)
+          if (-not $asset) { exit 1 }
+          "asset=$($asset.Matches[0].Groups[1].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Cache the pinned FFmpeg build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third-party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg-pin.outputs.asset }}
+
+      - name: Fetch FFmpeg
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # --locked and `npm ci` rather than their forgiving equivalents. A release
+      # is the one build where resolving a dependency nobody tested against is
+      # unacceptable, and both refuse a lockfile that disagrees with its
+      # manifest - which is also what catches a version bump that updated the
+      # manifests and left the lockfiles behind.
+      - name: Install dependencies
+        run: npm ci
+
+      # The two commands docs/releasing.md and README.md tell a person to run,
+      # in that order, because tauri.conf.json's beforeBuildCommand stages the
+      # recorder into the bundle and refuses if it is not there.
+      - name: Build the recorder
+        run: cargo build --release --locked -p clipped-recorder
+
+      - name: Build the installer
+        run: npm run build:app
+
+      - name: Find the installer
+        id: installer
+        run: |
+          $bundle = 'apps/desktop/src-tauri/target/release/bundle/nsis'
+          $found = @(Get-ChildItem -Path $bundle -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+          if ($found.Count -ne 1) {
+              Write-Host "Expected exactly one installer in $bundle, found $($found.Count)." -ForegroundColor Red
+              $found | ForEach-Object { Write-Host "  $($_.Name)" }
+              Write-Host 'Releasing the wrong one, or one of two, is not a mistake worth risking.'
+              exit 1
+          }
+          Write-Host "Installer: $($found[0].FullName)"
+          "path=$($found[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "name=$($found[0].Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # The checksum is computed from the installer being released and written
+      # into both the notes and a sidecar file, so that a reader can check the
+      # download by eye or with a tool. Publishing it beside an unsigned build
+      # is the only thing that makes the download checkable at all.
+      - name: Write the release notes and the checksum
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/write-release-notes.ps1 `
+              -Tag '${{ needs.gate.outputs.tag }}' `
+              -InstallerPath '${{ steps.installer.outputs.path }}' `
+              -OutFile release-notes.md `
+              -FfmpegPinPath third-party/ffmpeg/current/.clipped-ffmpeg-pin.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $hash = (Get-FileHash -LiteralPath '${{ steps.installer.outputs.path }}' -Algorithm SHA256).Hash.ToLowerInvariant()
+          # The `sha256sum -c` format, so the sidecar is usable by a tool and
+          # not only by eye.
+          "$hash *${{ steps.installer.outputs.name }}" |
+              Out-File -FilePath '${{ steps.installer.outputs.name }}.sha256' -Encoding ascii -NoNewline
+
+          "## ${{ needs.gate.outputs.tag }}`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "``````text`n${{ steps.installer.outputs.name }}`nSHA-256 $hash`n``````" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Get-Content -LiteralPath release-notes.md -Raw | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      # Everything above this line has now run on a rehearsal too, which is the
+      # point of one: on the day of the first real tag, the only step that has
+      # never executed is this one.
+      #
+      # A draft, always. A draft is not a distribution: nothing is downloadable
+      # and no version has been announced until a human opens it, reads the
+      # notes and presses publish. That human is the last gate, and the one the
+      # other five exist to leave a decision worth making.
+      - name: Create the draft release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (-not '${{ github.ref }}'.StartsWith('refs/tags/')) {
+              Write-Host 'This step only ever runs for a tag push.' -ForegroundColor Red
+              exit 1
+          }
+          $prerelease = @()
+          if ('${{ needs.gate.outputs.prerelease }}' -eq 'true') { $prerelease = @('--prerelease') }
+          # --verify-tag so that the release is attached to the tag that exists,
+          # rather than gh creating one from the default branch if it does not.
+          gh release create '${{ needs.gate.outputs.tag }}' `
+              --draft `
+              --verify-tag `
+              --title 'Clipped ${{ needs.gate.outputs.tag }}' `
+              --notes-file release-notes.md `
+              @prerelease `
+              '${{ steps.installer.outputs.path }}' `
+              '${{ steps.installer.outputs.name }}.sha256'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host 'Drafted. It is not visible to anybody until a human publishes it.'
+
+      - name: Say what a rehearsal did not do
+        if: github.event_name != 'push'
+        run: |
+          Write-Host 'Rehearsal complete. The installer was built, hashed and described, and'
+          Write-Host 'then left on the runner: no release was created and nothing was uploaded.'
+          Write-Host 'An installer built today may not be distributed at all - see the licence'
+          Write-Host 'gate in the job above, and docs/licensing.md.'
+          "`n> Rehearsal: built and hashed, published nothing.`n" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
