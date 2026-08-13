@@ -49,9 +49,13 @@
 //! # Looking, then deciding
 //!
 //! ```text
-//! look_at(window)  ── needs Windows ──▶  SeenWindow
-//!                                             │
-//!                        worth_offering(&seen)  ── pure, and where the rules live
+//! describe(window)
+//!   │
+//!   ├── look_at(window)  ── needs Windows ──▶  SeenWindow
+//!   │
+//!   └── offer(seen)      ── decides, and names what it accepts ──▶ ForegroundWindow
+//!         │
+//!         └── worth_offering(&seen)  ── pure, and where the rules live
 //! ```
 //!
 //! The split is the same one `clipped_windows` makes between enumerating
@@ -59,6 +63,16 @@
 //! can only be answered by Windows and has no judgement in it, while "may this
 //! one be offered?" is all judgement and needs no desktop — so it is a function
 //! over written-down windows and is tested as one (AGENTS.md section 25).
+//!
+//! [`offer`] is the deciding half taken as far as it goes — up to and including
+//! the refusal — because a rule that passes its own test and is never asked is
+//! no rule at all. Each of [`worth_offering`]'s is tested on a written-down
+//! window, and none of those tests would notice [`offer`] not consulting it;
+//! what would follow is [issue #390]'s reported symptom, the record control
+//! reading *Start recording msedgewebview2.exe* again. So the refusal is
+//! asserted where it happens, on a window [`look_at`] never had to see.
+//!
+//! [issue #390]: https://github.com/wildware-uk/clipped/issues/390
 //!
 //! # Threading
 //!
@@ -215,8 +229,25 @@ fn remember(window: HWND) {
 }
 
 /// What a window is, or [`None`] if it is not one to offer recording.
+///
+/// Looking and deciding, and nothing of its own: one expression, so that
+/// neither half can be dropped without the other failing to compile.
 fn describe(window: HWND) -> Option<ForegroundWindow> {
-    let seen = look_at(window)?;
+    offer(look_at(window)?)
+}
+
+/// How the tray would name a window Windows has described, or [`None`] if the
+/// rules refuse it.
+///
+/// The deciding half of [`describe`], which needs no window of its own —
+/// [`look_at`] has already asked Windows everything — so the refusal
+/// [issue #390](https://github.com/wildware-uk/clipped/issues/390) is about can
+/// be asserted here, at the point it actually happens, rather than only on
+/// [`worth_offering`] one call below.
+///
+/// Naming comes after the rules and not before, so that a window Clipped will
+/// not offer is never opened to ask what it is called.
+fn offer(seen: SeenWindow) -> Option<ForegroundWindow> {
     if !worth_offering(&seen) {
         return None;
     }
@@ -231,6 +262,16 @@ fn describe(window: HWND) -> Option<ForegroundWindow> {
 ///
 /// Gathered before anything is decided, so that [`worth_offering`] is a
 /// function of a flag, a string and a number rather than of a desktop.
+///
+/// `#[must_use]` because a described window that is not then decided about is
+/// the whole of the bug: [`describe`] reaching Windows and dropping the answer
+/// compiles perfectly and leaves the tray with nothing to offer for anything.
+/// No test here can catch that — a visible window belonging to some other
+/// application is the one thing a test cannot conjure, and this process's own
+/// windows are exactly the ones the rules refuse — and in a **test** build the
+/// dead-code lint cannot either, because the tests below keep every function
+/// in this file alive. The compiler can, so it is asked to.
+#[must_use]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SeenWindow {
     /// Whether it is on screen at all.
@@ -457,6 +498,87 @@ mod tests {
         };
 
         assert!(!worth_offering(&orphan));
+    }
+
+    /// A window carrying an identifier `process_name` genuinely answers for.
+    ///
+    /// This is the whole difficulty of testing [`offer`], and the reason the
+    /// two tests below share one helper. `offer` ends in
+    /// `process_name(seen.process_id)?`, so a made-up identifier makes it
+    /// answer [`None`] whatever the rules decide — a refusal that proves
+    /// nothing, and passes just as happily with [`worth_offering`] deleted from
+    /// the call site.
+    ///
+    /// This process's own identifier is the one a test can be certain of. It
+    /// needs no window, no fixture and no other application: a process can
+    /// always be opened for `PROCESS_QUERY_LIMITED_INFORMATION` against
+    /// itself, on any machine and in a session with no desktop at all
+    /// (AGENTS.md section 25). The name is returned alongside so that a failure
+    /// can say what was offered.
+    fn a_process_that_can_be_named() -> (SeenWindow, String) {
+        let process_id = std::process::id();
+        let name = process_name(process_id)
+            .expect("a process can always name itself, which is what makes this test honest");
+
+        (
+            SeenWindow {
+                process_id,
+                ..a_game()
+            },
+            name,
+        )
+    }
+
+    #[test]
+    fn a_window_the_rules_refuse_is_not_named_even_though_naming_it_would_have_worked() {
+        // Issue #390, asserted where the refusal happens rather than one call
+        // below it. Every rule in `worth_offering` is tested on a written-down
+        // window, and not one of those tests can tell whether anything asks it.
+        // A call site that consulted the rules and threw the answer away —
+        // `let _ = worth_offering(&seen);` — used to leave the whole suite
+        // green and clippy `-D warnings` clean, while the record control read
+        // "Start recording msedgewebview2.exe" again, which is the bug as it
+        // was reported. Deleting the call outright is the one shape dead code
+        // happens to catch, and only because `worth_offering` has no second
+        // caller to keep it alive.
+        //
+        // This process stands in for the webview host. `worth_offering`
+        // refuses both for the same reason and by the same field, and unlike
+        // the webview host it is here in every test run. That it can be named
+        // is the point: the `None` below is the rule's doing and can be
+        // nothing else's.
+        let (seen, name) = a_process_that_can_be_named();
+        let ours = SeenWindow {
+            class: "Chrome_WidgetWin_1".to_owned(),
+            this_application: true,
+            ..seen
+        };
+
+        assert_eq!(
+            offer(ours),
+            None,
+            "a window of Clipped's own was offered, as {name}"
+        );
+    }
+
+    #[test]
+    fn a_window_the_rules_accept_is_named_by_the_process_that_owns_it() {
+        // The other half of the pair, and what makes the refusal above mean
+        // something: the same identifier, the same everything, and one field
+        // different. An `offer` that answered `None` to everything would refuse
+        // Clipped's window for entirely the wrong reason and leave the tray
+        // with nothing to record, so the difference between these two tests has
+        // to be the rule and not the process.
+        let (seen, name) = a_process_that_can_be_named();
+        let process_id = seen.process_id;
+
+        assert_eq!(
+            offer(seen),
+            Some(ForegroundWindow {
+                process_id,
+                process_name: name,
+            })
+        );
     }
 
     #[test]
