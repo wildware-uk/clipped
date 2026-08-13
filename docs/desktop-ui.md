@@ -1300,9 +1300,9 @@ Two rules, both about not becoming a nuisance:
   and is announced, because otherwise a retry that failed would look like one
   that worked.
 - **The state the application opened in raises nothing.** A notification is for
-  something that happened while you were away. Without this an installation with
-  no recorder beside it (issue #226) would toast on every launch, saying what the
-  window in front of the user is already saying.
+  something that happened while you were away. Without this an installation
+  whose recorder is missing would toast on every launch, saying what the window in
+  front of the user is already saying.
 
 ### Every notification has something to do
 

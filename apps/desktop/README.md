@@ -35,7 +35,7 @@ From the repository root, after `npm install`:
 npm run dev       # the application: Vite plus the Tauri window
 npm run dev:web   # the interface alone, in a browser, for fast iteration
 npm run build     # the production bundle into apps/desktop/dist
-npm run build:app # the installable Windows application
+npm run build:app # the NSIS installer, with the recorder in it
 npm run lint      # eslint, prettier and tsc
 npm test          # the shell's behaviour, in jsdom
 ```
@@ -49,6 +49,20 @@ interface itself.
 `npm run build` is `vite build` and nothing else. esbuild strips the types
 rather than checking them, so a build succeeding says nothing about whether the
 types hold — `npm run lint` is what runs `tsc`, and it is the one CI gates on.
+
+`npm run build:app` needs the recorder built first, because the installer carries
+it:
+
+```powershell
+cargo build --release -p clipped-recorder
+npm run build:app
+```
+
+Without it, the installer build stops before it compiles anything and says which
+file is missing and how to produce it. What the installer contains, and why it is
+put there the way it is, is [docs/packaging.md](../../docs/packaging.md). An
+installer built today is not one that may be distributed — the licence texts and
+notices it owes are [#123](https://github.com/wildware-uk/clipped/issues/123).
 
 ## Layout
 
