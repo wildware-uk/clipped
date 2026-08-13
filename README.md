@@ -9,18 +9,29 @@ Clipped is local-first: no account, no cloud service and no telemetry.
 
 ## Status
 
-Early development. Nothing is installable yet. See [SPEC.md](SPEC.md) for the
-product this is being built towards, and the
-[issue tracker](https://github.com/wildware-uk/clipped/issues) for what is
-actually being worked on.
+Early development, and **nothing is installable yet** — there is no installer,
+no signed build and no release. What follows is what a build from source does
+today. See [SPEC.md](SPEC.md) for the product this is being built towards, and
+the [issue tracker](https://github.com/wildware-uk/clipped/issues) for what is
+being worked on.
 
-`cargo build --workspace` produces a `clipped-recorder` binary. It cannot record
-yet — the recording engine is milestone M1 — but
-`clipped-recorder capabilities` reports the graphics adapters and hardware
-encoders it found on your machine
-([docs/encoder-capabilities.md](docs/encoder-capabilities.md)).
+**The recorder records.** `clipped-recorder record --process <name>` captures a
+window through Windows Graphics Capture, encodes it with the best hardware
+encoder it finds, and writes Matroska with the system audio and the microphone
+as separate uncompressed tracks. `clipped-recorder watch` does the same
+automatically when a game in the catalogue launches, and stops when it exits.
+`clipped-recorder capabilities` reports the adapters and encoders it found
+([docs/encoder-capabilities.md](docs/encoder-capabilities.md)), and
+`clipped-recorder list-windows` shows what can be captured.
 
-Installation instructions and screenshots are pending a shippable build.
+**The desktop window runs**, from `npm run dev`. It starts and stops a recording
+and lists what has been recorded. It cannot yet play a recording
+([#304](https://github.com/wildware-uk/clipped/issues/304)) or export one
+([#322](https://github.com/wildware-uk/clipped/issues/322)), and the library
+draws no thumbnails yet. Recordings land in `%USERPROFILE%\Videos\Clipped\` and
+any player that handles Matroska will open them.
+
+Screenshots and installation instructions are pending a shippable build.
 
 ## Supported platforms
 
@@ -88,15 +99,28 @@ The workspace lints `missing_docs`, `missing_debug_implementations`,
 `unreachable_pub` and `clippy::undocumented_unsafe_blocks` are enabled in
 `Cargo.toml`, so anything public needs a doc comment.
 
-The desktop application is not buildable yet: `apps/desktop` and `packages/`
-are placeholders until milestone M5, and there is no npm workspace to install.
+The desktop application is an npm workspace at the repository root, covering
+`apps/desktop` and `packages/*`. The Node version is pinned in `.nvmrc`, which is
+what CI installs from:
+
+```text
+npm install
+npm run dev      # Vite plus the Tauri window, rebuilt on change
+npm test         # the desktop and package suites
+npm run lint     # eslint, prettier and tsc --noEmit
+```
+
+`npm run dev` builds the Rust side too, so the first run takes as long as a
+`cargo build` of the desktop crate. The window loads its frontend from Vite on
+port 5173 in development, so it needs that server — which `npm run dev` starts
+for you.
 
 ## Repository layout
 
 ```text
 apps/
     recorder/       The recording process, which runs independently of the UI
-    desktop/        The Tauri desktop application (placeholder until M5)
+    desktop/        The Tauri desktop application, and its React frontend
 crates/            The Rust libraries the recorder is assembled from
 plugins/           The highlight plugins shipped with Clipped, one executable each
 packages/          TypeScript packages consumed by the desktop application
@@ -109,11 +133,11 @@ docs/              Architecture, subsystem documentation and ADRs
 The recorder is a native Rust process that owns capture, encoding, muxing and
 session state. The desktop application is a client of that process over IPC, not
 a host for it, so closing or crashing the UI cannot interrupt a recording.
-[docs/architecture.md](docs/architecture.md) will describe the subsystems and
-how they fit together, and significant decisions are to be recorded as ADRs
-under `docs/adr/` (AGENTS.md section 48). Neither exists yet: both arrive with
-issue #6, and until then the crate-level documentation in each `lib.rs` is the
-authority.
+[docs/architecture.md](docs/architecture.md) describes the subsystems and how
+they fit together, and significant decisions are recorded as ADRs under
+[docs/adr/](docs/adr/) (AGENTS.md section 48). The crate-level documentation in
+each `lib.rs` remains the authority on what an individual crate is and is not
+responsible for.
 
 ### Dependency direction
 
@@ -277,13 +301,35 @@ is not responsible for, and where it sits in this stack.
 | [docs/editing.md](docs/editing.md) | What an edit is, the two kinds of time it is written in, where it is stored and how a document from an older build is read |
 | [docs/storage-management.md](docs/storage-management.md) | What the library occupies, how accurate that figure is, and the limits configured against it |
 
-The `docs/` entries are written under issues #3, #6, #8, #5, #23, #49, #42, #82
-and #93 and are listed here so those tickets do not each have to edit this
-table.
+Subsystem documents, each written beside the code it describes:
+
+| Document | What it covers |
+| --- | --- |
+| [docs/capture-pipeline.md](docs/capture-pipeline.md) | The capture backends, and how one is chosen |
+| [docs/encoder-pipeline.md](docs/encoder-pipeline.md) | Encoder selection, configuration and fallback |
+| [docs/muxing.md](docs/muxing.md) | Containers, track ordering and what a recording carries |
+| [docs/av-sync.md](docs/av-sync.md) | The clocks, and how audio is kept against video |
+| [docs/audio-routing.md](docs/audio-routing.md) | Per-process audio scoping and the device graph |
+| [docs/replay-buffer.md](docs/replay-buffer.md) | Retained segments, and saving from them |
+| [docs/sessions.md](docs/sessions.md) | Sessions, and recording a game without being told to |
+| [docs/library.md](docs/library.md) | The index, its reconciliation against the disk, and search |
+| [docs/thumbnails.md](docs/thumbnails.md) · [docs/waveforms.md](docs/waveforms.md) | Generation and caching of each |
+| [docs/screenshots.md](docs/screenshots.md) | Taking a still of the game on a hotkey, while it is being played |
+| [docs/bookmarks.md](docs/bookmarks.md) | Marking a moment while the recording is being made |
+| [docs/highlights.md](docs/highlights.md) | Turning events into clips |
+| [docs/plugin-api.md](docs/plugin-api.md) | The event model, and the contract a highlight plugin meets |
+| [docs/exporting.md](docs/exporting.md) | The copy-or-re-encode decision, and what an export guarantees |
+| [docs/configuration.md](docs/configuration.md) | Settings, and how per-game overrides resolve |
+| [docs/desktop-ui.md](docs/desktop-ui.md) | The window's screens and the design system |
+| [docs/hotkeys.md](docs/hotkeys.md) | Global hotkeys, and what they cannot do |
+| [docs/diagnostics.md](docs/diagnostics.md) | Metrics, the support bundle and what it redacts |
+| [docs/recorder-cli.md](docs/recorder-cli.md) | Every recorder subcommand and its arguments |
+| [docs/search.md](docs/search.md) | The query language for searching the library, and what of it runs today |
+| [docs/storage.md](docs/storage.md) | The database behind the library: its schema, and how it is migrated |
 
 ## Contributing
 
-Work is tracked as GitHub issues grouped into milestones `M0` to `M14`. An issue
+Work is tracked as GitHub issues grouped into milestones `M0` to `M15`. An issue
 is the source of truth for its own scope and acceptance criteria; `SPEC.md` is a
 reference document, not a task list.
 
