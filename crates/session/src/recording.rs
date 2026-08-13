@@ -2125,6 +2125,15 @@ mod tests {
 
     /// Runs the whole recording loop over `steps` and returns what it reported.
     fn recording_of(purpose: &str, steps: impl IntoIterator<Item = Step>) -> RecordingReport {
+        recording_into(purpose, steps, &crate::RecordingOutputs::default())
+    }
+
+    /// The same, writing into `outputs` as well as into the file.
+    fn recording_into(
+        purpose: &str,
+        steps: impl IntoIterator<Item = Step>,
+        outputs: &crate::RecordingOutputs<'_>,
+    ) -> RecordingReport {
         // Not a skip. WARP ships with Windows, so a machine that cannot create
         // a device here is a broken one and this is a failure worth seeing —
         // a test that quietly does nothing is worse than no test (AGENTS.md
@@ -2148,9 +2157,60 @@ mod tests {
             &mut backend,
             format,
             CaptureMethod::WindowsGraphicsCapture,
-            &crate::RecordingOutputs::default(),
+            outputs,
         )
         .expect("a recording with frames in it is a recording")
+    }
+
+    #[test]
+    fn a_recording_given_a_replay_handle_starts_that_handle_and_fills_it_from_its_own_encoder() {
+        // The one line that turns the replay feature on:
+        // `record_frames` hands `outputs.replay` to `crate::replay::start_buffer`
+        // once its encoder is open. Passing `None` there instead compiles, keeps
+        // every other test in this crate green and is invisible in a running
+        // recorder — the recording is written exactly as before, no buffer is
+        // ever begun, and the first sign of it is a hotkey that answers "this
+        // recording is not keeping a replay buffer" for every recording there
+        // will ever be. Everything downstream of the hand-off is covered
+        // elsewhere (`crate::replay`, `drain` above,
+        // `apps/recorder/tests/replay_clip.rs`), and all of it stays green
+        // without it, because none of it is reached from the recording loop.
+        //
+        // So this is the only test that runs the real loop with a handle in the
+        // outputs and asks the handle what happened to it.
+        let replay = crate::replay::ReplayRecording::new(Duration::from_secs(30))
+            .expect("thirty seconds is in range");
+
+        let report = recording_into(
+            "replay-handed-off",
+            [Step::Drew, Step::Drew, Step::Drew, Step::Drew, Step::Drew],
+            &crate::RecordingOutputs::default().with_replay(&replay),
+        );
+
+        let stats = replay
+            .stats()
+            .expect("the recording never started the replay buffer it was given");
+
+        assert!(
+            report.frames_encoded() > 0,
+            "the recording encoded nothing, so this says nothing about the buffer"
+        );
+        assert_eq!(
+            stats.packets_buffered(),
+            report.frames_encoded(),
+            "the buffer was started but not fed the recording's own packets: {stats:?}"
+        );
+        assert!(
+            stats
+                .covered()
+                .is_some_and(|covered| !covered.length().is_zero()),
+            "the buffer holds no stretch of the recording's timeline: {stats:?}"
+        );
+        assert_eq!(
+            stats.packets_discarded_before_first_keyframe(),
+            0,
+            "the buffer was attached after the recording's first keyframe: {stats:?}"
+        );
     }
 
     #[test]
