@@ -1003,30 +1003,36 @@ checks `shutdown` in [`welcome.features`](#the-handshake) first.
 
 ## Commands this build cannot perform
 
-Four commands are defined by the protocol and refused by this build, with
-`not_implemented` and a detail naming the subsystem, the milestone and the
-issue:
+**One** command is defined by the protocol and refused by this build —
+`apply_settings` — with `not_implemented` and a detail naming the subsystem, the
+milestone and the issue:
 
 ```json
 {"type":"response","id":3,"outcome":{"error":{
   "code":"not_implemented",
-  "message":"a recording with a replay buffer is not in this build",
+  "message":"the settings API is not in this build",
   "detail":{"detail":"not_implemented",
-            "subsystem":"a recording with a replay buffer",
-            "milestone":"M3","tracking_issue":38}}}}
+            "subsystem":"the settings API",
+            "milestone":"M7","tracking_issue":108}}}}
 ```
 
-They are refused **before dispatch**, so there is no handler for one to be wired
+`save_replay` was in this list until issue #38 built it, and is now an ordinary
+command with a schema of its own — see [`save_replay`](#save_replay) above.
+`UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` is the list this section
+describes, and it is the one to check rather than this prose.
+
+It is refused **before dispatch**, so there is no handler for it to be wired
 to. That is the point: a command that could be handled is a command that could
-be answered "saved" by something that saved nothing (AGENTS.md sections 27 and
-54). The UI is expected to render the refusal as what it is — "Save replay is
+be answered "applied" by something that applied nothing (AGENTS.md sections 27 and
+54). The UI is expected to render the refusal as what it is — "the settings API is
 not in this build" — rather than showing a dead control.
 
-Their *parameters* are deliberately left as an open object rather than given a
-schema. Nobody knows yet what `save_replay` takes, because the thing it would
-ask for does not exist; inventing a shape now would be a public API designed
-against a guess, and one the milestone that builds it would have to break
-(AGENTS.md section 43).
+Its *parameters* are deliberately left as an open object rather than given a
+schema, because nobody yet knows what the settings API takes; inventing a shape
+now would be a public API designed against a guess, and
+one the milestone that builds it would have to break (AGENTS.md section 43).
+That is what happened to `save_replay`, which got its shape from the work that
+built it rather than from a guess made in advance.
 
 ## Events
 
