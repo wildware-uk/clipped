@@ -406,6 +406,7 @@ dependencies = [
  "clap",
  "clipped-encoder",
  "clipped-game-detection",
+ "clipped-hotkeys",
  "clipped-ipc",
  "clipped-library",
  "clipped-logging",

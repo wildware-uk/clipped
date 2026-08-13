@@ -171,6 +171,21 @@ pub struct Unhandled {
 }
 
 impl Unhandled {
+    /// The sentence for an action this process has no handler for.
+    ///
+    /// Public so that it can be said *before* anybody presses the key. A
+    /// configuration screen listing an action nothing performs has to give the
+    /// same reason a press would, and two copies of that sentence would drift
+    /// apart the moment a milestone landed (AGENTS.md section 55) — which is a
+    /// drift nobody would notice, because the stale one still reads plausibly.
+    #[must_use]
+    pub const fn for_action(action: HotkeyAction) -> Self {
+        Self {
+            action,
+            planned: action.planned_subsystem(),
+        }
+    }
+
     /// The action nobody handled.
     #[must_use]
     pub const fn action(&self) -> HotkeyAction {
@@ -378,10 +393,7 @@ impl Dispatcher {
     /// The queue half of [`press`](Self::press), without the reporting.
     fn queue(&self, press: HotkeyPress) -> PressOutcome {
         let Some(worker) = self.workers.get(&press.action) else {
-            return PressOutcome::Unhandled(Unhandled {
-                action: press.action,
-                planned: press.action.planned_subsystem(),
-            });
+            return PressOutcome::Unhandled(Unhandled::for_action(press.action));
         };
 
         // Counted before the send, like the muxer's queue, so that the depth a
