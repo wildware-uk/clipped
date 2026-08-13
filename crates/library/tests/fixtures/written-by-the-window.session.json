@@ -54,7 +54,18 @@
       }
     }
   ],
-  "clips": [],
+  "clips": [
+    {
+      "path": "D:\\clips\\clipped-unattributed-20260811-153205-replay-1.mkv",
+      "created_at": "2026-08-11T15:33:05+01:00",
+      "source_recording": 1,
+      "source_start_seconds": 553.017,
+      "source_end_seconds": 583.0,
+      "duration_seconds": 29.983,
+      "requested_seconds": 30.0,
+      "complete": true
+    }
+  ],
   "bookmarks": [],
   "events": [
     {
@@ -68,6 +79,12 @@
       "event": "recording-started",
       "index": 1,
       "output": "D:\\clips\\clipped-unattributed-20260811-153205.mkv"
+    },
+    {
+      "at": "2026-08-11T15:33:05+01:00",
+      "event": "replay-saved",
+      "index": 1,
+      "output": "D:\\clips\\clipped-unattributed-20260811-153205-replay-1.mkv"
     },
     {
       "at": "2026-08-11T16:02:05+01:00",

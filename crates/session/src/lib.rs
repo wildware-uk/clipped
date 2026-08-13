@@ -54,16 +54,18 @@
 //! recording made today has at most one system-audio track — the whole output
 //! endpoint — and one microphone track.
 //!
-//! A recording can also fill a replay buffer: [`record_with_replay`] copies
-//! every packet it writes to the file into a `clipped_replay::ReplayBuffer` as
-//! well, so that a rolling window of the last few minutes is available to save
-//! from. That is one encoder and two consumers, not two encodes
-//! (`docs/replay-buffer.md`). Turning a buffered window into a clip is
-//! `clipped_replay::save_clip`
-//! ([issue #37](https://github.com/wildware-uk/clipped/issues/37)); the command
-//! that would drive it is still
-//! [issue #38](https://github.com/wildware-uk/clipped/issues/38), so nothing in
-//! this workspace calls it outside its own tests.
+//! **A recording can keep the last few minutes to save from.** [`replay`] is
+//! the join between a live recording and `clipped-replay`'s rolling buffer:
+//! [`record_with_replay`] copies every packet it writes to the file into the
+//! buffer as well — one encoder and two consumers, not two encodes
+//! (`docs/replay-buffer.md`) — and [`ReplayRecording::save_last`] turns the
+//! last N seconds of it into a playable clip on whichever thread asked for one
+//! ([issues #37 and #38](https://github.com/wildware-uk/clipped/issues/38)).
+//! The handle exists because a clip's container needs the codec, the picture
+//! size and the parameter sets the encoder produced, and those are known only
+//! once a recording has opened one. `apps/recorder`'s `replay` subcommand is
+//! the driver, and its `serve` subcommand answers `save_replay` with the same
+//! call.
 //!
 //! And the marks a person puts on a recording while it is being made:
 //! [`bookmarks`] is the bookmark store
@@ -226,6 +228,7 @@ pub mod disk;
 pub mod failure;
 pub mod highlights;
 pub mod plugins;
+pub mod replay;
 pub mod screenshot;
 
 mod error;
@@ -251,6 +254,7 @@ pub use error::SessionError;
 pub use failure::{FailureKind, FootageKept, RecordingFailure};
 pub use pacing::FrameGate;
 pub use progress::RecordingProgress;
+pub use replay::{ReplayRecording, ReplaySaveError};
 pub use report::{AudioSyncReport, AudioTrackReport, EndReason, RecordingReport};
 pub use settings::{
     AudioSourceSetting, CaptureTargetSettings, CodecPreference, EncoderPreference,
@@ -293,19 +297,10 @@ pub fn record(
 /// per packet and the memory the buffer's own configuration bounds, not a
 /// second encode (SPEC.md section 16, `docs/replay-buffer.md`).
 ///
-/// The buffer is owned by the caller rather than by the session, because the
-/// caller is what saves from it: a save runs on another thread while this one
-/// carries on recording, and
-/// [`ReplayBuffer::lease`](clipped_replay::ReplayBuffer::lease) is what holds
-/// the segments it reads against the eviction happening underneath it.
-///
-/// Building the clip is `clipped_replay::save_clip`
-/// ([issue #37](https://github.com/wildware-uk/clipped/issues/37)), which a
-/// caller can hand a lease taken from `replay`. Nothing in this workspace does
-/// so outside that crate's own tests: the `recorder replay` command that would
-/// drive it is
-/// [issue #38](https://github.com/wildware-uk/clipped/issues/38), so today this
-/// fills a buffer and reports what it holds at the end.
+/// The handle is owned by the caller rather than by the session, because the
+/// caller is what saves from it: [`ReplayRecording::save_last`] runs on another
+/// thread while this one carries on recording, and the lease it takes is what
+/// holds the segments it reads against the eviction happening underneath it.
 ///
 /// # Errors
 ///
@@ -317,7 +312,7 @@ pub fn record(
 pub fn record_with_replay(
     settings: &RecordingSettings,
     stop: &dyn StopSignal,
-    replay: &clipped_replay::ReplayBuffer,
+    replay: &ReplayRecording,
 ) -> Result<RecordingReport, SessionError> {
     recording::record(
         settings,
@@ -344,7 +339,12 @@ pub fn record_with_replay(
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RecordingOutputs<'a> {
     /// A rolling window of the last few minutes, filled from the same encoder.
-    pub replay: Option<&'a clipped_replay::ReplayBuffer>,
+    ///
+    /// The handle rather than the buffer, because a clip's container needs the
+    /// codec, the picture size and the parameter sets the encoder produced, and
+    /// only a recording knows those: [`ReplayRecording`] is where the recording
+    /// puts them so that a save can declare them (`crate::replay`).
+    pub replay: Option<&'a ReplayRecording>,
     /// Where a screenshot asks the recording for one of the frames it already
     /// has ([issue #67](https://github.com/wildware-uk/clipped/issues/67)).
     ///
@@ -367,7 +367,7 @@ pub struct RecordingOutputs<'a> {
 impl<'a> RecordingOutputs<'a> {
     /// The same outputs, also filling `replay`.
     #[must_use]
-    pub const fn with_replay(mut self, replay: &'a clipped_replay::ReplayBuffer) -> Self {
+    pub const fn with_replay(mut self, replay: &'a ReplayRecording) -> Self {
         self.replay = Some(replay);
         self
     }
@@ -452,7 +452,7 @@ pub fn record(
 pub fn record_with_replay(
     settings: &RecordingSettings,
     stop: &dyn StopSignal,
-    replay: &clipped_replay::ReplayBuffer,
+    replay: &ReplayRecording,
 ) -> Result<RecordingReport, SessionError> {
     let _ = (settings, stop, replay);
     Err(SessionError::UnsupportedPlatform)

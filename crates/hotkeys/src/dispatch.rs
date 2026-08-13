@@ -621,21 +621,20 @@ mod tests {
     fn an_action_with_no_handler_reports_which_milestone_would_build_it() {
         let (dispatcher, events) = Dispatcher::start(Handlers::new());
 
-        let outcome = dispatcher.press(press(HotkeyAction::SaveReplay));
+        let outcome = dispatcher.press(press(HotkeyAction::OpenOverlay));
 
         let PressOutcome::Unhandled(unhandled) = outcome else {
-            panic!("no build runs a recording with a replay buffer, so this must be Unhandled: {outcome}");
+            panic!("no build has an in-game overlay, so this must be Unhandled: {outcome}");
         };
-        assert_eq!(unhandled.action(), HotkeyAction::SaveReplay);
+        assert_eq!(unhandled.action(), HotkeyAction::OpenOverlay);
         let message = unhandled.to_string();
-        assert!(message.contains("Save replay"), "{message}");
-        assert!(message.contains("M3"), "{message}");
-        // #38, not #37: #37 built the buffer's save, and nothing runs it yet.
-        assert!(message.contains("#38"), "{message}");
+        assert!(message.contains("Open overlay"), "{message}");
+        assert!(message.contains("M5"), "{message}");
+        assert!(message.contains("#53"), "{message}");
 
         let reported = drain(&events);
         assert_eq!(reported.len(), 1, "the caller is told, not only the log");
-        assert_eq!(reported[0].press().action(), HotkeyAction::SaveReplay);
+        assert_eq!(reported[0].press().action(), HotkeyAction::OpenOverlay);
     }
 
     #[test]

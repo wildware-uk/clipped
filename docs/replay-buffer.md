@@ -8,15 +8,23 @@ what it costs, what it does when it cannot have what it asked for, and — since
 [issue #37](https://github.com/wildware-uk/clipped/issues/37) — how a leased
 range becomes a playable file.
 
-**What does not exist yet is anything that asks for one.** The `recorder replay`
-command is [issue #38](https://github.com/wildware-uk/clipped/issues/38) and the
-hotkey is [issue #39](https://github.com/wildware-uk/clipped/issues/39).
-Spilling segments to disk for long durations is
+**Something asks for one now.** `clipped-recorder replay` records with a buffer
+and binds `Ctrl`+`F10` to a save
+([issue #38](https://github.com/wildware-uk/clipped/issues/38),
+`docs/recorder-cli.md`); `start_recording` takes a `replay_seconds` and
+`save_replay` saves from it over the protocol (`docs/ipc.md`).
+`clipped_session::replay::ReplayRecording` is the join between the two — it is
+what knows the video in the buffer well enough to write a container header for
+it — and `docs/sessions.md` is where a saved clip is written down.
+
+What still does not exist is a capture that keeps *only* the buffer: SPEC.md
+section 4's Manual/Replay mode writes no continuous file, and this build has no
+recording without one, which is
+[issue #423](https://github.com/wildware-uk/clipped/issues/423). Spilling
+segments to disk for long durations is
 [issue #36](https://github.com/wildware-uk/clipped/issues/36), and the
 "per-configuration ceiling" section below is the argument for why it has to
-exist. Nothing in the shipped recorder turns a replay buffer on: `clipped-session`
-exposes `record_with_replay` and `crates/session/examples/replay_probe.rs` drives
-it, but the command line has no option that calls it.
+exist.
 
 ## Encoded segments, never raw frames
 
@@ -238,15 +246,26 @@ with `SavedClip::is_complete` false and `shortfall` saying what was missing.
 Refusing would be worse — there is a clip to be had, and it is the clip somebody
 asked for.
 
-### Audio: there is none, deliberately
+### Audio: there is none, and that is now a gap rather than a consequence
 
-A replay is video only. A recording has no audio track yet
-([issue #180](https://github.com/wildware-uk/clipped/issues/180)), so there is
-nothing in the buffer to write, and carrying every audio track into a replay is
-[issue #40](https://github.com/wildware-uk/clipped/issues/40), which is where it
-will be verified. `save_clip` takes a `VideoTrack` rather than a
-`RecordingLayout` so that this is a property of the signature and not a comment:
-a caller cannot hand it audio tracks that would be silently dropped.
+A replay is video only. That used to follow from the pipeline — a recording had
+no audio track at all — and it no longer does: since
+[issue #180](https://github.com/wildware-uk/clipped/issues/180) a recording has
+a system track and a microphone track, and **a clip saved out of the buffer has
+neither**. The buffer takes `clipped_encoder::EncodedPacket`s, which are coded
+*pictures*; captured audio reaches the file as PCM on the muxing thread and is
+not offered to the buffer at all (`crates/session/src/muxing.rs`).
+
+SPEC.md section 42 asks for M3 to "preserve all audio tracks", so this is an
+unmet requirement of the milestone rather than a design decision, and it is
+[issue #40](https://github.com/wildware-uk/clipped/issues/40) — which was
+written as the *verification* of the audio path and now also owns building it.
+`apps/recorder/tests/replay_clip.rs` asserts `audio_stream_count(0)` on a saved
+clip, so the gap is stated in a test rather than assumed.
+
+`save_clip` takes a `VideoTrack` rather than a `RecordingLayout` so that this is
+a property of the signature and not a comment: a caller cannot hand it audio
+tracks that would be silently dropped.
 
 ### Where the work happens
 
@@ -271,8 +290,13 @@ failure, and both files are decoded.
 
 Nothing in `save_clip` invents a file name, and a path that is already taken is
 refused rather than overwritten (AGENTS.md section 56). Deciding what a clip
-should be called belongs to the layer that knows what it is of, which is
-[issue #38](https://github.com/wildware-uk/clipped/issues/38).
+should be called belongs to the layer that knows what it is of, which is the
+**session**: a clip is `clipped-<session-id>-replay-<n>.mkv`, beside the
+recording it came out of and numbered within its sitting, so everything one
+session produced sorts together in a directory listing and no two saves can
+collide (`clipped_session::automatic::Session::clip_path`). A caller that names
+its own destination — `save_replay`'s `output` — gets that instead, and a
+destination that already exists is still refused.
 
 Two saves at once need nothing special: two leases are two independent sets of
 references and two writers are two files. The test above takes two leases a
@@ -529,12 +553,28 @@ disk-backed buffering exists as a ticket rather than as an optimisation.
 ## Attached to a live recording
 
 `clipped_session::record_with_replay` is `record` with a buffer to fill. The
-caller owns the buffer, because the caller is what saves from it: a save runs on
-another thread while the recording carries on.
+caller owns the **handle** — `clipped_session::replay::ReplayRecording` — rather
+than the buffer, and the difference is the point: a clip's container needs the
+codec, the picture size and the parameter sets the encoder produced, and those
+exist only once a recording has opened one. The handle is created with a window,
+the recording fills in the rest when its encoder opens, and
+`ReplayRecording::save_last` is what a caller calls. A save runs on another
+thread while the recording carries on.
 
-`crates/session/examples/replay_probe.rs` is how that is exercised without a
-command to drive it. It records a window for a stated number of seconds with a
-buffer attached and prints what the buffer ended up holding. Against
+**A saved clip is written down where the recording is.** `apps/recorder`'s
+`replay` subcommand and its `serve` both go through one routine
+(`apps/recorder/src/replay.rs`): write the clip, then enter it in the session's
+own record — the sidecar `clipped-library` indexes — so a replay reaches the
+library exactly as the recording beside it does, in the `clips` table that was
+designed for it (`docs/sessions.md`, `docs/storage.md`). The order is the crash
+safety: the file first, the record after it exists, so an interrupted recorder
+leaves a clip nothing indexed rather than a library row for a file that was
+never written.
+
+`crates/session/examples/replay_probe.rs` is the same wiring with the buffer's
+own accounting printed instead of a clip — `clipped-recorder replay` is what a
+person uses. It records a window for a stated number of seconds with a buffer
+attached and prints what the buffer ended up holding. Against
 `test-apps/video-pattern` at 1920×1080 and 60 fps for 50 seconds, on an RTX 4090
 encoding AV1 through NVENC:
 
@@ -598,16 +638,10 @@ and a wrong number in a report is a smaller failure than a recording that stops
 
 ## What is not decided here
 
-- **Audio.** A replay save has to carry every audio track
-  ([issue #40](https://github.com/wildware-uk/clipped/issues/40)), and
-  `clipped-session` has no audio path yet
-  ([issue #180](https://github.com/wildware-uk/clipped/issues/180)). The segment
-  model does not assume one stream, but nothing has been built for more, and a
-  clip written today is video only.
-- **What a clip is called, and where it goes.** `save_clip` writes where it is
-  told and refuses a name that is taken; choosing one is
-  [issue #38](https://github.com/wildware-uk/clipped/issues/38), which is also
-  what will decide whether a saved clip is entered in the recording library.
+- **Audio.** A clip is video only, and SPEC.md section 42 asks for M3 to keep
+  every track. See "Audio: there is none" above;
+  [issue #40](https://github.com/wildware-uk/clipped/issues/40) is where the
+  buffer learns to carry it.
 - **Interaction with a full-session recording**, and with automatic highlight
   clipping in M10. Both consume the same packets and neither has been written.
 

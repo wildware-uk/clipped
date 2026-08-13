@@ -115,6 +115,7 @@ export const FEATURES = [
   'library',
   'export',
   'hotkeys',
+  'replay',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -130,7 +131,7 @@ export type KnownFeature = (typeof FEATURES)[number];
  */
 export type Feature = Extensible<KnownFeature>;
 
-/** Every command the protocol defines, including the two no build performs yet. */
+/** Every command the protocol defines, including the one no build performs yet. */
 export const COMMANDS = [
   'ping',
   'get_status',
@@ -138,12 +139,12 @@ export const COMMANDS = [
   'stop_recording',
   'add_bookmark',
   'take_screenshot',
+  'save_replay',
   'library_sessions',
   'library_games',
   'export_recording',
   'get_hotkeys',
   'shutdown',
-  'save_replay',
   'apply_settings',
 ] as const;
 
@@ -218,6 +219,7 @@ export const REPLIES = [
   'recording_stopped',
   'bookmark_added',
   'screenshot_taken',
+  'replay_saved',
   'library_sessions',
   'library_games',
   'recording_exported',
@@ -321,6 +323,15 @@ export type StartRecordingParams = {
   readonly microphone?: string;
   /** `default`, `none`, or part of a device name. */
   readonly system_audio?: string;
+  /**
+   * Keep the last this many seconds in memory, so that `save_replay` has
+   * something to save.
+   *
+   * Absent means no buffer, which is what an ordinary recording is. It belongs
+   * to the recording rather than to the save, because a buffer has to have been
+   * filling since before the thing somebody wants to keep happened.
+   */
+  readonly replay_seconds?: number;
 };
 
 /**
@@ -408,6 +419,35 @@ export type TakeScreenshotParams = {
   readonly pid?: number;
   /** `png`, `jpeg` or `webp`. Absent means the recorder's own default. */
   readonly format?: string;
+};
+
+/**
+ * How much of the replay buffer to keep, and where to put it. A type alias for
+ * the reason {@link StartRecordingParams} is one.
+ *
+ * Every field is optional, because the shape a hotkey sends is no fields at
+ * all: keep the recorder's configured duration out of whatever is being
+ * recorded, and put it where that recording's clips go.
+ */
+export type SaveReplayParams = {
+  /**
+   * Which recording to save out of. Absent means "whatever is being recorded",
+   * exactly as it does for a bookmark and a screenshot.
+   */
+  readonly recording_id?: string;
+  /**
+   * How many seconds to keep. Absent means the duration the recording's buffer
+   * was started with.
+   *
+   * More than the buffer's window is not refused: the clip is what there was,
+   * and {@link ReplaySummary.complete} says it was short.
+   */
+  readonly duration_seconds?: number;
+  /**
+   * Where to write the clip. Absent means beside the recording, named after the
+   * session it belongs to.
+   */
+  readonly output?: string;
 };
 
 /**
@@ -739,6 +779,14 @@ export interface ScreenshotTakenReply {
   readonly screenshot: ScreenshotSummary;
 }
 
+/** A replay was saved, and the clip is finished and playable. */
+export interface ReplaySavedReply {
+  /** The tag. */
+  readonly reply: 'replay_saved';
+  /** The clip, and how it compares with what was asked for. */
+  readonly clip: ReplaySummary;
+}
+
 /** One page of the recording library. */
 export interface LibrarySessionsReply {
   /** The tag. */
@@ -864,6 +912,7 @@ export type Reply =
   | RecordingStoppedReply
   | BookmarkAddedReply
   | ScreenshotTakenReply
+  | ReplaySavedReply
   | LibrarySessionsReply
   | LibraryGamesReply
   | RecordingExportedReply
@@ -898,6 +947,14 @@ export interface ActiveRecording {
   readonly target: string;
   /** Milliseconds the recording has been running, as the recorder measures it. */
   readonly elapsed_ms: number;
+  /**
+   * How much history this recording's replay buffer keeps, when it has one.
+   *
+   * Absent for a recording with no buffer. The `replay` feature says the build
+   * has the command; this says there is something for it to save from, and
+   * bounds what may be asked for.
+   */
+  readonly replay_seconds?: number;
 }
 
 /** A recording is in progress. */
@@ -1014,6 +1071,37 @@ export interface ScreenshotSummary {
    * a timeline can put a marker exactly where the picture came from.
    */
   readonly at_seconds?: number;
+}
+
+/**
+ * A clip saved out of a recording's replay buffer.
+ *
+ * It carries what the clip turned out to be rather than only that one was
+ * written, because what comes out is not exactly what was asked for: a clip can
+ * only begin on a keyframe, so it is slightly longer at the front, and a buffer
+ * that has not filled yet gives less than was asked for.
+ */
+export interface ReplaySummary {
+  /** The file that was written. */
+  readonly path: string;
+  /** The recording it was saved out of. */
+  readonly recording_id: string;
+  /** How much video was asked for. */
+  readonly requested_seconds: number;
+  /** How long the clip is. */
+  readonly duration_seconds: number;
+  /** Where in the recording the clip begins, on the recording's own timeline. */
+  readonly source_start_seconds: number;
+  /** Where in the recording the clip ends. */
+  readonly source_end_seconds: number;
+  /** Video kept before the requested start, because a clip begins on a keyframe. */
+  readonly leading_slack_seconds: number;
+  /** Whether the buffer held the whole of what was asked for. */
+  readonly complete: boolean;
+  /** How much of the request the buffer did not hold. Zero when `complete`. */
+  readonly shortfall_seconds: number;
+  /** How many bytes of coded video were written. */
+  readonly bytes: number;
 }
 
 /** Which versions this recorder actually speaks. */

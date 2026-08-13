@@ -147,7 +147,7 @@ use crate::config::{Configuration, GameKey, ResolvedSettings};
 
 pub use manual::{ManualSession, RecordedProcess};
 pub use session::{
-    GameIdentity, RecordingOutcomeSummary, Session, SessionEndReason, SessionEvent,
+    GameIdentity, RecordingOutcomeSummary, Session, SessionClip, SessionEndReason, SessionEvent,
     SessionEventKind, SessionId, SessionRecording, UNATTRIBUTED,
 };
 pub use settings::{

@@ -228,8 +228,9 @@ large:
   copies each packet into a `clipped-replay` buffer, so a rolling window of the
   last few minutes is there to save from; `clipped_replay::save_clip` turns a
   window of it into a file
-  ([#37](https://github.com/wildware-uk/clipped/issues/37)), and no command
-  turns a buffer on or asks for a clip yet
+  ([#37](https://github.com/wildware-uk/clipped/issues/37)), and
+  `clipped_session::replay` is what a recording and a save meet through:
+  `clipped-recorder replay` turns a buffer on and a hotkey asks for a clip
   ([#38](https://github.com/wildware-uk/clipped/issues/38)). It also owns
   the **session manager**: `clipped_session::automatic` joins
   `clipped-game-detection`'s watcher and catalogue to that recording loop, and is

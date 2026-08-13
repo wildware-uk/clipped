@@ -27,7 +27,7 @@
 //!   "started_at": "2026-08-11T14:32:05+01:00",
 //!   "ended_at": null,
 //!   "recordings": [ { …, "settings": { … } } ],
-//!   "clips": [],
+//!   "clips": [ { "path": "…-replay-1.mkv", "source_recording": 1, … } ],
 //!   "bookmarks": [],
 //!   "events": [ … ]
 //! }
@@ -67,24 +67,27 @@
 //! is worth more than the one field nobody could interpret, so adding a kind is
 //! an addition to the file rather than a change to its shape.
 //!
-//! `clips` and `bookmarks` are reserved and are **always empty in this build**.
-//! Nothing here can create either, and for two different reasons now. A clip
-//! needs a recording running a replay buffer to save from, which is
-//! [issue #38](https://github.com/wildware-uk/clipped/issues/38). Bookmarks
-//! *exist* ([issue #64](https://github.com/wildware-uk/clipped/issues/64)) and
-//! are not kept here: a bookmark is an offset into one recording rather than a
-//! moment in a session, so it lives in that recording's own sidecar beside it
+//! **`clips` is written** since
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38). A save from a
+//! recording's replay buffer produces a shorter file beside it, and this is
+//! where the session says what that file is and which part of which recording
+//! it came from ([`SidecarClip`]). The key was reserved from the first version
+//! of this schema for exactly this, so filling it is an addition to the file
+//! rather than a change to its shape and the version is unchanged (AGENTS.md
+//! section 43). A session that produced none writes an empty list, as every
+//! session did before.
+//!
+//! `bookmarks` **is still reserved and always empty**. Bookmarks *exist*
+//! ([issue #64](https://github.com/wildware-uk/clipped/issues/64)) and are not
+//! kept here: a bookmark is an offset into one recording rather than a moment
+//! in a session, so it lives in that recording's own sidecar beside it
 //! (`crate::bookmarks`, `docs/bookmarks.md`) — which is also the shape
 //! `clipped-storage`'s `bookmarks` table has. What no build has is a way to
 //! *take* one during an automatic session: `watch` serves no protocol, so
 //! nothing can reach it with an `add_bookmark`, and joining the two is
-//! [issue #232](https://github.com/wildware-uk/clipped/issues/232).
-//!
-//! Both keys are named here so that filling them later is an addition to the
-//! file rather than a change to its shape (AGENTS.md section 43). A reader must
-//! not infer from their presence that a session has none — for bookmarks, the
-//! answer is in the recordings' own files; `docs/sessions.md` says so in the
-//! same words.
+//! [issue #232](https://github.com/wildware-uk/clipped/issues/232). A reader
+//! must not infer from the empty list that a session has none; the answer is in
+//! the recordings' own files, and `docs/sessions.md` says so in the same words.
 //!
 //! # Writing it safely
 //!
@@ -149,8 +152,7 @@ struct SidecarFile<'a> {
     started_at: String,
     ended_at: Option<String>,
     recordings: Vec<SidecarRecording<'a>>,
-    /// Always empty; see the module documentation.
-    clips: Reserved,
+    clips: Vec<SidecarClip>,
     /// Always empty; see the module documentation.
     bookmarks: Reserved,
     events: Vec<SidecarEvent>,
@@ -169,7 +171,7 @@ impl<'a> SidecarFile<'a> {
                 .iter()
                 .map(SidecarRecording::of)
                 .collect(),
-            clips: Reserved,
+            clips: session.clips().iter().map(SidecarClip::of).collect(),
             bookmarks: Reserved,
             events: session.events().iter().map(SidecarEvent::of).collect(),
         }
@@ -178,8 +180,7 @@ impl<'a> SidecarFile<'a> {
 
 /// A list this build always writes empty.
 ///
-/// A type rather than an empty `Vec` of something, because nothing in an
-/// automatic session fills either list: no clip can be made at all, and a
+/// A type rather than an empty `Vec` of something, because nothing fills it: a
 /// bookmark belongs to a recording's own sidecar rather than to this file. See
 /// the module documentation.
 #[derive(Debug)]
@@ -243,6 +244,47 @@ struct SidecarRecording<'a> {
     /// What this recording was made with, and which layer each answer came
     /// from. See [`SidecarSetting`].
     settings: BTreeMap<&'static str, SidecarSetting>,
+}
+
+/// One clip the session produced.
+///
+/// `source_start_seconds` and `source_end_seconds` are offsets into the
+/// recording named by `source_recording`, on that recording's own timeline —
+/// not wall-clock times — so they still mean something after the files have
+/// been moved to another machine. They are the two columns
+/// `clipped-storage`'s `clips` table already has for exactly this
+/// (`crates/storage/migrations/0001_initial.sql`).
+///
+/// `requested_seconds` and `complete` are the two figures the library does not
+/// store and a person reading the file wants: a replay clip is bought at
+/// keyframe granularity and a buffer that has not filled yet gives less than
+/// was asked for, so "I pressed the key for thirty seconds and got twelve" has
+/// an answer here (`docs/replay-buffer.md`).
+#[derive(Debug, Serialize)]
+struct SidecarClip {
+    path: String,
+    created_at: String,
+    source_recording: u32,
+    source_start_seconds: f64,
+    source_end_seconds: f64,
+    duration_seconds: f64,
+    requested_seconds: f64,
+    complete: bool,
+}
+
+impl SidecarClip {
+    fn of(clip: &super::session::SessionClip) -> Self {
+        Self {
+            path: clip.path().display().to_string(),
+            created_at: clock::rfc3339(clip.created_at()),
+            source_recording: clip.source_index(),
+            source_start_seconds: clip.source_start().as_secs_f64(),
+            source_end_seconds: clip.source_end().as_secs_f64(),
+            duration_seconds: clip.duration().as_secs_f64(),
+            requested_seconds: clip.requested().as_secs_f64(),
+            complete: clip.is_complete(),
+        }
+    }
 }
 
 /// One effective setting, as a session's record keeps it.
@@ -390,6 +432,10 @@ impl SidecarEvent {
                 written.index = Some(*index);
                 written.outcome = Some(outcome.clone());
             }
+            SessionEventKind::ReplaySaved { index, output } => {
+                written.index = Some(*index);
+                written.output = Some(output.display().to_string());
+            }
             SessionEventKind::GameExited { pid } | SessionEventKind::GameRelaunched { pid } => {
                 written.pid = Some(*pid);
             }
@@ -418,6 +464,7 @@ fn token(kind: &SessionEventKind) -> &'static str {
         SessionEventKind::Started { .. } => "session-started",
         SessionEventKind::RecordingStarted { .. } => "recording-started",
         SessionEventKind::RecordingEnded { .. } => "recording-ended",
+        SessionEventKind::ReplaySaved { .. } => "replay-saved",
         SessionEventKind::GameExited { .. } => "game-exited",
         SessionEventKind::GameRelaunched { .. } => "game-relaunched",
         SessionEventKind::AnotherGameStarted { .. } => "another-game-started",

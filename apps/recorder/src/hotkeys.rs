@@ -58,7 +58,7 @@ use clipped_hotkeys::{
 };
 use clipped_ipc::{
     AddBookmark, Command, CommandHandler, ErrorCode, HotkeyBinding, HotkeyState, ProtocolError,
-    RecorderStatus, Reply, StopRecording, TakeScreenshot,
+    RecorderStatus, Reply, SaveReplay, StopRecording, TakeScreenshot,
 };
 use clipped_session::config::Configuration;
 
@@ -176,6 +176,11 @@ pub fn start(
 fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
     let mut handlers = Handlers::new();
     for action in [
+        // `Ctrl`+`F10` is the reason this list exists at all (SPEC.md section
+        // 7). It was the one action here with nothing behind it until issue
+        // #38 built the buffer, the save and the command; leaving it out now
+        // would be the recorder going on refusing a key it can perform.
+        HotkeyAction::SaveReplay,
         HotkeyAction::AddBookmark,
         HotkeyAction::TakeScreenshot,
         HotkeyAction::ToggleRecording,
@@ -240,6 +245,13 @@ fn command_for(
     action: HotkeyAction,
 ) -> Result<Command, ProtocolError> {
     match action {
+        // Nothing named at all: keep the duration the recording's buffer was
+        // started with, out of whatever is being recorded, and put the clip
+        // where that recording's clips go. Somebody pressing the key mid-fight
+        // has said everything they are going to say (`clipped_ipc::SaveReplay`).
+        // A recording that keeps no buffer is refused in the recorder's own
+        // words, which is more use than a guess at a duration.
+        HotkeyAction::SaveReplay => Ok(Command::SaveReplay(SaveReplay::default())),
         // No recording named, which means "whatever is running" — the same
         // thing the tray's menu sends, and the only thing a key press can mean.
         HotkeyAction::AddBookmark => Ok(Command::AddBookmark(AddBookmark::default())),
@@ -280,6 +292,7 @@ fn command_for(
 /// a user records (AGENTS.md section 13, `docs/logging.md`).
 fn described(reply: &Reply) -> &'static str {
     match reply {
+        Reply::ReplaySaved { .. } => "a replay clip was saved",
         Reply::BookmarkAdded { .. } => "the moment was marked",
         Reply::ScreenshotTaken { .. } => "a screenshot was written",
         Reply::RecordingStopped { .. } => "the recording was stopped and its file finished",
@@ -331,7 +344,7 @@ mod tests {
     use clipped_hotkeys::{Bindings, Hotkey, HotkeyAction, HotkeyService, Registration, ACTIONS};
     use clipped_ipc::{
         ActiveRecording, Command, CommandHandler, ErrorCode, HotkeyState, ProtocolError,
-        RecorderStatus, Reply,
+        RecorderStatus, Reply, SaveReplay,
     };
     use clipped_session::config::{Configuration, HotkeyOverride, HotkeyOverrides};
 
@@ -365,6 +378,10 @@ mod tests {
                     output: r"D:\clips\session.mkv".to_owned(),
                     target: "process `cs2.exe`".to_owned(),
                     elapsed_ms: 4_000,
+                    // Whether this recording keeps a buffer changes what
+                    // `save_replay` answers, not which command a press sends,
+                    // and it is the command these tests are about.
+                    replay_seconds: Some(300),
                 }),
             }
         }
@@ -412,6 +429,7 @@ mod tests {
         assert_eq!(
             handled,
             vec![
+                HotkeyAction::SaveReplay,
                 HotkeyAction::AddBookmark,
                 HotkeyAction::TakeScreenshot,
                 HotkeyAction::ToggleRecording,
@@ -455,6 +473,25 @@ mod tests {
             });
 
         recorder.asked()
+    }
+
+    /// The key SPEC.md section 7 names, and the one this recorder refused to
+    /// perform until issue #38 built the buffer behind it.
+    #[test]
+    fn the_handler_registered_for_save_replay_saves_out_of_whatever_is_running() {
+        let recorder = Arc::new(AskedRecorder::recording());
+
+        match pressed(&recorder, HotkeyAction::SaveReplay).as_slice() {
+            [Command::SaveReplay(request)] => {
+                assert_eq!(
+                    request,
+                    &SaveReplay::default(),
+                    "a press names no recording, no duration and no file: it keeps what the \
+                     recording's buffer was started with, where that recording's clips go",
+                );
+            }
+            other => panic!("a replay press must send one `save_replay`, not {other:?}"),
+        }
     }
 
     #[test]
@@ -530,16 +567,16 @@ mod tests {
 
         let row = row_for(
             registration
-                .status(HotkeyAction::SaveReplay)
+                .status(HotkeyAction::OpenOverlay)
                 .expect("every action has a row"),
         );
 
-        assert_eq!(row.action, "save_replay");
+        assert_eq!(row.action, "open_overlay");
         assert!(!row.handled);
         let reason = row.unavailable.expect("an unhandled action says why");
-        assert!(reason.contains("Save replay"), "{reason}");
-        assert!(reason.contains("M3"), "{reason}");
-        assert!(reason.contains("#38"), "{reason}");
+        assert!(reason.contains("Open overlay"), "{reason}");
+        assert!(reason.contains("M5"), "{reason}");
+        assert!(reason.contains("#53"), "{reason}");
 
         let row = row_for(
             registration
@@ -551,6 +588,22 @@ mod tests {
             "the recorder adds bookmarks, so that row must not read as unavailable",
         );
         assert_eq!(row.hotkey.as_deref(), Some("Ctrl+F9"));
+
+        // The row this ticket turned over. Save replay was the example above
+        // until issue #38 built it, and a build that went on reporting it as
+        // unavailable would be telling a user a shipped feature is missing —
+        // invisibly, because the sentence still reads plausibly (AGENTS.md
+        // sections 27 and 54).
+        let row = row_for(
+            registration
+                .status(HotkeyAction::SaveReplay)
+                .expect("every action has a row"),
+        );
+        assert!(
+            row.handled && row.unavailable.is_none(),
+            "the recorder saves replays, so that row must not read as unavailable: {row:?}",
+        );
+        assert_eq!(row.hotkey.as_deref(), Some("Ctrl+F10"));
     }
 
     /// The whole list, every time. A screen sent only the bound actions could

@@ -172,6 +172,7 @@ fn record_frames(
         .span();
     let _entered = span.enter();
 
+    let bitrate = opened.bitrate;
     let mut encoder = opened.encoder;
     // Before the file, because a track's sampling rate and channel count go in
     // the container's header and only the device knows them. A source that
@@ -183,6 +184,15 @@ fn record_frames(
         &sources,
     );
 
+    // Before the first packet and after the encoder: this is the moment both
+    // things a replay buffer needs exist — the bitrate its memory ceiling is
+    // sized from, and the track description a clip saved from it has to declare
+    // (`crate::replay`). A buffer that could not be configured leaves the
+    // recording untouched.
+    if let Some(replay) = replay {
+        replay.begin(layout.video(), bitrate);
+    }
+
     let writer = open_output(settings, &layout)?;
     let muxing = MuxingThread::start(
         writer,
@@ -191,7 +201,7 @@ fn record_frames(
     )?;
     let sinks = PacketSinks {
         muxing: &muxing,
-        replay,
+        replay: replay.and_then(crate::replay::ReplayRecording::buffer),
     };
 
     let mut counters = Counters::default();
@@ -417,12 +427,11 @@ fn record_frames(
         "recording finished"
     );
 
-    if let Some(replay) = replay {
+    if let Some(stats) = replay.and_then(crate::replay::ReplayRecording::stats) {
         // Said once, at the end, because it is the only account of what the
         // buffer actually did: a window that came out shorter than it was
         // configured for, or a segment count that never grew, is the difference
         // between a replay that can be saved and one that cannot.
-        let stats = replay.stats();
         tracing::info!(
             segments_held = stats.segments_held(),
             bytes_held = stats.bytes_held(),

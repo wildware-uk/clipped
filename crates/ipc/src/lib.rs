@@ -127,8 +127,8 @@ pub mod transport;
 
 pub use client::{Client, ClientError, EventClient};
 pub use command::{
-    AddBookmark, Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording,
-    TakeScreenshot, UnbuiltCommand, UNBUILT_COMMANDS,
+    AddBookmark, Command, ExportRecording, Reply, SaveReplay, Shutdown, StartRecording,
+    StopRecording, TakeScreenshot, UnbuiltCommand, UNBUILT_COMMANDS,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
@@ -146,7 +146,7 @@ pub use server::{
 };
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
-    ScreenshotSummary,
+    ReplaySummary, ScreenshotSummary,
 };
 pub use supervisor::{
     ensure_recorder, wait_for_recorder_to_exit, Attachment, AttachmentOrigin, RecorderCallError,

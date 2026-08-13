@@ -153,6 +153,7 @@ support bundle needs in order to answer "the hotkey does nothing"
 
 | Action | What a press sends | With nothing being recorded |
 | --- | --- | --- |
+| `save_replay` | `save_replay`, naming no recording, no duration and no file | Refused: there is no replay buffer to save from ([#38](https://github.com/wildware-uk/clipped/issues/38)) |
 | `add_bookmark` | `add_bookmark`, naming no recording | Refused: there is no recording to mark a moment in |
 | `take_screenshot` | `take_screenshot`, naming no target | Refused: there is no window to photograph |
 | `toggle_recording` | `stop_recording`, naming no recording | Refused: a key press does not say which window to record ([#416](https://github.com/wildware-uk/clipped/issues/416)) |
@@ -164,7 +165,9 @@ Settings → Hotkeys, in the desktop application. The window asks the recorder
 `get_hotkeys` (`docs/ipc.md`) and draws a row per action: the combination, what
 Windows said about it, and whether anything in this build performs it. The last
 two are separate questions, and a row that ran them together would be wrong half
-the time — `Ctrl`+`F10` registers cleanly and no build saves a replay.
+the time: `Ctrl`+`F10` is the combination another application is most likely to
+have taken, and the recorder performs Save replay whether or not Windows gave it
+that key; Open overlay is bound to nothing and would do nothing if it were.
 
 Asking rather than being told is deliberate. Registration happens when the
 recorder starts, which is usually long before a window exists, so a conflict
@@ -180,7 +183,7 @@ line and will appear in a configuration file.
 
 | Action | Name | Default | What is behind it today |
 | --- | --- | --- | --- |
-| Save replay | `save_replay` | `Ctrl`+`F10` | Nothing: the buffer and its save exist ([#37](https://github.com/wildware-uk/clipped/issues/37)), but no build runs a recording with one, which is M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
+| Save replay | `save_replay` | `Ctrl`+`F10` | **The recorder saves the clip**, through `save_replay` ([#38](https://github.com/wildware-uk/clipped/issues/38), docs/replay-buffer.md). `clipped-recorder replay` binds it too and writes the last N seconds out directly; over the protocol the recording has to be keeping a buffer, which is `active_recording.replay_seconds` |
 | Add bookmark | `add_bookmark` | `Ctrl`+`F9` | **The recorder marks the moment**, through `add_bookmark` ([#64](https://github.com/wildware-uk/clipped/issues/64), docs/bookmarks.md) |
 | Take screenshot | `take_screenshot` | — | **The recorder writes a still**, through `take_screenshot` ([#67](https://github.com/wildware-uk/clipped/issues/67), docs/screenshots.md) |
 | Start or stop recording | `toggle_recording` | — | **The recorder stops the recording that is running.** Starting one needs a window a key press cannot name, [#416](https://github.com/wildware-uk/clipped/issues/416) |
@@ -196,11 +199,14 @@ any of them.
 
 **A press with nothing behind it says so**, and it says so twice: once in the
 row `get_hotkeys` reports before anybody presses anything, and once when they
-do. It is reported as `Unhandled`,
-carrying the milestone and issue where there is one — "Save replay is not in
-this build: a recording with a replay buffer arrives in M3 (issue #38)" — and as "nothing in
-this process handles Start or stop recording" where the subsystem exists and
-this process simply was not given a handler. Nothing is ever swallowed, and no
+do. It is reported as `Unhandled`, carrying the milestone and issue where there
+is one — "Open overlay is not in this build: the overlay arrives in M5 (issue
+#53)" — and as "nothing in this process handles Start or stop recording" where
+the subsystem exists and this process simply was not given a handler. Which of
+the two a given action gets depends on the process: `serve` supplies a handler
+for the first four rows above, `clipped-recorder replay` supplies one for Save
+replay alone, and every other subcommand registers nothing at all. Nothing is
+ever swallowed, and no
 handler is ever faked to make a key appear to work (AGENTS.md section 54).
 
 ## Conflicts

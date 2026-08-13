@@ -441,6 +441,10 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_take_screenshot(), &[]),
         ),
         (
+            "save_replay".to_owned(),
+            structure_of(&exemplar_save_replay(), &[]),
+        ),
+        (
             "recording_summary".to_owned(),
             structure_of(&exemplar_summary(), &[]),
         ),
@@ -451,6 +455,10 @@ fn structures() -> BTreeMap<String, Structure> {
         (
             "screenshot_summary".to_owned(),
             structure_of(&exemplar_screenshot(), &[]),
+        ),
+        (
+            "replay_summary".to_owned(),
+            structure_of(&exemplar_replay(), &[]),
         ),
         (
             "active_recording".to_owned(),
@@ -546,6 +554,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::StopRecording(_) => Some("stop_recording".to_owned()),
                 Command::AddBookmark(_) => Some("add_bookmark".to_owned()),
                 Command::TakeScreenshot(_) => Some("take_screenshot".to_owned()),
+                Command::SaveReplay(_) => Some("save_replay".to_owned()),
                 Command::LibrarySessions(_) => Some("library_sessions".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
@@ -562,6 +571,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::StopRecording(_) => Some("reply.recording_stopped".to_owned()),
                 Command::AddBookmark(_) => Some("reply.bookmark_added".to_owned()),
                 Command::TakeScreenshot(_) => Some("reply.screenshot_taken".to_owned()),
+                Command::SaveReplay(_) => Some("reply.replay_saved".to_owned()),
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
@@ -775,6 +785,15 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "a replay clip saved out of the buffer",
+            ServerMessage::Response(Response {
+                id: 12,
+                outcome: Outcome::Ok(Reply::ReplaySaved {
+                    clip: exemplar_replay(),
+                }),
+            }),
+        ),
+        (
             "a page of the library, with more after it",
             ServerMessage::Response(Response {
                 id: 9,
@@ -909,16 +928,22 @@ fn samples() -> Vec<Sample> {
                     hotkeys: vec![
                         // The row this reply exists for: a combination the user
                         // cannot have, carrying the sentence a window shows.
+                        // The recorder performs this one, so `handled` is true
+                        // and `unavailable` absent — which is exactly why the
+                        // two questions are separate fields.
                         HotkeyBinding {
+                            action: "save_replay".to_owned(),
+                            label: "Save replay".to_owned(),
+                            hotkey: Some("Ctrl+F10".to_owned()),
                             state: HotkeyState::Conflict {
                                 reason: "Ctrl+F10 could not be Clipped's shortcut for Save                                          replay: another application already uses it. Choose a                                          different combination, or close the application that                                          has this one and try again"
                                     .to_owned(),
                             },
-                            ..exemplar_hotkey_binding()
+                            handled: true,
+                            unavailable: None,
                         },
                         // A hotkey that works: registered, and something behind
-                        // it. `unavailable` is absent, which is what tells the
-                        // two rows apart.
+                        // it.
                         HotkeyBinding {
                             action: "add_bookmark".to_owned(),
                             label: "Add bookmark".to_owned(),
@@ -936,6 +961,9 @@ fn samples() -> Vec<Sample> {
                             handled: true,
                             unavailable: None,
                         },
+                        // And one with nothing behind it, carrying the sentence
+                        // a settings screen shows in place of a working row.
+                        exemplar_hotkey_binding(),
                     ],
                 }),
             }),
@@ -971,7 +999,7 @@ fn samples() -> Vec<Sample> {
             "a command this build cannot perform",
             ServerMessage::Response(Response {
                 id: 3,
-                outcome: Outcome::Error(UnbuiltCommand::SaveReplay.refusal()),
+                outcome: Outcome::Error(UnbuiltCommand::ApplySettings.refusal()),
             }),
         ),
         (
@@ -1185,6 +1213,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         }
         Reply::BookmarkAdded { .. } => "bookmark_added".to_owned(),
         Reply::ScreenshotTaken { .. } => "screenshot_taken".to_owned(),
+        Reply::ReplaySaved { .. } => "replay_saved".to_owned(),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
         // would otherwise reach the same discriminant for a page that continues
@@ -1378,7 +1407,7 @@ fn exemplar_response() -> Response {
 /// schema is a refusal the recorder really sends and cannot drift from one as
 /// the subsystems behind these commands are built.
 fn exemplar_error() -> ProtocolError {
-    UnbuiltCommand::SaveReplay.refusal()
+    UnbuiltCommand::ApplySettings.refusal()
 }
 
 /// Every `start_recording` option at once.
@@ -1395,6 +1424,7 @@ fn exemplar_start_recording() -> StartRecording {
         encoder: Some("auto".to_owned()),
         microphone: Some("none".to_owned()),
         system_audio: Some("none".to_owned()),
+        replay_seconds: Some(60),
     }
 }
 
@@ -1410,6 +1440,7 @@ fn exemplar_active_recording() -> ActiveRecording {
         output: r"D:\clips\session.mkv".to_owned(),
         target: "process `cs2.exe`".to_owned(),
         elapsed_ms: 4_200,
+        replay_seconds: Some(60),
     }
 }
 
@@ -1449,6 +1480,32 @@ fn exemplar_take_screenshot() -> crate::command::TakeScreenshot {
         process: Some("cs2.exe".to_owned()),
         pid: Some(4242),
         format: Some("png".to_owned()),
+    }
+}
+
+/// Every `save_replay` parameter at once.
+fn exemplar_save_replay() -> crate::command::SaveReplay {
+    crate::command::SaveReplay {
+        recording_id: Some("r-1".to_owned()),
+        duration_seconds: Some(30.0),
+        output: Some(r"D:\clipsce on mirage.mkv".to_owned()),
+    }
+}
+
+/// A saved replay clip, short of what was asked for so that every field of the
+/// shortfall is in the schema.
+fn exemplar_replay() -> crate::status::ReplaySummary {
+    crate::status::ReplaySummary {
+        path: r"D:\clips\clipped-cs2-20260813-201400-replay-1.mkv".to_owned(),
+        recording_id: "r-1".to_owned(),
+        requested_seconds: 30.0,
+        duration_seconds: 21.983,
+        source_start_seconds: 8.017,
+        source_end_seconds: 30.0,
+        leading_slack_seconds: 1.983,
+        complete: false,
+        shortfall_seconds: 10.0,
+        bytes: 51_204_112,
     }
 }
 
@@ -1690,6 +1747,7 @@ fn every_built_command() -> Vec<Command> {
         Command::StopRecording(StopRecording::default()),
         Command::AddBookmark(exemplar_add_bookmark()),
         Command::TakeScreenshot(exemplar_take_screenshot()),
+        Command::SaveReplay(exemplar_save_replay()),
         Command::LibrarySessions(exemplar_library_sessions()),
         Command::LibraryGames,
         Command::ExportRecording(exemplar_export_recording()),
@@ -1704,6 +1762,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::StopRecording(_)
             | Command::AddBookmark(_)
             | Command::TakeScreenshot(_)
+            | Command::SaveReplay(_)
             | Command::LibrarySessions(_)
             | Command::LibraryGames
             | Command::ExportRecording(_)
@@ -1770,9 +1829,9 @@ fn every_error_detail() -> Vec<ErrorDetail> {
             recorder_version: "0.1.0".to_owned(),
         },
         ErrorDetail::NotImplemented {
-            subsystem: UnbuiltCommand::SaveReplay.subsystem().to_owned(),
-            milestone: UnbuiltCommand::SaveReplay.milestone().to_owned(),
-            tracking_issue: UnbuiltCommand::SaveReplay.tracking_issue(),
+            subsystem: UnbuiltCommand::ApplySettings.subsystem().to_owned(),
+            milestone: UnbuiltCommand::ApplySettings.milestone().to_owned(),
+            tracking_issue: UnbuiltCommand::ApplySettings.tracking_issue(),
         },
     ];
     for detail in &details {
@@ -1859,6 +1918,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::ScreenshotTaken {
             screenshot: exemplar_screenshot(),
         },
+        Reply::ReplaySaved {
+            clip: exemplar_replay(),
+        },
         Reply::LibrarySessions {
             page: exemplar_library_page(),
         },
@@ -1890,6 +1952,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::RecordingStopped { .. }
             | Reply::BookmarkAdded { .. }
             | Reply::ScreenshotTaken { .. }
+            | Reply::ReplaySaved { .. }
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
             | Reply::Hotkeys { .. }
@@ -1919,16 +1982,22 @@ fn every_hotkey_state() -> Vec<HotkeyState> {
 
 /// One row of the hotkey list, with every optional field present so that the
 /// schema sees it.
+///
+/// An action nothing performs, because `unavailable` is only ever sent for one
+/// and it is the field the schema would otherwise never see. It is
+/// `open_overlay` and no longer `save_replay`: [issue
+/// #38](https://github.com/wildware-uk/clipped/issues/38) built the replay
+/// buffer, the command and the key, so a schema still shipping that row would
+/// describe a recorder nobody builds (AGENTS.md sections 27 and 54).
 fn exemplar_hotkey_binding() -> HotkeyBinding {
     HotkeyBinding {
-        action: "save_replay".to_owned(),
-        label: "Save replay".to_owned(),
-        hotkey: Some("Ctrl+F10".to_owned()),
+        action: "open_overlay".to_owned(),
+        label: "Open overlay".to_owned(),
+        hotkey: Some("Ctrl+F12".to_owned()),
         state: HotkeyState::Registered,
         handled: false,
         unavailable: Some(
-            "Save replay is not in this build: a recording with a replay buffer arrives in M3              (issue #38)"
-                .to_owned(),
+            "Open overlay is not in this build: the overlay arrives in M5 (issue #53)".to_owned(),
         ),
     }
 }

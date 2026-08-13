@@ -63,6 +63,14 @@ pub(crate) struct SessionSidecar {
     pub(crate) ended_at: Option<String>,
     #[serde(default)]
     pub(crate) recordings: Vec<SidecarRecording>,
+    /// The clips saved out of this session's recordings.
+    ///
+    /// Defaulted rather than required, because a sidecar written before
+    /// [issue #38](https://github.com/wildware-uk/clipped/issues/38) has the
+    /// key but a hand-written one may not, and a session is worth more than the
+    /// list.
+    #[serde(default)]
+    pub(crate) clips: Vec<SidecarClip>,
     #[serde(default)]
     pub(crate) events: Vec<SidecarEvent>,
 }
@@ -117,6 +125,39 @@ pub(crate) struct SidecarRecording {
     pub(crate) width: Option<u32>,
     #[serde(default)]
     pub(crate) height: Option<u32>,
+}
+
+/// One shorter file the session produced: today, a save from a recording's
+/// replay buffer.
+///
+/// `source_start_seconds` and `source_end_seconds` are offsets into the
+/// recording `source_recording` names, on that recording's own timeline, which
+/// is what the `clips` table stores and what survives the files being moved
+/// (`crates/session/src/automatic/sidecar.rs`, `docs/sessions.md`).
+///
+/// Everything but the path is optional here, and deliberately. A clip whose
+/// provenance a hand-edited file left out is still a clip the user has, and
+/// filing it with the columns that *are* legible beats refusing to index a file
+/// that exists (AGENTS.md section 16).
+#[derive(Debug, Deserialize)]
+pub(crate) struct SidecarClip {
+    /// The file, as the recorder named it.
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) created_at: Option<String>,
+    /// Which recording of the session it was cut from.
+    #[serde(default)]
+    pub(crate) source_recording: Option<u32>,
+    #[serde(default)]
+    pub(crate) source_start_seconds: Option<f64>,
+    #[serde(default)]
+    pub(crate) source_end_seconds: Option<f64>,
+    #[serde(default)]
+    pub(crate) duration_seconds: Option<f64>,
+    /// What the user called it, when anything did. Nothing names a replay clip
+    /// today; the column exists for the clips M11 creates.
+    #[serde(default)]
+    pub(crate) title: Option<String>,
 }
 
 /// One thing that happened during the session.
@@ -276,14 +317,22 @@ mod tests {
         // Within a version this build understands, an unknown field is a field
         // added by a writer that still claims compatibility. Refusing the file
         // would lose a whole session over a field nobody needed.
-        let text = MINIMAL.replace(
-            "\"events\": []",
-            "\"events\": [], \"weather\": \"raining\", \"clips\": []",
-        );
+        // `clips` used to be this test's second example, because it was a key
+        // the recorder wrote and this reader ignored. It is read now
+        // ([issue #38](https://github.com/wildware-uk/clipped/issues/38)), so a
+        // key that is still nobody's is used instead — and `bookmarks`, which
+        // the recorder writes and this build has no column for, stands in for
+        // the case that mattered: a field the *writer* has and the reader does
+        // not.
+        let text = MINIMAL.replace("\"events\": []", "\"events\": [], \"weather\": \"raining\"");
 
         let sidecar = parse(&text).expect("an unknown field is not fatal");
 
         assert_eq!(sidecar.session_id, "counter-strike-2-20260811-143205");
+        assert!(
+            sidecar.clips.is_empty(),
+            "a session that saved no clips reads as one that saved none"
+        );
     }
 
     #[test]

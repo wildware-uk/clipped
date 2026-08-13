@@ -46,7 +46,7 @@ use clipped_ipc::transport::connect;
 use clipped_ipc::{
     features, Client, ClientError, ClientMessage, Command as IpcCommand, ConnectionRole, Endpoint,
     ErrorCode, ErrorDetail, Event, EventClient, EventStream, Hello, HotkeyBinding, PeerIdentity,
-    RecorderStatus, Reply, ServerMessage, StartRecording, StopRecording,
+    RecorderStatus, Reply, SaveReplay, ServerMessage, StartRecording, StopRecording,
     MAX_CONCURRENT_CONNECTIONS, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, UNBUILT_COMMANDS,
 };
 
@@ -213,6 +213,64 @@ fn a_client_handshakes_with_a_real_recorder_and_gets_answers_to_real_commands() 
             "a recorder that was just started is not recording"
         ),
         other => panic!("expected a status, got {other:?}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn save_replay_is_a_command_this_recorder_performs_rather_than_one_it_refuses_by_name() {
+    // Issue #38 turned `save_replay` from an `UnbuiltCommand` into a real one,
+    // and this is the difference against a real process: the refusal a recorder
+    // with nothing recording gives is `not_recording` — a fact about right now,
+    // which changes when a recording starts — and **not** `not_implemented`,
+    // which is a fact about the build and never changes.
+    //
+    // The mistake it guards against is the one `add_bookmark` and the library
+    // commands already record: a command left in `UNBUILT_COMMANDS` after its
+    // subsystem landed refuses every request with a plausible sentence about a
+    // milestone, and nobody questions it.
+    let recorder = ServedRecorder::start("save-replay");
+    let mut client = recorder.client();
+
+    assert!(
+        client
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == features::REPLAY),
+        "a build that can save a replay has to say so, or the window never offers the \
+         control: {:?}",
+        client.welcome()
+    );
+
+    match client
+        .call(&IpcCommand::SaveReplay(SaveReplay::default()))
+        .expect_err("nothing is being recorded")
+    {
+        ClientError::Refused(refusal) => {
+            assert_eq!(
+                refusal.code,
+                ErrorCode::NotRecording,
+                "a recorder with nothing recording has nothing to save from: {refusal:?}"
+            );
+            assert_ne!(
+                refusal.code,
+                ErrorCode::NotImplemented,
+                "`save_replay` is built; refusing it by milestone would be a lie the UI                  would repeat"
+            );
+            assert!(
+                refusal.detail.is_none(),
+                "and it carries no milestone to point at: {refusal:?}"
+            );
+            assert!(
+                refusal.message.contains("replay buffer"),
+                "the refusal has to say what was missing: {}",
+                refusal.message
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
     }
 
     drop(client);
@@ -696,14 +754,29 @@ fn a_real_recorder_registers_the_global_hotkeys_and_says_where_each_one_stands()
          {bookmark:?}",
     );
 
+    // The row this ticket turned over. `save_replay` was the example of an
+    // action nothing performed, naming M3 and issue #38 — and issue #38 built
+    // it, so the recorder answers `save_replay` now (`crate::hotkeys`,
+    // `docs/hotkeys.md`). A row still reading as unavailable here would be the
+    // product telling a user a shipped feature is unbuilt, which is the failure
+    // AGENTS.md sections 27 and 54 name and the one nobody questions, because
+    // the sentence still reads plausibly.
     let save = row(&hotkeys, "save_replay");
-    assert!(!save.handled, "no build saves a replay yet: {save:?}");
-    let reason = save
+    assert!(
+        save.handled && save.unavailable.is_none(),
+        "this recorder answers `save_replay`, so its row must not read as unavailable: {save:?}",
+    );
+
+    // And the half that has not changed: an action nothing performs still says
+    // which milestone and issue would build it.
+    let overlay = row(&hotkeys, "open_overlay");
+    assert!(!overlay.handled, "no build opens an overlay: {overlay:?}");
+    let reason = overlay
         .unavailable
         .as_deref()
         .expect("an action nothing performs has to say why");
     assert!(
-        reason.contains("Save replay") && reason.contains("M3") && reason.contains("#38"),
+        reason.contains("Open overlay") && reason.contains("M5") && reason.contains("#53"),
         "the refusal has to name the action, the milestone and the issue: {reason}",
     );
 
