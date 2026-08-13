@@ -1279,17 +1279,16 @@ fn what_a_game_was_configured_for_reaches_the_recording_it_is_made_with() {
 /// Replaces the few things two session records of different sittings cannot
 /// share, so that everything else has to be identical.
 ///
-/// Four values, and each one is here because it *must* differ rather than
-/// because it was inconvenient: the identifier is named after the game and the
-/// moment, the game object is the whole point of the two being different
-/// sittings, and a session ends for the reason it ended. Nothing else is
-/// touched — not a key, not a settings source, not an event's fields — so a
-/// second writer, a forgotten field or an extra one fails the comparison below.
+/// Two values, and each one is here because it *must* differ rather than
+/// because it was inconvenient: the identifier carries the moment the sitting
+/// started, and a session ends for the reason it ended. Nothing else is touched
+/// — not a key, not a settings source, not an event's fields, and **not the
+/// game**, which the two sittings now have to agree about — so a second writer,
+/// a forgotten field or an extra one fails the comparison below.
 fn comparable(text: &str, session_id: &str) -> serde_json::Value {
     let mut file: serde_json::Value = serde_json::from_str(text).expect("a sidecar is JSON");
 
     file["session_id"] = serde_json::Value::from("<session>");
-    file["game"] = serde_json::Value::from("<game>");
     for event in file["events"]
         .as_array_mut()
         .expect("a session has events")
@@ -1311,18 +1310,22 @@ fn comparable(text: &str, session_id: &str) -> serde_json::Value {
 #[test]
 fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced() {
     // The acceptance criterion of issue #402, checked by *comparing two real
-    // files* rather than by asserting a shape either of them might drift from.
+    // files* rather than by asserting a shape either of them might drift from,
+    // and now issue #403's as well: the same process recorded both ways is one
+    // game recorded twice, so the two records agree about the game too and it
+    // is no longer normalised away below.
     //
     // `serve` opens a `ManualSession` and `watch` drives a `SessionManager`.
     // Both reach `Session` and `sidecar::write`, and this is what says so: the
-    // two files below are byte-identical once the identifier, the game and the
-    // reason the session ended have been replaced — and those three are the
-    // only things that can differ, because one sitting was of a game the
-    // catalogue named and the other was of a window somebody chose.
+    // two files below are byte-identical once the identifier and the reason the
+    // session ended have been replaced — and those two are the only things that
+    // can differ, because a session is named after the moment it started and
+    // ends for the reason it ended.
     //
     // A second description of a session — a hand-rolled writer in `serve`, a
     // field one path fills and the other does not, a settings block resolved
-    // through a different fold — cannot pass this.
+    // through a different fold, a second answer to "which game is this
+    // process" — cannot pass this.
     let started = t(0);
     let ended = t(60);
 
@@ -1369,8 +1372,11 @@ fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced(
             directory.path(),
             output.clone(),
             &Configuration::defaults(),
-            4_242,
-            "test-game.exe",
+            // The same catalogue the manager was built with, because that is
+            // the situation: one machine, one catalogue, one game, recorded
+            // two different ways.
+            &Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            RecordedProcess::new(4_242, "test-game.exe"),
             started,
         );
         let path = session.sidecar_path();
@@ -1394,15 +1400,16 @@ fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced(
         automatic.0
     );
 
-    // And the three that had to be replaced are not the same, which is what
+    // And the two that had to be replaced are not the same, which is what
     // makes the comparison above mean something: a normalisation that had
     // flattened the whole file would pass it too.
     assert_ne!(manual.0, automatic.0);
-    assert!(
-        manual.1.starts_with("clipped-unattributed-"),
-        "{}",
-        manual.1
-    );
+
+    // Both sittings are of Test Game, which is the whole of issue #403 in one
+    // pair of file names: before it, the first of these was
+    // `clipped-unattributed-…` and the Library screen showed the two sittings
+    // as two different things.
+    assert!(manual.1.starts_with("clipped-test-game-"), "{}", manual.1);
     assert!(
         automatic.1.starts_with("clipped-test-game-"),
         "{}",

@@ -1139,8 +1139,11 @@ fn a_real_recorder_indexes_the_recordings_folder_at_start_up_and_answers_from_it
         &recordings,
         output.clone(),
         &clipped_session::config::Configuration::defaults(),
-        4_242,
-        "cs2.exe",
+        // Deliberately empty. What is under test is indexing, and a catalogue
+        // is the one input here that would otherwise come from the machine
+        // running the test rather than from the test (AGENTS.md section 25).
+        &clipped_game_detection::catalogue::Catalogue::default(),
+        clipped_session::automatic::RecordedProcess::new(4_242, "cs2.exe"),
         std::time::SystemTime::now(),
     );
     let identifier = session.id().as_str().to_owned();
@@ -1198,6 +1201,55 @@ fn a_real_recorder_indexes_the_recordings_folder_at_start_up_and_answers_from_it
 
     drop(client);
     recorder.stop();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_recorder_whose_games_file_cannot_be_read_still_serves_and_says_so() {
+    // Issue #403's third acceptance criterion, against the real process. The
+    // catalogue is read at start-up now, because a recording started from the
+    // window is filed under the game it belongs to — and a user who has broken
+    // their own games file must lose the attribution and nothing else. `watch`
+    // refuses to start over this same file, correctly, because it has nothing
+    // to do without a catalogue; a `serve` that did the same would take the
+    // window, the tray, every recording and the library with it.
+    //
+    // The entry below is refused by the catalogue for a reason nothing can
+    // change later: a game with no executable can never match anything, so it
+    // is rejected rather than skipped (`clipped_game_detection::catalogue`).
+    let home = scratch_home("unreadable-catalogue");
+    let application_directory = home.join("AppData").join("Local").join("Clipped");
+    std::fs::create_dir_all(&application_directory).expect("the data directory can be made");
+    std::fs::write(
+        application_directory.join("games.toml"),
+        "schema_version = 1\n\n[[game]]\ngame_id = \"broken\"\nname = \"Broken\"\n",
+    )
+    .expect("the games file can be written");
+
+    // Starting at all is half the assertion: `start_under` waits for the ready
+    // line and fails if the recorder exits instead of announcing an endpoint.
+    let recorder = ServedRecorder::start_under("unreadable-catalogue", Some(&home));
+    let mut client = recorder.client();
+    assert_eq!(
+        client.call(&IpcCommand::Ping).expect("ping is answered"),
+        Reply::Pong
+    );
+    match client
+        .call(&IpcCommand::GetStatus)
+        .expect("status is answered")
+    {
+        Reply::Status { status } => assert_eq!(status, RecorderStatus::Idle),
+        other => panic!("expected a status, got {other:?}"),
+    }
+
+    drop(client);
+    let diagnostics = recorder.stop();
+    assert!(
+        diagnostics.contains("games.toml"),
+        "somebody whose games file is unreadable has to be told which file to fix, or the \
+         recordings quietly stop being attributed:\n{diagnostics}"
+    );
+
     let _ = std::fs::remove_dir_all(&home);
 }
 

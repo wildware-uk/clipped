@@ -213,13 +213,15 @@ will collect.
   the day the table exists. That is
   [#334](https://github.com/wildware-uk/clipped/issues/334).
 - **Attribution to a game.** A screenshot taken by `serve` is filed
-  `unattributed`. `serve` does open a session for a recording somebody asked for
-  ([sessions.md](sessions.md), [#402](https://github.com/wildware-uk/clipped/issues/402)),
-  but that session's game is `unidentified` — nothing asked the catalogue about
-  the window the user picked — so there is still no game to file a screenshot
-  under, and filing it under one nobody identified would be invented data
-  (AGENTS.md section 27). Same issue; identifying the game a manual session is of
-  is [#403](https://github.com/wildware-uk/clipped/issues/403).
+  `unattributed`, even now that the session it was taken during may have a game:
+  `serve` opens a session for a recording somebody asked for and the catalogue
+  names its game where it claims the window
+  ([sessions.md](sessions.md), [#402](https://github.com/wildware-uk/clipped/issues/402),
+  [#403](https://github.com/wildware-uk/clipped/issues/403)). Reading it here is
+  [#334](https://github.com/wildware-uk/clipped/issues/334) rather than #403,
+  because a screenshot taken with *nothing* recording has no session at all, so
+  filing screenshots by game is a decision about both cases. What changed is that
+  there is now something to read.
 - **Settings.** The format, the JPEG quality and the folder are typed, validated
   and defaulted in `ScreenshotSettings`, and nothing reads them from the
   configuration file: the recorder does not read the settings API at the moment a
