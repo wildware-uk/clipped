@@ -318,3 +318,149 @@ fn a_session_record_the_recorder_wrote_indexes_without_a_single_problem() {
         .expect("the session is indexed");
     assert_eq!(ended, "game-exited");
 }
+
+/// A session record for a recording somebody asked for, indexed end to end.
+///
+/// `fixtures/written-by-the-window.session.json` was captured the same way its
+/// sibling was: from `clipped_session::automatic`'s own writer, running in that
+/// crate's tests, with the temporary directory replaced by `D:\clips` and
+/// nothing else touched. It is the file the recorder writes when a recording is
+/// started over the protocol rather than by a game launching
+/// ([issue #402](https://github.com/wildware-uk/clipped/issues/402)).
+///
+/// Two things about it are new to this reader, and a build that had only been
+/// taught one of them would index half the sitting: a game of kind
+/// `unidentified`, and a session that ended because its recording did. Both are
+/// in the fixture, so both are checked by indexing it.
+#[test]
+fn a_session_record_the_window_produced_indexes_without_a_single_problem() {
+    let root = scratch_directory("window-writer");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("written-by-the-window.session.json");
+    let text = fs::read_to_string(&fixture).expect("the fixture can be read");
+    let text = text.replace(
+        "D:\\\\clips",
+        &root.display().to_string().replace('\\', "\\\\"),
+    );
+    fs::write(
+        root.join("clipped-unattributed-20260811-153205.session.json"),
+        &text,
+    )
+    .expect("the fixture can be written");
+    fs::write(
+        root.join("clipped-unattributed-20260811-153205.mkv"),
+        [0u8; 2048],
+    )
+    .expect("the recording it names can be written");
+
+    // `index` refuses any problem at all, so a `kind` or an end reason this
+    // build could not interpret fails here rather than being indexed quietly.
+    let database = index(&root);
+
+    let (session_id, game_id, end_reason): (String, Option<String>, Option<String>) = database
+        .connection()
+        .query_row(
+            "SELECT session_id, game_id, end_reason FROM sessions",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the session is indexed");
+    assert_eq!(session_id, "unattributed-20260811-153205");
+    assert_eq!(
+        game_id, None,
+        "nothing identified a game, and inventing one would be worse than saying so"
+    );
+    assert_eq!(
+        end_reason.as_deref(),
+        Some("recording-ended"),
+        "the reason a session opened for one recording ends has to survive the vocabulary \
+         the column constrains"
+    );
+
+    let games: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))
+        .expect("the games can be counted");
+    assert_eq!(games, 0, "an unattributed session must not invent a game");
+
+    let (outcome, frames, size, missing): (String, i64, i64, Option<String>) = database
+        .connection()
+        .query_row(
+            "SELECT outcome, frames_encoded, size_bytes, missing_since FROM recordings",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("the recording is indexed");
+    assert_eq!(outcome, "recorded");
+    assert_eq!(frames, 181);
+    assert_eq!(
+        size, 2048,
+        "the size comes from the file, not from the record"
+    );
+    assert_eq!(missing, None);
+}
+
+/// A `game.kind` a newer recorder invented costs the attribution and not the
+/// sitting.
+///
+/// The forward-compatibility promise `crates/session/src/automatic/sidecar.rs`
+/// makes when it adds a kind without changing `schema_version`. Without it, a
+/// user who downgraded Clipped would find every session written by the newer
+/// build missing from their library rather than merely unattributed.
+#[test]
+fn a_game_kind_this_build_has_never_heard_of_is_indexed_unattributed_and_reported() {
+    let root = scratch_directory("unknown-kind");
+    let text = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("written-by-the-window.session.json"),
+    )
+    .expect("the fixture can be read")
+    .replace("\"unidentified\"", "\"invented-by-a-later-build\"")
+    .replace(
+        "D:\\\\clips",
+        &root.display().to_string().replace('\\', "\\\\"),
+    );
+    fs::write(
+        root.join("clipped-unattributed-20260811-153205.session.json"),
+        &text,
+    )
+    .expect("the sidecar can be written");
+    fs::write(
+        root.join("clipped-unattributed-20260811-153205.mkv"),
+        [0u8; 2048],
+    )
+    .expect("the recording it names can be written");
+
+    let mut database = Database::open(root.join("library.db")).expect("a database");
+    let mut settings = IndexSettings::new([root.to_path_buf()]);
+    settings.pace = IndexPace::foreground();
+    let report = reconcile(
+        &mut database,
+        &settings,
+        &IndexControl::new(),
+        observed_at(),
+    )
+    .expect("reconciliation completes");
+
+    assert_eq!(
+        report.sessions_indexed, 1,
+        "the sitting is worth more than the one word that could not be read"
+    );
+    assert_eq!(report.recordings_indexed, 1);
+    assert_eq!(
+        report.problems.len(),
+        1,
+        "a kind this build cannot interpret must be reported rather than swallowed: {:?}",
+        report.problems
+    );
+
+    let game_id: Option<String> = database
+        .connection()
+        .query_row("SELECT game_id FROM sessions", [], |row| row.get(0))
+        .expect("the session is indexed");
+    assert_eq!(game_id, None);
+}

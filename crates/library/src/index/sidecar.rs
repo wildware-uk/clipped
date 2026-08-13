@@ -79,6 +79,20 @@ pub(crate) enum SidecarGame {
         #[serde(default)]
         candidates: Vec<String>,
     },
+    /// Nothing asked the catalogue. The session is one somebody started by
+    /// pointing at a window, so it is unattributed with nothing to attribute it
+    /// from (`clipped_session::automatic::ManualSession`).
+    Unidentified,
+    /// A kind this build has never heard of.
+    ///
+    /// Indexed as unattributed and reported, rather than refusing the session:
+    /// the recording, when it started and which files it produced are all still
+    /// legible, and losing the whole sitting over one word would be losing far
+    /// more than could not be read. This variant is also what makes
+    /// `game.kind` an open vocabulary that a new writer can add to without a
+    /// schema version — see `crates/session/src/automatic/sidecar.rs`.
+    #[serde(other)]
+    Unrecognised,
 }
 
 /// One media file the session produced.

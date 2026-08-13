@@ -1,13 +1,15 @@
 # Configuration
 
-**Status: a settings file changes what `clipped-recorder watch` records, and
-nothing else reads one yet.** `clipped_session::config` models the settings,
-resolves global and per-game layers, validates them and reads and writes
-`settings.json`. `clipped_session::automatic` uses it — every recording it asks
-for carries the settings resolved for that game — and `watch` now loads the
-file at start-up and applies what it holds to each recording it starts
-([issue #61](https://github.com/wildware-uk/clipped/issues/61), and
-["Applying a setting to a recording"](#applying-a-setting-to-a-recording)
+**Status: a settings file changes what `clipped-recorder watch` and
+`clipped-recorder serve` record, and nothing else reads one yet.**
+`clipped_session::config` models the settings, resolves global and per-game
+layers, validates them and reads and writes `settings.json`.
+`clipped_session::automatic` uses it — every recording it asks for carries the
+settings resolved for that game — and both long-running subcommands load the file
+at start-up and apply what it holds to each recording they start: `watch` since
+[issue #61](https://github.com/wildware-uk/clipped/issues/61) and `serve` since
+[issue #402](https://github.com/wildware-uk/clipped/issues/402), through the same
+call (["Applying a setting to a recording"](#applying-a-setting-to-a-recording)
 below). `clipped-recorder record` takes its settings from its command line and
 always will; that is what a command line is for. Nothing yet *writes* a
 settings file: the screen that edits all of this is
@@ -459,7 +461,12 @@ answers of its own or does not, and that decides which method it wants:
 
 `apps/recorder/src/watch.rs` is the second row: its command line names a
 resolution, a frame rate, a codec, an encoder and two audio selections before
-any game has launched.
+any game has launched. So is `apps/recorder/src/serve.rs`, for the same reason
+wearing different clothes: a `start_recording` may carry any of those parameters,
+and `apply_to` would replace every one of them with the shipped default on a
+machine with no settings file. The recording a window asks for resolves through
+the *global* layer, because nothing identified a game for it to have a layer of
+its own ([issue #403](https://github.com/wildware-uk/clipped/issues/403)).
 
 ```rust
 // at start-up, from `%LOCALAPPDATA%\Clipped\settings.json`

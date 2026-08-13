@@ -52,7 +52,14 @@ const RECORDING_OUTCOMES: &[&str] = &["recorded", "no-window", "failed"];
 /// The words `recordings.end_reason` may hold.
 const RECORDING_END_REASONS: &[&str] = &["stopped", "target-lost", "target-resized"];
 /// The words `sessions.end_reason` may hold.
-const SESSION_END_REASONS: &[&str] = &["game-exited", "system-resumed", "recorder-stopping"];
+const SESSION_END_REASONS: &[&str] = &[
+    "game-exited",
+    "system-resumed",
+    "recorder-stopping",
+    // A session opened for one recording somebody asked for, which ends when
+    // that recording does (`clipped_session::automatic::ManualSession`).
+    "recording-ended",
+];
 
 /// A sidecar that has been read, with the filesystem already consulted about
 /// every file it names.
@@ -168,6 +175,18 @@ fn write_game(
 ) -> Result<Option<String>, clipped_storage::rusqlite::Error> {
     let session = &prepared.sidecar;
     let SidecarGame::Known { game_id, name } = &session.game else {
+        if matches!(session.game, SidecarGame::Unrecognised) {
+            // Reported rather than silently unattributed: it means this build
+            // is older than the recorder that wrote the file, and a library
+            // quietly filing sessions under nothing is exactly the kind of
+            // "working" that hides an upgrade nobody performed (AGENTS.md
+            // section 54). The sitting is still indexed.
+            problems.push(IndexProblem::Unattributable {
+                session_id: session.session_id.clone(),
+                detail: "it names a kind of game this build does not know, so it is indexed \
+                         without one",
+            });
+        }
         return Ok(None);
     };
 

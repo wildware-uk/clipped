@@ -59,11 +59,18 @@ pub struct Migration {
 ///
 /// The list is the schema. A database is at version *n* when the first *n* of
 /// these have been applied to it, and nothing else counts as a schema change.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "manual_session_end_reason",
+        sql: include_str!("../migrations/0002_manual_session_end_reason.sql"),
+    },
+];
 
 /// The checksum of every migration that has been released.
 ///
@@ -73,7 +80,7 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
 /// constant: it is a fact about the repository rather than something the
 /// running application consults.
 #[cfg(test)]
-const CHECKSUMS: &[(u32, &str)] = &[(1, "afab7973dd06f9d1")];
+const CHECKSUMS: &[(u32, &str)] = &[(1, "afab7973dd06f9d1"), (2, "58c7954428d814fa")];
 
 /// The newest schema version this build understands.
 pub const SCHEMA_VERSION: u32 = latest_version(MIGRATIONS);
@@ -227,9 +234,27 @@ pub(crate) fn migrate(
 
 /// Applies each pending migration in its own transaction.
 ///
-/// Returns the versions that were applied. On failure the migration that failed
-/// has been rolled back and the ones before it are committed, which is the
-/// point: every intermediate state is a schema version some build understood.
+/// Returns the versions this connection applied. On failure the migration that
+/// failed has been rolled back and the ones before it are committed, which is
+/// the point: every intermediate state is a schema version some build
+/// understood.
+///
+/// # Two connections opening the same new database
+///
+/// This is an ordinary situation rather than an exotic one: one process holds
+/// more than one connection to its library — `apps/recorder` reads the index on
+/// the window's behalf and reconciles it on a thread of its own — and a database
+/// that does not exist yet is migrated by whichever of them opens it first.
+///
+/// Two things make that safe, and both are needed. The transaction is
+/// **immediate**, so the second connection waits for the first rather than
+/// reading a schema that is about to change under it; SQLite's deferred default
+/// would let both decide to create the same table. And the version is read again
+/// **inside** the transaction, because the pending list was worked out before
+/// the wait: without that, the second connection would wait politely and then
+/// run a migration that had already been applied, which is the
+/// `table games already exists` that issue #402 found the moment `serve` grew a
+/// second connection.
 fn apply_each(
     connection: &mut Connection,
     pending: &[&Migration],
@@ -238,8 +263,17 @@ fn apply_each(
 
     for migration in pending {
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|source| failure(migration, source))?;
+
+        let already = schema_version(&transaction).map_err(|source| failure(migration, source))?;
+        if migration.version <= already {
+            // Applied by another connection while this one waited for the write
+            // lock. Dropping the transaction rolls back nothing, because nothing
+            // has been written.
+            drop(transaction);
+            continue;
+        }
 
         transaction
             .execute_batch(migration.sql)
@@ -842,6 +876,138 @@ mod tests {
     /// `sqlite_master` holds the exact text of each `CREATE`, so comparing this
     /// between two databases compares their schemas rather than their table
     /// names.
+    #[test]
+    fn two_connections_opening_the_same_new_database_both_get_a_working_schema() {
+        // `apps/recorder` holds two: one answers the window's questions about
+        // the library and one reconciles it against the disk. On a machine with
+        // no library yet they open it at the same moment, and before this was
+        // held by a test the second one failed with `table games already exists`
+        // — which reached the window as "the recording library could not be
+        // opened", on exactly the first run, for exactly the users who had never
+        // recorded anything.
+        let directory = scratch_directory("concurrent-open");
+        let path = directory.join("library.db");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+
+        let openers: Vec<std::thread::JoinHandle<Result<MigrationOutcome, StorageError>>> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut connection = Connection::open(&path).expect("the file can be opened");
+                    connection
+                        .busy_timeout(std::time::Duration::from_secs(30))
+                        .expect("a busy timeout can be set");
+                    barrier.wait();
+                    migrate(&mut connection, Some(&path), MIGRATIONS)
+                })
+            })
+            .collect();
+
+        let mut applied = 0;
+        for opener in openers {
+            let outcome = opener
+                .join()
+                .expect("the thread did not panic")
+                .expect("every connection has to end up with a usable schema");
+            assert_eq!(outcome.to, SCHEMA_VERSION);
+            applied += outcome.applied.len();
+        }
+        assert_eq!(
+            applied,
+            MIGRATIONS.len(),
+            "each migration must be applied once in total, whichever connection got there first"
+        );
+
+        let connection = Connection::open(&path).expect("the file can be opened");
+        assert!(table_names(&connection).contains(&"sessions".to_owned()));
+    }
+
+    #[test]
+    fn rebuilding_sessions_keeps_every_row_and_everything_hanging_off_it() {
+        // Migration 2 drops and re-creates `sessions`, which is the shape of
+        // change AGENTS.md section 56 is about: a library that lost a row here
+        // has lost the route to somebody's recordings, and the recordings are
+        // what cannot be made again. `every_shipped_version_migrates_forwards`
+        // proves the *schema* survives; this proves the rows do, including the
+        // one column no sidecar can rewrite — a favourite the user set.
+        let mut connection = in_memory();
+        migrate(&mut connection, None, &MIGRATIONS[..1]).expect("a version 1 database is built");
+
+        connection
+            .execute_batch(
+                "INSERT INTO games (game_id, name, first_seen_at) \
+                     VALUES ('cs2', 'Counter-Strike 2', '2026-08-11T20:14:00+01:00'); \
+                 INSERT INTO sessions \
+                     (session_id, game_id, started_at, ended_at, end_reason, sidecar_path, \
+                      favourited_at) \
+                     VALUES ('cs2-20260811-201400', 'cs2', '2026-08-11T20:14:00+01:00', \
+                             '2026-08-11T21:00:00+01:00', 'game-exited', \
+                             'D:\\clips\\cs2.session.json', '2026-08-12T09:00:00+01:00'); \
+                 INSERT INTO session_events (session_id, at, kind) \
+                     VALUES ('cs2-20260811-201400', '2026-08-11T20:14:00+01:00', \
+                             'session-started'); \
+                 INSERT INTO session_game_candidates (session_id, game_id) \
+                     VALUES ('cs2-20260811-201400', 'half-life-2'); \
+                 INSERT INTO recordings \
+                     (session_id, session_index, path, started_at, size_bytes) \
+                     VALUES ('cs2-20260811-201400', 1, 'D:\\clips\\cs2.mkv', \
+                             '2026-08-11T20:14:00+01:00', 1024);",
+            )
+            .expect("a version 1 library can be filled");
+
+        migrate(&mut connection, None, MIGRATIONS).expect("it migrates forwards");
+
+        let session: (String, Option<String>, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT session_id, game_id, end_reason, favourited_at FROM sessions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("the session survived");
+        assert_eq!(session.0, "cs2-20260811-201400");
+        assert_eq!(session.1.as_deref(), Some("cs2"));
+        assert_eq!(session.2.as_deref(), Some("game-exited"));
+        assert_eq!(
+            session.3.as_deref(),
+            Some("2026-08-12T09:00:00+01:00"),
+            "a favourite is the user's own and is not derived from any file"
+        );
+
+        for table in ["session_events", "session_game_candidates", "recordings"] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("the table can be counted");
+            assert_eq!(rows, 1, "{table} lost its row when `sessions` was rebuilt");
+        }
+
+        // The reason the migration exists, and the check that would fail if the
+        // rebuilt table had been created with the old vocabulary.
+        connection
+            .execute("UPDATE sessions SET end_reason = 'recording-ended'", [])
+            .expect("a session may now end because its recording did");
+    }
+
+    #[test]
+    fn a_session_may_not_end_for_a_reason_nothing_writes() {
+        // The other half: the column is a vocabulary rather than free text, so
+        // a writer's typo is a failed insert instead of a session no filter
+        // ever matches. Without this, the migration above would pass just as
+        // well having dropped the constraint altogether.
+        let mut connection = in_memory();
+        migrate(&mut connection, None, MIGRATIONS).expect("a fresh database migrates");
+
+        connection
+            .execute(
+                "INSERT INTO sessions (session_id, started_at, end_reason) \
+                 VALUES ('s', '2026-08-11T20:14:00+01:00', 'recording-finished')",
+                [],
+            )
+            .expect_err("`recording-finished` is not a reason anything writes");
+    }
+
     fn schema_of(connection: &Connection) -> Vec<(String, String, String)> {
         let mut statement = connection
             .prepare(

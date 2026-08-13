@@ -424,6 +424,18 @@ An ambiguous session writes its candidates instead of a name it did not earn:
 "game": { "kind": "ambiguous", "candidates": ["half-life-2", "team-fortress-2"] }
 ```
 
+A session nobody asked the catalogue about writes neither:
+
+```json
+"game": { "kind": "unidentified" }
+```
+
+`kind` is an **open vocabulary**: `known`, `ambiguous` and `unidentified` today,
+and a kind added later does not change `schema_version`. That is a promise the
+reader keeps rather than a hope — `clipped-library` files a `kind` it has never
+met as unattributed and reports it, instead of refusing the whole sitting over
+one word it could not interpret.
+
 `event` values are `session-started`, `recording-started`, `recording-ended`,
 `game-exited`, `game-relaunched`, `another-game-started`, `system-resumed`,
 `recording-limit-reached` and `session-ended`. These are events about the
@@ -433,6 +445,49 @@ entirely, they come from plugins, and they are M9's `clipped-events`.
 A sidecar that cannot be written is a warning and nothing else. The video is what
 cannot be made again, and a metadata failure must not cost a recording
 (AGENTS.md section 17).
+
+## A session somebody asked for
+
+Everything above is about a session a *game launch* produced. There is a second
+way one starts, and it produces the same record: somebody opens Clipped, picks a
+window and presses record. The window sends `start_recording` and `serve` opens a
+session for it ([#402]).
+
+```text
+ clipped-session::automatic
+ ──────────────────────────
+ SessionManager   a game launched      ──▶ Session ──▶ sidecar::write
+ ManualSession    somebody pressed record ─┘
+```
+
+**One session, one recording, and it ends when that recording does.** There is no
+restart grace, no suspend rule and no deferral, because none of them can apply:
+the sitting is the recording. Its `session-ended` reason is `recording-ended`,
+which is a fourth value of that vocabulary and therefore a migration in
+`clipped-storage` (`docs/storage.md`).
+
+**Its game is `unidentified`.** Nothing asked the catalogue — the person chose
+the window, and the catalogue's opinion was not needed to decide whether to
+record it. That is a different statement from `ambiguous`, which means several
+catalogue entries tied, and it is filed under the same `unattributed` name for
+the same reason: a session needs something to be named after, and it must not be
+a game nobody established. Attributing such a recording to a game is [#403].
+
+**Its settings are resolved through the same fold.** `serve` reads the user's
+settings file exactly as `watch` does and lays what the user configured over what
+the request asked for, so a frame rate somebody set applies to a recording they
+started from the window, and the session's record says where each answer came
+from. A session with no `known` game resolves the *global* layer, which is not a
+special case: it is what "this game has no overrides" means.
+
+The two records are compared field for field by a test rather than described as
+similar: `clipped_session::automatic`'s
+`a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced`
+writes one of each and asserts the files are identical once the identifier, the
+game and the end reason — the only three things that *can* differ — are replaced.
+
+[#402]: https://github.com/wildware-uk/clipped/issues/402
+[#403]: https://github.com/wildware-uk/clipped/issues/403
 
 ## When part of the pipeline fails
 

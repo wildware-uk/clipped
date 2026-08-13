@@ -1275,3 +1275,137 @@ fn what_a_game_was_configured_for_reaches_the_recording_it_is_made_with() {
         "a configured recording must not be refused over a setting that has gone stale"
     );
 }
+
+/// Replaces the few things two session records of different sittings cannot
+/// share, so that everything else has to be identical.
+///
+/// Four values, and each one is here because it *must* differ rather than
+/// because it was inconvenient: the identifier is named after the game and the
+/// moment, the game object is the whole point of the two being different
+/// sittings, and a session ends for the reason it ended. Nothing else is
+/// touched — not a key, not a settings source, not an event's fields — so a
+/// second writer, a forgotten field or an extra one fails the comparison below.
+fn comparable(text: &str, session_id: &str) -> serde_json::Value {
+    let mut file: serde_json::Value = serde_json::from_str(text).expect("a sidecar is JSON");
+
+    file["session_id"] = serde_json::Value::from("<session>");
+    file["game"] = serde_json::Value::from("<game>");
+    for event in file["events"]
+        .as_array_mut()
+        .expect("a session has events")
+        .iter_mut()
+    {
+        if event["event"] == *"session-ended" {
+            event["reason"] = serde_json::Value::from("<reason>");
+        }
+    }
+
+    let rendered = serde_json::to_string(&file).expect("it re-renders");
+    assert!(
+        !rendered.contains(session_id),
+        "the identifier appears somewhere this normalisation did not reach: {rendered}"
+    );
+    file
+}
+
+#[test]
+fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced() {
+    // The acceptance criterion of issue #402, checked by *comparing two real
+    // files* rather than by asserting a shape either of them might drift from.
+    //
+    // `serve` opens a `ManualSession` and `watch` drives a `SessionManager`.
+    // Both reach `Session` and `sidecar::write`, and this is what says so: the
+    // two files below are byte-identical once the identifier, the game and the
+    // reason the session ended have been replaced — and those three are the
+    // only things that can differ, because one sitting was of a game the
+    // catalogue named and the other was of a window somebody chose.
+    //
+    // A second description of a session — a hand-rolled writer in `serve`, a
+    // field one path fills and the other does not, a settings block resolved
+    // through a different fold — cannot pass this.
+    let started = t(0);
+    let ended = t(60);
+
+    // What `watch` produces: a launch, a recording, and the recorder stopping.
+    let automatic = {
+        let mut harness = Harness::new("equivalence-automatic");
+        let actions = harness.observe(&launch(&[(4_242, "test-game.exe")]), started);
+        let request = one_start(&actions);
+        let recording = request.recording.clone();
+        // The same file for both sittings, so that the path is one more thing
+        // the two records have to agree about rather than something this test
+        // waved away. A manual recording is written where the request said; an
+        // automatic one is named after its session.
+        let output = request.output.clone();
+        harness.finished(&recording, recorded(&output, EndReason::Stopped), ended);
+        // The manager has moved on to a second recording of a game that is
+        // still running, so the sitting is closed the way Ctrl+C closes it.
+        let ended_by = harness.shut_down(ended);
+        assert!(
+            ended_by
+                .iter()
+                .any(|action| matches!(action, SessionAction::SessionEnded(_))),
+            "the automatic session has to be closed for its file to be final"
+        );
+        let path = harness.directory.path().to_path_buf();
+        let name = harness
+            .directory
+            .sidecars()
+            .pop()
+            .expect("the automatic session wrote a sidecar");
+        (
+            fs::read_to_string(path.join(&name)).expect("it can be read"),
+            name,
+            output,
+        )
+    };
+    let output = automatic.2.clone();
+
+    // What `serve` produces: somebody pressed record on the same process, and
+    // the recording ended the same way.
+    let manual = {
+        let directory = TestDirectory::new("equivalence-manual");
+        let session = ManualSession::start(
+            directory.path(),
+            output.clone(),
+            &Configuration::defaults(),
+            4_242,
+            "test-game.exe",
+            started,
+        );
+        let path = session.sidecar_path();
+        let _ = session.finish(&recorded(&output, EndReason::Stopped), ended);
+        let text = fs::read_to_string(&path).expect("it can be read");
+        (
+            text,
+            path.file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+
+    assert_eq!(
+        comparable(&manual.0, &manual.1),
+        comparable(&automatic.0, &automatic.1),
+        "a session record written for a recording somebody asked for differs from one \
+         written for a game that launched:\n\nmanual:\n{}\n\nautomatic:\n{}",
+        manual.0,
+        automatic.0
+    );
+
+    // And the three that had to be replaced are not the same, which is what
+    // makes the comparison above mean something: a normalisation that had
+    // flattened the whole file would pass it too.
+    assert_ne!(manual.0, automatic.0);
+    assert!(
+        manual.1.starts_with("clipped-unattributed-"),
+        "{}",
+        manual.1
+    );
+    assert!(
+        automatic.1.starts_with("clipped-test-game-"),
+        "{}",
+        automatic.1
+    );
+}

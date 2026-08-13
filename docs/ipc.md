@@ -618,6 +618,13 @@ the database answers for it.
    "next_cursor":"2026-08-11T20:14:00+01:00|cs2-20260811-201400"}}}}
 ```
 
+A session's `end_reason` is `game-exited`, `system-resumed`, `recorder-stopping`
+or `recording-ended` — the last for a sitting that was one recording somebody
+asked for over this protocol ([sessions.md](sessions.md)). `game_id` and
+`game_name` are absent for a sitting nothing attributed to a game, which is what
+a `start_recording` produces today: the person chose a window and nothing asked
+the catalogue about it.
+
 **An empty library is this reply, not a refusal.** `{"sessions":[]}` means the
 library was read and holds nothing matching the request. A library that could
 not be read is `library_unavailable` and says why. The two must never be drawn

@@ -125,7 +125,9 @@ pub struct LibrarySession {
     /// When it ended. Absent for a sitting that has not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
-    /// Why it ended: `game-exited`, `system-resumed` or `recorder-stopping`.
+    /// Why it ended: `game-exited`, `system-resumed`, `recorder-stopping`, or
+    /// `recording-ended` for a sitting that was one recording somebody asked for
+    /// (`docs/sessions.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
     /// Whether the user favourited the sitting itself (SPEC.md section 29).
