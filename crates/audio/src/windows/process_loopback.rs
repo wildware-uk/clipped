@@ -727,10 +727,20 @@ mod tests {
     /// thread descheduled on a shared runner comes back long after either, and
     /// the audio engine goes on capturing the whole time it is away. A bound
     /// written against the nominal duration therefore fails on a busy machine
-    /// with nothing having regressed — three of these tests did, on a commit
-    /// that changed an icon
-    /// ([issue #387](https://github.com/wildware-uk/clipped/issues/387),
-    /// AGENTS.md section 25).
+    /// with nothing having regressed — which
+    /// [issue #387](https://github.com/wildware-uk/clipped/issues/387) is about,
+    /// and which `stopping_a_capture_hands_over_the_audio_the_engine_was_still_holding`
+    /// did on a commit that changed an icon (AGENTS.md section 25).
+    ///
+    /// Two other tests in this module failed in that same run and are **not**
+    /// this: `a_process_tree_that_plays_nothing_still_produces_a_track_of_the_right_length`
+    /// failed its *lower* bound with 0.1 s of track in 1.2 s of reading
+    /// ([issue #425](https://github.com/wildware-uk/clipped/issues/425)), and
+    /// `a_game_that_re_executes_itself_is_followed_onto_the_process_that_survived`
+    /// failed on one nanosecond of contiguity in a helper this does not touch
+    /// ([issue #424](https://github.com/wildware-uk/clipped/issues/424)). Three
+    /// tests failing together is not three tests failing for one reason, and
+    /// reading it that way would have closed #387 over two live defects.
     const ENGINE_BACKLOG: Duration = Duration::from_nanos(BUFFER_DURATION as u64 * 100);
 
     /// How long the consumer stops reading for in the drain test.
