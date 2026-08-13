@@ -153,6 +153,7 @@ support bundle needs in order to answer "the hotkey does nothing"
 
 | Action | What a press sends | With nothing being recorded |
 | --- | --- | --- |
+| `save_replay` | `save_replay`, naming no recording, no duration and no file | Refused: there is no replay buffer to save from ([#38](https://github.com/wildware-uk/clipped/issues/38)) |
 | `add_bookmark` | `add_bookmark`, naming no recording | Refused: there is no recording to mark a moment in |
 | `take_screenshot` | `take_screenshot`, naming no target | Refused: there is no window to photograph |
 | `toggle_recording` | `stop_recording`, naming no recording | Refused: a key press does not say which window to record ([#416](https://github.com/wildware-uk/clipped/issues/416)) |
@@ -164,7 +165,9 @@ Settings → Hotkeys, in the desktop application. The window asks the recorder
 `get_hotkeys` (`docs/ipc.md`) and draws a row per action: the combination, what
 Windows said about it, and whether anything in this build performs it. The last
 two are separate questions, and a row that ran them together would be wrong half
-the time — `Ctrl`+`F10` registers cleanly and no build saves a replay.
+the time: `Ctrl`+`F10` is the combination another application is most likely to
+have taken, and the recorder performs Save replay whether or not Windows gave it
+that key; Open overlay is bound to nothing and would do nothing if it were.
 
 Asking rather than being told is deliberate. Registration happens when the
 recorder starts, which is usually long before a window exists, so a conflict
@@ -180,7 +183,7 @@ line and will appear in a configuration file.
 
 | Action | Name | Default | What is behind it today |
 | --- | --- | --- | --- |
-| Save replay | `save_replay` | `Ctrl`+`F10` | Nothing: the buffer and its save exist ([#37](https://github.com/wildware-uk/clipped/issues/37)), but no build runs a recording with one, which is M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
+| Save replay | `save_replay` | `Ctrl`+`F10` | **The recorder saves the clip**, through `save_replay` ([#38](https://github.com/wildware-uk/clipped/issues/38), docs/replay-buffer.md). `clipped-recorder replay` binds it too and writes the last N seconds out directly; over the protocol the recording has to be keeping a buffer, which is `active_recording.replay_seconds` |
 | Add bookmark | `add_bookmark` | `Ctrl`+`F9` | **The recorder marks the moment**, through `add_bookmark` ([#64](https://github.com/wildware-uk/clipped/issues/64), docs/bookmarks.md) |
 | Take screenshot | `take_screenshot` | — | **The recorder writes a still**, through `take_screenshot` ([#67](https://github.com/wildware-uk/clipped/issues/67), docs/screenshots.md) |
 | Start or stop recording | `toggle_recording` | — | **The recorder stops the recording that is running.** Starting one needs a window a key press cannot name, [#416](https://github.com/wildware-uk/clipped/issues/416) |
@@ -196,12 +199,15 @@ any of them.
 
 **A press with nothing behind it says so**, and it says so twice: once in the
 row `get_hotkeys` reports before anybody presses anything, and once when they
-do. It is reported as `Unhandled`,
-carrying the milestone and issue where there is one — "Save replay is not in
-this build: a recording with a replay buffer arrives in M3 (issue #38)" — and as "nothing in
-this process handles Start or stop recording" where the subsystem exists and
-this process simply was not given a handler. Nothing is ever swallowed, and no
-handler is ever faked to make a key appear to work (AGENTS.md section 54).
+do. It is reported as `Unhandled`, carrying the milestone and issue where there
+is one — "Open overlay is not in this build: the overlay arrives in M5 (issue
+#53)" — and as "nothing in this process handles Start or stop recording" where
+the subsystem exists and this process simply was not given a handler. Which of
+the two a given action gets depends on the process: `serve` supplies a handler
+for the first four rows above, `clipped-recorder replay` supplies one for Save
+replay alone, and every other subcommand registers nothing at all. Nothing is
+ever swallowed, and no handler is ever faked to make a key appear to work
+(AGENTS.md section 54).
 
 ## Conflicts
 
@@ -319,22 +325,34 @@ The dispatch rules need no keyboard and no desktop, and are unit tests in
 what a full queue does, what a panicking handler does. They run everywhere,
 including on a machine that is not Windows.
 
-### Asserting what a handler does
+### Testing what a caller wires into it
 
-`Handlers::press(action, hotkey)` runs the handler registered for an action on
-the calling thread, and is how the process that registered the handlers checks
-that each one performs the action it was registered against. It exists because
-that is otherwise unobservable: `handled()` says only *which* actions have a
-handler, `HotkeyService::start` consumes the set into worker threads, and a
-closure is opaque from the moment it goes in. The failure it catches is not a
-dead key but a key wired to the wrong action — the screenshot combination
-stopping a recording, which is worse than the screenshot combination doing
-nothing, and which every other test in the repository would call correct.
-`apps/recorder/src/hotkeys.rs` uses it once per action the recorder performs.
+A process that uses this crate has two things worth checking that neither its
+own tests nor the ones above would otherwise reach, so the crate exposes the
+seam for each rather than leaving both to be hoped about:
 
-It is not a way to test the dispatcher: it runs the handler where it is called,
-so it neither queues nor drops, and the concurrency rules above are asserted
-against `Dispatcher` instead.
+| The question | The seam | Why a real service cannot answer it |
+| --- | --- | --- |
+| Does this key do what the caller thinks it does? | `Handlers::press`, which runs one action's handler on the calling thread | A press needs a keyboard, a desktop session and the combination to be free on the machine |
+| What does the caller show when Windows refuses a combination? | `Registration::of`, which builds the report from what was asked for and what was refused | Whether `Ctrl`+`F10` is taken depends on what else is installed, so a real conflict passes or fails by accident |
+
+`Handlers::press(action, hotkey)` exists because a closure is otherwise opaque
+from the moment it goes in: `handled()` says only *which* actions have a
+handler, and `HotkeyService::start` consumes the set into worker threads. The
+failure it catches is not a dead key but a key wired to the wrong action — the
+screenshot combination stopping a recording, which is worse than the screenshot
+combination doing nothing, and which every other test in the repository would
+call correct. It refuses with the same `Unhandled` a real press would carry, so
+an action nothing performs reads the same either way.
+
+`Registration::of` is the construction `HotkeyService::start` itself uses, so
+there is one of it rather than a production path and a test-shaped imitation of
+it. `Handlers::press` is **not** how a press is delivered — it runs the handler
+where it is called, so it neither queues nor drops, and the concurrency rules
+above are asserted against `Dispatcher` instead; nothing in a running service
+may use it. `apps/recorder/src/hotkeys.rs` uses it once per action `serve`
+performs, and `apps/recorder/src/replay.rs` with
+`apps/recorder/tests/replay_clip.rs` are the worked example of both seams.
 
 Everything that needs Windows is in `crates/hotkeys/tests/windows_hotkeys.rs`,
 which registers real combinations and presses real keys with `SendInput`. It

@@ -148,11 +148,15 @@ pub struct IndexedSession {
     pub recordings: Vec<IndexedRecording>,
     /// The clips cut from it.
     ///
-    /// Empty in every database this build writes: nothing creates a clip yet
-    /// ([issue #91](https://github.com/wildware-uk/clipped/issues/91)). The
-    /// shape is here because the read is, and a clip saved with no session
-    /// behind it is not reachable from a session listing — it needs a listing of
-    /// its own, with the screen that creates one.
+    /// One per replay saved out of one of its recordings
+    /// ([issue #38](https://github.com/wildware-uk/clipped/issues/38)): the
+    /// recorder writes them into the session's sidecar and
+    /// [`super::ingest`] reads them out of it. Clips a *timeline* selection
+    /// produces are still to come
+    /// ([issue #91](https://github.com/wildware-uk/clipped/issues/91)), and a
+    /// clip saved with no session behind it is not reachable from a session
+    /// listing at all — it needs a listing of its own, with the screen that
+    /// creates one.
     pub clips: Vec<IndexedClip>,
 }
 

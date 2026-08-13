@@ -55,13 +55,13 @@
 //! (AGENTS.md section 20). Each is one small `write` and one `rename`.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use clipped_game_detection::catalogue::Catalogue;
 
 use crate::config::{Configuration, ResolvedSettings};
 
-use super::session::{Session, SessionEndReason, SessionEventKind, SessionId};
+use super::session::{Session, SessionClip, SessionEndReason, SessionEventKind, SessionId};
 use super::{identify_process, persist, resolve_for, RecordingOutcome};
 
 /// Which recording of a manual session. There is only ever the one.
@@ -247,6 +247,69 @@ impl ManualSession {
         self.session.sidecar_path(&self.directory)
     }
 
+    /// Where the next clip saved out of this session goes.
+    ///
+    /// The session names it, for the reason it names its recording: everything
+    /// one sitting produced sorts together in a directory listing, and a clip
+    /// whose name says nothing about where it came from is a file nobody can
+    /// place six months later. [`Session::clip_path`] is the naming and
+    /// [`Self::clip_saved`] is what makes the next call answer differently.
+    #[must_use]
+    pub fn next_clip_path(&self) -> PathBuf {
+        self.session
+            .clip_path(&self.directory, self.session.clips_saved() + 1)
+    }
+
+    /// Records a clip that has been written, and rewrites the sidecar.
+    ///
+    /// Called **after** the file exists, so that a session record naming a clip
+    /// is a session record whose clip is on disk: the library reconciles what
+    /// the sidecar says against the filesystem, and a row for a file that was
+    /// never written would be an entry the user cannot play (AGENTS.md
+    /// section 54).
+    ///
+    /// `source_start` and `source_end` are offsets into this session's
+    /// recording, on the recording's own timeline, which is the timeline the
+    /// replay buffer's packets are stamped on.
+    ///
+    /// A sidecar that cannot be rewritten is a warning and not a failure, for
+    /// the reason [`Self::start`] gives: the clip is what cannot be made again.
+    pub fn clip_saved(
+        &mut self,
+        path: PathBuf,
+        source_start: Duration,
+        source_end: Duration,
+        requested: Duration,
+        complete: bool,
+        now: SystemTime,
+    ) -> &SessionClip {
+        self.session.add_clip(SessionClip {
+            path,
+            created_at: now,
+            source_index: ONLY_RECORDING,
+            source_start,
+            source_end,
+            requested,
+            complete,
+        });
+        persist(&self.directory, &self.session);
+
+        let clip = self
+            .session
+            .clips()
+            .last()
+            .expect("a clip was just added to the session");
+        tracing::info!(
+            session = self.session.id().as_str(),
+            clip = %clipped_logging::RedactedPath::new(clip.path()),
+            seconds = clip.duration().as_secs_f64(),
+            requested_seconds = clip.requested().as_secs_f64(),
+            complete = clip.is_complete(),
+            "a replay clip was saved out of this session's recording"
+        );
+        clip
+    }
+
     /// Records what the recording turned out to be, closes the session and
     /// writes the sidecar for the last time.
     ///
@@ -255,6 +318,22 @@ impl ManualSession {
     /// type is gone.
     #[must_use]
     pub fn finish(mut self, outcome: &RecordingOutcome, now: SystemTime) -> Session {
+        self.finish_in_place(outcome, now);
+        self.session
+    }
+
+    /// The same, without consuming the session.
+    ///
+    /// For an owner that cannot give the session up: `apps/recorder`'s `serve`
+    /// holds it behind a mutex so that a `save_replay` arriving on a connection
+    /// thread can enter its clip in it, and taking it out of that mutex to end
+    /// it would mean waiting for every reader first. Ending it in place needs
+    /// only the lock everything else takes.
+    ///
+    /// Ending twice would write a second `session-ended` event, so callers end
+    /// a session once — which is what dropping the recording that owns it
+    /// enforces in practice.
+    pub fn finish_in_place(&mut self, outcome: &RecordingOutcome, now: SystemTime) -> &Session {
         let summary = outcome.summarise();
         let outcome_token = summary.token();
         let produced_a_file = summary.produced_a_file();
@@ -271,7 +350,7 @@ impl ManualSession {
             "the session that was opened for a recording ended, because its recording did"
         );
 
-        self.session
+        &self.session
     }
 }
 
@@ -566,6 +645,74 @@ name = "tied.exe"
         assert!(
             written.contains("recording-ended"),
             "a manual session ends because its recording did: {written}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_saved_clip_is_written_into_the_session_record_with_where_it_came_from() {
+        // The whole of "a replay reaches the library the same way a recording
+        // does" on this side of the file: the session records the clip, its
+        // bounds in the recording it was cut from, and whether the buffer held
+        // the whole request — and rewrites the sidecar immediately, so a
+        // recorder killed a second later has already said the clip exists
+        // (AGENTS.md section 17).
+        let directory = scratch("clips");
+        let mut session = ManualSession::start(
+            &directory,
+            directory.join("clipped-20260813-120000.mkv"),
+            &Configuration::defaults(),
+            &catalogue(),
+            RecordedProcess::new(4_242, "cs2.exe"),
+            moment(1_786_458_725),
+        );
+
+        let first = session.next_clip_path();
+        assert!(
+            first.ends_with(format!("clipped-{}-replay-1.mkv", session.id())),
+            "a clip is named after its session and numbered within it: {}",
+            first.display()
+        );
+
+        let clip = session.clip_saved(
+            first.clone(),
+            Duration::from_millis(553_017),
+            Duration::from_secs(583),
+            Duration::from_secs(30),
+            true,
+            moment(1_786_458_785),
+        );
+        assert_eq!(clip.duration(), Duration::from_millis(29_983));
+
+        assert_eq!(
+            session.next_clip_path(),
+            directory.join(format!("clipped-{}-replay-2.mkv", session.id())),
+            "a second save must not be handed the first one's name"
+        );
+
+        let written =
+            std::fs::read_to_string(session.sidecar_path()).expect("the sidecar is rewritten");
+        let file: serde_json::Value = serde_json::from_str(&written).expect("the sidecar is JSON");
+        let clip = &file["clips"][0];
+        assert_eq!(clip["source_recording"], serde_json::Value::from(1));
+        assert_eq!(
+            clip["source_start_seconds"],
+            serde_json::Value::from(553.017)
+        );
+        assert_eq!(clip["source_end_seconds"], serde_json::Value::from(583.0));
+        assert_eq!(clip["requested_seconds"], serde_json::Value::from(30.0));
+        assert_eq!(clip["complete"], serde_json::Value::from(true));
+        assert!(
+            clip["path"]
+                .as_str()
+                .expect("the clip names its file")
+                .ends_with("-replay-1.mkv"),
+            "{clip}"
+        );
+        assert!(
+            written.contains("replay-saved"),
+            "the save belongs in the session's history as well as in its clips: {written}"
         );
 
         let _ = std::fs::remove_dir_all(&directory);

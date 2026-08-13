@@ -47,6 +47,15 @@ track's dimensions in its header and the encoder is configured for one size. The
 file is finished at that point and says so; what a session should do instead is
 [#184](https://github.com/wildware-uk/clipped/issues/184).
 
+**`replay` keeps the last few minutes and saves them on a key.** It is `record`
+with a rolling buffer beside it: the recording runs as usual, every encoded
+packet is copied into `clipped-replay`'s buffer as well, and `Ctrl`+`F10` turns
+the last N seconds of that buffer into a clip of the thing that just happened
+([#38](https://github.com/wildware-uk/clipped/issues/38), SPEC.md sections 15
+and 16). The clip is written beside the recording, named after the session, and
+entered in the session's own record — so it reaches the library exactly as the
+recording does ([sessions.md](sessions.md), [replay-buffer.md](replay-buffer.md)).
+
 **`watch` records games automatically.** It is the mode the product exists for
 (SPEC.md section 2): a game launching starts a session recording and quitting it
 finalises one, with nothing to press
@@ -65,6 +74,7 @@ rather than only a fixture.
 
 ```text
 clipped-recorder record --window <TITLE>
+clipped-recorder replay --window <TITLE> [--duration <SECONDS>]
 clipped-recorder watch [--output-directory <PATH>]
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
@@ -73,6 +83,7 @@ clipped-recorder start-at-login <enable|disable|status>
 ```
 
 Nothing is currently specified without being declared: `record`,
+`replay` ([#38](https://github.com/wildware-uk/clipped/issues/38)),
 `watch` ([#46](https://github.com/wildware-uk/clipped/issues/46)),
 `list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)),
 `capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)),
@@ -257,6 +268,75 @@ Validation does write one thing, briefly: a uniquely named zero-byte probe file
 in the output directory, created and immediately deleted, because Windows has no
 permission bit that can be read and believed. Failing here beats failing twenty
 minutes into a session.
+
+## `replay`
+
+Records, and keeps the last few minutes to save from.
+
+```text
+clipped-recorder replay --window "Counter-Strike 2"
+```
+
+That is a complete invocation. It records exactly as `record` does — the same
+target rules, the same options, the same file in the same place — and adds two
+things:
+
+- **A rolling buffer** of the last `--duration` seconds of encoded video, held
+  in memory. There is one encoder and two consumers of its packets, so the
+  buffer costs one `memcpy` per packet and the memory its window needs, not a
+  second encode ([replay-buffer.md](replay-buffer.md)).
+- **A hotkey.** `Ctrl`+`F10` writes the last `--save-duration` seconds out as a
+  clip, beside the recording and named after the session
+  (`clipped-<session>-replay-1.mkv`, then `-2`, and so on). A combination
+  another application already owns is reported when the command starts rather
+  than discovered when a press does nothing ([hotkeys.md](hotkeys.md)).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--duration <SECONDS>` | the configured replay window, 300 unless changed | How much video the buffer keeps, from 30 to 1800 |
+| `--save-duration <SECONDS>` | the whole of `--duration` | How much one save keeps, from 1 second up |
+
+Every `record` option — `--window`, `--process`, `--pid`, `--output`,
+`--resolution`, `--framerate`, `--codec`, `--encoder`, `--microphone`,
+`--system-audio` — means exactly what it means there, because they are the same
+arguments validated by the same code.
+
+**It writes the ordinary recording as well as the clips.** SPEC.md section 4's
+Manual/Replay capture mode keeps the buffer and writes no continuous file; this
+build has no recording without one, so `replay` costs the disk what `record`
+costs it. Buffer-only capture is
+[#423](https://github.com/wildware-uk/clipped/issues/423).
+
+What comes out is not exactly what was asked for, and the command says so on
+every save:
+
+```text
+Keeping the last 5 minutes. Press Ctrl+F10 to save 5 minutes; Ctrl+C to stop.
+Replay saved: D:\clips\clipped-unattributed-20260813-201400-replay-1.mkv (5 minutes 2 seconds)
+```
+
+A clip can only begin on a keyframe, so it is up to one keyframe interval longer
+at the front than the request; and a buffer that has not filled yet gives less
+than was asked for, which is said in as many words rather than left to be
+noticed:
+
+```text
+Replay saved: …-replay-1.mkv (12 seconds)
+  18 seconds of what was asked for was not in the buffer yet.
+```
+
+A duration no buffer can hold, or a save longer than the buffer it comes from,
+is a usage error with the acceptable range in it — before a capture session
+exists, not after a game has launched:
+
+```text
+error: invalid value '4000' for '--duration <SECONDS>': a replay buffer of 4000
+seconds is outside the supported range 30-1800 seconds
+```
+
+The session is indexed by the next `serve` that starts, exactly as a `watch`
+session is: what makes a sitting findable is its sidecar, and the library run at
+start-up catches everything no run has seen ([library.md](library.md)).
 
 ## `watch`
 

@@ -344,9 +344,12 @@ would pass every other test in the repository.
 deck's tab strip and its selectable chips **at the point a screen needs them**,
 so that a component with no consumer is not designed against a guess. **The
 Library screen still does not need them**: since #301 it has one populated list
-— sessions — and two empty ones, because nothing creates a clip or a highlight
-yet, so a strip over them would still be the speculative component that issue
-exists to prevent. It belongs with the first screen that has three lists worth
+— sessions — and two the window does not draw. Clips exist on disk and in the
+database now, because a saved replay makes one
+([#38](https://github.com/wildware-uk/clipped/issues/38)), but they arrive
+*inside* a session rather than as a list of their own, and a strip over one
+populated list would still be the speculative component that issue exists to
+prevent. It belongs with the first screen that has three lists worth
 switching between, which is this one once #91 and #76 land.
 `LibraryScreen.test.tsx` asserts that no `tablist` and no `tab` is drawn, so
 adding one is a decision rather than a drift.
@@ -967,7 +970,7 @@ only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
 ```text
   Recording process `cs2.exe`          the status, not a control
   ─────────────────────────────
-  Save Replay — needs a recording with a replay buffer (#38)   disabled
+  Save Replay — this recording is not keeping a replay buffer   disabled
   Add Bookmark
   Stop Recording
   ─────────────────────────────
@@ -1029,11 +1032,13 @@ a light taskbar and nothing else in the application would notice. The recording
 disc is the one mark whose fill carries both grounds by itself.
 
 **There is no "buffering" mark**, which SPEC.md section 33's own list implies.
-The recorder cannot report one: `RecorderStatus` is `idle` or `recording`, the
-replay buffer exists as a crate and nothing in `serve` runs it, and a tray that
-showed buffering would be showing something nobody measured (AGENTS.md section
-27). It arrives with the recording that runs a buffer, in
-[issue #38](https://github.com/wildware-uk/clipped/issues/38).
+`RecorderStatus` is `idle` or `recording` and nothing else: a recording that
+keeps a replay buffer is still a recording, and it says so by carrying
+`replay_seconds` on the recording rather than by being a third state
+([#38](https://github.com/wildware-uk/clipped/issues/38)). A separate mark would
+be for the mode that keeps a buffer and records nothing, which no build has
+([#423](https://github.com/wildware-uk/clipped/issues/423)), and a tray showing
+it today would be showing something nobody measured (AGENTS.md section 27).
 
 ### Nothing offered that would do nothing
 
@@ -1042,11 +1047,18 @@ reason in its own label**. A notification-area menu has no tooltip and no help
 text, so the label is the only place a reason can go, and "greyed out with no
 explanation" is the failure AGENTS.md section 27 names.
 
-- **Save Replay** is a command the protocol defines and the recorder refuses.
-  Its label is built from `UnbuiltCommand`'s own subsystem and tracking issue —
-  the same two facts the recorder puts in the `not_implemented` refusal — so the
-  day it is built, the menu stops claiming it has not.
-- **Add Bookmark** is what that looked like the day it happened. Issue #64 built
+- **Save Replay** was a command the protocol defined and the recorder refused,
+  labelled from `UnbuiltCommand`'s own subsystem and tracking issue so that the
+  day it was built the menu would stop claiming it had not. That day was
+  [#38](https://github.com/wildware-uk/clipped/issues/38). It is now live
+  exactly when the running recording is keeping a replay buffer, and disabled
+  with the true reason otherwise: `— nothing is being recorded`, or `— this
+  recording is not keeping a replay buffer`. **In practice it is still always
+  the second**, because nothing in this window asks `start_recording` for a
+  buffer ([#427](https://github.com/wildware-uk/clipped/issues/427)) — which is
+  a fact about this recording rather than a stale claim about the build, and
+  that is the whole difference.
+- **Add Bookmark** is what that looked like the first time. Issue #64 built
   the bookmark store and the `add_bookmark` command, the refusal it quoted
   stopped existing, and the item became a control: live while something is being
   recorded, and disabled with `— nothing is being recorded` otherwise, because a
@@ -1268,13 +1280,14 @@ for days, and a toast when a recording starts would train the user to dismiss
 them without reading, taking the three that matter with it.
 
 Issue #110's scope also lists "replay saved", "bookmark added" and "screenshot
-taken". **None of them is here.** Two of the three do not exist at all:
-`clipped_replay` can write a clip out of the retained segments (issue #37), but
-no build runs a recording with a buffer to save from (issue #38) and
-`save_replay` is a command this build refuses. Notifying about something no
-subsystem reports would be the invented state AGENTS.md section 27 forbids, and
-it would be the one thing worse than a missing notification: a user believing a
-clip was saved.
+taken". **None of them is here**, and the reason for the first has changed: a
+replay *can* be saved now — `clipped-recorder replay` does it on a hotkey and
+`save_replay` does it over the protocol (issue #38) — but `serve` publishes no
+event when one is, so a window has nothing to notify from. It is the reply to
+the command it sent, and a notification for a save the *user's own window* asked
+for would be telling them what they just did. The notification belongs with the
+hotkey reaching `serve` (issue #232), where a save can happen without the window
+asking for it.
 
 Bookmarks are the third, and they *do* exist now (issue #64). A "bookmark added"
 toast is still not here, and that is a decision rather than an omission: a

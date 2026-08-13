@@ -116,6 +116,11 @@ fn the_documented_session_record_is_the_one_this_build_indexes() {
         [0u8; 128],
     )
     .expect("the recording it names can be written");
+    fs::write(
+        root.join("clipped-counter-strike-2-20260811-143205-replay-1.mkv"),
+        [0u8; 64],
+    )
+    .expect("the clip it names can be written");
 
     let database = index(&root);
 
@@ -155,6 +160,10 @@ fn the_documented_session_record_is_the_one_this_build_indexes() {
     );
 
     let recording = &written["recordings"][0];
+    let recording_row_id: i64 = database
+        .connection()
+        .query_row("SELECT recording_id FROM recordings", [], |row| row.get(0))
+        .expect("the documented recording is indexed");
     let (index, outcome, end_reason, frames, width, height, duration, size): (
         i64,
         String,
@@ -213,6 +222,64 @@ fn the_documented_session_record_is_the_one_this_build_indexes() {
         events,
         written["events"].as_array().expect("events").len() as i64,
         "an event printed in docs/sessions.md did not reach the index"
+    );
+
+    // The clip the documented session saved out of its recording
+    // ([issue #38](https://github.com/wildware-uk/clipped/issues/38)). This is
+    // the whole of "a replay reaches the library the same way a recording
+    // does": the recorder writes it into the session's own record, and the
+    // index reads it out of there into the table that was designed for it. A
+    // build that wrote clips and never indexed them would leave the user with
+    // files their library has never heard of.
+    let clip = &written["clips"][0];
+    let (path, recording_id, created, start, end, duration, size): (
+        String,
+        i64,
+        String,
+        f64,
+        f64,
+        f64,
+        i64,
+    ) = database
+        .connection()
+        .query_row(
+            "SELECT path, source_recording_id, created_at, source_start_seconds, \
+                    source_end_seconds, duration_seconds, size_bytes FROM clips",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .expect("the documented clip is indexed");
+    assert!(
+        path.ends_with("clipped-counter-strike-2-20260811-143205-replay-1.mkv"),
+        "the clip's own path has to reach the row, or nothing can play it: {path}"
+    );
+    assert_eq!(
+        recording_id, recording_row_id,
+        "a clip has to point at the recording it was cut from, or \"what depends on this \
+         recording?\" cannot be answered before a deletion (#111)"
+    );
+    assert_eq!(created, clip["created_at"].as_str().expect("a time"));
+    assert!(
+        (start - clip["source_start_seconds"].as_f64().expect("a start")).abs() < f64::EPSILON
+            && (end - clip["source_end_seconds"].as_f64().expect("an end")).abs() < f64::EPSILON,
+        "the clip's bounds in its recording have to survive being indexed"
+    );
+    assert!(
+        (duration - clip["duration_seconds"].as_f64().expect("a duration")).abs() < f64::EPSILON
+    );
+    assert_eq!(
+        size, 64,
+        "the clip's size comes from the file, exactly as a recording's does"
     );
 }
 
@@ -324,14 +391,19 @@ fn a_session_record_the_recorder_wrote_indexes_without_a_single_problem() {
 /// `fixtures/written-by-the-window.session.json` was captured the same way its
 /// sibling was: from `clipped_session::automatic`'s own writer, running in that
 /// crate's tests, with the temporary directory replaced by `D:\clips` and
-/// nothing else touched. It is the file the recorder writes when a recording is
+/// nothing else touched. Its `clips` entry and `replay-saved` event were
+/// captured from the same writer a second time, when
+/// [issue #38](https://github.com/wildware-uk/clipped/issues/38) taught it to
+/// record a saved replay, and pasted in with the same substitution. It is the file the recorder writes when a recording is
 /// started over the protocol rather than by a game launching
 /// ([issue #402](https://github.com/wildware-uk/clipped/issues/402)).
 ///
-/// Two things about it are new to this reader, and a build that had only been
-/// taught one of them would index half the sitting: a game of kind
-/// `unidentified`, and a session that ended because its recording did. Both are
-/// in the fixture, so both are checked by indexing it.
+/// Three things about it are new to this reader, and a build that had only been
+/// taught one of them would index part of the sitting: a game of kind
+/// `unidentified`, a session that ended because its recording did, and a clip
+/// saved out of the recording's replay buffer
+/// ([issue #38](https://github.com/wildware-uk/clipped/issues/38)). All three
+/// are in the fixture, so all three are checked by indexing it.
 #[test]
 fn a_session_record_the_window_produced_indexes_without_a_single_problem() {
     let root = scratch_directory("window-writer");
@@ -354,6 +426,11 @@ fn a_session_record_the_window_produced_indexes_without_a_single_problem() {
         [0u8; 2048],
     )
     .expect("the recording it names can be written");
+    fs::write(
+        root.join("clipped-unattributed-20260811-153205-replay-1.mkv"),
+        [0u8; 512],
+    )
+    .expect("the clip it names can be written");
 
     // `index` refuses any problem at all, so a `kind` or an end reason this
     // build could not interpret fails here rather than being indexed quietly.
@@ -400,6 +477,39 @@ fn a_session_record_the_window_produced_indexes_without_a_single_problem() {
         "the size comes from the file, not from the record"
     );
     assert_eq!(missing, None);
+
+    // The clip the recorder saved out of that recording's replay buffer. It is
+    // keyed on its own path and points back at the recording it was cut from,
+    // which is what makes "this clip came from that file" a query rather than a
+    // scan (`crates/storage/migrations/0001_initial.sql`).
+    let (clip_path, source, complete_size, clip_duration): (String, i64, i64, f64) = database
+        .connection()
+        .query_row(
+            "SELECT clips.path, clips.source_recording_id, clips.size_bytes,                     clips.duration_seconds              FROM clips JOIN recordings ON recordings.recording_id = clips.source_recording_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("the clip is indexed, and against the recording it came from");
+    assert!(
+        clip_path.ends_with("clipped-unattributed-20260811-153205-replay-1.mkv"),
+        "{clip_path}"
+    );
+    assert!(
+        source > 0,
+        "a clip has to name the recording it was cut from"
+    );
+    assert_eq!(complete_size, 512, "the clip's size comes from its file");
+    assert!((clip_duration - 29.983).abs() < f64::EPSILON);
+
+    // And re-indexing the same sidecar must not produce a second clip: the
+    // path is the natural key, so a library re-walked every start-up would
+    // otherwise grow a row per run (`clipped_library::index::ingest`).
+    let database = index(&root);
+    let clips: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))
+        .expect("the clips can be counted");
+    assert_eq!(clips, 1, "re-indexing wrote the clip a second time");
 }
 
 /// A `game.kind` a newer recorder invented costs the attribution and not the

@@ -278,8 +278,9 @@ the frame that went to both the file and the buffer, and the sidecar belongs to
 the file.
 
 A recording that fills a buffer and writes *no* file has nothing for a bookmark
-to be an offset into, and no build makes one — starting a buffered recording at
-all is [issue #38](https://github.com/wildware-uk/clipped/issues/38). What a
+to be an offset into, and no build makes one: `clipped-recorder replay` fills a
+buffer *and* writes the recording, and a capture that keeps only the buffer is
+[issue #423](https://github.com/wildware-uk/clipped/issues/423). What a
 bookmark should mean in that mode is a decision for the ticket that builds it,
 and the honest answer today is that this build cannot be in that state.
 

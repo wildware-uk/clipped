@@ -75,6 +75,8 @@ pub(crate) struct PreparedSession {
     pub(crate) sidecar_path: PathBuf,
     /// Each recording's file, in the same order as `sidecar.recordings`.
     pub(crate) files: Vec<PreparedFile>,
+    /// Each clip's file, in the same order as `sidecar.clips`.
+    pub(crate) clip_files: Vec<PreparedFile>,
 }
 
 /// One recording's file, as the filesystem describes it.
@@ -117,11 +119,24 @@ pub(crate) fn prepare(path: &Path) -> Result<PreparedSession, SidecarError> {
             PreparedFile { path, facts }
         })
         .collect();
+    // Through the same resolution a recording's path goes through, so that a
+    // folder moved to another drive carries its clips as well as its
+    // recordings.
+    let clip_files = sidecar
+        .clips
+        .iter()
+        .map(|clip| {
+            let path = sidecar::recording_path(directory, &clip.path);
+            let facts = presence::look_at(&path);
+            PreparedFile { path, facts }
+        })
+        .collect();
 
     Ok(PreparedSession {
         sidecar,
         sidecar_path: path.to_path_buf(),
         files,
+        clip_files,
     })
 }
 
@@ -161,7 +176,11 @@ pub(crate) fn write(
 
     write_candidates(savepoint, session)?;
     write_events(savepoint, session)?;
-    write_recordings(savepoint, prepared, observed_at, problems)
+    let written = write_recordings(savepoint, prepared, observed_at, problems)?;
+    // After the recordings, because a clip points at the one it was cut from
+    // and the row it points at has to exist.
+    write_clips(savepoint, prepared, problems)?;
+    Ok(written)
 }
 
 /// Writes the session's game, and answers which game the session is of.
@@ -506,6 +525,128 @@ fn write_recording(
         newly_missing: judged.newly_missing,
         returned: judged.returned,
     })
+}
+
+/// Writes the clips the session saved out of its recordings.
+///
+/// A clip's natural key is its **path**, because a clip has no ordinal within
+/// its session the way a recording does: they are saved when somebody presses a
+/// key, and the file is the thing. `clips.path` is `UNIQUE`, so re-indexing the
+/// same sidecar updates the row it wrote last time rather than adding another.
+///
+/// A row the trash has moved is found by where it *came from*
+/// (`clips.deleted_from`) and keeps its own `path`, which is where the file
+/// actually is now — exactly as [`write_recording`] keeps a trashed
+/// recording's. Writing the sidecar's path over it would lose the only record
+/// of where the file went and make restoring it impossible (AGENTS.md
+/// section 56).
+///
+/// Presence is deliberately **not** judged here. Every clip row is looked at by
+/// the pass over rows nothing claimed, in the same run
+/// (`super::reconcile_rows`), so a clip whose file has gone is marked there
+/// with the same rule and counted in the same figures as every other one.
+fn write_clips(
+    savepoint: &Savepoint<'_>,
+    prepared: &PreparedSession,
+    problems: &mut Vec<IndexProblem>,
+) -> Result<(), clipped_storage::rusqlite::Error> {
+    let session = &prepared.sidecar;
+
+    for (clip, file) in session.clips.iter().zip(&prepared.clip_files) {
+        if clip.path.trim().is_empty() {
+            problems.push(IndexProblem::UnknownToken {
+                session_id: session.session_id.clone(),
+                field: "clip path",
+                value: String::new(),
+            });
+            continue;
+        }
+
+        let path = file.path.display().to_string();
+        let source_recording_id = match clip.source_recording {
+            None => None,
+            Some(index) => savepoint
+                .prepare(
+                    "SELECT recording_id FROM recordings WHERE session_id = ?1 \
+                     AND session_index = ?2",
+                )?
+                .query_row(params![session.session_id, index], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()?,
+        };
+
+        let existing: Option<(i64, String, bool)> = savepoint
+            .prepare(
+                "SELECT clip_id, path, deleted_at IS NOT NULL FROM clips \
+                 WHERE path = ?1 OR deleted_from = ?1",
+            )?
+            .query_row(params![path], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()?;
+
+        // The size of the file as it is now, or nothing when it is not there —
+        // the row keeps whatever it had, for the reason a recording's does.
+        let size_bytes = file
+            .facts
+            .present
+            .then_some(file.facts.size_bytes)
+            .flatten();
+
+        match existing {
+            Some((clip_id, row_path, deleted)) => {
+                let path = if deleted { row_path } else { path };
+                savepoint
+                    .prepare(
+                        "UPDATE clips SET session_id = ?2, source_recording_id = ?3, path = ?4, \
+                             title = COALESCE(?5, title), created_at = COALESCE(?6, created_at), \
+                             source_start_seconds = ?7, source_end_seconds = ?8, \
+                             duration_seconds = ?9, size_bytes = COALESCE(?10, size_bytes) \
+                         WHERE clip_id = ?1",
+                    )?
+                    .execute(params![
+                        clip_id,
+                        session.session_id,
+                        source_recording_id,
+                        path,
+                        clip.title,
+                        clip.created_at,
+                        clip.source_start_seconds,
+                        clip.source_end_seconds,
+                        clip.duration_seconds,
+                        size_bytes,
+                    ])?;
+            }
+            None => {
+                savepoint
+                    .prepare(
+                        "INSERT INTO clips (session_id, source_recording_id, path, title, \
+                             created_at, source_start_seconds, source_end_seconds, \
+                             duration_seconds, size_bytes) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    )?
+                    .execute(params![
+                        session.session_id,
+                        source_recording_id,
+                        path,
+                        clip.title,
+                        // `created_at` is NOT NULL in the schema. A clip whose
+                        // sidecar entry does not say when it was saved is filed
+                        // at the moment the session started, which is the
+                        // nearest true thing this row can say and keeps it
+                        // sortable beside its session.
+                        clip.created_at.as_deref().unwrap_or(&session.started_at),
+                        clip.source_start_seconds,
+                        clip.source_end_seconds,
+                        clip.duration_seconds,
+                        size_bytes,
+                    ])?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The reason the session ended, from the event that says so.

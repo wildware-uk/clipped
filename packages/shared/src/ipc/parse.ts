@@ -62,6 +62,7 @@ import type {
   RecorderStatus,
   RecordingSummary,
   Reply,
+  ReplaySummary,
   ScreenshotSummary,
   ServerMessage,
   Welcome,
@@ -339,6 +340,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'bookmark_added', bookmark: readBookmark(reply['bookmark']) };
     case 'screenshot_taken':
       return { reply: 'screenshot_taken', screenshot: readScreenshot(reply['screenshot']) };
+    case 'replay_saved':
+      return { reply: 'replay_saved', clip: readReplay(reply['clip']) };
     case 'library_sessions':
       return { reply: 'library_sessions', page: readSessionPage(reply['page']) };
     case 'library_games':
@@ -373,11 +376,16 @@ function readReply(value: JsonValue | undefined): Reply {
 
 function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
   const recording = object(value, 'a recording');
+  const replay = optionalNumberField(recording, 'replay_seconds', 'a recording');
   return {
     recording_id: stringField(recording, 'recording_id', 'a recording'),
     output: stringField(recording, 'output', 'a recording'),
     target: stringField(recording, 'target', 'a recording'),
     elapsed_ms: numberField(recording, 'elapsed_ms', 'a recording'),
+    // Absent is "this recording keeps no replay buffer", which is an answer
+    // rather than a gap: the recorder skips the field entirely for one that
+    // was started without one.
+    ...(replay === undefined ? {} : { replay_seconds: replay }),
   };
 }
 
@@ -490,6 +498,23 @@ function readScreenshot(value: JsonValue | undefined): ScreenshotSummary {
     bytes: numberField(screenshot, 'bytes', what),
     ...(recording === undefined ? {} : { recording_id: recording }),
     ...(at === undefined ? {} : { at_seconds: at }),
+  };
+}
+
+function readReplay(value: JsonValue | undefined): ReplaySummary {
+  const clip = object(value, 'a replay clip');
+  const what = 'a replay clip';
+  return {
+    path: stringField(clip, 'path', what),
+    recording_id: stringField(clip, 'recording_id', what),
+    requested_seconds: numberField(clip, 'requested_seconds', what),
+    duration_seconds: numberField(clip, 'duration_seconds', what),
+    source_start_seconds: numberField(clip, 'source_start_seconds', what),
+    source_end_seconds: numberField(clip, 'source_end_seconds', what),
+    leading_slack_seconds: numberField(clip, 'leading_slack_seconds', what),
+    complete: booleanField(clip, 'complete', what),
+    shortfall_seconds: numberField(clip, 'shortfall_seconds', what),
+    bytes: numberField(clip, 'bytes', what),
   };
 }
 

@@ -1,12 +1,13 @@
 //! Records a real window with a replay buffer attached, and says what the
 //! buffer ended up holding.
 //!
-//! This is how [`clipped_session::record_with_replay`] is exercised end to end
-//! before there is a command that turns a replay buffer on
-//! ([issue #38](https://github.com/wildware-uk/clipped/issues/38)). Everything
-//! in it is real: the Windows Graphics Capture backend, a hardware encoder
-//! session, the Matroska writer, and the buffer being filled from the same
-//! packets the file is written from.
+//! `clipped-recorder replay` is the command a person uses
+//! ([issue #38](https://github.com/wildware-uk/clipped/issues/38)); this is the
+//! same wiring with the buffer's own accounting printed instead of a clip, for
+//! looking at what a window's worth of history costs and what a save would have
+//! got out of it. Everything in it is real: the Windows Graphics Capture
+//! backend, a hardware encoder session, the Matroska writer, and the buffer
+//! being filled from the same packets the file is written from.
 //!
 //! It is an example rather than a test because it needs a GPU, a desktop
 //! session and a window to point at — the same reasons `tests/capture` is
@@ -42,10 +43,8 @@ mod windows_only {
     use std::time::Instant;
 
     use clap::Parser;
-    use clipped_encoder::BitRate;
-    use clipped_replay::{ReplayBuffer, ReplayConfig};
     use clipped_session::{
-        record_with_replay, CaptureTargetSettings, RecordingSettings, StopSignal,
+        record_with_replay, CaptureTargetSettings, RecordingSettings, ReplayRecording, StopSignal,
     };
 
     #[derive(Debug, Parser)]
@@ -116,18 +115,11 @@ mod windows_only {
             output.clone(),
         );
 
-        // The rate `clipped-session` gives a recording of this size, which is
-        // what the buffer has to be sized from: it is a consumer of the packets
-        // that rate produces (`crates/session/src/encoding.rs`).
-        let bits =
-            f64::from(args.width) * f64::from(args.height) * f64::from(settings.framerate()) * 0.15;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let bitrate = BitRate::bits_per_second(bits.clamp(2_000_000.0, 120_000_000.0) as u32)
-            .ok_or("a bitrate of zero is not a bitrate")?;
-
-        let replay = ReplayConfig::new(Duration::from_secs(args.replay_seconds), bitrate)?;
-        let buffer = ReplayBuffer::new(replay);
-        println!("replay buffer: {replay}");
+        // The buffer itself is built by the recording, once its encoder is open:
+        // the rate a buffer sizes its memory ceiling from is the rate that
+        // encoder was configured with, and the size capture actually produces
+        // is not the size a window was measured at (`clipped_session::replay`).
+        let replay = ReplayRecording::new(Duration::from_secs(args.replay_seconds))?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let timer = {
@@ -142,13 +134,16 @@ mod windows_only {
         };
 
         let started = Instant::now();
-        let report = record_with_replay(&settings, &Deadline(Arc::clone(&stop)), &buffer)?;
+        let report = record_with_replay(&settings, &Deadline(Arc::clone(&stop)), &replay)?;
         timer.join().map_err(|_| "the timer thread panicked")?;
 
         println!();
         println!("{report}");
         println!();
 
+        let buffer = replay
+            .buffer()
+            .ok_or("the recording produced no replay buffer")?;
         let stats = buffer.stats();
         println!(
             "replay buffer after {:.1} s",

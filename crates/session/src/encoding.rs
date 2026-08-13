@@ -70,6 +70,15 @@ pub(crate) struct OpenedEncoder {
     pub(crate) kind: EncoderKind,
     /// What it is producing.
     pub(crate) codec: Codec,
+    /// How many bits a second it was configured for.
+    ///
+    /// Carried out of here rather than recomputed by whoever wants it, because
+    /// it is chosen from the size capture is *actually* producing rather than
+    /// the size that was asked for — and a replay buffer sizes its memory
+    /// ceiling from it (`crate::replay`, `docs/replay-buffer.md`). Two places
+    /// deriving a bitrate from a picture would be two answers (AGENTS.md
+    /// section 55).
+    pub(crate) bitrate: BitRate,
 }
 
 /// Opens an encoder for `settings`, against the device the frames are on.
@@ -99,13 +108,15 @@ pub(crate) fn open(
         Probing::WithoutSessions,
     )?;
 
+    let bitrate = bitrate_for(size, frame_rate);
+
     let mut attempts = Vec::new();
     for (kind, codec) in candidates(settings, detection.report()) {
         let config = EncoderConfig::new(
             codec,
             resolution,
             frame_rate,
-            rate_control(size, frame_rate),
+            RateControl::constant(bitrate),
         )
         .with_keyframe_interval(KeyframeInterval::every(
             KeyframeInterval::DEFAULT,
@@ -138,6 +149,7 @@ pub(crate) fn open(
                     encoder,
                     kind,
                     codec,
+                    bitrate,
                 });
             }
             Err(error) => {
@@ -244,17 +256,21 @@ fn open_one(
 }
 
 /// How many bits a second a recording of this size and rate is given.
-fn rate_control(size: (u32, u32), frame_rate: FrameRate) -> RateControl {
+///
+/// The rate itself rather than the [`RateControl`] wrapping it, because two
+/// things need the answer: the encoder is configured with it, and a replay
+/// buffer running alongside the recording sizes its memory ceiling from it
+/// (`crate::replay`). Deriving it twice would be two answers to one question
+/// (AGENTS.md section 55).
+fn bitrate_for(size: (u32, u32), frame_rate: FrameRate) -> BitRate {
     let bits =
         f64::from(size.0) * f64::from(size.1) * frame_rate.as_f64() * BITS_PER_PIXEL_PER_FRAME;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let clamped = bits.clamp(f64::from(MINIMUM_BITRATE), f64::from(MAXIMUM_BITRATE)) as u32;
 
-    RateControl::constant(
-        BitRate::bits_per_second(clamped)
-            .unwrap_or_else(|| BitRate::megabits_per_second(MINIMUM_BITRATE / 1_000_000)),
-    )
+    BitRate::bits_per_second(clamped)
+        .unwrap_or_else(|| BitRate::megabits_per_second(MINIMUM_BITRATE / 1_000_000))
 }
 
 /// What the encoder should be told the incoming frames look like.
@@ -298,10 +314,13 @@ mod tests {
     }
 
     fn rate_of(width: u32, height: u32, fps: u32) -> u32 {
-        match rate_control(
+        // Through `RateControl` rather than reading the bitrate directly, so
+        // that what these figures describe is still what the encoder is
+        // configured with.
+        match RateControl::constant(bitrate_for(
             (width, height),
             FrameRate::new(fps, 1).expect("a real rate"),
-        ) {
+        )) {
             RateControl::Bitrate { average, .. } => average.as_bits_per_second(),
             other => panic!("expected a bitrate, got {other}"),
         }

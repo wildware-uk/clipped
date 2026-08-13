@@ -384,7 +384,18 @@ one sitting, one file — produces a file named after the session and nothing el
       }
     }
   ],
-  "clips": [],
+  "clips": [
+    {
+      "path": "D:\\clips\\clipped-counter-strike-2-20260811-143205-replay-1.mkv",
+      "created_at": "2026-08-11T14:41:52+01:00",
+      "source_recording": 1,
+      "source_start_seconds": 553.017,
+      "source_end_seconds": 583.0,
+      "duration_seconds": 29.983,
+      "requested_seconds": 30.0,
+      "complete": true
+    }
+  ],
   "bookmarks": [],
   "events": [
     { "at": "2026-08-11T14:32:05+01:00", "event": "session-started", "pid": 4242, "image_name": "cs2.exe" },
@@ -409,11 +420,31 @@ reader that does not know the key ignores it. A sidecar written by an older
 build has no `settings` on its recordings, which is not the same as a recording
 made at the defaults.
 
-`clips` and `bookmarks` are **always empty in this build**. They are written so
-that a reader can tell "no clips" from "a file that predates clips", and so that
-filling either is an addition rather than a change of shape (AGENTS.md section
-43). Their presence is not a claim that a session has none: no build can make a
-clip at all ([#38]), and a session's bookmarks are in its recordings' own files
+`clips` is **one entry per replay saved out of this session's recordings**
+([#38]). A save takes the last N seconds out of the recording's replay buffer
+and writes a shorter file beside it, and this is where the session says what
+that file is and which part of which recording it came from:
+
+- `source_recording` is a recording's `index` in the list above, and
+  `source_start_seconds`/`source_end_seconds` are offsets into *that recording's
+  own timeline* rather than wall-clock times, so they still mean something after
+  the folder has been moved to another drive. They are the two columns
+  `clipped-storage`'s `clips` table already has for exactly this.
+- `requested_seconds` and `complete` are what the library does not store and a
+  person reading the file wants. A clip is bought at keyframe granularity, so it
+  is usually slightly longer at the front than was asked for; and a buffer that
+  had not filled yet gives less, which is what `complete: false` records. "I
+  pressed the key for thirty seconds and got twelve" has an answer here
+  (`docs/replay-buffer.md`).
+
+The key was reserved from the first version of this schema and is filled now, so
+the `schema_version` is unchanged: a reader that ignores it loses the clips and
+still indexes the sitting. A session that saved none writes an empty list, as
+every session did before.
+
+`bookmarks` is **still always empty**. It is written so that a reader can tell
+"no bookmarks" from "a file that predates them", and its presence is not a claim
+that a session has none: a session's bookmarks are in its recordings' own files
 (`docs/bookmarks.md`). Nothing can take a bookmark during an automatic session
 yet either: `watch` serves no protocol, so no `add_bookmark` can reach it, and
 it registers no hotkey either — the global hotkeys belong to `serve`
@@ -439,8 +470,11 @@ met as unattributed and reports it, instead of refusing the whole sitting over
 one word it could not interpret.
 
 `event` values are `session-started`, `recording-started`, `recording-ended`,
-`game-exited`, `game-relaunched`, `another-game-started`, `system-resumed`,
-`recording-limit-reached` and `session-ended`. These are events about the
+`replay-saved`, `game-exited`, `game-relaunched`, `another-game-started`,
+`system-resumed`, `recording-limit-reached` and `session-ended`. A
+`replay-saved` carries the `index` of the recording it came out of and the
+`output` it was written to — the same clip `clips` describes, in the session's
+history, so that "what happened during this sitting" reads in order. These are events about the
 *session*; game events — a kill, a round starting — are a different vocabulary
 entirely, they come from plugins, and they are M9's `clipped-events`.
 

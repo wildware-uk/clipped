@@ -975,6 +975,9 @@ mod tests {
             output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 754_000,
+            // The window does not ask for a replay buffer, so a recording it
+            // started keeps none (#427).
+            replay_seconds: None,
         })
     }
 

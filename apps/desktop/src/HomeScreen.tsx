@@ -37,8 +37,9 @@ const RECENT = 5;
  * link `clipped-library` (`docs/library.md`, ADR 0002, issue #301).
  *
  * The other two are still waiting on the things that produce them rather than on
- * a way to read them: nothing creates a clip yet (#91), and nothing can
- * favourite anything (#58).
+ * a way to read them: a saved replay is the only thing that makes a clip (#38),
+ * the timeline that would make the rest is #91, and nothing can favourite
+ * anything (#58).
  *
  * A library that could not be read says so and says why. It is never drawn as an
  * empty one: four tiles reading "0" over a database that could not be opened

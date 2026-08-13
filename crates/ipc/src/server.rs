@@ -958,6 +958,7 @@ mod tests {
                     output: r"D:\clips\session.mkv".to_owned(),
                     target: "process `cs2.exe`".to_owned(),
                     elapsed_ms: 4_200,
+                    replay_seconds: None,
                 }),
             }
         }

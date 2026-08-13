@@ -413,6 +413,7 @@ dependencies = [
  "clipped-media-validation",
  "clipped-muxer",
  "clipped-plugins",
+ "clipped-replay",
  "clipped-session",
  "clipped-storage",
  "clipped-windows",
