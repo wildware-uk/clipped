@@ -453,6 +453,7 @@ produces documentation that is wrong on the day it is committed.
 Supporting documents that are not subsystems:
 
 - [prerequisites.md](prerequisites.md) — toolchain and platform requirements.
+- [packaging.md](packaging.md) — what the installer puts beside the window, and why.
 - [privacy.md](privacy.md) — the privacy and network access policy.
 - [logging.md](logging.md) — structured logging and log configuration.
 - [adr/](adr/) — architecture decision records.
