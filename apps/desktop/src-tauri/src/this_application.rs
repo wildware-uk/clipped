@@ -723,6 +723,24 @@ mod tests {
     }
 
     #[test]
+    fn the_idle_process_is_not_part_of_this_application() {
+        // Process 0 is what Windows answers for a window it has no process
+        // for, so this is the identifier the foreground hands over whenever it
+        // could not name one — and `includes` decides it before the table is
+        // ever read.
+        //
+        // Which way it is decided is not a formality. Answering `true` would
+        // claim the idle process as Clipped's own, and every window Windows
+        // declined to name a process for would silently stop being offered for
+        // recording: the bug issue #390 is about, pointed at whatever the user
+        // was actually looking at.
+        assert!(
+            !includes(0),
+            "the idle process is neither this process nor one it started"
+        );
+    }
+
+    #[test]
     fn a_process_this_one_started_is_part_of_this_application_and_its_creator_is_not() {
         // The half of `includes` that the written-down tables above cannot
         // reach: that the real process table is read, that the identifiers in
@@ -786,6 +804,53 @@ mod tests {
         assert!(
             child_started >= this_started,
             "the times are the processes' own, and a child cannot have started before its parent"
+        );
+    }
+
+    #[test]
+    fn the_creation_time_the_real_call_site_reads_is_a_whole_file_time() {
+        // `ticks` is held to this below, and that is not enough on its own:
+        // `creation_time` is the only place a real process's creation time is
+        // produced, and it could drop the high half itself — the same mistake,
+        // made one call frame up from the helper written to prevent it. Every
+        // tree in this module writes its own times down, so every one of them
+        // goes on passing while the production path returns half a time.
+        //
+        // The consequence is not a rounding error. `table_read_at` comes from
+        // `file_time_now`, which keeps its high half, so `process <=
+        // table_read_at` would be vacuously true and the recycled-identifier
+        // half of `consistent_with` would switch off entirely; `process >=
+        // parent` would meanwhile compare two numbers across a wrap every 429
+        // seconds.
+        //
+        // A file time is 100-nanosecond ticks since 1601, so a process running
+        // now started around 1.3 x 10^17 of them in — some thirty million
+        // times `u32::MAX`. A creation time that fits in thirty-two bits is
+        // therefore not a time at all: it is one half of one.
+        let before_it_started = file_time_now();
+        let mut child = a_process_this_one_started();
+        let child_started = started_at_asking_windows(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            child_started.is_some_and(|started| started > u64::from(u32::MAX)),
+            "a real process's creation time carries a high half: {child_started:?}"
+        );
+        assert!(
+            this_process_started_at().is_some_and(|started| started > u64::from(u32::MAX)),
+            "and so does the one remembered for this process: {:?}",
+            this_process_started_at()
+        );
+        // The size is not the whole of it. Dropping the *low* half leaves a
+        // number well above `u32::MAX` and up to 429 seconds early, and
+        // reading one of the other three `FILETIME`s leaves a number that is
+        // not a moment at all — neither of them a moment a process spawned
+        // just now could have started at.
+        assert!(
+            child_started.is_some_and(|started| started >= before_it_started),
+            "and it is the moment the process started, which was after this one was read: \
+             {child_started:?} against {before_it_started}"
         );
     }
 
