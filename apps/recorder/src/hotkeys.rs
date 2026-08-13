@@ -434,17 +434,33 @@ mod tests {
         }
     }
 
+    /// Presses `action`'s key through the handler `handlers_for` registered for
+    /// it, and answers with what the recorder was asked for.
+    ///
+    /// The three tests below go through this and **not** through [`perform`]
+    /// directly, which is the whole point of them. `perform` is told which
+    /// action to run, so a test that calls it proves only that `perform` maps an
+    /// action it was handed to a command. What it cannot see is
+    /// [`handlers_for`] registering a closure against the wrong action — and
+    /// that is not a dead key but a key that does something other than what its
+    /// row on the settings screen says it does.
+    fn pressed(recorder: &Arc<AskedRecorder>, action: HotkeyAction) -> Vec<Command> {
+        let mut handlers = handlers_for(&handler(recorder));
+
+        handlers
+            .press(action, a_combination())
+            .unwrap_or_else(|unhandled| {
+                panic!("this build performs {action}, so its key must have a handler: {unhandled}")
+            });
+
+        recorder.asked()
+    }
+
     #[test]
-    fn a_bookmark_press_sends_the_command_the_window_sends_with_no_recording_named() {
+    fn the_handler_registered_for_add_bookmark_bookmarks_whatever_is_running() {
         let recorder = Arc::new(AskedRecorder::recording());
 
-        perform(
-            &handler(&recorder),
-            HotkeyAction::AddBookmark,
-            a_combination(),
-        );
-
-        match recorder.asked().as_slice() {
+        match pressed(&recorder, HotkeyAction::AddBookmark).as_slice() {
             [Command::AddBookmark(request)] => assert_eq!(
                 request.recording_id, None,
                 "a key press means whatever is running, because it cannot mean anything else",
@@ -453,19 +469,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_handler_registered_for_take_screenshot_takes_a_screenshot() {
+        let recorder = Arc::new(AskedRecorder::recording());
+
+        match pressed(&recorder, HotkeyAction::TakeScreenshot).as_slice() {
+            [Command::TakeScreenshot(request)] => assert_eq!(
+                request.pid, None,
+                "a key press names no window: the picture comes from a frame already captured",
+            ),
+            other => panic!("a screenshot press must send one `take_screenshot`, not {other:?}"),
+        }
+    }
+
     /// The half of `toggle_recording` this build performs, and the reason the
     /// action is given a handler at all.
     #[test]
-    fn a_toggle_press_while_recording_stops_the_recording_that_is_running() {
+    fn the_handler_registered_for_toggle_recording_stops_the_recording_that_is_running() {
         let recorder = Arc::new(AskedRecorder::recording());
 
-        perform(
-            &handler(&recorder),
-            HotkeyAction::ToggleRecording,
-            a_combination(),
-        );
-
-        match recorder.asked().as_slice() {
+        match pressed(&recorder, HotkeyAction::ToggleRecording).as_slice() {
             [Command::StopRecording(stop)] => assert_eq!(
                 stop.recording_id, None,
                 "a toggle stops whatever is running, which is all a key press can mean",

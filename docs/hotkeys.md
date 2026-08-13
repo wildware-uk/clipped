@@ -218,13 +218,19 @@ for conflict in service.registration().conflicts() {
 
 ```text
 Ctrl+F10 could not be Clipped's shortcut for Save replay: another application
-already uses it. Discord, Steam, NVIDIA's overlay and GeForce Experience all
-claim function-key combinations, and Windows reserves a few of its own. Choose a
-different combination, or close the application that has this one and try again.
+already uses it, and that includes another copy of Clipped: only one process can
+hold a combination. Discord, Steam, NVIDIA's overlay and GeForce Experience all
+claim function-key combinations too, and Windows reserves a few of its own.
+Choose a different combination, or close the application that has this one and
+try again.
 ```
 
 That is the shape AGENTS.md section 45 asks for: what failed, who is likely to
-have it, and what to do next. A refusal that is *not* a conflict carries the
+have it, and what to do next. Clipped is named among the culprits because it is
+one: a recorder already running holds these combinations, which is what a second
+`clipped-recorder serve` on an endpoint of its own runs into. Listing only the
+overlays sent that user looking through Discord's settings for a binding that
+was never there. A refusal that is *not* a conflict carries the
 `HRESULT` instead, because a code belongs in the diagnostics rather than in the
 sentence a user reads.
 
@@ -312,6 +318,23 @@ The dispatch rules need no keyboard and no desktop, and are unit tests in
 `src/dispatch.rs`: what a slow handler delays, what an unhandled action reports,
 what a full queue does, what a panicking handler does. They run everywhere,
 including on a machine that is not Windows.
+
+### Asserting what a handler does
+
+`Handlers::press(action, hotkey)` runs the handler registered for an action on
+the calling thread, and is how the process that registered the handlers checks
+that each one performs the action it was registered against. It exists because
+that is otherwise unobservable: `handled()` says only *which* actions have a
+handler, `HotkeyService::start` consumes the set into worker threads, and a
+closure is opaque from the moment it goes in. The failure it catches is not a
+dead key but a key wired to the wrong action — the screenshot combination
+stopping a recording, which is worse than the screenshot combination doing
+nothing, and which every other test in the repository would call correct.
+`apps/recorder/src/hotkeys.rs` uses it once per action the recorder performs.
+
+It is not a way to test the dispatcher: it runs the handler where it is called,
+so it neither queues nor drops, and the concurrency rules above are asserted
+against `Dispatcher` instead.
 
 Everything that needs Windows is in `crates/hotkeys/tests/windows_hotkeys.rs`,
 which registers real combinations and presses real keys with `SendInput`. It

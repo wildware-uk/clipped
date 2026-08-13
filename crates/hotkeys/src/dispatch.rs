@@ -307,6 +307,39 @@ impl Handlers {
     pub fn handled(&self) -> impl Iterator<Item = HotkeyAction> + '_ {
         self.handlers.keys().copied()
     }
+
+    /// Runs the handler registered for `action`, on the calling thread, as
+    /// though `hotkey` had been pressed.
+    ///
+    /// This is the only way to reach a registered handler without a keyboard.
+    /// [`handled`](Self::handled) says *that* an action has one, and
+    /// [`crate::HotkeyService::start`] consumes the whole set into worker
+    /// threads, so without this a closure is opaque from the moment it is
+    /// registered: the process wiring the handlers up can assert which actions
+    /// it registered, and nothing whatsoever about what those handlers do.
+    ///
+    /// That gap is worth an API because of the specific way it fails. A handler
+    /// registered against the wrong action is not a dead key — it is a key that
+    /// does something other than what its row in the settings screen says, and
+    /// the screenshot key stopping a recording is a worse outcome than the
+    /// screenshot key doing nothing.
+    ///
+    /// Unlike a real press this runs the handler **here**, not on that action's
+    /// thread, and so it neither queues nor drops: the concurrency rules this
+    /// module documents belong to [`Dispatcher`] and are tested against it.
+    ///
+    /// # Errors
+    ///
+    /// [`Unhandled`] when no handler is registered for `action`, carrying the
+    /// same sentence a real press of it would be reported with.
+    pub fn press(&mut self, action: HotkeyAction, hotkey: Hotkey) -> Result<(), Unhandled> {
+        let Some(handler) = self.handlers.get_mut(&action) else {
+            return Err(Unhandled::for_action(action));
+        };
+
+        handler(HotkeyPress::new(action, hotkey, Instant::now()));
+        Ok(())
+    }
 }
 
 /// One action's queue, thread and backlog counter.
@@ -486,7 +519,9 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
     use std::time::{Duration, Instant};
 
-    use super::{Dispatcher, Handlers, HotkeyEvent, HotkeyPress, PressOutcome, PRESSES_PER_ACTION};
+    use super::{
+        Dispatcher, Handlers, HotkeyEvent, HotkeyPress, PressOutcome, Unhandled, PRESSES_PER_ACTION,
+    };
     use crate::action::HotkeyAction;
     use crate::hotkey::Hotkey;
 
@@ -532,6 +567,53 @@ mod tests {
                 .expect("the handler runs on its own thread"),
             HotkeyAction::AddBookmark,
         );
+    }
+
+    /// The property every caller of `Handlers::press` is relying on: it runs
+    /// the handler registered for the action it was given, and hands that
+    /// handler that action.
+    ///
+    /// Registering two handlers and pressing one is what makes this an
+    /// assertion rather than a tautology — a `press` that ran whichever handler
+    /// came first would pass with only one registered.
+    #[test]
+    fn pressing_an_action_runs_the_handler_registered_for_that_action_and_no_other() {
+        let (bookmarked, bookmarks) = mpsc::channel();
+        let (shot, screenshots) = mpsc::channel();
+        let mut handlers = Handlers::new()
+            .on(HotkeyAction::AddBookmark, move |press| {
+                bookmarked.send(press).expect("the test is listening");
+            })
+            .on(HotkeyAction::TakeScreenshot, move |press| {
+                shot.send(press).expect("the test is listening");
+            });
+
+        handlers
+            .press(HotkeyAction::TakeScreenshot, hotkey())
+            .expect("a handler was registered for it");
+
+        let ran = screenshots
+            .try_recv()
+            .expect("the screenshot handler is the one that should have run");
+        assert_eq!(ran.action(), HotkeyAction::TakeScreenshot);
+        assert_eq!(ran.hotkey(), hotkey());
+        assert!(
+            bookmarks.try_recv().is_err(),
+            "pressing one action ran another action's handler",
+        );
+    }
+
+    /// AGENTS.md section 54: pressing an action nothing handles has to say so
+    /// rather than look like it worked.
+    #[test]
+    fn pressing_an_action_with_no_handler_is_refused_in_the_words_a_real_press_uses() {
+        let mut handlers = Handlers::new().on(HotkeyAction::AddBookmark, |_| {});
+
+        let unhandled = handlers
+            .press(HotkeyAction::SaveReplay, hotkey())
+            .expect_err("nothing was registered for it");
+
+        assert_eq!(unhandled, Unhandled::for_action(HotkeyAction::SaveReplay));
     }
 
     /// AGENTS.md section 54: an action with nothing behind it says so.
