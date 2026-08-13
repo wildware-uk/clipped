@@ -1,9 +1,9 @@
 # Application icons
 
 `source.png` is the master: Clipped's brand mark — white waveform bars in the
-accent disc, on the neutral-900 rounded square — at 2048 × 2048 with an alpha
-channel. Everything beside it is generated from it, and is regenerated rather
-than edited:
+accent disc, on a white rounded square — at 2048 × 2048 with an alpha channel,
+the corners being the only transparent part of it. Everything beside it is
+generated from it, and is regenerated rather than edited:
 
 ```powershell
 npm run tauri --workspace @clipped/desktop -- icon src-tauri/icons/source.png
@@ -16,14 +16,19 @@ Clipped is a Windows application (SPEC.md section 3), so only the four files
 named by `bundle.icon` in `tauri.conf.json` are kept; delete the rest after
 regenerating.
 
-## This is the application's mark, not the tray's
+## The tray's ground is dark, and that is deliberate
 
-The notification-area icon is **not** this image, and should not be changed to
-it. It is four drawn marks — one per state, in `src/tray_icon.rs` — because a
-tray icon is sixteen pixels wide, carries no label, and has to say whether a
-recording is running. Each state is a different _shape_ so that it survives
-being printed in black and white, which is what AGENTS.md section 46 asks and
-what a single brand mark in four colours would fail.
+The mark in the notification area (`src/tray_icon.rs`) is drawn on the
+**neutral-900** ground rather than this white one, and the two are allowed to
+differ.
 
-The application icon identifies the application. The tray marks identify the
-state. They are different jobs and the same picture cannot do both.
+An application icon is drawn on surfaces the application does not choose but can
+predict — a taskbar, a Start menu, Explorer — and white reads on all of them. A
+tray icon is drawn on a strip Windows paints dark by default, light on some
+machines and some versions, and never tells the application which. A white
+ground vanishes into a light taskbar; a dark one carries its own contrast on
+either, which is the "sticker" treatment `tray_icon.rs` documents and
+`every_mark_reads_on_a_light_ground_and_on_a_dark_one` measures.
+
+So the brand is the same mark in both places. Only the ground under it differs,
+and it differs because one of the two surfaces is unknown at drawing time.
