@@ -296,6 +296,7 @@ dependencies = [
  "clipped-logging",
  "clipped-windows",
  "serde",
+ "serde_json",
  "toml",
  "toml_edit",
  "tracing",

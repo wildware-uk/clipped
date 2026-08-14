@@ -11,11 +11,13 @@
 //! The shape is one submodule per launcher, which is SPEC.md section 6's
 //! "provider-based so that support for a new launcher is an addition rather than
 //! a change to shared logic". [`steam`] is the first
-//! ([#43](https://github.com/wildware-uk/clipped/issues/43)); Epic, Xbox,
-//! Battle.net, EA, Ubisoft, Riot and GOG are
-//! [#44](https://github.com/wildware-uk/clipped/issues/44) and are deliberately
-//! not stubbed here — an empty provider that always answers "no" is a control
-//! that silently does nothing (AGENTS.md section 27), and
+//! ([#43](https://github.com/wildware-uk/clipped/issues/43)) and [`epic`] the
+//! second ([#44](https://github.com/wildware-uk/clipped/issues/44), which asks
+//! for one pull request per launcher and is still open for the rest).
+//!
+//! Xbox, Battle.net, EA, Ubisoft, Riot and GOG are deliberately **not** stubbed
+//! here — an empty provider that always answers "no" is a control that silently
+//! does nothing (AGENTS.md section 27), and
 //! [`LauncherKind`](crate::catalogue::LauncherKind) already carries the
 //! vocabulary they will need.
 //!
@@ -33,12 +35,19 @@
 //!   installer wrote, so they will be missing, half-written and occasionally
 //!   nonsense; every failure says which file (AGENTS.md section 15).
 //!
-//! There is no `trait LauncherProvider` yet, on purpose. One implementation is
-//! not enough to know what the trait's shape should be, and #44 brings three
-//! launchers whose metadata lives in three different kinds of place —
-//! `.item` manifests, the package registry, a product database. Writing the
-//! abstraction now would be guessing at all three (AGENTS.md, "Do not
-//! over-engineer").
+//! There is still no `trait LauncherProvider`, and two implementations have made
+//! the case for waiting rather than weakened it. Steam and Epic agree on three
+//! methods — `discover`, `candidate_for`, `problems` — and agree on nothing
+//! else: Steam follows a registry key to a library index to a manifest per
+//! application across several drives, and Epic reads one directory of JSON. The
+//! part that would be shared is the part that is already shared, in
+//! [`crate::catalogue`]: `normalise_path`, `path_segments` and
+//! `ProcessCandidate`.
+//!
+//! What remains of #44 is Xbox, whose metadata is in the package registry rather
+//! than in any file, and that is the one most likely to decide the trait's shape.
+//! Writing it now would still be guessing (AGENTS.md, "Do not over-engineer").
 
+pub mod epic;
 mod keyvalues;
 pub mod steam;
