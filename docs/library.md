@@ -209,6 +209,28 @@ one process is what write-ahead logging is for — and it is why migrating a
 database that does not exist yet has to be safe against two connections doing it
 at once (`docs/storage.md`).
 
+### Demonstrated, not only argued
+
+Everything above is a design argument, and [#385]'s second acceptance criterion
+asked for it to be shown. `an_index_run_in_flight_neither_delays_nor_interrupts_a_recording`
+in `apps/recorder/tests/ipc_protocol.rs` is that demonstration: it leaves 8,000
+earlier sittings in the recordings folder, starts the real recorder, and records
+a real window through the real encoder while the start-up walk is going.
+
+On the development machine (RTX 4090, NVMe) the run was still walking — 2,160
+sittings in, cancelled by shutdown rather than finished — across the whole of a
+recording that ran from 6 ms to 4,035 ms after the walk began, and that recording
+came back with 115 frames of AV1 that `ffprobe` validates.
+
+The test is `#[ignore]`d, because it needs a GPU, an encoder and a desktop
+session. Two assertions stop it passing for the wrong reason: the run must have
+indexed enough sessions to have genuinely been walking the library, and it must
+still have been in flight when the recording *stopped*. Both matter — the first
+draft wrote its sittings from `SystemTime::now()`, they collapsed onto eight
+identifiers because a session's id is its game and the second it started, and
+the "demonstration" was a recording made alongside a 46 ms walk of eight
+sessions.
+
 Which folders it walks is the recordings folder `record` and `watch` write into
 by default. A recording written somewhere else — an `output` a `start_recording`
 named — has its session record beside it, outside that root, and is not indexed.
