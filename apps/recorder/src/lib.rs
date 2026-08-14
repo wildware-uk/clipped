@@ -120,9 +120,14 @@ impl RunError {
             Self::Replay(replay::ReplayCommandError::Recording(error)) => {
                 recording_exit_code(error)
             }
+            // A settings file naming one combination for two actions is a file
+            // to fix, exactly as a bad argument is a command line to fix — the
+            // user's own text either way, and nothing about the machine
+            // (issue #444).
             Self::Replay(
                 replay::ReplayCommandError::Configuration(_)
-                | replay::ReplayCommandError::Buffer(_),
+                | replay::ReplayCommandError::Buffer(_)
+                | replay::ReplayCommandError::Hotkeybindings(_),
             ) => EXIT_USAGE,
             Self::Replay(replay::ReplayCommandError::Hotkeys(_)) => EXIT_FAILURE,
             // A selector that named no window, or more than one, is a command

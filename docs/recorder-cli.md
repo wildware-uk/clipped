@@ -315,6 +315,15 @@ Keeping the last 5 minutes. Press Ctrl+F10 to save 5 minutes; Ctrl+C to stop.
 Replay saved: D:\clips\clipped-unattributed-20260813-201400-replay-1.mkv (5 minutes 2 seconds)
 ```
 
+`Ctrl`+`F10` there is the shipped default. The combination named is the one
+`replay` actually registered, which is whatever the `hotkeys` section of
+`settings.json` says (`docs/configuration.md`) — so on a machine where another
+application already owns the default, rebinding it in that file works and the
+line says so. It did not until
+[#444](https://github.com/wildware-uk/clipped/issues/444): the subcommand
+registered the defaults and ignored the file, which made the conflict report's
+advice to "choose a different combination" impossible to act on.
+
 A clip can only begin on a keyframe, so it is up to one keyframe interval longer
 at the front than the request; and a buffer that has not filled yet gives less
 than was asked for, which is said in as many words rather than left to be
