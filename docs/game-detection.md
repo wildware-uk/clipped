@@ -423,22 +423,24 @@ of *its* games this is. That is the catalogue's strongest matching rung
 (`LauncherIdentity`), and until [#43] nothing produced it. Launcher detection is
 provider-based — one module per shop, so support for a new one is an addition
 rather than a change to shared logic (SPEC.md section 6). Steam is the first
-([#43]), Epic the second and Ubisoft Connect the third ([#44], which asks for one
-pull request per launcher). Xbox, Battle.net, EA, Riot and GOG are the rest of
-[#44] and are deliberately not stubbed, because a provider that always answers
-"no" is a control that silently does nothing.
+([#43]), Epic the second, Ubisoft Connect the third and Xbox the fourth ([#44],
+which asks for one pull request per launcher). Battle.net, EA, Riot and GOG are
+the rest of [#44] and are deliberately not stubbed, because a provider that
+always answers "no" is a control that silently does nothing.
 
-There is still no `trait LauncherProvider`. Three implementations have not
-settled its shape: Steam follows a registry key to a library index to a manifest
-per application across several drives, Epic reads one directory of JSON, and
-Ubisoft enumerates a registry key and reads the game's name out of somebody
-else's. What the third one did settle is what they demonstrably share, which is
-now shared rather than repeated:
+There is still no `trait LauncherProvider`. Xbox was expected to settle it and
+settled it the other way: it reads a *two-level* registry key whose entries are
+not all installations, and its identifier has to be derived from a package full
+name rather than read out of a field. Steam follows a registry key to a library
+index to a manifest per application across several drives, Epic reads one
+directory of JSON, and Ubisoft enumerates a registry key and reads the game's
+name out of somebody else's. What they demonstrably share is shared rather than
+repeated:
 
 | Module | Shared by | Extracted when |
 | --- | --- | --- |
-| `launcher/registry.rs` | Steam, Ubisoft | Ubisoft needed the same two-call `RegGetValueW` sizing |
-| `launcher/claim.rs` | Epic, Ubisoft | Ubisoft needed the same deepest-directory rule |
+| `launcher/registry.rs` | Steam, Ubisoft, Xbox | Ubisoft needed the same two-call `RegGetValueW` sizing; Xbox needed the subkey enumeration twice over |
+| `launcher/claim.rs` | Epic, Ubisoft, Xbox | Ubisoft needed the same deepest-directory rule; Xbox uses it unchanged |
 
 Both were extracted when a second caller appeared and named exactly what the two
 had in common — which is the argument for waiting on the trait rather than
@@ -732,6 +734,45 @@ path and name rungs, which are a better answer than a confident wrong one
 to claim every executable actually sitting in each install directory: 2 games,
 0 problems, 10 executables, none claimed by the wrong game. The equivalent Epic
 probe is what found [#459].
+
+### Xbox
+
+Xbox keeps its metadata furthest from a file. `Get-AppxPackage` and the
+`PackageManager` API list every MSIX package on the machine — Sticky Notes, the
+Ubuntu subsystem, the Xbox overlay — and say nothing about which are games. The
+gaming services repository lists **only** what the Xbox app installed:
+
+```text
+HKLM\SOFTWARE\Microsoft\GamingServices\PackageRepository\Root
+  \<container>\<mangled path>
+      Package = 38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g
+      Root    = \?\B:\WindowsApps\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g\
+```
+
+**The identifier is the package family name, and deriving it has a trap.** A
+package *full* name carries the version, so it changes with every update; the
+*family* name is what stays put. The obvious derivation is "split on `__`", and
+it is wrong — the `COREBase` package above carries a resource qualifier and has
+a **single** underscore before the publisher where every other package on the
+same machine has two. A `__` split drops it silently, which was one game in six.
+
+Taking the name before the first underscore and the publisher after the last is
+right for both shapes, and the result is checkable rather than assumed: the same
+repository has a `GameSave` entry keyed by `38985CA0.COREBase_5bkah9njm3e9g`,
+which is exactly what the derivation produces.
+
+Two other things a scan would get wrong. `Root` is an extended-length path, so
+the `\?\` prefix has to come off before it can meet a path a process reports.
+And games are **not all on one drive**: the machine this was written against had
+four on `B:` and one under `C:\Program Files\WindowsApps`, so anything assuming
+`C:\XboxGames` would find a fraction of them.
+
+**Verified against a real registry**, not only fixtures:
+`examples/xbox_probe.rs` reports 6 packages, 0 problems, and none claimed by the
+wrong package — including the `_ww_` one and the one on the other drive.
+`WindowsApps` is not readable by an ordinary process, so the probe checks the two
+things that would silently produce nothing rather than walking executables the
+way `ubisoft_probe` does.
 
 ## The process watcher
 
