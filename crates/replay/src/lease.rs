@@ -27,7 +27,7 @@ use core::time::Duration;
 use std::sync::Arc;
 
 use crate::range::TimeRange;
-use crate::segment::{Segment, SegmentPacket};
+use crate::segment::{Segment, SegmentAudio, SegmentPacket};
 
 /// The segments covering a requested range, held against eviction.
 ///
@@ -170,5 +170,16 @@ impl SegmentLease {
     /// makes the result decodable on its own.
     pub fn packets(&self) -> impl Iterator<Item = SegmentPacket<'_>> + '_ {
         self.segments.iter().flat_map(|segment| segment.packets())
+    }
+
+    /// Every block of captured audio in every segment.
+    ///
+    /// Unfiltered, and in the order it arrived rather than in timestamp order:
+    /// audio is appended to whichever segment is open when it arrives, so a
+    /// block near a segment boundary can carry a timestamp belonging to its
+    /// neighbour. [`save_clip`](crate::save_clip) selects by timestamp for that
+    /// reason, and nothing here pretends the two clocks were locked together.
+    pub fn audio(&self) -> impl Iterator<Item = SegmentAudio<'_>> + '_ {
+        self.segments.iter().flat_map(|segment| segment.audio())
     }
 }

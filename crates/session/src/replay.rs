@@ -53,10 +53,10 @@ use core::fmt;
 use core::time::Duration;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use clipped_encoder::BitRate;
-use clipped_muxer::{RecordingLayout, VideoTrack};
+use clipped_muxer::RecordingLayout;
 use clipped_replay::{
     save_clip, ConfigError, LeaseError, ReplayBuffer, ReplayConfig, ReplayStats, SaveError,
     SavedClip, MAXIMUM_WINDOW, MINIMUM_WINDOW,
@@ -87,8 +87,28 @@ pub fn start_buffer<'replay>(
     replay: Option<&'replay ReplayRecording>,
 ) -> Option<&'replay ReplayBuffer> {
     let replay = replay?;
-    replay.begin(layout.video(), bitrate);
+    replay.begin(layout, bitrate);
     replay.buffer()
+}
+
+/// What a recording's audio costs a replay buffer, in bytes a second.
+///
+/// Every declared track, at the four bytes a sample the buffer holds them in —
+/// it keeps the interleaved `f32` the capture produced rather than the PCM the
+/// file gets, so that a clip and the recording go through one conversion
+/// (`clipped_replay::SegmentAudio`).
+///
+/// Told to [`ReplayConfig`] so that audio is budgeted rather than merely
+/// stored. They share one ceiling, so audio nobody accounted for evicts video
+/// and quietly shortens the window (`ReplayConfig::with_audio_bytes_per_second`).
+fn audio_cost(layout: &RecordingLayout) -> u64 {
+    layout
+        .audio_tracks()
+        .iter()
+        .map(|track| {
+            u64::from(track.sample_rate()) * u64::from(track.channels()) * size_of::<f32>() as u64
+        })
+        .sum()
 }
 
 /// A rolling window of the last few minutes of a recording, and what it takes
@@ -115,10 +135,15 @@ pub struct ReplayRecording {
 /// The half of a [`ReplayRecording`] that exists once the encoder does.
 #[derive(Debug)]
 struct StartedReplay {
-    buffer: ReplayBuffer,
-    /// What a clip written from this buffer has to declare, from the encoder
-    /// that produced the packets in it.
-    video: VideoTrack,
+    /// Behind an [`Arc`] because the audio threads outlive the borrow the
+    /// packet loop uses: they are spawned, not scoped, so they need an owned
+    /// handle to push into (`crate::audio`).
+    buffer: Arc<ReplayBuffer>,
+    /// What a clip written from this buffer has to declare: the video track
+    /// from the encoder that produced the packets, and every audio track the
+    /// recording is writing, so a clip carries the same set the file does
+    /// ([issue #40](https://github.com/wildware-uk/clipped/issues/40)).
+    layout: RecordingLayout,
 }
 
 impl ReplayRecording {
@@ -176,8 +201,10 @@ impl ReplayRecording {
     /// only way `ReplayConfig` can refuse here is arithmetic nobody expected,
     /// and a replay buffer may never cost somebody their recording (AGENTS.md
     /// section 17): it is reported and the recording carries on with no buffer.
-    pub fn begin(&self, video: &VideoTrack, bitrate: BitRate) {
-        let config = match ReplayConfig::new(self.window, bitrate) {
+    pub fn begin(&self, layout: &RecordingLayout, bitrate: BitRate) {
+        let config = match ReplayConfig::new(self.window, bitrate)
+            .map(|config| config.with_audio_bytes_per_second(audio_cost(layout)))
+        {
             Ok(config) => config,
             Err(error) => {
                 tracing::error!(
@@ -193,8 +220,8 @@ impl ReplayRecording {
         // `ReplayConfig` is `Copy`, so the configuration is still readable for
         // the line below after the buffer has taken it.
         let _ = self.started.set(StartedReplay {
-            buffer: ReplayBuffer::new(config),
-            video: video.clone(),
+            buffer: Arc::new(ReplayBuffer::new(config)),
+            layout: layout.clone(),
         });
 
         tracing::info!(
@@ -215,7 +242,19 @@ impl ReplayRecording {
     /// encoder changed.
     #[must_use]
     pub fn buffer(&self) -> Option<&ReplayBuffer> {
-        self.started.get().map(|started| &started.buffer)
+        self.started.get().map(|started| started.buffer.as_ref())
+    }
+
+    /// An owned handle to the buffer, for a thread that outlives this borrow.
+    ///
+    /// The packet loop pushes through [`Self::buffer`], because it runs inside
+    /// the recording. The audio threads are spawned rather than scoped, so they
+    /// need something `'static` to push into, and this is it.
+    #[must_use]
+    pub fn buffer_handle(&self) -> Option<Arc<ReplayBuffer>> {
+        self.started
+            .get()
+            .map(|started| Arc::clone(&started.buffer))
     }
 
     /// What the buffer holds and what it has thrown away, or [`None`] before
@@ -258,7 +297,7 @@ impl ReplayRecording {
             .lease_last(keep)
             .map_err(ReplaySaveError::NothingBuffered)?;
 
-        save_clip(&lease, destination, &started.video).map_err(|source| {
+        save_clip(&lease, destination, &started.layout).map_err(|source| {
             ReplaySaveError::NotWritten {
                 destination: destination.to_path_buf(),
                 source,

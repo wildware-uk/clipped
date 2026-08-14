@@ -66,6 +66,8 @@ use clipped_capture::{
 use clipped_muxer::{AudioSource, AudioTrack, RecordingLayout, TrackId, VideoTrack};
 
 use crate::error::SessionError;
+use clipped_replay::ReplayBuffer;
+
 use crate::muxing::{AudioQueue, AudioQueued, MuxingThread};
 use crate::report::{AudioSyncReport, AudioTrackReport};
 use crate::settings::{AudioSourceSetting, RecordingSettings};
@@ -329,6 +331,7 @@ impl AudioThreads {
         layout: &RecordingLayout,
         clock: CaptureClock,
         muxing: &MuxingThread,
+        replay: Option<&Arc<ReplayBuffer>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(sources.len());
@@ -344,11 +347,12 @@ impl AudioThreads {
             };
 
             let queue = muxing.audio_queue();
+            let buffered = replay.map(Arc::clone);
             let stopping = Arc::clone(&stop);
             let name = format!("clipped-audio-{}", track_thread_name(&open.source));
             match thread::Builder::new()
                 .name(name)
-                .spawn(move || pump(open, track, clock, &queue, &stopping))
+                .spawn(move || pump(open, track, clock, &queue, buffered.as_deref(), &stopping))
             {
                 Ok(handle) => workers.push(handle),
                 // A recording without one of its audio tracks is worth far more
@@ -429,6 +433,7 @@ fn pump(
     track: TrackId,
     clock: CaptureClock,
     queue: &AudioQueue,
+    replay: Option<&ReplayBuffer>,
     stop: &AtomicBool,
 ) -> AudioTrackReport {
     let format = open.format;
@@ -529,7 +534,21 @@ fn pump(
         };
         report.note_trimmed((placed.samples_trimmed / usize::from(channels.max(1))) as u64);
 
-        match queue.write(track, placed.at, &samples[placed.samples_trimmed..]) {
+        let placed_samples = &samples[placed.samples_trimmed..];
+
+        // The buffer gets the same samples the file does, at the same instant,
+        // taken from the same placement — so a clip's audio and the recording's
+        // agree by construction rather than by two pieces of arithmetic that
+        // have to be kept in step. It is copied into memory the buffer already
+        // owns and cannot fail a recording (AGENTS.md section 17): audio that
+        // arrives before the first keyframe has nothing to sit beside and is
+        // counted there rather than reported here.
+        if let Some(buffer) = replay {
+            let at = Duration::from_nanos(placed.at.as_nanos().max(0).unsigned_abs());
+            let _ = buffer.push_audio(track, at, placed_samples);
+        }
+
+        match queue.write(track, placed.at, placed_samples) {
             AudioQueued::Written => {}
             AudioQueued::DroppedWriterBehind => report.note_dropped(),
             AudioQueued::WriterLost => {

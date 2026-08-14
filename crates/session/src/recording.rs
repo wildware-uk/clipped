@@ -190,6 +190,10 @@ fn record_frames(
     // (`crate::replay`). A buffer that could not be configured leaves the
     // recording untouched.
     let replay_buffer = crate::replay::start_buffer(&layout, bitrate, replay);
+    // The same buffer, owned, for the audio threads: they are spawned rather
+    // than scoped, so the borrow the packet loop uses will not do
+    // (`crate::replay::ReplayRecording::buffer_handle`).
+    let buffered_audio = replay.and_then(crate::replay::ReplayRecording::buffer_handle);
 
     let writer = open_output(settings, &layout)?;
     let muxing = MuxingThread::start(
@@ -281,7 +285,8 @@ fn record_frames(
                 // not before: a packet has nowhere to go on a timeline that has
                 // not begun (`docs/av-sync.md`).
                 if let Some(sources) = sources.take() {
-                    audio_threads = start_audio(sources, &layout, clock, &muxing);
+                    audio_threads =
+                        start_audio(sources, &layout, clock, &muxing, buffered_audio.as_ref());
                 }
 
                 if let Err(error) = offer(
@@ -665,8 +670,9 @@ fn start_audio(
     layout: &RecordingLayout,
     clock: CaptureClock,
     muxing: &MuxingThread,
+    replay: Option<&std::sync::Arc<clipped_replay::ReplayBuffer>>,
 ) -> Option<AudioThreads> {
-    (!sources.is_empty()).then(|| AudioThreads::start(sources, layout, clock, muxing))
+    (!sources.is_empty()).then(|| AudioThreads::start(sources, layout, clock, muxing, replay))
 }
 
 /// Stops the audio threads and collects what each source produced.

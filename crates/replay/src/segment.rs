@@ -32,6 +32,7 @@ use core::fmt;
 use core::time::Duration;
 
 use clipped_encoder::EncodedPacket;
+use clipped_muxer::TrackId;
 
 use crate::range::TimeRange;
 
@@ -107,6 +108,50 @@ impl<'segment> SegmentPacket<'segment> {
     }
 }
 
+/// Where one block of captured audio sits in its segment.
+#[derive(Debug, Clone, Copy)]
+struct BufferedAudio {
+    offset: usize,
+    length: usize,
+    track: TrackId,
+    at: Duration,
+}
+
+/// One block of captured audio, read back out of a segment.
+///
+/// Interleaved `f32` samples, which is what the capture produced and what
+/// [`clipped_muxer::AudioTrackWriter`] takes. They are held in that form rather
+/// than converted to PCM on the way in so that a clip and the recording it was
+/// taken from go through **one** conversion, in one place: a buffer that
+/// encoded its own samples would be a second implementation of the thing the
+/// muxer already does (AGENTS.md section 55).
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentAudio<'segment> {
+    samples: &'segment [f32],
+    track: TrackId,
+    at: Duration,
+}
+
+impl<'segment> SegmentAudio<'segment> {
+    /// The interleaved samples.
+    #[must_use]
+    pub const fn samples(&self) -> &'segment [f32] {
+        self.samples
+    }
+
+    /// Which audio track they belong to.
+    #[must_use]
+    pub const fn track(&self) -> TrackId {
+        self.track
+    }
+
+    /// When the first frame in the block was captured, in media time.
+    #[must_use]
+    pub const fn at(&self) -> Duration {
+        self.at
+    }
+}
+
 /// A sealed run of packets beginning on a keyframe.
 ///
 /// Immutable once built. Everything that reads one — a save, a report, a test —
@@ -117,6 +162,8 @@ pub struct Segment {
     id: SegmentId,
     bytes: Vec<u8>,
     packets: Vec<BufferedPacket>,
+    samples: Vec<f32>,
+    audio: Vec<BufferedAudio>,
     start: Duration,
     last_presentation: Duration,
 }
@@ -180,7 +227,24 @@ impl Segment {
     pub fn resident_bytes(&self) -> usize {
         self.bytes.capacity()
             + self.packets.capacity() * size_of::<BufferedPacket>()
+            + self.samples.capacity() * size_of::<f32>()
+            + self.audio.capacity() * size_of::<BufferedAudio>()
             + size_of::<Self>()
+    }
+
+    /// Every block of captured audio in it, in the order it arrived.
+    ///
+    /// Audio is appended to whichever segment is open when it arrives, and it
+    /// arrives on its own thread, so a block's timestamp is **not** guaranteed
+    /// to lie inside its segment's span. Nothing here tries to correct that:
+    /// selection is by timestamp (`crate::save`), which is the only thing that
+    /// is true of audio captured beside a video stream it was never locked to.
+    pub fn audio(&self) -> impl ExactSizeIterator<Item = SegmentAudio<'_>> + '_ {
+        self.audio.iter().map(|block| SegmentAudio {
+            samples: &self.samples[block.offset..block.offset + block.length],
+            track: block.track,
+            at: block.at,
+        })
     }
 
     /// Every packet, in the order the encoder produced them, which is decode
@@ -225,6 +289,8 @@ pub(crate) struct OpenSegment {
     id: SegmentId,
     bytes: Vec<u8>,
     packets: Vec<BufferedPacket>,
+    samples: Vec<f32>,
+    audio: Vec<BufferedAudio>,
     start: Duration,
     last_presentation: Duration,
     /// How many bytes to add when the byte buffer is full.
@@ -251,6 +317,11 @@ impl OpenSegment {
             id,
             bytes: Vec::with_capacity(reserve.max(keyframe.data().len())),
             packets: Vec::with_capacity(PACKET_INDEX_STEP),
+            // Not reserved ahead: a recording with no audio must not pay for a
+            // pool it never fills, and a segment's worth of samples is far
+            // larger than its coded video.
+            samples: Vec::new(),
+            audio: Vec::new(),
             start: keyframe.presentation_time(),
             last_presentation: keyframe.presentation_time(),
             growth: reserve.max(1),
@@ -317,6 +388,66 @@ impl OpenSegment {
         self.last_presentation = self.last_presentation.max(packet.presentation_time());
     }
 
+    /// What this segment would occupy after appending `samples` of audio.
+    ///
+    /// The audio counterpart of
+    /// [`resident_bytes_after`](Self::resident_bytes_after), and it exists for
+    /// the same reason: the buffer's ceiling has to be checked before the
+    /// memory is committed, and audio is the larger of the two per second of
+    /// recording once several tracks are captured.
+    pub(crate) fn resident_bytes_after_audio(&self, samples: usize) -> usize {
+        let (sample_capacity, index_capacity) = self.audio_capacities_after(samples);
+        self.bytes.capacity()
+            + self.packets.capacity() * size_of::<BufferedPacket>()
+            + sample_capacity * size_of::<f32>()
+            + index_capacity * size_of::<BufferedAudio>()
+            + size_of::<Segment>()
+    }
+
+    /// The capacities [`append_audio`](Self::append_audio) would grow to.
+    ///
+    /// One function for the same reason `capacities_after` is one function: the
+    /// growth policy and the ceiling arithmetic must not drift apart.
+    fn audio_capacities_after(&self, samples: usize) -> (usize, usize) {
+        let sample_capacity = if self.samples.len() + samples > self.samples.capacity() {
+            self.samples.len() + samples + self.growth
+        } else {
+            self.samples.capacity()
+        };
+        let index_capacity = if self.audio.len() == self.audio.capacity() {
+            self.audio.capacity() + PACKET_INDEX_STEP
+        } else {
+            self.audio.capacity()
+        };
+
+        (sample_capacity, index_capacity)
+    }
+
+    /// Adds one block of captured audio.
+    ///
+    /// `at` is when the first frame of the block was captured, on the same
+    /// media clock the video packets carry, which is what lets a save select
+    /// audio for a range that begins on a keyframe.
+    pub(crate) fn append_audio(&mut self, track: TrackId, at: Duration, samples: &[f32]) {
+        let (sample_capacity, index_capacity) = self.audio_capacities_after(samples.len());
+        if sample_capacity > self.samples.capacity() {
+            self.samples
+                .reserve_exact(sample_capacity - self.samples.len());
+        }
+        if index_capacity > self.audio.capacity() {
+            self.audio.reserve_exact(index_capacity - self.audio.len());
+        }
+
+        let offset = self.samples.len();
+        self.samples.extend_from_slice(samples);
+        self.audio.push(BufferedAudio {
+            offset,
+            length: samples.len(),
+            track,
+            at,
+        });
+    }
+
     /// The presentation time of the keyframe it began with.
     pub(crate) const fn start(&self) -> Duration {
         self.start
@@ -337,6 +468,8 @@ impl OpenSegment {
     pub(crate) fn resident_bytes(&self) -> usize {
         self.bytes.capacity()
             + self.packets.capacity() * size_of::<BufferedPacket>()
+            + self.samples.capacity() * size_of::<f32>()
+            + self.audio.capacity() * size_of::<BufferedAudio>()
             + size_of::<Segment>()
     }
 
@@ -349,10 +482,14 @@ impl OpenSegment {
     pub(crate) fn seal(mut self) -> Segment {
         self.bytes.shrink_to_fit();
         self.packets.shrink_to_fit();
+        self.samples.shrink_to_fit();
+        self.audio.shrink_to_fit();
         Segment {
             id: self.id,
             bytes: self.bytes,
             packets: self.packets,
+            samples: self.samples,
+            audio: self.audio,
             start: self.start,
             last_presentation: self.last_presentation,
         }
@@ -371,6 +508,8 @@ impl OpenSegment {
             id: self.id,
             bytes: self.bytes.clone(),
             packets: self.packets.clone(),
+            samples: self.samples.clone(),
+            audio: self.audio.clone(),
             start: self.start,
             last_presentation: self.last_presentation,
         }
