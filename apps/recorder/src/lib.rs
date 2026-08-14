@@ -310,6 +310,8 @@ fn recording_exit_code(error: &record::RecordError) -> u8 {
 /// Whatever the subcommand failed with. See [`RunError::exit_code`] for how
 /// each becomes a process exit code.
 pub fn run(cli: &Cli) -> Result<(), RunError> {
+    sweep_abandoned_replay_spill();
+
     match &cli.command {
         Command::Record(args) => record::run(args).map_err(RunError::from),
         Command::ListWindows(args) => list_windows::run(args).map_err(RunError::from),
@@ -319,6 +321,33 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::Watch(args) => watch::run(args).map_err(RunError::from),
         Command::Recover(args) => recover::run(args).map_err(RunError::from),
         Command::Replay(args) => replay::run(args).map_err(RunError::from),
+    }
+}
+
+/// Removes replay spill directories left behind by a Clipped that crashed.
+///
+/// A replay buffer keeps its window on disk
+/// ([issue #36](https://github.com/wildware-uk/clipped/issues/36)) and removes
+/// its own directory when the recording ends. A process that was killed, or
+/// that stopped at a power cut, does not — so the files are swept here, once,
+/// before anything else runs.
+///
+/// It cannot take a *running* Clipped's directory: each one holds a lock file
+/// open for as long as its buffer lives, and the sweep only removes a directory
+/// whose lock it can open (`clipped_replay::sweep`). That matters because
+/// `serve` and a `replay` run are both ordinary things to have going at once.
+///
+/// Nothing is reported when there is nothing to do, which is the ordinary case.
+fn sweep_abandoned_replay_spill() {
+    let Some(root) = clipped_replay::SpillArea::default_root() else {
+        return;
+    };
+    let removed = clipped_replay::sweep(&root);
+    if removed > 0 {
+        tracing::info!(
+            directories = removed,
+            "removed replay buffer files left behind by a Clipped that did not shut down"
+        );
     }
 }
 
