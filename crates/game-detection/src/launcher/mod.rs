@@ -12,11 +12,11 @@
 //! "provider-based so that support for a new launcher is an addition rather than
 //! a change to shared logic". [`steam`] is the first
 //! ([#43](https://github.com/wildware-uk/clipped/issues/43)), [`epic`] the
-//! second, [`ubisoft`] the third and [`xbox`] the fourth
-//! ([#44](https://github.com/wildware-uk/clipped/issues/44), which asks
+//! second, [`ubisoft`] the third, [`xbox`] the fourth and [`battlenet`] the
+//! fifth ([#44](https://github.com/wildware-uk/clipped/issues/44), which asks
 //! for one pull request per launcher and is still open for the rest).
 //!
-//! Battle.net, EA, Riot and GOG are deliberately **not** stubbed
+//! EA, Riot and GOG are deliberately **not** stubbed
 //! here — an empty provider that always answers "no" is a control that silently
 //! does nothing (AGENTS.md section 27), and
 //! [`LauncherKind`](crate::catalogue::LauncherKind) already carries the
@@ -44,7 +44,8 @@
 //! `candidate_for`, `problems` — and agree on nothing else: Steam follows a
 //! registry key to a library index to a manifest per application across several
 //! drives, Epic reads one directory of JSON, Ubisoft enumerates a registry key
-//! and reads a name out of somebody else's, and Xbox enumerates two.
+//! and reads a name out of somebody else's, Xbox enumerates two, and Battle.net
+//! reads its identifier out of a **command line**.
 //!
 //! What the later ones *did* change is what is demonstrably shared, which is now
 //! shared rather than repeated (AGENTS.md section 55):
@@ -62,13 +63,14 @@
 //! second caller appeared and named exactly what the two had in common, which a
 //! trait written in advance would have had to guess at.
 //!
-//! What remains of #44 is Battle.net, EA, Riot and GOG. Riot is the one to leave
+//! What remains of #44 is EA, Riot and GOG. Riot is the one to leave
 //! alone: its `RiotClientInstalls.json` publishes no per-game identifier, and
 //! only one of eight `Metadata` directories on a real installation carried an
 //! install path, so a provider would find one game out of seven products (#44
 //! records the measurements). Writing it now would still be guessing (AGENTS.md,
 //! "Do not over-engineer").
 
+pub mod battlenet;
 mod claim;
 pub mod epic;
 mod keyvalues;
