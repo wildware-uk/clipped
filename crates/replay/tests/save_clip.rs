@@ -421,29 +421,56 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     let second_path = directory.file("second.mkv");
     let track = video.track();
 
-    // "Still evicting" measured rather than claimed. This waits — with both
-    // saves still running — for the buffer to move its window past a segment one
-    // of them is reading: `segments_evicted_for_window` says the window moved,
-    // and `segments_retained_for_a_save` says what it moved past was still being
-    // read. The two together are the contention "without corrupting the buffer"
-    // is about; the eviction count alone would be satisfied by a window moving
-    // past segments no reader ever wanted.
-    let (during, first_clip, second_clip) = std::thread::scope(|scope| {
+    // "Still evicting" made a precondition rather than hoped for, which is the
+    // whole of [issue #430](https://github.com/wildware-uk/clipped/issues/430).
+    //
+    // This used to wait *inside* the scope below, with the saves running, and
+    // its loop had two ways out: the contention appearing, or a save finishing.
+    // On a runner where both saves completed before the capture thread evicted
+    // anything it took the second and then asserted the first, so the test
+    // reported a symptom of its own setup not having happened.
+    //
+    // It waits here instead, before the saves start, and it is sound because a
+    // *lease* is what retains an evicted segment — `drop_front` moves a segment
+    // to `leased` when anything else holds an `Arc` to it, which the two leases
+    // above do for as long as they are alive. So neither counter needs a save to
+    // be in flight, and the capture thread pushing underneath is enough to make
+    // both move. `segments_evicted_for_window` says the window moved;
+    // `segments_retained_for_a_save` says what it moved past was still held. The
+    // eviction count alone would be satisfied by a window rolling past segments
+    // no reader ever wanted.
+    //
+    // Bounded by the capture thread's own ceiling, so a buffer that never
+    // reaches the state says so instead of spinning — and says it as a
+    // *give-up*, distinct from the assertions below failing.
+    loop {
+        let now = buffer.stats();
+        if now.segments_evicted_for_window() > before.segments_evicted_for_window()
+            && now.segments_retained_for_a_save() > 0
+        {
+            break;
+        }
+        assert!(
+            pushed.load(Ordering::Acquire) < 12_000,
+            "gave up rather than failed: the capture thread pushed all 12,000 frames and the \
+             window never moved past a leased segment, so this test never reached the state it \
+             is about ({} evicted, {} retained, {} evicted before the leases were taken)",
+            now.segments_evicted_for_window(),
+            now.segments_retained_for_a_save(),
+            before.segments_evicted_for_window()
+        );
+        std::thread::yield_now();
+    }
+    // The state the assertions at the bottom are about, taken at the moment it
+    // was reached rather than after the saves — by then the saves have finished
+    // and what is being asserted would be a fact about a different moment.
+    let during = buffer.stats();
+
+    let (first_clip, second_clip) = std::thread::scope(|scope| {
         let one = scope.spawn(|| save_clip(&first, &first_path, &track));
         let two = scope.spawn(|| save_clip(&second, &second_path, &track));
 
-        let mut during = buffer.stats();
-        while !one.is_finished()
-            && !two.is_finished()
-            && (during.segments_evicted_for_window() == before.segments_evicted_for_window()
-                || during.segments_retained_for_a_save() == 0)
-        {
-            std::thread::yield_now();
-            during = buffer.stats();
-        }
-
         (
-            during,
             one.join().expect("the first save finishes"),
             two.join().expect("the second save finishes"),
         )
@@ -454,10 +481,16 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     stop.store(true, Ordering::Release);
     let frames = capturing.join().expect("the capture thread finishes");
 
+    // Both of these are now established by the wait above rather than raced
+    // for, so neither can fail as the test stands — and they are kept anyway,
+    // deliberately. They are what the wait is *for*, written where a reader
+    // meets the clips, and they are the guard on the loop's exit condition: a
+    // later change that weakens it back into "or a save finished" makes these
+    // reachable again and they fail exactly as they used to.
     assert!(
         during.segments_evicted_for_window() > before.segments_evicted_for_window(),
-        "the window did not move while the saves were running, so neither save read an evicting \
-         buffer: {} segments evicted before the saves and {} while they ran",
+        "the window did not move while a save held a lease, so neither save read an evicting \
+         buffer: {} segments evicted before the leases were taken and {} once the wait ended",
         before.segments_evicted_for_window(),
         during.segments_evicted_for_window()
     );
