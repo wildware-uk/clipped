@@ -96,6 +96,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use clipped_audio::{AudioFormat, ChannelMask, Level, MixSourceId, Mixer, SampleFormat};
 use clipped_capture::MediaTime;
 use clipped_muxer::{
     AudioTrackWriter, EncodedPacket, MkvWriter, MuxError, PacketTimestamp, RecordingLayout,
@@ -417,6 +418,10 @@ impl MuxingThread {
         layout: &RecordingLayout,
     ) -> Result<Self, SessionError> {
         let tracks = audio_track_writers(layout)?;
+        // Built here, on the thread that starts the writer, and moved into it:
+        // the mixer belongs to the one thread that writes, so nothing else can
+        // contend for it (`CompatibilityMixer`).
+        let mixer = CompatibilityMixer::new(layout);
 
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let depth = Arc::new(AtomicUsize::new(0));
@@ -432,6 +437,7 @@ impl MuxingThread {
                 write_until_closed(
                     writer,
                     tracks,
+                    mixer,
                     &receiver,
                     &Depths {
                         video: &counted,
@@ -606,6 +612,123 @@ struct Depths<'counters> {
 /// Built before the thread starts, from the same layout the container was
 /// described from, so a track this writer cannot produce packets for is refused
 /// while the caller still has somewhere to report it.
+/// The mixer that fills the compatibility track, and which source feeds which
+/// part of it.
+///
+/// [`None`] when the layout has no `CompatibilityMix` track, which is what
+/// `--no-compatibility-mix` produces.
+///
+/// It lives on the writer thread rather than beside the captures for the reason
+/// the issue gives: that thread already owns the queue every capture writes
+/// into, so mixing there costs no capture thread a lock
+/// ([issue #29](https://github.com/wildware-uk/clipped/issues/29)).
+struct CompatibilityMixer {
+    mixer: Mixer,
+    /// Which mix source each declared audio track is, indexed the way
+    /// `TrackId::Audio` indexes them. [`None`] for the mix track itself and for
+    /// any source the mixer would not take.
+    sources: Vec<Option<MixSourceId>>,
+}
+
+/// A container track's source, in the vocabulary the mixer reports against.
+///
+/// Two enumerations, because they answer different questions: `clipped-muxer`'s
+/// says what a *track* is, and `clipped-logging`'s is the field vocabulary every
+/// diagnostic in the workspace shares. The mixer takes the second because what
+/// it produces is a log line and a report rather than a track.
+///
+/// `VoiceChat` and a per-application track both map to `Application`, which is
+/// the nearest thing the logging vocabulary has; neither is produced by this
+/// build yet ([issue #33](https://github.com/wildware-uk/clipped/issues/33)).
+fn mixed_as(source: &clipped_muxer::AudioSource) -> clipped_logging::AudioSource {
+    use clipped_muxer::AudioSource as Track;
+    match source {
+        Track::CompatibilityMix => clipped_logging::AudioSource::CompatibilityMix,
+        Track::Game => clipped_logging::AudioSource::Game,
+        Track::OtherSystemAudio => clipped_logging::AudioSource::OtherSystem,
+        Track::Microphone => clipped_logging::AudioSource::Microphone,
+        // `Application` covers voice chat, a per-application track, and
+        // anything the container model gains later: the mixer uses this only to
+        // name a source in a report, so a new track kind must not stop a
+        // recording compiling here.
+        _ => clipped_logging::AudioSource::Application,
+    }
+}
+
+/// The shape a declared track's samples arrive in.
+///
+/// Every capture in this crate hands over interleaved `f32`
+/// (`clipped_audio::CapturedAudio`), so that is what the mixer is told, whatever
+/// the container stores.
+fn shape_of(track: &clipped_muxer::AudioTrack) -> Option<AudioFormat> {
+    Some(AudioFormat::new(
+        core::num::NonZeroU32::new(track.sample_rate())?,
+        core::num::NonZeroU16::new(track.channels())?,
+        ChannelMask::default(),
+        SampleFormat::Float32,
+    ))
+}
+
+impl CompatibilityMixer {
+    /// Builds one from the layout, or [`None`] if there is no mix track.
+    ///
+    /// A source whose sampling rate differs from the mix's is **left out of the
+    /// mix and said so once**, rather than failing the recording or being
+    /// resampled here. Its own isolated track is unaffected, which is the track
+    /// that matters most; resampling belongs with the rest of the clock and
+    /// rate handling in
+    /// [issue #30](https://github.com/wildware-uk/clipped/issues/30), and doing
+    /// it badly here would be worse than leaving one source out of a
+    /// convenience track.
+    fn new(layout: &RecordingLayout) -> Option<Self> {
+        let tracks = layout.audio_tracks();
+        let mix = tracks.iter().position(|track| {
+            track.source() == Some(&clipped_muxer::AudioSource::CompatibilityMix)
+        })?;
+        let declared = tracks.get(mix)?;
+        let format = shape_of(declared)?;
+
+        let mut mixer = Mixer::new(format);
+        let mut sources = Vec::with_capacity(tracks.len());
+        for (index, track) in tracks.iter().enumerate() {
+            if index == mix {
+                sources.push(None);
+                continue;
+            }
+            let Some(source) = track.source().cloned() else {
+                sources.push(None);
+                continue;
+            };
+            let Some(shape) = shape_of(track) else {
+                sources.push(None);
+                continue;
+            };
+            match mixer.add_source(mixed_as(&source), shape, Level::UNITY) {
+                Ok(id) => sources.push(Some(id)),
+                Err(error) => {
+                    tracing::warn!(
+                        audio_track = %source,
+                        %error,
+                        "this source is not in the compatibility mix, because the mix cannot \
+                         take it as it is; its own track is unaffected"
+                    );
+                    sources.push(None);
+                }
+            }
+        }
+
+        Some(Self { mixer, sources })
+    }
+
+    /// Which track the mix is written to.
+    fn track(&self) -> Option<u16> {
+        self.sources
+            .iter()
+            .position(Option::is_none)
+            .and_then(|index| u16::try_from(index).ok())
+    }
+}
+
 fn audio_track_writers(layout: &RecordingLayout) -> Result<Vec<AudioTrackWriter>, SessionError> {
     layout
         .audio_tracks()
@@ -631,6 +754,7 @@ fn audio_track_writers(layout: &RecordingLayout) -> Result<Vec<AudioTrackWriter>
 fn write_until_closed(
     mut writer: MkvWriter,
     mut tracks: Vec<AudioTrackWriter>,
+    mut mixer: Option<CompatibilityMixer>,
     receiver: &Receiver<Queued>,
     depths: &Depths<'_>,
     guard: &SpaceGuard,
@@ -666,6 +790,7 @@ fn write_until_closed(
             Queued::Audio(audio) => {
                 depths.audio.fetch_sub(1, Ordering::Relaxed);
                 write_samples(&mut writer, &mut tracks, &audio)
+                    .and_then(|()| mix_samples(&mut writer, &mut tracks, mixer.as_mut(), &audio))
             }
         };
 
@@ -676,6 +801,16 @@ fn write_until_closed(
             // finished file.
             failure = Some(error);
             break;
+        }
+    }
+
+    // Whatever the mixer is still holding, before the trailer. A mix is
+    // assembled a block behind its sources — it cannot emit a frame until every
+    // source has either contributed to it or been left behind — so without this
+    // the compatibility track is short by the tail of the recording.
+    if failure.is_none() {
+        if let Err(error) = drain_mix(&mut writer, &mut tracks, mixer.as_mut()) {
+            failure = Some(error);
         }
     }
 
@@ -698,6 +833,98 @@ fn write_until_closed(
 /// — so it is reported once at `error` and the buffer is dropped. Failing the
 /// write instead would end a recording over a bug in the code that placed it
 /// (AGENTS.md section 17).
+/// Adds one source's block to the compatibility mix and writes whatever that
+/// completes.
+///
+/// Runs after the block has gone to its own track, and cannot change it: the
+/// mix reads the samples and never writes them, so a level or a limiter in the
+/// mix leaves the isolated tracks exactly as they were — which is the property
+/// [issue #29](https://github.com/wildware-uk/clipped/issues/29) asks for and
+/// the one a person would notice being wrong.
+fn mix_samples(
+    writer: &mut MkvWriter,
+    tracks: &mut [AudioTrackWriter],
+    mixer: Option<&mut CompatibilityMixer>,
+    audio: &QueuedSamples,
+) -> Result<(), MuxError> {
+    let Some(mixer) = mixer else {
+        return Ok(());
+    };
+    let TrackId::Audio(index) = audio.track else {
+        return Ok(());
+    };
+    let Some(Some(source)) = mixer.sources.get(usize::from(index)).copied() else {
+        // The mix track itself, or a source the mix could not take.
+        return Ok(());
+    };
+
+    // A contribution that the mixer refuses is this block missing from a
+    // convenience track, which is not worth failing a recording over
+    // (AGENTS.md section 17). It is said once by `CompatibilityMixer::new` for
+    // the cases that are knowable up front.
+    // The queue carries a signed nanosecond count because a muxer timestamp can
+    // legitimately be negative; a mix position cannot. A block placed before the
+    // recording's own zero has nothing in the mix to be added to, so it is left
+    // out rather than clamped to the start, where it would pile up on the first
+    // frame.
+    let Ok(nanos) = u64::try_from(audio.at_nanos) else {
+        return Ok(());
+    };
+    let at = clipped_audio::AudioTimestamp::from_nanos(nanos);
+    let _ = mixer.mixer.contribute(source, at, &audio.samples);
+    emit_mix(writer, tracks, mixer, false)
+}
+
+/// Writes everything the mixer has finished with.
+fn emit_mix(
+    writer: &mut MkvWriter,
+    tracks: &mut [AudioTrackWriter],
+    mixer: &mut CompatibilityMixer,
+    finishing: bool,
+) -> Result<(), MuxError> {
+    let Some(index) = mixer.track() else {
+        return Ok(());
+    };
+    let Some(track) = tracks.get_mut(usize::from(index)) else {
+        return Ok(());
+    };
+
+    loop {
+        let taken = if finishing {
+            mixer.mixer.drain()
+        } else {
+            mixer.mixer.take()
+        };
+        let Some(mixed) = taken else {
+            return Ok(());
+        };
+        track.write_samples(
+            writer,
+            PacketTimestamp::from_nanos(
+                i64::try_from(mixed.timestamp().as_nanos()).unwrap_or(i64::MAX),
+            ),
+            mixed.samples(),
+        )?;
+        if finishing {
+            // `drain` empties what is left in one or more blocks; `take` is
+            // called again above until it says there is nothing ready.
+            continue;
+        }
+    }
+}
+
+/// Writes the tail of the mix when the recording ends.
+fn drain_mix(
+    writer: &mut MkvWriter,
+    tracks: &mut [AudioTrackWriter],
+    mixer: Option<&mut CompatibilityMixer>,
+) -> Result<(), MuxError> {
+    match mixer {
+        Some(mixer) => emit_mix(writer, tracks, mixer, true),
+        None => Ok(()),
+    }
+}
+
 fn write_samples(
     writer: &mut MkvWriter,
     tracks: &mut [AudioTrackWriter],

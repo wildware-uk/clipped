@@ -290,11 +290,38 @@ fn chosen_microphone(
 /// this a recording with a system track and a microphone track would leave a
 /// player to guess, and a player that guessed the microphone is a recording
 /// somebody concludes is broken.
-pub(crate) fn declare(video: VideoTrack, sources: &[OpenSource]) -> RecordingLayout {
+pub(crate) fn declare(
+    video: VideoTrack,
+    sources: &[OpenSource],
+    compatibility_mix: bool,
+) -> RecordingLayout {
     let mut ordered: Vec<&OpenSource> = sources.iter().collect();
     ordered.sort_by_key(|open| open.source.ordering_rank());
 
     let mut layout = RecordingLayout::new(video);
+
+    // First, and carrying the default flag, because that is the whole point of
+    // it: a player that takes one track arbitrarily has to get the one that
+    // sounds like the recording (SPEC.md section 13,
+    // [issue #29](https://github.com/wildware-uk/clipped/issues/29)).
+    //
+    // Its shape is the first ordered source's. The mixer refuses a source whose
+    // sampling rate differs from the mix's and channel counts are placed rather
+    // than resampled, so taking the rate from the highest-ranked source is the
+    // choice that includes the game's audio — which is the one somebody would
+    // most notice missing. `crate::muxing` says what happens to a source whose
+    // rate does not match.
+    let mix_format = compatibility_mix
+        .then(|| ordered.first().map(|open| open.format))
+        .flatten();
+    if let Some(format) = mix_format {
+        layout = layout.with_audio_track(AudioTrack::for_source(
+            AudioSource::CompatibilityMix,
+            format.sample_rate().get(),
+            format.channels().get(),
+        ));
+    }
+
     for (position, open) in ordered.into_iter().enumerate() {
         layout = layout.with_audio_track(
             AudioTrack::for_source(
@@ -302,7 +329,9 @@ pub(crate) fn declare(video: VideoTrack, sources: &[OpenSource]) -> RecordingLay
                 open.format.sample_rate().get(),
                 open.format.channels().get(),
             )
-            .with_default_flag(position == 0),
+            // `for_source` gives the flag to the compatibility mix and to
+            // nothing else, so this only has to stand in when there is no mix.
+            .with_default_flag(mix_format.is_none() && position == 0),
         );
     }
     layout

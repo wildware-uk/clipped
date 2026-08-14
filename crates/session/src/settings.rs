@@ -270,6 +270,7 @@ pub struct RecordingSettings {
     capture_cursor: bool,
     system_audio: AudioSourceSetting,
     microphone: AudioSourceSetting,
+    compatibility_mix: bool,
     overwrite: bool,
     minimum_free_space: u64,
     unavailable: UnavailableChoice,
@@ -288,6 +289,7 @@ impl RecordingSettings {
             codec: CodecPreference::Automatic,
             encoder: EncoderPreference::Automatic,
             capture_cursor: false,
+            compatibility_mix: true,
             system_audio: AudioSourceSetting::Off,
             microphone: AudioSourceSetting::Off,
             overwrite: false,
@@ -374,6 +376,28 @@ impl RecordingSettings {
     pub fn with_microphone(mut self, source: AudioSourceSetting) -> Self {
         self.microphone = source;
         self
+    }
+
+    /// Whether the recording carries a compatibility mix on its first track.
+    ///
+    /// On by default, and an opt-out rather than an opt-in: SPEC.md section 13
+    /// says the mix "should be the default", because some players pick a single
+    /// track arbitrarily from a multi-track file and a recording that sounded
+    /// silent in one of them would look broken
+    /// ([issue #29](https://github.com/wildware-uk/clipped/issues/29)).
+    ///
+    /// Turning it off is a real thing to want — it is a whole extra track of
+    /// uncompressed audio for somebody who only ever opens these in an editor.
+    #[must_use]
+    pub const fn with_compatibility_mix(mut self, wanted: bool) -> Self {
+        self.compatibility_mix = wanted;
+        self
+    }
+
+    /// Whether a compatibility mix is wanted.
+    #[must_use]
+    pub const fn compatibility_mix(&self) -> bool {
+        self.compatibility_mix
     }
 
     /// Allows an existing recording at [`output`](Self::output) to be replaced.
