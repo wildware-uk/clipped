@@ -423,10 +423,10 @@ of *its* games this is. That is the catalogue's strongest matching rung
 (`LauncherIdentity`), and until [#43] nothing produced it. Launcher detection is
 provider-based — one module per shop, so support for a new one is an addition
 rather than a change to shared logic (SPEC.md section 6). Steam is the first
-([#43]), Epic the second, Ubisoft Connect the third and Xbox the fourth ([#44],
-which asks for one pull request per launcher). Battle.net, EA, Riot and GOG are
-the rest of [#44] and are deliberately not stubbed, because a provider that
-always answers "no" is a control that silently does nothing.
+([#43]), Epic the second, Ubisoft Connect the third, Xbox the fourth and
+Battle.net the fifth ([#44], which asks for one pull request per launcher). EA,
+Riot and GOG are the rest of [#44] and are deliberately not stubbed, because a
+provider that always answers "no" is a control that silently does nothing.
 
 There is still no `trait LauncherProvider`. Xbox was expected to settle it and
 settled it the other way: it reads a *two-level* registry key whose entries are
@@ -440,7 +440,7 @@ repeated:
 | Module | Shared by | Extracted when |
 | --- | --- | --- |
 | `launcher/registry.rs` | Steam, Ubisoft, Xbox | Ubisoft needed the same two-call `RegGetValueW` sizing; Xbox needed the subkey enumeration twice over |
-| `launcher/claim.rs` | Epic, Ubisoft, Xbox | Ubisoft needed the same deepest-directory rule; Xbox uses it unchanged |
+| `launcher/claim.rs` | Epic, Ubisoft, Xbox, Battle.net | Ubisoft needed the same deepest-directory rule; every provider since uses it unchanged |
 
 Both were extracted when a second caller appeared and named exactly what the two
 had in common — which is the argument for waiting on the trait rather than
@@ -773,6 +773,40 @@ wrong package — including the `_ww_` one and the one on the other drive.
 `WindowsApps` is not readable by an ordinary process, so the probe checks the two
 things that would silently produce nothing rather than walking executables the
 way `ubisoft_probe` does.
+
+### Battle.net
+
+Battle.net keeps its product list in two places and **neither joins a product to
+a directory**, which is the join a provider needs. `Battle.net.config` has a
+`Games` section keyed by product — `battle_net`, `prometheus` — and records no
+install path for any of them, only a `DefaultInstallPath` for the next one;
+`product.db` is protocol buffers, which would mean carrying a parser and a schema
+for somebody else's private format.
+
+The uninstall entry has both halves:
+
+```text
+UninstallString = "…\Blizzard Uninstaller.exe" --lang=enUS
+                  --uid=prometheus --displayname="Overwatch"
+InstallLocation = B:\BattleNet\Overwatch
+```
+
+**The identifier is in the command line.** `--uid=prometheus` is Overwatch's
+product code, and it is the same identifier `Battle.net.config` uses, so the two
+agree without this having to make them. The alternative was the `Product` column
+of `.build.info` in the game's own directory — which says `pro` for the same
+game, a *different* identifier, and would mean opening a file on a drive that may
+have gone.
+
+**The launcher is not a game.** Battle.net's own uninstall entry is written by
+the same uninstaller and is identical down to the flags —
+`--uid=battle.net --displayname="Battle.net"`. Left in, every process under the
+client's directory would be reported as a game called Battle.net. The product
+identifier is the one thing that distinguishes it, and it is what excludes it.
+
+**Verified against a real installation**: `examples/battlenet_probe.rs` reports
+1 game, 0 problems, 5 executables checked and none claimed by the wrong game —
+with the client correctly absent.
 
 ## The process watcher
 
