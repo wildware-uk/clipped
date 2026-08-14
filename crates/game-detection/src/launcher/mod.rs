@@ -35,19 +35,38 @@
 //!   installer wrote, so they will be missing, half-written and occasionally
 //!   nonsense; every failure says which file (AGENTS.md section 15).
 //!
-//! There is still no `trait LauncherProvider`, and two implementations have made
-//! the case for waiting rather than weakened it. Steam and Epic agree on three
-//! methods — `discover`, `candidate_for`, `problems` — and agree on nothing
-//! else: Steam follows a registry key to a library index to a manifest per
-//! application across several drives, and Epic reads one directory of JSON. The
-//! part that would be shared is the part that is already shared, in
-//! [`crate::catalogue`]: `normalise_path`, `path_segments` and
-//! `ProcessCandidate`.
+//! There is still no `trait LauncherProvider`, and a third implementation has
+//! not changed that. The three agree on the same three methods — `discover`,
+//! `candidate_for`, `problems` — and agree on nothing else: Steam follows a
+//! registry key to a library index to a manifest per application across several
+//! drives, Epic reads one directory of JSON, and Ubisoft enumerates a registry
+//! key and reads a name out of somebody else's.
 //!
-//! What remains of #44 is Xbox, whose metadata is in the package registry rather
-//! than in any file, and that is the one most likely to decide the trait's shape.
-//! Writing it now would still be guessing (AGENTS.md, "Do not over-engineer").
+//! What the third one *did* change is what is demonstrably shared, which is now
+//! shared rather than repeated (AGENTS.md section 55):
+//!
+//! - [`registry`] — reading a value and enumerating subkeys, for Steam and
+//!   Ubisoft. Extracted from Steam when Ubisoft needed the same two-call sizing.
+//! - [`claim`] — which installation directory owns a running executable.
+//!   Extracted from Epic when Ubisoft needed the same rule, with the same two
+//!   details that are easy to get subtly wrong.
+//!
+//! That is the case for waiting, not against it: each extraction happened when a
+//! second caller appeared and named exactly what the two had in common, which a
+//! trait written in advance would have had to guess at.
+//!
+//! What remains of #44 is Xbox, Battle.net, EA, Riot and GOG. Xbox is the one
+//! most likely to decide the trait's shape, because its metadata is in the
+//! package registry rather than in any file. Riot is the one to leave alone for
+//! now: its `RiotClientInstalls.json` publishes no per-game identifier, and only
+//! one of eight `Metadata` directories on a real installation carried an install
+//! path, so a provider would find one game out of seven products (#44 records
+//! the measurements). Writing either now would still be guessing (AGENTS.md,
+//! "Do not over-engineer").
 
+mod claim;
 pub mod epic;
 mod keyvalues;
+mod registry;
 pub mod steam;
+pub mod ubisoft;

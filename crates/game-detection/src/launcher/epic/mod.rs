@@ -57,6 +57,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::catalogue::{normalise_path, path_segments, LauncherKind, ProcessCandidate};
+use crate::launcher::claim::deepest_claimants;
 
 pub use error::EpicError;
 
@@ -280,31 +281,9 @@ impl Epic {
     /// ([issue #459](https://github.com/wildware-uk/clipped/issues/459)).
     #[must_use]
     pub fn app_for(&self, executable_name: &str, executable_path: &str) -> Option<&EpicApp> {
-        let normalised = normalise_path(executable_path);
-        let path: Vec<&str> = path_segments(&normalised).collect();
-
-        let mut deepest = 0;
-        let mut claimants: Vec<&EpicApp> = Vec::new();
-        for app in &self.apps {
-            let normalised = normalise_path(&app.installation.to_string_lossy());
-            let directory: Vec<&str> = path_segments(&normalised).collect();
-            // Longer than, not at least as long as: the last segment is the
-            // executable's file name, so a path equal to the installation
-            // directory is a directory and not a program in it.
-            if directory.is_empty() || path.len() <= directory.len() {
-                continue;
-            }
-            if !path.starts_with(&directory) {
-                continue;
-            }
-            if directory.len() > deepest {
-                deepest = directory.len();
-                claimants.clear();
-            }
-            if directory.len() == deepest {
-                claimants.push(app);
-            }
-        }
+        let claimants = deepest_claimants(executable_path, &self.apps, |app| {
+            app.installation.to_string_lossy().into_owned()
+        });
 
         match claimants.as_slice() {
             [] => None,
