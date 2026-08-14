@@ -470,21 +470,12 @@ impl CapabilityCache {
             fs::create_dir_all(directory)?;
         }
 
-        let temporary = temporary_path(path);
-        fs::write(&temporary, serde_json::to_vec_pretty(&file)?)?;
-        fs::rename(&temporary, path)?;
+        let contents = serde_json::to_vec_pretty(&file)?;
+        clipped_logging::write_atomically(path, |temporary| {
+            std::io::Write::write_all(temporary, &contents)
+        })?;
         Ok(())
     }
-}
-
-/// The temporary file [`CapabilityCache::store`] writes before renaming.
-///
-/// One per process. A fixed name would be shared by every process writing the
-/// same cache, and two of them interleaving write and rename can leave a
-/// truncated file where the finished one should be — which the documented
-/// atomicity promises will not happen.
-fn temporary_path(path: &Path) -> PathBuf {
-    path.with_extension(format!("json.{}.tmp", std::process::id()))
 }
 
 /// A directory of one test's own, removed when it is dropped.
@@ -716,7 +707,7 @@ mod tests {
             .store(&HardwareSignature::of(&adapters), &report_for(adapters))
             .expect("the cache is written");
 
-        assert!(!temporary_path(&cache_path(&cache)).exists());
+        assert!(!clipped_logging::temporary_path(&cache_path(&cache)).exists());
     }
 
     #[test]
@@ -725,7 +716,8 @@ mod tests {
         // temporary file: interleaving their writes and renames is how a
         // truncated report gets renamed into place, which is precisely what
         // the atomicity in the documentation promises cannot happen.
-        let temporary = temporary_path(Path::new("C:/anywhere/encoder-capabilities.json"));
+        let temporary =
+            clipped_logging::temporary_path(Path::new("C:/anywhere/encoder-capabilities.json"));
         let name = temporary
             .file_name()
             .and_then(|name| name.to_str())
