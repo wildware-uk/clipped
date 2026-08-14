@@ -23,8 +23,9 @@
 //! | `State(Unavailable)` | **yes** | The link has given up. Nothing is being recorded and nothing further will be tried unless asked. |
 //! | `RecordingInterrupted` | **yes** | A recorder died mid-recording. There is a file, and nothing else will ever tell the user where. |
 //! | `RecordingFailed` | **yes** | A recording ended because something went wrong, and the state that follows is only "idle". |
+//! | `HotkeysUnavailable` | **yes**, once | Windows refused a combination, so a control the user believes in does nothing. Only the first time a given set is seen; a reconnection reporting the same refusals is not news. |
 //!
-//! Every row is an event that exists today: they are the three variants of
+//! Every row is an event that exists today: they are the four variants of
 //! [`RecorderLinkEvent`] and the four of [`RecorderLinkState`], and there are no
 //! others. "Replay saved", "bookmark added" and "screenshot taken" are in issue
 //! #110's scope and are **not** here, because no such event exists — the replay
@@ -65,7 +66,8 @@
 //!   machine whose recorder is missing would toast on every launch.
 
 use clipped_ipc::{
-    ActiveRecording, ProtocolError, RecorderLinkEvent, RecorderLinkState, RecorderStatus,
+    ActiveRecording, HotkeyBinding, HotkeyState, ProtocolError, RecorderLinkEvent,
+    RecorderLinkState, RecorderStatus,
 };
 use serde::Deserialize;
 
@@ -74,9 +76,9 @@ pub(crate) const SETTINGS_VERSION: u32 = 1;
 
 /// What a notification is about.
 ///
-/// The unit the user switches off. There are three because there are three
-/// things worth interrupting anybody for; a fourth category means a fourth real
-/// event, not a fourth wording.
+/// The unit the user switches off. There are four because there are four things
+/// worth interrupting anybody for; a fifth category means a fifth real event,
+/// not a fifth wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotificationCategory {
     /// A recording ended because something went wrong. The recorder is still
@@ -87,6 +89,13 @@ pub(crate) enum NotificationCategory {
     /// The link gave up: nothing is being recorded and nothing further will be
     /// tried on its own.
     RecorderUnavailable,
+    /// Windows refused a global hotkey, so pressing it does nothing.
+    ///
+    /// The odd one out, and deliberately still here: it is not a recording that
+    /// failed but a control that is not there, and the way somebody finds out
+    /// otherwise is by pressing it in a game and watching nothing happen
+    /// ([issue #417](https://github.com/wildware-uk/clipped/issues/417)).
+    HotkeyUnavailable,
 }
 
 impl NotificationCategory {
@@ -95,10 +104,11 @@ impl NotificationCategory {
     /// The single list. Tests walk it rather than repeating it, so a category
     /// added without a switch to turn it off fails a test rather than reaching a
     /// user as a notification nothing can silence.
-    pub(crate) const ALL: [Self; 3] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::RecordingFailed,
         Self::RecordingInterrupted,
         Self::RecorderUnavailable,
+        Self::HotkeyUnavailable,
     ];
 
     /// The name this category has in the settings file.
@@ -110,6 +120,7 @@ impl NotificationCategory {
             Self::RecordingFailed => "recording_failed",
             Self::RecordingInterrupted => "recording_interrupted",
             Self::RecorderUnavailable => "recorder_unavailable",
+            Self::HotkeyUnavailable => "hotkey_unavailable",
         }
     }
 }
@@ -150,6 +161,15 @@ pub(crate) enum NotificationAction {
         /// What the window is to say when it arrives.
         notice: String,
     },
+    /// Raise the window on the screen that lists the hotkeys and what Windows
+    /// said about each.
+    ///
+    /// The Settings screen, which has drawn that list since
+    /// [issue #232](https://github.com/wildware-uk/clipped/issues/232). It is a
+    /// real destination rather than a button that apologises: the row for the
+    /// refused combination is already there, with the recorder's own sentence
+    /// beside it.
+    OpenHotkeySettings,
 }
 
 impl NotificationAction {
@@ -162,6 +182,7 @@ impl NotificationAction {
             Self::ShowFile { .. } => "Show the file",
             Self::RetryRecorder => "Try again",
             Self::OpenClipped { .. } => "Open Clipped",
+            Self::OpenHotkeySettings => "Change the hotkey",
         }
     }
 }
@@ -231,6 +252,8 @@ pub(crate) struct NotificationSettings {
     recording_interrupted: bool,
     /// Whether a link that gave up looking for a recorder is.
     recorder_unavailable: bool,
+    /// Whether a global hotkey Windows refused is.
+    hotkey_unavailable: bool,
 }
 
 impl Default for NotificationSettings {
@@ -240,6 +263,7 @@ impl Default for NotificationSettings {
             recording_failed: true,
             recording_interrupted: true,
             recorder_unavailable: true,
+            hotkey_unavailable: true,
         }
     }
 }
@@ -251,6 +275,7 @@ impl NotificationSettings {
             NotificationCategory::RecordingFailed => self.recording_failed,
             NotificationCategory::RecordingInterrupted => self.recording_interrupted,
             NotificationCategory::RecorderUnavailable => self.recorder_unavailable,
+            NotificationCategory::HotkeyUnavailable => self.hotkey_unavailable,
         }
     }
 
@@ -314,6 +339,19 @@ pub(crate) struct NotificationPolicy {
     /// matched to a recording whose `recording_id` it names, so a stale one is
     /// ignored rather than misreported.
     recording: Option<ActiveRecording>,
+    /// The refused combinations the user has already been told about.
+    ///
+    /// The link reports conflicts on **every** attachment, because it cannot
+    /// know what has already been said; this is where issue #417's "once, and
+    /// not on every reconnection" is kept. A recorder that loses its connection
+    /// and comes back with the same combinations still refused is the ordinary
+    /// case, and it is not news.
+    ///
+    /// Compared by combination and action rather than by count, so that a
+    /// *different* hotkey being refused after the user changed one is news
+    /// again. Sorted, because the order the recorder lists them in is not part
+    /// of the fact.
+    reported_conflicts: Option<Vec<(String, String)>>,
 }
 
 impl NotificationPolicy {
@@ -331,6 +369,7 @@ impl NotificationPolicy {
             can_retry,
             last_state: opening_state.clone(),
             recording: recording_in(opening_state).cloned(),
+            reported_conflicts: None,
         }
     }
 
@@ -351,7 +390,62 @@ impl NotificationPolicy {
                 recording_id,
                 error,
             } => Some(self.recording_failed(recording_id, error)),
+            RecorderLinkEvent::HotkeysUnavailable { conflicts } => {
+                self.hotkeys_unavailable(conflicts)
+            }
         }
+    }
+
+    /// Windows refused one or more global hotkeys.
+    ///
+    /// Answers `None` for a set the user has already been told about, which is
+    /// what makes a reconnection to the same recorder silent.
+    fn hotkeys_unavailable(&mut self, conflicts: &[HotkeyBinding]) -> Option<Notification> {
+        let mut seen: Vec<(String, String)> = conflicts
+            .iter()
+            .map(|binding| {
+                (
+                    binding.hotkey.clone().unwrap_or_default(),
+                    binding.action.clone(),
+                )
+            })
+            .collect();
+        seen.sort();
+
+        if self.reported_conflicts.as_ref() == Some(&seen) {
+            return None;
+        }
+        self.reported_conflicts = Some(seen);
+
+        // The recorder's own sentence for the first one, because it is the one
+        // that says who is likely to have the combination and what to do — and
+        // repeating it for each of several would make a toast nobody reads
+        // (AGENTS.md sections 28 and 45).
+        let first = conflicts.first()?;
+        let combination = first.hotkey.as_deref().unwrap_or("a combination");
+        let said = match &first.state {
+            HotkeyState::Conflict { reason } => as_sentence(reason),
+            // Not reachable through the link, which filters to conflicts before
+            // it sends. Stated rather than unwrapped so that a future caller
+            // passing something else gets a true sentence instead of a panic.
+            _ => format!("{combination} could not be registered."),
+        };
+
+        let body = if conflicts.len() == 1 {
+            format!("{combination} does nothing: {said}")
+        } else {
+            format!(
+                "{combination} does nothing: {said} {} more of Clipped's hotkeys were refused too.",
+                conflicts.len() - 1
+            )
+        };
+
+        Some(Notification {
+            category: NotificationCategory::HotkeyUnavailable,
+            title: format!("{} is unavailable", first.label),
+            body,
+            action: NotificationAction::OpenHotkeySettings,
+        })
     }
 
     /// The link is somewhere new — or says it is.
@@ -828,7 +922,27 @@ mod tests {
             failed("r-1", "the encoder stopped responding"),
             RecorderLinkEvent::RecordingInterrupted(active("r-1")),
             RecorderLinkEvent::State(unavailable("the recorder could not be started")),
+            RecorderLinkEvent::HotkeysUnavailable {
+                conflicts: vec![refused("save_replay", "Save replay", "Ctrl+F10")],
+            },
         ]
+    }
+
+    /// A binding Windows would not give this recorder.
+    fn refused(action: &str, label: &str, combination: &str) -> HotkeyBinding {
+        HotkeyBinding {
+            action: action.to_owned(),
+            label: label.to_owned(),
+            hotkey: Some(combination.to_owned()),
+            state: HotkeyState::Conflict {
+                reason: format!(
+                    "{combination} is already registered by another application, most likely one \
+                     running in the background"
+                ),
+            },
+            handled: true,
+            unavailable: None,
+        }
     }
 
     #[test]
@@ -883,6 +997,16 @@ mod tests {
                             "Open Clipped would raise the window carrying nothing that says what \
                              happened: {notification:?}"
                         ),
+                        // Carries nothing, because the destination is the whole
+                        // of it. What it needs instead is for the notification
+                        // to have named the combination — a toast that sends
+                        // somebody to a settings screen without saying which
+                        // hotkey is the vague message AGENTS.md section 28 is
+                        // about.
+                        NotificationAction::OpenHotkeySettings => assert!(
+                            notification.body.contains("Ctrl+F10"),
+                            "Change the hotkey never said which hotkey: {notification:?}"
+                        ),
                     }
 
                     reached.push(notification.action.label());
@@ -893,13 +1017,161 @@ mod tests {
         // The half that the old test was missing. Without it a variant can stop
         // being produced, or stop having a label, and every assertion above
         // still passes because nothing ever reaches it.
-        for label in ["Show the file", "Try again", "Open Clipped"] {
+        for label in [
+            "Show the file",
+            "Try again",
+            "Open Clipped",
+            "Change the hotkey",
+        ] {
             assert!(
                 reached.contains(&label),
                 "no case in this test produces {label}, so nothing here says whether it works: \
                  {reached:?}"
             );
         }
+    }
+
+    /// Attaching to a recorder that reports the same refusals again.
+    ///
+    /// What the link really does on a reconnection: `follow` asks `get_hotkeys`
+    /// on every attachment, so the policy sees this event as often as the
+    /// connection drops.
+    fn attached_again(
+        policy: &mut NotificationPolicy,
+        conflicts: Vec<HotkeyBinding>,
+    ) -> Option<Notification> {
+        policy.decide(&RecorderLinkEvent::State(RecorderLinkState::Reconnecting {
+            attempt: 1,
+            attempts_allowed: 5,
+            delay_ms: 250,
+            reason: "the pipe closed".to_owned(),
+        }));
+        policy.decide(&RecorderLinkEvent::HotkeysUnavailable { conflicts })
+    }
+
+    #[test]
+    fn a_refused_hotkey_says_which_combination_which_action_and_where_to_change_it() {
+        // Issue #417's second acceptance criterion. Somebody who never opens
+        // Settings finds out that Ctrl+F10 is Discord's by pressing it in a game
+        // and watching nothing happen; the whole point of the notification is
+        // that it says which key and which action, and offers the screen where
+        // that can be changed.
+        let mut policy = NotificationPolicy::new(
+            NotificationSettings::default(),
+            true,
+            &RecorderLinkState::Connecting,
+        );
+
+        let notification = policy
+            .decide(&RecorderLinkEvent::HotkeysUnavailable {
+                conflicts: vec![refused("save_replay", "Save replay", "Ctrl+F10")],
+            })
+            .expect("a refused hotkey is worth telling somebody about");
+
+        assert_eq!(
+            notification.category,
+            NotificationCategory::HotkeyUnavailable
+        );
+        assert!(
+            notification.title.contains("Save replay"),
+            "the notification never named the action: {notification:?}"
+        );
+        assert!(
+            notification.body.contains("Ctrl+F10"),
+            "the notification never named the combination: {notification:?}"
+        );
+        assert!(
+            notification.body.contains("another application"),
+            "the recorder's own explanation was dropped on the way: {notification:?}"
+        );
+        assert_eq!(notification.action, NotificationAction::OpenHotkeySettings);
+    }
+
+    #[test]
+    fn a_refused_hotkey_is_notified_once_and_not_again_on_every_reconnection() {
+        // Issue #417's first acceptance criterion, and the reason the policy
+        // remembers rather than the link: `follow` asks `get_hotkeys` on every
+        // attachment because it cannot know what has already been said, so a
+        // recorder that drops its connection twice an hour would otherwise toast
+        // twice an hour about a combination the user has already decided to live
+        // with.
+        let conflicts = vec![refused("save_replay", "Save replay", "Ctrl+F10")];
+        let mut policy = NotificationPolicy::new(
+            NotificationSettings::default(),
+            true,
+            &RecorderLinkState::Connecting,
+        );
+
+        assert!(
+            policy
+                .decide(&RecorderLinkEvent::HotkeysUnavailable {
+                    conflicts: conflicts.clone()
+                })
+                .is_some(),
+            "the first time a hotkey is refused is news"
+        );
+
+        for attempt in 1..=3 {
+            assert!(
+                attached_again(&mut policy, conflicts.clone()).is_none(),
+                "reconnection {attempt} announced the same refused hotkey again"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_hotkey_being_refused_is_news_again() {
+        // The other half of remembering: the set is compared by combination and
+        // action, not by "have we ever said anything about hotkeys". Somebody
+        // who changed Ctrl+F10 to Ctrl+F11 and hit a *different* application's
+        // combination has a new problem, and a policy that only remembered
+        // "already told them once" would leave them with a control that silently
+        // does nothing.
+        let mut policy = NotificationPolicy::new(
+            NotificationSettings::default(),
+            true,
+            &RecorderLinkState::Connecting,
+        );
+
+        policy
+            .decide(&RecorderLinkEvent::HotkeysUnavailable {
+                conflicts: vec![refused("save_replay", "Save replay", "Ctrl+F10")],
+            })
+            .expect("the first refusal is news");
+
+        let second = attached_again(
+            &mut policy,
+            vec![refused("save_replay", "Save replay", "Ctrl+F11")],
+        )
+        .expect("a combination that was not refused before is news");
+
+        assert!(
+            second.body.contains("Ctrl+F11"),
+            "the second notification is about the new combination: {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_hotkey_can_be_switched_off_on_its_own() {
+        // Issue #417's third acceptance criterion. The generic
+        // `every_category_can_be_switched_off_and_switching_one_off_leaves_the_others`
+        // walks `ALL` and covers this too; it is asserted here as well because
+        // that test would still pass if this category never produced a
+        // notification at all.
+        let settings = NotificationSettings {
+            hotkey_unavailable: false,
+            ..NotificationSettings::default()
+        };
+        let mut policy = NotificationPolicy::new(settings, true, &RecorderLinkState::Connecting);
+
+        assert!(
+            policy
+                .decide(&RecorderLinkEvent::HotkeysUnavailable {
+                    conflicts: vec![refused("save_replay", "Save replay", "Ctrl+F10")],
+                })
+                .is_none(),
+            "a switched-off category must not interrupt anybody"
+        );
     }
 
     #[test]

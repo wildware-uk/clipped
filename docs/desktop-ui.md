@@ -729,7 +729,7 @@ the screen says how:
 | Audio | The same options, with the recorder's own warning that a recording has no audio track yet (#180) |
 | Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
 | Hotkeys | The `hotkeys` section of `settings.json`, read when the recorder starts. The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232); binding one from here is #54 |
-| Notifications | **The one thing this window's own behaviour follows**: the three switches in `notifications.json`, named with their keys and their file |
+| Notifications | **The one thing this window's own behaviour follows**: the four switches in `notifications.json`, named with their keys and their file |
 | Startup | `clipped-recorder start-at-login enable`, which no protocol command can reach — [#308](https://github.com/wildware-uk/clipped/issues/308) |
 
 Two settings SPEC.md asks for have nowhere to be stored rather than nothing to
@@ -1273,8 +1273,9 @@ Everything, and there is no more:
 | `State(Unavailable)` | **yes** | The link has given up. Nothing is being recorded and nothing further will be tried unless asked. |
 | `RecordingInterrupted` | **yes** | A recorder died mid-recording. There is a playable file, and nothing else will ever say where. |
 | `RecordingFailed` | **yes** | A recording ended because something went wrong, and the state that follows it is only "idle". |
+| `HotkeysUnavailable` | **yes**, once per set | Windows refused a combination, so a control the user believes in does nothing at all. Only the first time a given set of refusals is seen — see below. |
 
-Those seven rows are the whole of `RecorderLinkEvent` and `RecorderLinkState`.
+Those eight rows are the whole of `RecorderLinkEvent` and `RecorderLinkState`.
 The rule they encode is that **only failures interrupt anybody**: a recorder runs
 for days, and a toast when a recording starts would train the user to dismiss
 them without reading, taking the three that matter with it.
@@ -1328,6 +1329,7 @@ ever offers one this build can actually perform:
 | Recording failed | The recorder's own sentence, and where the file it wrote up to the failure is. | **Show the file** — File Explorer, with the recording selected. |
 | Recording interrupted | What was being recorded, that it was not resumed, and where the file is. | **Show the file** |
 | Recorder unavailable | Why the link gave up. | **Try again** — `RecorderLink::retry`, and the window is raised to watch it. |
+| *Action* is unavailable | Which combination Windows refused, for which action, in the recorder's own words. | **Change the hotkey** — the Settings screen, where that row already is. |
 
 `recording_failed` carries a recording identifier and no path, so the file is
 named from the last `Recording` status the window saw — and **only** when that
@@ -1343,6 +1345,32 @@ button that would do nothing is worse than no button (AGENTS.md section 27).
 
 Clicking the *body* of a toast raises the window rather than performing the
 action, which is the platform convention and means neither click does nothing.
+
+### A hotkey Windows would not give out, and why it is announced once
+
+The recorder has known which of its combinations Windows refused since issue
+#232, and `get_hotkeys` has been able to say so. Nothing *asked*: the list is
+drawn on Settings > Hotkeys, so somebody who never opens Settings found out that
+Ctrl+F10 belongs to another application by pressing it in a game and watching
+nothing happen (issue #417).
+
+`RecorderLink` now asks once it has attached, on a control connection of its own,
+and reports whatever came back in the `Conflict` state as
+`RecorderLinkEvent::HotkeysUnavailable`. A recorder that got every combination it
+asked for produces no event at all — an event meaning "all well" would have every
+consumer checking a length before deciding whether something was wrong.
+
+**The link reports on every attachment; the policy announces once.** The link
+cannot know what the user has already been told, and a recorder that drops its
+connection twice an hour would otherwise toast twice an hour about a combination
+the user has already decided to live with. So `NotificationPolicy` remembers the
+set it announced, compared by combination and action — which means a *different*
+hotkey being refused later, after somebody changed one, is news again.
+
+Nothing here fails an attachment. A recorder too old to know `get_hotkeys`, one
+that refuses it, or one that goes away between attaching and being asked, all
+mean the same thing: nothing to report. Losing the link over a question about
+hotkeys would trade a convenience for the thing the link exists to do.
 
 #### Keeping the button connected to its handler
 
