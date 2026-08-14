@@ -75,11 +75,14 @@ fn push_seconds(buffer: &ReplayBuffer, seconds: u64) {
 ///
 /// The only wall-clock wait in this file, and it is bounded: a failure to catch
 /// up is reported as one rather than hanging.
-fn settle(buffer: &ReplayBuffer) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+fn settle(buffer: &ReplayBuffer, budget: u64) {
+    // Generous, because this waits on a real disk and CI's is not the one this
+    // was developed against. It is a bound on a converging process rather than
+    // a guess at how long it takes: each completed write offers the next, so
+    // the resident set falls until it is within the budget and then stops.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
     while std::time::Instant::now() < deadline {
-        let stats = buffer.stats();
-        if stats.bytes_held() <= stats.spilled_bytes().max(1) * 4 {
+        if buffer.stats().bytes_held() <= budget {
             return;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -102,7 +105,9 @@ fn a_thirty_minute_window_is_held_without_thirty_minutes_of_memory() {
 
     let buffer = ReplayBuffer::spilling(settings, area);
     push_seconds(&buffer, 30 * 60);
-    settle(&buffer);
+    // What the buffer promises to converge to: a few segments, not a fraction
+    // of the window.
+    settle(&buffer, settings.expected_segment_bytes() * 32);
 
     let stats = buffer.stats();
     let resident = stats.bytes_held();
@@ -148,7 +153,7 @@ fn a_clip_can_still_be_saved_from_material_that_went_to_disk() {
 
     let buffer = ReplayBuffer::spilling(settings, area);
     push_seconds(&buffer, 60);
-    settle(&buffer);
+    settle(&buffer, settings.expected_segment_bytes() * 32);
 
     assert!(
         buffer.stats().segments_spilled() > 0,

@@ -344,7 +344,7 @@ impl ReplayBuffer {
     /// Called by the writer thread. A segment evicted while it was being
     /// written is no longer in the queue, and its file is removed rather than
     /// left behind.
-    fn mark_spilled(&self, area: &Arc<SpillArea>, segment: &Segment, disk_bytes: u64) {
+    fn mark_spilled(self: &Arc<Self>, area: &Arc<SpillArea>, segment: &Segment, disk_bytes: u64) {
         let id = segment.id();
         let mut inner = self.locked();
         inner.spilling.remove(&id);
@@ -366,6 +366,14 @@ impl ReplayBuffer {
         };
         inner.sealed_bytes = inner.sealed_bytes.saturating_sub(freed);
         inner.counters.segments_spilled += 1;
+        drop(inner);
+
+        // Offer the next one now that there is room in the queue, rather than
+        // waiting for another packet to arrive. Without this the only thing
+        // that ever drives spilling is `push`, so a buffer whose writer fell
+        // behind stays that way until more video turns up — and a buffer that
+        // has stopped receiving keeps everything it had not yet written.
+        self.spill_if_needed();
     }
 
     /// Stops spilling after a write failed, and says so once.
