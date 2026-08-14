@@ -784,6 +784,32 @@ mod tests {
                  give or take the {slack:.3} s the audio engine holds; got {seconds:.3} s"
             );
         }
+
+        /// Asserts that the audio covers *at least* the time it was read over.
+        ///
+        /// The one-sided form, for a drain that follows a deliberate stall.
+        /// What would mean audio was lost there is a drain **shorter** than the
+        /// period the reader was away for. A longer one means the engine was
+        /// holding more than [`ENGINE_BACKLOG`] describes, which is what a
+        /// machine under load does to it and not a defect: CI has produced
+        /// 0.793 s of drain against a 0.500 s stall, so an engine holding
+        /// 0.293 s where 0.200 s was allowed for (#387).
+        ///
+        /// Deliberately not the wider tolerance that would also silence the
+        /// two-sided assertion everywhere else. A stall is the one place a long
+        /// drain is the expected outcome, because the reader was made slow on
+        /// purpose; everywhere else both directions are still suspicious.
+        fn assert_covered_at_least_as_long_as_it_took(&self, what: &str) {
+            let took = self.elapsed.as_secs_f64();
+            let slack = ENGINE_BACKLOG.as_secs_f64();
+            let seconds = self.timeline.seconds();
+            assert!(
+                seconds >= took - slack,
+                "{what}: {took:.3} s passed, so the drain has to cover at least that much, \
+                 give or take the {slack:.3} s the audio engine holds; got {seconds:.3} s, \
+                 which is a drain that lost some of the period the reader was away for"
+            );
+        }
     }
 
     /// Opens a capture of a process tree, or reports why this machine cannot.
@@ -1052,8 +1078,10 @@ mod tests {
             drain.timeline.frames
         );
         // And the recording does not lose the period the reader was away for:
-        // the drain covers it, however long it really was.
-        drain.assert_as_long_as_it_took("draining after a stall");
+        // the drain covers it, however long it really was — which is the whole
+        // property here, so it is asserted in that direction only. See
+        // `assert_covered_at_least_as_long_as_it_took`.
+        drain.assert_covered_at_least_as_long_as_it_took("draining after a stall");
         assert_eq!(
             capture.stats().frames - before,
             drain.timeline.frames,
