@@ -1036,7 +1036,10 @@ mod tests {
     /// What the link really does on a reconnection: `follow` asks `get_hotkeys`
     /// on every attachment, so the policy sees this event as often as the
     /// connection drops.
-    fn attached_again(policy: &mut NotificationPolicy, conflicts: Vec<HotkeyBinding>) -> Option<Notification> {
+    fn attached_again(
+        policy: &mut NotificationPolicy,
+        conflicts: Vec<HotkeyBinding>,
+    ) -> Option<Notification> {
         policy.decide(&RecorderLinkEvent::State(RecorderLinkState::Reconnecting {
             attempt: 1,
             attempts_allowed: 5,
@@ -1065,7 +1068,10 @@ mod tests {
             })
             .expect("a refused hotkey is worth telling somebody about");
 
-        assert_eq!(notification.category, NotificationCategory::HotkeyUnavailable);
+        assert_eq!(
+            notification.category,
+            NotificationCategory::HotkeyUnavailable
+        );
         assert!(
             notification.title.contains("Save replay"),
             "the notification never named the action: {notification:?}"
@@ -1156,8 +1162,7 @@ mod tests {
             hotkey_unavailable: false,
             ..NotificationSettings::default()
         };
-        let mut policy =
-            NotificationPolicy::new(settings, true, &RecorderLinkState::Connecting);
+        let mut policy = NotificationPolicy::new(settings, true, &RecorderLinkState::Connecting);
 
         assert!(
             policy
