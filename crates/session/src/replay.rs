@@ -59,7 +59,7 @@ use clipped_encoder::BitRate;
 use clipped_muxer::RecordingLayout;
 use clipped_replay::{
     save_clip, ConfigError, LeaseError, ReplayBuffer, ReplayConfig, ReplayStats, SaveError,
-    SavedClip, MAXIMUM_WINDOW, MINIMUM_WINDOW,
+    SavedClip, SpillArea, MAXIMUM_WINDOW, MINIMUM_WINDOW,
 };
 
 /// Attaches `replay` to a recording whose encoder has just opened, and hands
@@ -89,6 +89,44 @@ pub fn start_buffer<'replay>(
     let replay = replay?;
     replay.begin(layout, bitrate);
     replay.buffer()
+}
+
+/// Counts the buffers this process has made, so that two recordings running at
+/// once get spill directories of their own.
+static BUFFERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A buffer for `config`, spilling to disk if this machine will let it.
+///
+/// A buffer that cannot make a spill directory — no per-user directory, a
+/// read-only profile, a full disk — simply keeps everything in memory, which is
+/// what every buffer did before
+/// [issue #36](https://github.com/wildware-uk/clipped/issues/36) and is a
+/// shorter window rather than a failed recording (AGENTS.md section 17).
+fn buffer_for(config: ReplayConfig) -> Arc<ReplayBuffer> {
+    let Some(root) = SpillArea::default_root() else {
+        tracing::info!(
+            "this machine describes no per-user directory, so the replay buffer will keep its              window in memory"
+        );
+        return Arc::new(ReplayBuffer::new(config));
+    };
+
+    let ordinal = BUFFERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match SpillArea::create(&root, std::process::id(), ordinal) {
+        Ok(area) => {
+            tracing::info!(
+                directory = %clipped_logging::RedactedPath::new(area.directory()),
+                "the replay buffer will keep its window on disk"
+            );
+            ReplayBuffer::spilling(config, area)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the replay buffer could not make a directory to spill into and will keep its                  window in memory, which for a long window may be less than was asked for"
+            );
+            Arc::new(ReplayBuffer::new(config))
+        }
+    }
 }
 
 /// What a recording's audio costs a replay buffer, in bytes a second.
@@ -220,7 +258,7 @@ impl ReplayRecording {
         // `ReplayConfig` is `Copy`, so the configuration is still readable for
         // the line below after the buffer has taken it.
         let _ = self.started.set(StartedReplay {
-            buffer: Arc::new(ReplayBuffer::new(config)),
+            buffer: buffer_for(config),
             layout: layout.clone(),
         });
 

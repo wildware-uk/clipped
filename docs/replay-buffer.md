@@ -21,10 +21,9 @@ What still does not exist is a capture that keeps *only* the buffer: SPEC.md
 section 4's Manual/Replay mode writes no continuous file, and this build has no
 recording without one, which is
 [issue #423](https://github.com/wildware-uk/clipped/issues/423). Spilling
-segments to disk for long durations is
-[issue #36](https://github.com/wildware-uk/clipped/issues/36), and the
-"per-configuration ceiling" section below is the argument for why it has to
-exist.
+segments to disk for long durations is done
+([issue #36](https://github.com/wildware-uk/clipped/issues/36)) and has its own
+section below.
 
 ## Encoded segments, never raw frames
 
@@ -440,9 +439,8 @@ decodable, and put the loss in the statistics where somebody can see it.
 Nothing here reserves memory up front, so there is no allocation to fail at
 start-up; and nothing grows without bound, so there is no allocation to fail
 during a match. What a 30-minute window at 3.9 GiB does to a machine with 8 GB of
-RAM is nevertheless a real problem, and the answer to it is issue #36:
-disk-backed buffering, which trades the memory for a bounded amount of disk and
-keeps the long durations SPEC.md section 16 asks for.
+RAM was a real problem, and the answer to it is "Keeping the window on disk"
+below: the same window, in about a megabyte of memory.
 
 ## Measured memory use
 
@@ -568,10 +566,78 @@ a save of the whole window
   working set      188.3 MiB
 ```
 
-**And this is the argument for issue #36.** A 30-minute window costs the better
-part of 5 GiB of resident memory on a machine that is also running a game. That
-is affordable on 32 GB and it is not affordable on 8 or 16, which is why
-disk-backed buffering exists as a ticket rather than as an optimisation.
+**And this was the argument for issue #36.** A 30-minute window costs the better
+part of 5 GiB of resident memory on a machine that is also running a game — which
+is affordable on 32 GB and is not affordable on 8 or 16. The next section is what
+happens instead.
+
+## Keeping the window on disk
+
+A recording's buffer writes its older segments out and keeps only the newest few
+in memory, so **the memory a buffer costs stops depending on how long its window
+is** ([issue #36](https://github.com/wildware-uk/clipped/issues/36)). Measured
+over thirty minutes of media time, at the same bitrate, with and without it:
+
+| | resident | on disk |
+| --- | --- | --- |
+| in memory only | 212 MB | — |
+| spilling | **0.94 MB** | 208 MB |
+
+The window itself is unchanged: the same thirty minutes is held either way, and
+a clip saved from it reads back the same.
+
+### What decides how much stays in memory
+
+Not the memory ceiling. That is derived from the *window* — 6.3 GB for thirty
+minutes — so a spilling buffer that used it as its resident budget would still be
+holding gigabytes before it wrote anything. The budget is eight segments' worth
+of video instead (`SPILL_RESIDENT_SEGMENTS`), which is derived from the bitrate
+and the segment length and **not** from the window. A thirty-minute buffer and a
+thirty-second one hold the same amount.
+
+The ceiling is still there, as the backstop it always was: if the writer cannot
+keep up, the buffer evicts exactly as it did before, and
+`ReplayStats::spills_declined_writer_behind` says how often that happened.
+
+### Where the files go, and when they go away
+
+`%LOCALAPPDATA%\Clipped\replay\<pid>-<n>\`, beside the rest of Clipped's
+per-user state. The system drive rather than the recording's own, because a
+recording directory is chosen for capacity — an external drive, a spinning disk
+kept for the size of it — and a buffer spills continuously while the game runs.
+
+An ordinary exit removes the directory. A crash cannot, so the recorder sweeps
+at start-up. The rule has to survive **two Clipped processes running at once**,
+which is ordinary — `serve` alongside a `replay` run — so "delete what is not
+mine" would have one recording delete another's buffer, and naming the directory
+after the process id is not enough because Windows reuses them.
+
+So each directory holds a lock file its owner keeps open exclusively. The sweep
+tries to open each one: it fails while the owner is alive and succeeds once the
+owner has gone, however it went. That is a rule that cannot delete a live
+buffer's files.
+
+One trap, because it is invisible when you get it wrong: the lock has to be
+released **before** the directory is removed. Windows will not remove a directory
+that still holds an open file, so the obvious order leaves every byte behind and
+nothing notices until a disk fills up over weeks.
+
+### When the disk fills or goes away
+
+The buffer stops spilling, says so once at `warn`, and behaves exactly as it did
+before spilling existed — it evicts to stay under its ceiling. That is a shorter
+window, never a failed recording (AGENTS.md section 17). A buffer that could not
+make its directory in the first place does the same thing and never tries.
+
+### A lease still does not touch a disk under the lock
+
+A save selects its segments while holding the buffer's lock — measured at 0.77 ms
+above — and reads back anything that was spilled **after** releasing it. A
+spilled segment is pinned during the selection by an `Arc` over its file, exactly
+as a resident one is pinned by an `Arc` over its bytes, so eviction cannot take
+it out from under a save that is still reading. If a spilled segment will not
+read, the lease is refused (`LeaseError::Unreadable`) rather than returned with a
+hole in the middle of it.
 
 ## Attached to a live recording
 

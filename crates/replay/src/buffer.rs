@@ -119,8 +119,10 @@
 //! would be the worse failure (AGENTS.md section 17).
 
 use core::time::Duration;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::collections::{HashSet, VecDeque};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::thread::JoinHandle;
 
 use clipped_encoder::EncodedPacket;
 use clipped_muxer::TrackId;
@@ -130,6 +132,7 @@ use crate::error::LeaseError;
 use crate::lease::SegmentLease;
 use crate::range::TimeRange;
 use crate::segment::{OpenSegment, Segment, SegmentId, SegmentIds};
+use crate::spill::{SpillArea, SpilledSegment};
 
 /// What one [`ReplayBuffer::push`] did with a packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +180,96 @@ pub enum AudioPushOutcome {
 pub struct ReplayBuffer {
     config: ReplayConfig,
     inner: Mutex<Inner>,
+    /// The thread that writes segments out, if this buffer spills at all.
+    ///
+    /// [`None`] for a buffer made with [`ReplayBuffer::new`], which is every
+    /// buffer that existed before
+    /// [issue #36](https://github.com/wildware-uk/clipped/issues/36) and every
+    /// one whose window fits in memory. Spilling is opt-in for that reason: a
+    /// thirty-second buffer writing continuously to disk would be paying a cost
+    /// for a problem it does not have.
+    spill: Option<SpillWorker>,
+}
+
+/// How many segments may be waiting to be written before the buffer stops
+/// offering more.
+///
+/// Small on purpose. A queue that absorbed a slow disk would be holding the
+/// memory that spilling exists to release, so when the writer falls behind the
+/// buffer stops offering and the ceiling evicts instead — which is the same
+/// degradation a full disk produces, and is a shorter window rather than a
+/// failed recording.
+const SPILL_QUEUE: usize = 4;
+
+/// How many segments' worth of video a spilling buffer keeps in memory.
+///
+/// The number that makes this feature work, and the reason it needs no new
+/// configuration. `ReplayConfig::memory_ceiling` scales with the *window* — it
+/// is 6.3 GB for thirty minutes — so a spilling buffer that used it as its
+/// resident budget would still be holding gigabytes before it wrote anything.
+///
+/// This is derived from `expected_segment_bytes` instead, which scales with the
+/// bitrate and the segment length and **not** with the window. So a
+/// thirty-minute buffer and a thirty-second one hold the same amount of memory,
+/// which is the whole of what
+/// [issue #36](https://github.com/wildware-uk/clipped/issues/36) asks for.
+///
+/// Eight of them: enough that the writer has room to fall behind a little
+/// without the ceiling starting to evict, and few enough that at the two-second
+/// default it is sixteen seconds of video rather than minutes.
+const SPILL_RESIDENT_SEGMENTS: u64 = 8;
+
+/// The writer thread and what it is fed with.
+#[derive(Debug)]
+struct SpillWorker {
+    /// An [`Option`] so that [`Drop`] can close the channel before joining:
+    /// the thread ends when the sender goes, and joining a thread that is still
+    /// waiting for one would never return.
+    sender: Option<SyncSender<Arc<Segment>>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for SpillWorker {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Writes segments out until the buffer that owns this thread has gone.
+///
+/// Holds a [`Weak`] rather than an [`Arc`] so that the thread is not what keeps
+/// the buffer alive: the recording owns the buffer, and when the recording ends
+/// the channel closes and this returns.
+fn spill_loop(
+    buffer: &Weak<ReplayBuffer>,
+    receiver: &Receiver<Arc<Segment>>,
+    area: &Arc<SpillArea>,
+) {
+    while let Ok(segment) = receiver.recv() {
+        let id = segment.id();
+        match area.write(&segment) {
+            Ok(disk_bytes) => {
+                let Some(buffer) = buffer.upgrade() else {
+                    // The buffer went while this was being written. The file is
+                    // nobody's, and the area is about to be removed anyway.
+                    area.remove(id);
+                    return;
+                };
+                buffer.mark_spilled(area, &segment, disk_bytes);
+            }
+            Err(error) => {
+                area.remove(id);
+                let Some(buffer) = buffer.upgrade() else {
+                    return;
+                };
+                buffer.give_up_spilling(&error);
+                return;
+            }
+        }
+    }
 }
 
 impl ReplayBuffer {
@@ -186,6 +279,162 @@ impl ReplayBuffer {
         Self {
             config,
             inner: Mutex::new(Inner::default()),
+            spill: None,
+        }
+    }
+
+    /// A buffer that writes segments to `area` rather than evicting them when
+    /// it reaches its memory ceiling.
+    ///
+    /// The ceiling stops being what the buffer may *hold* and becomes what it
+    /// may hold **in memory**: past it, the oldest segment still resident is
+    /// written out and its memory released, and the window rule alone decides
+    /// what is kept. That is what lets a thirty-minute window run in a bounded
+    /// amount of memory instead of the 6.3 GB `ReplayConfig::memory_ceiling`
+    /// derives for one
+    /// ([issue #36](https://github.com/wildware-uk/clipped/issues/36)).
+    ///
+    /// An [`Arc`] because the writer thread has to be able to reach back into
+    /// the buffer to say a segment is now on disk, and it holds a [`Weak`] so
+    /// that it is never what keeps the buffer alive.
+    #[must_use]
+    pub fn spilling(config: ReplayConfig, area: SpillArea) -> Arc<Self> {
+        let area = Arc::new(area);
+        let (sender, receiver) = sync_channel(SPILL_QUEUE);
+
+        Arc::new_cyclic(|weak: &Weak<Self>| {
+            let weak = weak.clone();
+            let thread_area = Arc::clone(&area);
+            let worker = std::thread::Builder::new()
+                .name("clipped-replay-spill".to_owned())
+                .spawn(move || spill_loop(&weak, &receiver, &thread_area))
+                .ok();
+
+            Self {
+                config,
+                inner: Mutex::new(Inner::default()),
+                // A machine that cannot start the thread simply does not spill,
+                // which is the behaviour every buffer had before this existed.
+                // The area itself is not kept here: the writer thread holds one
+                // reference for as long as it runs, and every spilled segment
+                // holds its own — so the directory outlives the last thing that
+                // needs it and goes when nothing does.
+                spill: worker.map(|worker| SpillWorker {
+                    sender: Some(sender),
+                    worker: Some(worker),
+                }),
+            }
+        })
+    }
+
+    /// How much video a spilling buffer holds in memory before writing some out.
+    ///
+    /// See [`SPILL_RESIDENT_SEGMENTS`]. Deliberately not the memory ceiling,
+    /// which scales with the window and would leave a long buffer holding
+    /// gigabytes before it wrote anything.
+    fn resident_budget(&self) -> u64 {
+        self.config
+            .expected_segment_bytes()
+            .saturating_mul(SPILL_RESIDENT_SEGMENTS)
+            .max(1)
+    }
+
+    /// Records that a segment is now on disk, and releases its memory.
+    ///
+    /// Called by the writer thread. A segment evicted while it was being
+    /// written is no longer in the queue, and its file is removed rather than
+    /// left behind.
+    fn mark_spilled(self: &Arc<Self>, area: &Arc<SpillArea>, segment: &Segment, disk_bytes: u64) {
+        let id = segment.id();
+        let mut inner = self.locked();
+        inner.spilling.remove(&id);
+
+        let Some(index) = inner.sealed.iter().position(|stored| stored.id() == id) else {
+            area.remove(id);
+            return;
+        };
+        if matches!(inner.sealed[index], Stored::Spilled { .. }) {
+            return;
+        }
+
+        let freed = inner.sealed[index].resident_bytes();
+        inner.sealed[index] = Stored::Spilled {
+            file: Arc::new(SpilledSegment::new(id, Arc::clone(area), disk_bytes)),
+            start: segment.start(),
+            last_presentation: segment.last_presentation(),
+            packets: segment.len() as u64,
+        };
+        inner.sealed_bytes = inner.sealed_bytes.saturating_sub(freed);
+        inner.counters.segments_spilled += 1;
+        drop(inner);
+
+        // Offer the next one now that there is room in the queue, rather than
+        // waiting for another packet to arrive. Without this the only thing
+        // that ever drives spilling is `push`, so a buffer whose writer fell
+        // behind stays that way until more video turns up — and a buffer that
+        // has stopped receiving keeps everything it had not yet written.
+        self.spill_if_needed();
+    }
+
+    /// Stops spilling after a write failed, and says so once.
+    ///
+    /// A full disk or a removed drive. The buffer falls back to what it did
+    /// before spilling existed — evicting to stay under its ceiling — which
+    /// costs history rather than the recording (AGENTS.md section 17).
+    fn give_up_spilling(&self, error: &std::io::Error) {
+        let mut inner = self.locked();
+        if inner.spilling_given_up {
+            return;
+        }
+        inner.spilling_given_up = true;
+        inner.spilling.clear();
+        drop(inner);
+
+        tracing::warn!(
+            %error,
+            "the replay buffer could not write a segment to disk and has stopped trying; it is \
+             now keeping only what fits in memory, so the window it holds will be shorter than \
+             the one it was configured for"
+        );
+    }
+
+    /// Offers the oldest resident segment to the writer, if there is reason to.
+    ///
+    /// Called after every push. Does nothing at all for a buffer that is not
+    /// spilling, which is the only cost that path pays.
+    fn spill_if_needed(&self) {
+        let Some(spill) = &self.spill else {
+            return;
+        };
+        let Some(sender) = &spill.sender else {
+            return;
+        };
+
+        loop {
+            let mut inner = self.locked();
+            if inner.spilling_given_up || inner.sealed_bytes <= self.resident_budget() {
+                return;
+            }
+            let Some(segment) = inner.next_to_spill() else {
+                return;
+            };
+            inner.spilling.insert(segment.id());
+            drop(inner);
+
+            // `try_send` and not `send`: this runs on the thread that is
+            // capturing, and it may never wait for a disk (AGENTS.md section
+            // 20). A full queue means the writer is behind, and the ceiling
+            // then evicts exactly as it did before.
+            if let Err(rejected) = sender.try_send(segment) {
+                let mut inner = self.locked();
+                let returned = match rejected {
+                    std::sync::mpsc::TrySendError::Full(segment)
+                    | std::sync::mpsc::TrySendError::Disconnected(segment) => segment,
+                };
+                inner.spilling.remove(&returned.id());
+                inner.counters.spills_declined_writer_behind += 1;
+                return;
+            }
         }
     }
 
@@ -202,7 +451,9 @@ impl ReplayBuffer {
     /// `clipped_encoder::EncodedPacket` is released by the next call to
     /// `next_packet`.
     pub fn push(&self, packet: &EncodedPacket<'_>) -> PushOutcome {
-        self.locked().push(&self.config, packet)
+        let outcome = self.locked().push(&self.config, packet);
+        self.spill_if_needed();
+        outcome
     }
 
     /// Adds one block of captured audio.
@@ -231,7 +482,11 @@ impl ReplayBuffer {
     /// [`LeaseError::OutsideBuffer`] if the range shares no instant with what
     /// is held.
     pub fn lease(&self, range: TimeRange) -> Result<SegmentLease, LeaseError> {
-        self.locked().lease(Request::Range(range))
+        // The plan is taken under the lock and finished outside it, so a buffer
+        // that has spilled to disk does not read a file while the capture
+        // thread is waiting to push its next packet.
+        let plan = self.locked().plan_lease(Request::Range(range))?;
+        plan.materialise()
     }
 
     /// The segments covering the last `length` of buffered video.
@@ -245,7 +500,8 @@ impl ReplayBuffer {
     ///
     /// [`LeaseError::Empty`] if no keyframe has reached the buffer yet.
     pub fn lease_last(&self, length: Duration) -> Result<SegmentLease, LeaseError> {
-        self.locked().lease(Request::Last(length))
+        let plan = self.locked().plan_lease(Request::Last(length))?;
+        plan.materialise()
     }
 
     /// The media time the buffer currently holds, or [`None`] if it holds
@@ -282,7 +538,7 @@ enum Request {
 #[derive(Debug, Default)]
 struct Inner {
     /// Sealed segments, oldest first. Each begins on a keyframe.
-    sealed: VecDeque<Arc<Segment>>,
+    sealed: VecDeque<Stored>,
     /// The segment being written, which no reader shares.
     open: Option<OpenSegment>,
     /// Segments this buffer has evicted and a lease is still reading.
@@ -305,6 +561,150 @@ struct Inner {
     /// next keyframe will begin, which is what makes the older material
     /// unusable (see the module documentation).
     ceiling_gap: Option<u64>,
+    /// Segments handed to the spill thread and not yet reported back.
+    ///
+    /// Without this the same segment is queued on every push until the write
+    /// finishes, which at 60 pushes a second is a hundred copies of the same
+    /// few megabytes in flight.
+    spilling: HashSet<SegmentId>,
+    /// Whether spilling has been given up on, and why it is not fatal.
+    ///
+    /// Set when a write fails — a full disk, a drive removed. The buffer then
+    /// behaves exactly as it did before spilling existed: it evicts to stay
+    /// under its ceiling, which is a shorter window rather than a failed
+    /// recording (AGENTS.md section 17).
+    spilling_given_up: bool,
+}
+
+/// One sealed segment, wherever it currently is.
+///
+/// The buffer's queue holds these rather than `Arc<Segment>` so that a segment
+/// can be on disk without leaving the window it belongs to
+/// ([issue #36](https://github.com/wildware-uk/clipped/issues/36)). Everything
+/// the queue is walked for — the window rule, the ceiling, what a lease
+/// selects — asks one of the four questions below, and only the ceiling cares
+/// which arm it is.
+#[derive(Debug, Clone)]
+enum Stored {
+    /// In memory, and shareable with a lease as it stands.
+    Resident(Arc<Segment>),
+    /// On disk. The span is kept here because answering "does this segment
+    /// belong to the window" must not read a file.
+    Spilled {
+        file: Arc<SpilledSegment>,
+        start: Duration,
+        last_presentation: Duration,
+        /// Kept here so that reporting what the buffer holds never reads a
+        /// file.
+        packets: u64,
+    },
+}
+
+impl Stored {
+    fn id(&self) -> SegmentId {
+        match self {
+            Self::Resident(segment) => segment.id(),
+            Self::Spilled { file, .. } => file.id(),
+        }
+    }
+
+    fn start(&self) -> Duration {
+        match self {
+            Self::Resident(segment) => segment.start(),
+            Self::Spilled { start, .. } => *start,
+        }
+    }
+
+    fn last_presentation(&self) -> Duration {
+        match self {
+            Self::Resident(segment) => segment.last_presentation(),
+            Self::Spilled {
+                last_presentation, ..
+            } => *last_presentation,
+        }
+    }
+
+    /// How many packets it holds, wherever it is.
+    fn packets(&self) -> u64 {
+        match self {
+            Self::Resident(segment) => segment.len() as u64,
+            Self::Spilled { packets, .. } => *packets,
+        }
+    }
+
+    /// What it costs in memory, which is nothing once it is on disk.
+    ///
+    /// This is the whole point of the type: the ceiling is enforced against the
+    /// sum of these, so spilling a segment is what makes room without dropping
+    /// anything.
+    fn resident_bytes(&self) -> u64 {
+        match self {
+            Self::Resident(segment) => segment.resident_bytes() as u64,
+            Self::Spilled { .. } => 0,
+        }
+    }
+}
+
+/// A segment a lease has claimed, before it is necessarily in memory.
+///
+/// Cloning one of these under the buffer's lock is what pins the material: a
+/// resident segment by its `Arc<Segment>`, a spilled one by the `Arc` that owns
+/// its file. Reading the file happens **after** the lock is released, which is
+/// what keeps `docs/replay-buffer.md`'s 0.77 ms lease off the capture thread's
+/// critical path.
+#[derive(Debug, Clone)]
+enum Pinned {
+    Resident(Arc<Segment>),
+    Spilled(Arc<SpilledSegment>),
+}
+
+impl From<Stored> for Pinned {
+    fn from(stored: Stored) -> Self {
+        match stored {
+            Stored::Resident(segment) => Self::Resident(segment),
+            Stored::Spilled { file, .. } => Self::Spilled(file),
+        }
+    }
+}
+
+/// What a lease will be, once anything on disk has been read back.
+///
+/// Produced under the buffer's lock and finished outside it.
+#[derive(Debug)]
+struct LeasePlan {
+    segments: Vec<Pinned>,
+    requested: TimeRange,
+    requested_length: Duration,
+}
+
+impl LeasePlan {
+    /// Reads back whatever was on disk and builds the lease.
+    ///
+    /// # Errors
+    ///
+    /// [`LeaseError::Unreadable`] if a spilled segment will not read. The lease
+    /// is refused rather than returned with a hole in it.
+    fn materialise(self) -> Result<SegmentLease, LeaseError> {
+        let mut segments = Vec::with_capacity(self.segments.len());
+        for pinned in self.segments {
+            match pinned {
+                Pinned::Resident(segment) => segments.push(segment),
+                Pinned::Spilled(file) => {
+                    let segment = file.load().map_err(|source| LeaseError::Unreadable {
+                        segment: file.id(),
+                        kind: source.kind(),
+                        detail: source.to_string(),
+                    })?;
+                    segments.push(Arc::new(segment));
+                }
+            }
+        }
+        Ok(SegmentLease::new(
+            segments,
+            self.requested,
+            self.requested_length,
+        ))
+    }
 }
 
 /// Totals for the life of a buffer.
@@ -320,6 +720,8 @@ struct Counters {
     audio_blocks_buffered: u64,
     audio_blocks_discarded_before_first_keyframe: u64,
     audio_blocks_discarded_over_ceiling: u64,
+    segments_spilled: u64,
+    spills_declined_writer_behind: u64,
     leases_taken: u64,
 }
 
@@ -389,8 +791,9 @@ impl Inner {
         };
 
         let segment = Arc::new(open.seal());
-        self.sealed_bytes += segment.resident_bytes() as u64;
-        self.sealed.push_back(segment);
+        let stored = Stored::Resident(segment);
+        self.sealed_bytes += stored.resident_bytes();
+        self.sealed.push_back(stored);
     }
 
     /// Accounts for a packet that cannot be buffered because no segment is
@@ -576,16 +979,22 @@ impl Inner {
     /// taken under, so a segment cannot acquire a reader between the check and
     /// the drop.
     fn drop_front(&mut self) {
-        let Some(segment) = self.sealed.pop_front() else {
+        let Some(stored) = self.sealed.pop_front() else {
             return;
         };
 
-        let bytes = segment.resident_bytes() as u64;
+        let bytes = stored.resident_bytes();
         self.sealed_bytes = self.sealed_bytes.saturating_sub(bytes);
 
-        if Arc::strong_count(&segment) > 1 {
-            self.leased_bytes += bytes;
-            self.leased.push(segment);
+        // A spilled segment needs nothing here: its file is owned by an `Arc`
+        // that a lease clones, so the file outlives the eviction exactly as
+        // long as somebody is still reading it and no longer
+        // (`crate::spill::SpilledSegment`).
+        if let Stored::Resident(segment) = stored {
+            if Arc::strong_count(&segment) > 1 {
+                self.leased_bytes += bytes;
+                self.leased.push(segment);
+            }
         }
     }
 
@@ -603,7 +1012,7 @@ impl Inner {
         self.leased_bytes = self.leased_bytes.saturating_sub(freed);
     }
 
-    fn lease(&mut self, request: Request) -> Result<SegmentLease, LeaseError> {
+    fn plan_lease(&mut self, request: Request) -> Result<LeasePlan, LeaseError> {
         self.release_finished_leases();
 
         let held = self.held().ok_or(LeaseError::Empty)?;
@@ -636,12 +1045,13 @@ impl Inner {
             .unwrap_or(0)
             .max(first);
 
-        let mut segments: Vec<Arc<Segment>> = self
+        let mut segments: Vec<Pinned> = self
             .sealed
             .iter()
             .skip(first)
             .take(last + 1 - first)
-            .map(Arc::clone)
+            .cloned()
+            .map(Pinned::from)
             .collect();
 
         // The open segment is the newest material there is — the seconds
@@ -649,12 +1059,16 @@ impl Inner {
         // while it is still being written, so the lease takes a copy of it.
         if last == starts.len() - 1 {
             if let Some(open) = &self.open {
-                segments.push(Arc::new(open.snapshot()));
+                segments.push(Pinned::Resident(Arc::new(open.snapshot())));
             }
         }
 
         self.counters.leases_taken += 1;
-        Ok(SegmentLease::new(segments, requested, requested_length))
+        Ok(LeasePlan {
+            segments,
+            requested,
+            requested_length,
+        })
     }
 
     /// The newest presentation time in the buffer.
@@ -680,6 +1094,27 @@ impl Inner {
         Some(TimeRange::new(start, self.latest_presentation()?))
     }
 
+    /// What this buffer has on disk, in bytes.
+    fn spilled_bytes(&self) -> u64 {
+        self.sealed
+            .iter()
+            .filter_map(|stored| match stored {
+                Stored::Spilled { file, .. } => Some(file.disk_bytes()),
+                Stored::Resident(_) => None,
+            })
+            .sum()
+    }
+
+    /// The oldest segment still in memory that is not already being written.
+    fn next_to_spill(&self) -> Option<Arc<Segment>> {
+        self.sealed.iter().find_map(|stored| match stored {
+            Stored::Resident(segment) if !self.spilling.contains(&segment.id()) => {
+                Some(Arc::clone(segment))
+            }
+            _ => None,
+        })
+    }
+
     /// The segments this buffer owns, in bytes. What the ceiling governs.
     fn owned_bytes(&self) -> u64 {
         self.sealed_bytes
@@ -698,11 +1133,7 @@ impl Inner {
     fn stats(&self) -> ReplayStats {
         ReplayStats {
             segments_held: self.sealed.len() + usize::from(self.open.is_some()),
-            packets_held: self
-                .sealed
-                .iter()
-                .map(|segment| segment.len() as u64)
-                .sum::<u64>()
+            packets_held: self.sealed.iter().map(Stored::packets).sum::<u64>()
                 + self.open.as_ref().map_or(0, |open| open.len() as u64),
             bytes_held: self.alive_bytes(),
             bytes_retained_for_a_save: self.leased_bytes,
@@ -723,6 +1154,9 @@ impl Inner {
                 .counters
                 .audio_blocks_discarded_before_first_keyframe,
             audio_blocks_discarded_over_ceiling: self.counters.audio_blocks_discarded_over_ceiling,
+            spilled_bytes: self.spilled_bytes(),
+            segments_spilled: self.counters.segments_spilled,
+            spills_declined_writer_behind: self.counters.spills_declined_writer_behind,
             leases_taken: self.counters.leases_taken,
         }
     }
@@ -754,6 +1188,9 @@ pub struct ReplayStats {
     audio_blocks_buffered: u64,
     audio_blocks_discarded_before_first_keyframe: u64,
     audio_blocks_discarded_over_ceiling: u64,
+    spilled_bytes: u64,
+    segments_spilled: u64,
+    spills_declined_writer_behind: u64,
     leases_taken: u64,
 }
 
@@ -775,6 +1212,30 @@ impl ReplayStats {
     #[must_use]
     pub const fn bytes_held(&self) -> u64 {
         self.bytes_held
+    }
+
+    /// What this buffer is keeping on disk, in bytes.
+    ///
+    /// Zero for a buffer that does not spill, which is every buffer made with
+    /// [`ReplayBuffer::new`].
+    #[must_use]
+    pub const fn spilled_bytes(&self) -> u64 {
+        self.spilled_bytes
+    }
+
+    /// Segments written out to disk over the life of this buffer.
+    #[must_use]
+    pub const fn segments_spilled(&self) -> u64 {
+        self.segments_spilled
+    }
+
+    /// Times a segment was not offered to the writer because it was behind.
+    ///
+    /// Non-zero means the ceiling has been evicting material that would
+    /// otherwise have been kept, because the disk could not take it fast enough.
+    #[must_use]
+    pub const fn spills_declined_writer_behind(&self) -> u64 {
+        self.spills_declined_writer_behind
     }
 
     /// Blocks of captured audio copied into the buffer.
