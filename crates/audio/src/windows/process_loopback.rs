@@ -7,9 +7,17 @@
 //! recorder that writes one mixed stream
 //! ([ADR 0003](../../../../docs/adr/0003-process-specific-audio-capture.md)).
 //! Windows scopes a capture client to a process and the processes it started
-//! through `ActivateAudioInterfaceAsync` with
-//! `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`; `activation.rs` is that
-//! call, and this is what a recording does with it.
+//! through `ActivateAudioInterfaceAsync`, and it offers **both sides**:
+//! `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` for what the tree
+//! played, and `..._EXCLUDE_...` for everything the machine played except it.
+//! `activation.rs` is that call, [`TreeScope`] is which side, and this is what
+//! a recording does with them.
+//!
+//! A session needs both or neither ([issue
+//! #27](https://github.com/wildware-uk/clipped/issues/27)): a recording with a
+//! `Game` track scoped to the tree *and* a system track that is the whole
+//! endpoint has the game's audio on two tracks, which is worse than one honest
+//! track and a note saying separation was unavailable (ADR 0003).
 //!
 //! Everything after the activation is `endpoint_capture.rs`: the same packet
 //! loop, the same timeline that keeps a track as long as its recording, the
@@ -77,7 +85,8 @@ use core::time::Duration;
 use clipped_windows::{ProcessTree, WindowsError};
 use windows::Win32::Media::Audio::{
     eRender, IAudioClient, IMMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, PROCESS_LOOPBACK_MODE,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
     PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     WAVEFORMATEXTENSIBLE_0,
 };
@@ -122,6 +131,43 @@ fn describe(root: u32) -> String {
 /// The [`CaptureSource`] arm of a process-scoped capture. It owns the tree, the
 /// format that was accepted, and the decision to re-scope; the engine owns
 /// everything that happens to the samples afterwards.
+/// Which side of a process tree a capture takes.
+///
+/// Windows offers both, and a session needs **both or neither**: a recording
+/// with a `Game` track scoped to the tree and a system track that is the whole
+/// endpoint has the game's audio on two tracks, which is worse than having one
+/// track and saying so (`clipped_session::audio`, ADR 0003).
+///
+/// The two are the same activation with one constant changed, which is why they
+/// are one type rather than two capture implementations
+/// ([issue #27](https://github.com/wildware-uk/clipped/issues/27)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TreeScope {
+    /// Everything the tree played, and nothing else. The game's own track.
+    Only,
+    /// Everything the machine played **except** the tree. The other-system-audio
+    /// track that can sit beside a game track without doubling it.
+    Except,
+}
+
+impl TreeScope {
+    /// The Windows constant for this side.
+    const fn mode(self) -> PROCESS_LOOPBACK_MODE {
+        match self {
+            Self::Only => PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            Self::Except => PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+        }
+    }
+
+    /// How this reads in a log line.
+    pub(super) const fn log_value(self) -> &'static str {
+        match self {
+            Self::Only => "the process tree",
+            Self::Except => "everything but the process tree",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ProcessLoopbackSource {
     /// The game, as the session identified it. Never changes: it is what the
@@ -130,6 +176,8 @@ pub(super) struct ProcessLoopbackSource {
     /// The process the current activation names, which is [`Self::root`] until
     /// that process exits with descendants still running.
     scoped_to: u32,
+    /// Which side of the tree this capture takes.
+    scope: TreeScope,
     /// The membership this capture is really about, maintained live
     /// (issue #25).
     tree: ProcessTree,
@@ -156,7 +204,7 @@ impl ProcessLoopbackSource {
     /// it has already exited, or it runs at a higher integrity level than
     /// Clipped. Either way there is no tree to scope a capture to, so it is a
     /// failure rather than an empty capture.
-    pub(super) fn new(root: u32) -> Result<Self, AudioError> {
+    pub(super) fn new(root: u32, scope: TreeScope) -> Result<Self, AudioError> {
         let tree = ProcessTree::rooted_at(root).map_err(|error| match error {
             WindowsError::ProcessUnavailable { process_id } => {
                 AudioError::ProcessUnavailable { process_id }
@@ -170,6 +218,7 @@ impl ProcessLoopbackSource {
         Ok(Self {
             root,
             scoped_to: root,
+            scope,
             tree,
             format: None,
             change: None,
@@ -314,10 +363,7 @@ impl ProcessLoopbackSource {
             return Ok(None);
         }
 
-        let client = activate_process_loopback(
-            self.scoped_to,
-            PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-        )?;
+        let client = activate_process_loopback(self.scoped_to, self.scope.mode())?;
 
         let candidates = match self.format {
             // A reopen mid-recording: the shape is already decided, and asking
@@ -327,7 +373,7 @@ impl ProcessLoopbackSource {
             None => candidate_formats(enumerator),
         };
 
-        let (client, format, wake) = initialise(client, &candidates, self.scoped_to)?;
+        let (client, format, wake) = initialise(client, &candidates, self.scoped_to, self.scope)?;
         self.format = Some(format);
 
         Ok(Some(StreamParts {
@@ -410,6 +456,7 @@ fn initialise(
     client: IAudioClient,
     candidates: &[AudioFormat],
     target: u32,
+    scope: TreeScope,
 ) -> Result<(IAudioClient, AudioFormat, Wake), AudioError> {
     let mut client = client;
     let mut refused = Vec::new();
@@ -418,10 +465,10 @@ fn initialise(
         if attempt > 0 {
             // A client whose `Initialize` failed is spent, whatever it failed
             // for.
-            client = activate_process_loopback(
-                target,
-                PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-            )?;
+            // The same side of the tree the first attempt asked for: a
+            // retry that quietly swapped to the other one would record the
+            // opposite of what the caller asked for.
+            client = activate_process_loopback(target, scope.mode())?;
         }
 
         match initialise_with(&client, *format) {
@@ -430,6 +477,10 @@ fn initialise(
                     audio_source = %SourceKind::GameAudio.audio_source(),
                     format = %format,
                     wake = ?wake,
+                    // Which side of the tree, because a recording with both
+                    // will open two of these and the log has to say which is
+                    // which (issue #27).
+                    scope = scope.log_value(),
                     "the audio engine accepted this shape for a process-scoped capture"
                 );
                 return Ok((client, *format, wake));
@@ -592,7 +643,28 @@ impl ProcessLoopbackCapture {
     /// shape this crate asks for, and [`AudioError::Platform`] when Windows
     /// refuses something outright.
     pub fn open(root_process: u32) -> Result<Self, AudioError> {
-        let source = ProcessLoopbackSource::new(root_process)?;
+        Self::open_scoped(root_process, TreeScope::Only)
+    }
+
+    /// Everything the machine played **except** `root_process` and its tree.
+    ///
+    /// The other half of the model, and the one that makes a `Game` track
+    /// possible: with only the including side, a recording that also captures
+    /// the whole endpoint has the game's audio on two tracks
+    /// ([issue #27](https://github.com/wildware-uk/clipped/issues/27)).
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`open`](Self::open)'s: this is the same activation with one
+    /// constant changed, so a machine that cannot do one cannot do the other.
+    pub fn open_excluding(root_process: u32) -> Result<Self, AudioError> {
+        Self::open_scoped(root_process, TreeScope::Except)
+    }
+
+    /// [`open`](Self::open) and [`open_excluding`](Self::open_excluding), which
+    /// differ only in which side of the tree they take.
+    fn open_scoped(root_process: u32, scope: TreeScope) -> Result<Self, AudioError> {
+        let source = ProcessLoopbackSource::new(root_process, scope)?;
         let capture = EndpointCapture::open(CaptureSource::ProcessTree(source))?
             // The tree was built a moment ago and had a member in it, so there
             // is only one way to be here: every process of the game exited
@@ -1247,7 +1319,8 @@ mod tests {
         // opened on any machine, which makes it the only deterministic negative
         // case available (AGENTS.md section 25). It needs no audio hardware, so
         // it runs in the pull-request CI job.
-        let error = ProcessLoopbackSource::new(0).expect_err("the idle process cannot be followed");
+        let error = ProcessLoopbackSource::new(0, TreeScope::Only)
+            .expect_err("the idle process cannot be followed");
 
         assert!(
             matches!(error, AudioError::ProcessUnavailable { process_id: 0 }),
@@ -1285,5 +1358,44 @@ mod tests {
             describe(4_242),
             "the game's process tree, rooted at process 4242"
         );
+    }
+
+    #[test]
+    fn the_other_side_of_a_process_tree_can_be_captured_too() {
+        // Issue #27's whole point. A session needs *both* sides or neither: a
+        // recording with a `Game` track scoped to the tree and a system track
+        // that is the whole endpoint has the game's audio on two tracks, which
+        // is worse than one honest track (ADR 0003).
+        //
+        // What this proves is that Windows accepts the excluding activation on
+        // this machine and hands back a client that initialises — the thing
+        // that was not known, because nothing had ever asked for it. What is on
+        // the two tracks is a routing question and belongs with the session
+        // (#33).
+        let root = std::process::id();
+
+        let including = match ProcessLoopbackCapture::open(root) {
+            Ok(capture) => capture,
+            Err(error) => {
+                skipped(&format!("this machine will not scope a capture: {error}"));
+                return;
+            }
+        };
+        let excluding = ProcessLoopbackCapture::open_excluding(root)
+            .expect("a machine that can include a tree can exclude one: same activation");
+
+        // Both are real captures of the same shape. A machine that gave the
+        // excluding side a different format would give a session two tracks it
+        // could not mix, which is worth knowing here rather than in a muxer.
+        assert_eq!(
+            including.format().sample_rate(),
+            excluding.format().sample_rate(),
+            "the two sides of one tree are captured at one rate"
+        );
+
+        let mut excluding = excluding;
+        let mut including = including;
+        including.close();
+        excluding.close();
     }
 }
