@@ -251,17 +251,40 @@ impl Epic {
         &self.apps
     }
 
-    /// The application whose installation directory contains `executable_path`.
+    /// The application a running executable belongs to.
     ///
-    /// The deepest match wins, for the reason Steam's does: one installation
-    /// directory can sit inside another, and the more specific answer is the
-    /// right one.
+    /// Two questions, in order, and the second exists because the first is not
+    /// enough on a real machine.
+    ///
+    /// **Deepest installation directory first.** One directory can sit inside
+    /// another, and the more specific answer is the right one — the same rule
+    /// Steam's provider uses.
+    ///
+    /// **Then the executable, because a directory does not identify an
+    /// application.** Epic installs plugins *into* the thing they extend and
+    /// gives each its own manifest, so several applications share one
+    /// `InstallLocation`. On the machine this was checked against, three of ten
+    /// directories were shared:
+    ///
+    /// ```text
+    /// B:\Epic Games\UE_5.8  <-  QuixelBridge_5.8, FabPlugin_5.8, UE_5.8
+    /// ```
+    ///
+    /// Depth cannot break that tie, so `LaunchExecutable` does: the manifest
+    /// Epic itself would start this program from is the one that owns it.
+    ///
+    /// **And when that still ties, the answer is [`None`].** An arbitrary
+    /// choice would hand the catalogue a launcher identity for the wrong
+    /// application, and the catalogue's own path and name rungs are a better
+    /// answer than a confident wrong one
+    /// ([issue #459](https://github.com/wildware-uk/clipped/issues/459)).
     #[must_use]
-    pub fn app_for_path(&self, executable_path: &str) -> Option<&EpicApp> {
+    pub fn app_for(&self, executable_name: &str, executable_path: &str) -> Option<&EpicApp> {
         let normalised = normalise_path(executable_path);
         let path: Vec<&str> = path_segments(&normalised).collect();
 
-        let mut best: Option<(&EpicApp, usize)> = None;
+        let mut deepest = 0;
+        let mut claimants: Vec<&EpicApp> = Vec::new();
         for app in &self.apps {
             let normalised = normalise_path(&app.installation.to_string_lossy());
             let directory: Vec<&str> = path_segments(&normalised).collect();
@@ -271,12 +294,40 @@ impl Epic {
             if directory.is_empty() || path.len() <= directory.len() {
                 continue;
             }
-            if path.starts_with(&directory) && best.is_none_or(|(_, depth)| depth < directory.len())
-            {
-                best = Some((app, directory.len()));
+            if !path.starts_with(&directory) {
+                continue;
+            }
+            if directory.len() > deepest {
+                deepest = directory.len();
+                claimants.clear();
+            }
+            if directory.len() == deepest {
+                claimants.push(app);
             }
         }
-        best.map(|(app, _)| app)
+
+        match claimants.as_slice() {
+            [] => None,
+            [only] => Some(only),
+            several => {
+                // The executable decides. `LaunchExecutable` is relative to the
+                // installation directory, so only its file name is comparable
+                // with the name of a running process.
+                let mut named = several.iter().filter(|app| {
+                    let normalised = normalise_path(&app.executable);
+                    path_segments(&normalised)
+                        .last()
+                        .is_some_and(|file| file.eq_ignore_ascii_case(executable_name))
+                });
+                match (named.next(), named.next()) {
+                    (Some(app), None) => Some(app),
+                    // Nothing matched, or more than one did. Either way this
+                    // cannot say which application it is, and saying so is the
+                    // point.
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// A running process as the catalogue wants to be asked about it.
@@ -291,7 +342,7 @@ impl Epic {
         executable_path: &'a str,
     ) -> ProcessCandidate<'a> {
         let candidate = ProcessCandidate::new(executable_name).with_path(executable_path);
-        match self.app_for_path(executable_path) {
+        match self.app_for(executable_name, executable_path) {
             Some(app) => candidate.from_launcher(LauncherKind::Epic, &app.app_name),
             None => candidate,
         }
