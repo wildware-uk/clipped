@@ -3,11 +3,9 @@
 //! Storage is a product feature rather than an implementation detail (SPEC.md
 //! section 27): a user configures a maximum size, a minimum amount of free disk
 //! space and a maximum recording age, and expects the figures they are shown to
-//! be the truth about their own disk. This module measures that truth and
-//! reports it. **It never deletes anything.** Acting on a breached limit is
-//! [issue #111](https://github.com/wildware-uk/clipped/issues/111), the trash is
-//! [issue #94](https://github.com/wildware-uk/clipped/issues/94), and the screen
-//! that shows all of it is
+//! be the truth about their own disk. This module measures that truth, reports
+//! it, and — in [`cleanup`] alone — acts on it. Everything else here is
+//! measurement and **deletes nothing**. The screen that shows all of it is
 //! [issue #95](https://github.com/wildware-uk/clipped/issues/95).
 //!
 //! # Responsibilities
@@ -142,6 +140,7 @@
 //! a limit that this module would have refused (AGENTS.md section 30).
 
 mod category;
+pub mod cleanup;
 mod error;
 mod inventory;
 mod limits;
