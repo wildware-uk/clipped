@@ -793,7 +793,20 @@ mod tests {
     /// they read is silence, and they are exempt from the "does this machine
     /// want quiet" check every test that plays a tone begins with. What they
     /// do need is a machine whose Windows can scope a capture to a process at
-    /// all, which a GitHub runner cannot, so they skip loudly there.
+    /// all; where it cannot, they skip loudly rather than failing.
+    ///
+    /// **They are not a local-only suite.** This comment used to say a GitHub
+    /// runner cannot scope a capture and that they skip there, which is false
+    /// and cost somebody an afternoon
+    /// ([issue #441](https://github.com/wildware-uk/clipped/issues/441)): the
+    /// CI failures behind
+    /// [#341](https://github.com/wildware-uk/clipped/issues/341),
+    /// [#387](https://github.com/wildware-uk/clipped/issues/387) and
+    /// [#425](https://github.com/wildware-uk/clipped/issues/425) all quote
+    /// measured track lengths, which a skipped test cannot produce. Whether a
+    /// given runner can scope a capture is a property of that machine, and the
+    /// skip below is what finds out — it is not a statement about where these
+    /// run.
     fn open(root: u32) -> Option<ProcessLoopbackCapture> {
         match ProcessLoopbackCapture::open(root) {
             Ok(capture) => Some(capture),
