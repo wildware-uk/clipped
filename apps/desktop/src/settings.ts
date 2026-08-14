@@ -375,6 +375,15 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         run: '"recorder_unavailable": false',
         needs: 'Issue #252, as above.',
       },
+      {
+        label: 'A hotkey is unavailable',
+        key: { name: 'hotkey_unavailable', file: 'notifications.json' },
+        today:
+          'Windows refused one of Clipped’s combinations, so pressing it does nothing. Said ' +
+          'once when it is first seen, not again every time the recorder reconnects.',
+        run: '"hotkey_unavailable": false',
+        needs: 'Issue #252, as above.',
+      },
     ],
   },
   {

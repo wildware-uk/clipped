@@ -900,6 +900,44 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
+
+        /// Waits until the link has asked its own start-up question.
+        ///
+        /// `RecorderLink` asks `get_hotkeys` once it has attached, on its
+        /// watching thread, so that a combination Windows refused reaches the
+        /// user as a notification rather than only as a line in a log
+        /// ([issue #417](https://github.com/wildware-uk/clipped/issues/417)).
+        ///
+        /// That question races every command a test sends afterwards: it can
+        /// arrive before one, after one, or between two. Waiting for it here and
+        /// then forgetting it is what keeps `asked()` a statement about *the
+        /// window* rather than about which thread got there first — the
+        /// alternative is nine assertions that pass or fail on timing.
+        fn wait_for_the_links_own_question(&self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if self
+                    .asked()
+                    .iter()
+                    .any(|command| matches!(command, clipped_ipc::Command::GetHotkeys))
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!(
+                "the link never asked this recorder which hotkeys it holds, so either it did not \
+                 attach or it stopped asking"
+            );
+        }
+
+        /// Forgets everything asked so far.
+        fn forget(&self) {
+            self.asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
     }
 
     impl clipped_ipc::CommandHandler for AskedRecorder {
@@ -1130,6 +1168,14 @@ mod tests {
                 )
             };
             let (link, _events) = RecorderLink::start(settings);
+
+            // Settled before the test looks at anything. See
+            // `wait_for_the_links_own_question`: the link asks the recorder
+            // which hotkeys it holds as soon as it attaches, and a test about
+            // what the window asked should not depend on whether that landed
+            // first.
+            self.handler.wait_for_the_links_own_question();
+            self.handler.forget();
 
             tauri::test::mock_builder()
                 .manage(link)

@@ -472,7 +472,12 @@ fn bookmark(app: &AppHandle) {
 }
 
 /// Opens the window at a screen.
-fn open_screen(app: &AppHandle, path: &str) {
+///
+/// Reachable from [`crate::notifications`] as well as from the menu: a
+/// notification's action is the same "raise the window somewhere useful" the
+/// tray performs, and a second implementation of it would be a second answer to
+/// how a screen is opened (AGENTS.md section 55).
+pub(crate) fn open_screen(app: &AppHandle, path: &str) {
     show_window(app);
     if let Err(error) = app.emit(NAVIGATE_EVENT, path) {
         eprintln!("the window could not be sent to {path}: {error}");

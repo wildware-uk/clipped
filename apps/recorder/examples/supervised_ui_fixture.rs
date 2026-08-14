@@ -152,6 +152,19 @@ fn main() -> ExitCode {
                 recording_id,
                 error,
             } => say(&format!("failed={recording_id} {error}")),
+            // Reported once the link attaches, when Windows would not give the
+            // recorder a combination it asked for (issue #417). Said here as the
+            // actions rather than the whole rows: this fixture's output is read
+            // line by line by a test, and what a test would assert on is which
+            // hotkeys were refused.
+            RecorderLinkEvent::HotkeysUnavailable { conflicts } => say(&format!(
+                "hotkeys_unavailable={}",
+                conflicts
+                    .iter()
+                    .map(|binding| binding.action.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(",")
+            )),
         }
     }
 

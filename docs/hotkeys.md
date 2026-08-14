@@ -171,9 +171,23 @@ that key; Open overlay is bound to nothing and would do nothing if it were.
 
 Asking rather than being told is deliberate. Registration happens when the
 recorder starts, which is usually long before a window exists, so a conflict
-published as an event would reach nobody. Interrupting the user with one is
-[issue #417](https://github.com/wildware-uk/clipped/issues/417); until that
-lands, a conflict is visible to somebody who looks and to nobody who does not.
+published as an event would reach nobody.
+
+**And a notification, once.** A conflict used to be visible to somebody who
+looked and to nobody who did not, which meant finding out that `Ctrl`+`F10`
+belongs to another application by pressing it in a game and watching nothing
+happen. `RecorderLink` now asks `get_hotkeys` as soon as it attaches — the same
+question, at the moment a window exists to ask it — and reports whatever came
+back refused as `RecorderLinkEvent::HotkeysUnavailable`. The desktop application
+turns the first such report into a toast naming the combination and the action,
+with **Change the hotkey** as its button
+([issue #417](https://github.com/wildware-uk/clipped/issues/417),
+`docs/desktop-ui.md`).
+
+Once, not once per attachment: the link reports on every attachment because it
+cannot know what has already been said, and the notification policy is what
+remembers. A recorder that reconnects twice an hour does not toast twice an
+hour. `hotkey_unavailable` in `notifications.json` switches it off.
 
 ## The actions
 
