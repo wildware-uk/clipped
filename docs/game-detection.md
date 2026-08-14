@@ -422,14 +422,27 @@ A launcher knows something no amount of looking at a process can tell you: which
 of *its* games this is. That is the catalogue's strongest matching rung
 (`LauncherIdentity`), and until [#43] nothing produced it. Launcher detection is
 provider-based — one module per shop, so support for a new one is an addition
-rather than a change to shared logic (SPEC.md section 6). Steam is the first;
-Epic, Xbox, Battle.net, EA, Ubisoft, Riot and GOG are [#44] and are deliberately
-not stubbed, because a provider that always answers "no" is a control that
-silently does nothing.
+rather than a change to shared logic (SPEC.md section 6). Steam is the first
+([#43]), Epic the second and Ubisoft Connect the third ([#44], which asks for one
+pull request per launcher). Xbox, Battle.net, EA, Riot and GOG are the rest of
+[#44] and are deliberately not stubbed, because a provider that always answers
+"no" is a control that silently does nothing.
 
-There is no `trait LauncherProvider` yet either. One implementation is not
-enough to know the shape of the abstraction, and [#44]'s launchers keep their
-metadata in three different kinds of place.
+There is still no `trait LauncherProvider`. Three implementations have not
+settled its shape: Steam follows a registry key to a library index to a manifest
+per application across several drives, Epic reads one directory of JSON, and
+Ubisoft enumerates a registry key and reads the game's name out of somebody
+else's. What the third one did settle is what they demonstrably share, which is
+now shared rather than repeated:
+
+| Module | Shared by | Extracted when |
+| --- | --- | --- |
+| `launcher/registry.rs` | Steam, Ubisoft | Ubisoft needed the same two-call `RegGetValueW` sizing |
+| `launcher/claim.rs` | Epic, Ubisoft | Ubisoft needed the same deepest-directory rule |
+
+Both were extracted when a second caller appeared and named exactly what the two
+had in common — which is the argument for waiting on the trait rather than
+against it.
 
 ### Steam
 
@@ -676,6 +689,49 @@ cargo run -p clipped-game-detection --example steam_probe -- cs2.exe "B:\SteamLi
 - **Nothing watches for changes.** An installation is read once; a caller that
   wants to notice a game installed since start-up reads it again, which is a few
   dozen small files.
+
+### Ubisoft Connect
+
+Ubisoft records nothing in a file. It keeps one registry subkey per installed
+game, named after the application identifier, so **enumerating the subkeys is the
+list of installed games** — which is why this provider needed
+`registry::subkeys` where Steam's only ever needed a value.
+
+```text
+HKLM\SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs\<id>        InstallDir
+HKLM\SOFTWARE\WOW6432Node\...\Uninstall\Uplay Install <id>      DisplayName
+```
+
+Read from a machine with two Ubisoft games on it:
+
+```text
+15657  C:/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/XDefiant/    XDefiant
+5595   C:/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/Trackmania/  Trackmania
+```
+
+Note the spelling of `InstallDir`: forward slashes, and a trailing one, where a
+running process reports the same directory with backslashes. Nothing in the
+provider cares because `normalise_path` does not — but a fixture written from
+memory gets both wrong, and would agree with a provider that never worked on a
+real machine.
+
+**The name is optional and the identifier is not.** `DisplayName` lives under
+the uninstall key, which is somebody else's namespace and can be missing. A game
+with no readable name is still detected and named after its identifier, because
+the identifier is what the catalogue matches on.
+
+**A tie is refused rather than guessed between.** Epic can break a tie between
+two applications sharing a directory on the executable its manifest names.
+Ubisoft's registry records no executable at all, so when two identifiers claim
+one directory the answer is "no launcher identity" — leaving the catalogue's own
+path and name rungs, which are a better answer than a confident wrong one
+([#459] is what the alternative costs).
+
+**Verified against a real installation, not only fixtures.**
+`examples/ubisoft_probe.rs` asks the registry itself and then asks the provider
+to claim every executable actually sitting in each install directory: 2 games,
+0 problems, 10 executables, none claimed by the wrong game. The equivalent Epic
+probe is what found [#459].
 
 ## The process watcher
 
@@ -1005,3 +1061,4 @@ the exact moment the process began and the exact moment it ended.
   that held only for the subscription would leave the poller enumerating every
   process on the machine twenty times a second — the thing this design exists to
   avoid.
+[#459]: https://github.com/wildware-uk/clipped/issues/459
