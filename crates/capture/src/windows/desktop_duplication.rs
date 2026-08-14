@@ -2716,6 +2716,75 @@ mod tests {
         FrameSize::new(bounds.width(), bounds.height())
     }
 
+    /// Whether duplication is delivering frames on this display at all, which
+    /// every test below that reads a pixel depends on and none of them can
+    /// assert.
+    ///
+    /// A monitor that has powered down after the idle timeout is still attached
+    /// and still duplicates: `DuplicateOutput` succeeds, `AttachedToDesktop`
+    /// stays true, and every `AcquireNextFrame` then times out for as long as
+    /// the screen is dark, because duplication follows what is scanned out to
+    /// the display rather than what DWM composes. Windows Graphics Capture is
+    /// measurably unaffected — 60 fps on the same darkened machine — which is
+    /// why only these tests notice. See #461 and
+    /// `examples/duplication_probe.rs`, which reproduces it against raw DXGI.
+    ///
+    /// This is deliberately a capability check and not an environment guess: it
+    /// asks *this* backend for a frame and believes the answer. It runs before
+    /// the duplication under test is built, because only one duplication per
+    /// output is allowed at a time, and it nudges a window across the display
+    /// so that a genuinely idle desktop cannot be mistaken for a dark one.
+    ///
+    /// A test that skips on this cannot then fail for it. That is the point: a
+    /// wrong pixel is a defect and still fails, whereas no pixel at all is a
+    /// machine that cannot answer the question (AGENTS.md section 25).
+    fn duplication_delivers_frames(display: &MonitorInfo) -> bool {
+        let Some(size) = size_of(display) else {
+            return false;
+        };
+        let Some(window) = MarkerWindow::on(display) else {
+            return false;
+        };
+        let Ok(mut backend) = capture_of(display.handle().as_u64(), TargetKind::Monitor, size)
+        else {
+            return false;
+        };
+
+        let bounds = display.bounds();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut nudge = 0_i32;
+        while Instant::now() < deadline {
+            // Somewhere for the window to have moved to. A repaint of the same
+            // colour is not necessarily a change; a move always is.
+            nudge = (nudge + 8) % 64;
+            window.move_to(
+                bounds.left() + WINDOW_INSET + nudge,
+                bounds.top() + WINDOW_INSET,
+            );
+            if matches!(
+                backend.acquire(Duration::from_millis(250)),
+                Ok(Acquisition::Frame(_))
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// [`duplication_delivers_frames`], with the explanation a skipped run needs.
+    fn the_display_is_awake(display: &MonitorInfo) -> bool {
+        if duplication_delivers_frames(display) {
+            return true;
+        }
+        skipped(
+            "this display is attached but is not scanning anything out, which is what a monitor \
+             that has powered down after its idle timeout looks like: duplication starts and then \
+             delivers no frames at all. Run `cargo run -p clipped-capture --example \
+             duplication_probe` to confirm, and see #461",
+        );
+        false
+    }
+
     #[test]
     fn each_display_duplicates_its_own_output_and_nothing_else() {
         let _one_at_a_time = one_duplication_at_a_time();
@@ -2735,6 +2804,9 @@ mod tests {
             skipped("this machine reports no displays");
             return;
         };
+        if !the_display_is_awake(marked) {
+            return;
+        }
         if monitors.len() < 2 {
             note(
                 "only one display is attached, so the half of this test that proves a \
@@ -2885,6 +2957,9 @@ mod tests {
             skipped("this machine reports no displays");
             return;
         };
+        if !the_display_is_awake(display) {
+            return;
+        }
         let Some(window) = MarkerWindow::on(display) else {
             skipped("this machine would not create a window");
             return;
@@ -2989,6 +3064,9 @@ mod tests {
             skipped("this machine reports no displays");
             return;
         };
+        if !the_display_is_awake(display) {
+            return;
+        }
         let Some(window) = MarkerWindow::on(display) else {
             skipped("this machine would not create a window");
             return;
@@ -3087,6 +3165,9 @@ mod tests {
             skipped("this machine reports no displays");
             return;
         };
+        if !the_display_is_awake(display) {
+            return;
+        }
         let Some(window) = MarkerWindow::on(display) else {
             skipped("this machine would not create a window");
             return;
@@ -3164,6 +3245,9 @@ mod tests {
             skipped("this machine reports no displays");
             return;
         };
+        if !the_display_is_awake(display) {
+            return;
+        }
         let Some(window) = MarkerWindow::on(display) else {
             skipped("this machine would not create a window");
             return;
@@ -3259,6 +3343,9 @@ mod tests {
             skipped("this machine reports no displays");
             return;
         };
+        if !the_display_is_awake(display) {
+            return;
+        }
         let Some(window) = MarkerWindow::on(display) else {
             skipped("this machine would not create a window");
             return;
