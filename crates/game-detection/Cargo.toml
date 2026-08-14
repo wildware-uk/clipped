@@ -36,6 +36,20 @@ authors.workspace = true
 # Dual MIT/Apache-2.0.
 toml = "1.1"
 
+# Epic's launcher writes one JSON manifest per installed application, and
+# `crates/game-detection/src/launcher/epic` reads them (issue #44).
+#
+# This is the case the comment above set aside. The three reasons the *catalogue*
+# is TOML — a file a contributor reads in a diff, comments explaining why an
+# entry is shaped as it is, and a parse error with a line and column — are all
+# about a file somebody authors. An Epic manifest is machine-written by
+# somebody else's installer, in a format this project does not choose, so none of
+# them applies and the format is not ours to pick.
+#
+# Already pinned in the workspace for the encoder cache and the IPC protocol, so
+# this adds a dependency edge rather than a dependency. Dual MIT/Apache-2.0.
+serde_json.workspace = true
+
 # The same format, the other direction: `toml` reads a file into values and
 # `toml_edit` changes a file that already exists without reformatting the rest
 # of it.
