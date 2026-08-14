@@ -62,6 +62,7 @@ use clipped_library::index::{
     IndexSettings, IndexedClip, IndexedRecording, IndexedSession, SessionListing,
 };
 use clipped_library::search::Query;
+use clipped_library::thumbnail::{ServiceOptions, ThumbnailCache, ThumbnailService};
 use clipped_storage::Database;
 
 /// The file the library index lives in, under Clipped's per-user directory.
@@ -433,6 +434,16 @@ struct Indexer {
     control: IndexControl,
     state: Mutex<IndexerState>,
     woken: Condvar,
+    /// Makes the pictures the library screens draw, or [`None`] on a machine
+    /// with nowhere to keep them.
+    ///
+    /// Started with the indexer and asked for a picture per recording after
+    /// every successful reconciliation. Before this, `ThumbnailService` was
+    /// referenced by nothing but its own tests: the service, the cache and the
+    /// renderer were all finished and unreachable, so a shipped build made no
+    /// thumbnails at all
+    /// ([issue #57](https://github.com/wildware-uk/clipped/issues/57)).
+    thumbnails: Option<ThumbnailService>,
 }
 
 /// The indexer's own state, which is all that a request touches.
@@ -459,12 +470,20 @@ impl LibraryIndexer {
     /// library is issue #272's question rather than this one's.
     #[must_use]
     pub fn for_this_user() -> Self {
-        Self::at(
+        let mut indexer = Self::at(
             clipped_logging::application_directory().map(|directory| directory.join(LIBRARY_FILE)),
             crate::config::default_output_directory()
                 .into_iter()
                 .collect(),
-        )
+        );
+        // Only here, and deliberately not in `at`: a test must not write
+        // pictures into the cache of whoever is running it (AGENTS.md section
+        // 25), and `at` is what every test uses.
+        if let Some(shared) = Arc::get_mut(&mut indexer.shared) {
+            shared.thumbnails = ThumbnailCache::in_default_directory()
+                .map(|cache| ThumbnailService::start(cache, ServiceOptions::new()));
+        }
+        indexer
     }
 
     /// An indexer for a named library and named recording folders.
@@ -480,6 +499,7 @@ impl LibraryIndexer {
                 control: IndexControl::new(),
                 state: Mutex::new(IndexerState::default()),
                 woken: Condvar::new(),
+                thumbnails: None,
             }),
             thread: Mutex::new(None),
         }
@@ -667,7 +687,10 @@ impl Indexer {
 
         let open = database.as_mut().expect("the database was just opened");
         match reconcile(open, &self.settings, &self.control, SystemTime::now()) {
-            Ok(report) => report_unindexed(&report),
+            Ok(report) => {
+                report_unindexed(&report);
+                self.picture_what_was_indexed(open);
+            }
             Err(error) => {
                 // The connection is dropped rather than kept: a database that
                 // refused may have gone with its drive, and the next run should
@@ -680,6 +703,48 @@ impl Indexer {
                      try again"
                 );
             }
+        }
+    }
+}
+
+impl Indexer {
+    /// Asks for a picture of every recording the index holds.
+    ///
+    /// After the reconciliation rather than during it, and by
+    /// [`ThumbnailService::request`] rather than
+    /// [`ThumbnailService::thumbnail`], because a scan has thousands of files
+    /// and wants none of the pictures yet — the service reads its own cache and
+    /// does the work on a background thread at the lowest priority it can get
+    /// (`clipped_library::thumbnail`).
+    ///
+    /// Nothing here waits, and nothing here fails a reconciliation. A recording
+    /// with no picture is a tile with no picture, which is a smaller problem
+    /// than an index that did not update (AGENTS.md section 17).
+    fn picture_what_was_indexed(&self, database: &Database) {
+        let Some(service) = self.thumbnails.as_ref() else {
+            return;
+        };
+        let recordings = match clipped_library::thumbnail::recordings_worth_picturing(database) {
+            Ok(recordings) => recordings,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "the library index could not be asked which recordings need a picture, so \
+                     none were made this time"
+                );
+                return;
+            }
+        };
+
+        let asked = recordings.len();
+        for recording in recordings {
+            let _ = service.request(&recording);
+        }
+        if asked > 0 {
+            tracing::debug!(
+                recordings = asked,
+                "asked for a picture of every recording the index holds"
+            );
         }
     }
 }

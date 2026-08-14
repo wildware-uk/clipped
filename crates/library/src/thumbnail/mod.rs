@@ -121,3 +121,80 @@ pub use service::{
     DEFAULT_QUEUE_CAPACITY,
 };
 pub use source::{SourceIdentity, UNKNOWN_MODIFIED};
+
+/// Every recording in the index that a picture could be made for.
+///
+/// What a library scan hands to [`ThumbnailService::request`], which is
+/// documented for exactly this and had nothing calling it: the service, the
+/// cache and the renderer were all finished and **unreachable**, so no thumbnail
+/// was ever made for a shipped build
+/// ([issue #57](https://github.com/wildware-uk/clipped/issues/57)).
+///
+/// Recordings whose file has gone or which are in the trash are left out. There
+/// is nothing to decode for either, and asking would put a failure in the log
+/// once per scan for a file the user already knows about.
+///
+/// # Errors
+///
+/// Whatever SQLite reported.
+pub fn recordings_worth_picturing(
+    database: &clipped_storage::Database,
+) -> Result<Vec<std::path::PathBuf>, clipped_storage::rusqlite::Error> {
+    let mut statement = database.connection().prepare(
+        "SELECT path FROM recordings \
+         WHERE missing_since IS NULL AND deleted_at IS NULL \
+         ORDER BY started_at DESC",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    rows.map(|path| path.map(std::path::PathBuf::from))
+        .collect()
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::recordings_worth_picturing;
+
+    #[test]
+    fn a_recording_whose_file_has_gone_is_not_asked_about() {
+        // A scan runs after every reconciliation. Asking for a picture of a
+        // file that is not there puts a decode failure in the log once per
+        // scan, for something the user already knows about.
+        let directory = std::env::temp_dir().join(format!(
+            "clipped-thumbnail-scan-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        let database = clipped_storage::Database::open(directory.join("library.db"))
+            .expect("a library can be opened");
+
+        database
+            .connection()
+            .execute_batch(
+                "INSERT INTO sessions (session_id, started_at)
+                     VALUES ('s', '2026-01-01T00:00:00Z');
+                 INSERT INTO recordings (recording_id, session_id, session_index, path, started_at)
+                     VALUES (1, 's', 1, 'here.mkv', '2026-01-03T00:00:00Z');
+                 INSERT INTO recordings (recording_id, session_id, session_index, path, started_at,
+                                         missing_since)
+                     VALUES (2, 's', 2, 'gone.mkv', '2026-01-02T00:00:00Z',
+                             '2026-02-01T00:00:00Z');
+                 INSERT INTO recordings (recording_id, session_id, session_index, path, started_at,
+                                         deleted_at)
+                     VALUES (3, 's', 3, 'trashed.mkv', '2026-01-01T00:00:00Z',
+                             '2026-02-01T00:00:00Z');",
+            )
+            .expect("the fixtures can be written");
+
+        let wanted = recordings_worth_picturing(&database).expect("the scan can read the index");
+
+        assert_eq!(
+            wanted,
+            vec![std::path::PathBuf::from("here.mkv")],
+            "only the recording that is actually on disk and not in the trash"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}
