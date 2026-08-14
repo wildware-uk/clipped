@@ -63,10 +63,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use clipped_hotkeys::{Bindings, Handlers, HotkeyAction, HotkeyError, HotkeyService, Registration};
+use clipped_hotkeys::{Handlers, HotkeyAction, HotkeyError, HotkeyService, Registration};
 use clipped_logging::RedactedPath;
 use clipped_replay::SavedClip;
 use clipped_session::automatic::ManualSession;
+use clipped_session::config::SettingError;
 use clipped_session::{record_with_replay, ReplayRecording, ReplaySaveError};
 
 use crate::cli::ReplayArgs;
@@ -95,6 +96,16 @@ pub enum ReplayCommandError {
     /// start with a conflict in the registration, which is reported and does not
     /// stop the recording (`clipped_hotkeys::HotkeyService::start`).
     Hotkeys(HotkeyError),
+    /// The `hotkeys` section of the settings file does not describe a usable set
+    /// of bindings — two actions on one combination is the only way to reach it.
+    ///
+    /// Refused **before** the recording starts, and deliberately unlike `serve`,
+    /// which registers nothing and carries on serving. A `serve` with no hotkey
+    /// still answers the protocol and still records; a `replay` with no hotkey
+    /// is a buffer nothing can save from, which is the whole of what the
+    /// subcommand is for. Finding that out after a capture session has opened
+    /// would be finding it out late (AGENTS.md section 45).
+    Hotkeybindings(SettingError),
 }
 
 impl fmt::Display for ReplayCommandError {
@@ -104,6 +115,12 @@ impl fmt::Display for ReplayCommandError {
             Self::Buffer(error) => write!(formatter, "{error}"),
             Self::Recording(error) => write!(formatter, "{error}"),
             Self::Hotkeys(error) => write!(formatter, "{error}"),
+            Self::Hotkeybindings(error) => write!(
+                formatter,
+                "No hotkey can be registered: {error} Fix the `hotkeys` section of the \
+                 settings file, because a replay buffer nothing can save from is not \
+                 worth recording."
+            ),
         }
     }
 }
@@ -115,6 +132,7 @@ impl Error for ReplayCommandError {
             Self::Buffer(error) => Some(error),
             Self::Recording(error) => Some(error),
             Self::Hotkeys(error) => Some(error),
+            Self::Hotkeybindings(error) => Some(error),
         }
     }
 }
@@ -141,6 +159,31 @@ impl From<HotkeyError> for ReplayCommandError {
     fn from(error: HotkeyError) -> Self {
         Self::Hotkeys(error)
     }
+}
+
+/// The bindings `replay` registers, from the settings file's `hotkeys` section.
+///
+/// **The only place this subcommand decides what Save replay is bound to.** It
+/// registered [`Bindings::defaults`](clipped_hotkeys::Bindings::defaults) until
+/// [issue #444](https://github.com/wildware-uk/clipped/issues/444), which threw
+/// every override in `settings.json` away in silence — and the symptom was
+/// worse than a hotkey that did nothing, because the conflict report tells a
+/// user whose combination is taken to "choose a different combination", and
+/// choosing one changed nothing.
+///
+/// Extracted so that the resolution can be asserted without a recording. What
+/// that assertion cannot cover is `run` calling
+/// `Bindings::defaults()` again instead of this, for the reason
+/// `crate::hotkeys`'s own test states about its half: what is unguarded is this
+/// process handing the answer on. Keeping this the one source in the module is
+/// what makes that a visible edit rather than a silent one.
+fn bindings_for(
+    configuration: &clipped_session::config::Configuration,
+) -> Result<clipped_hotkeys::Bindings, ReplayCommandError> {
+    configuration
+        .resolve_hotkeys()
+        .map(|resolved| resolved.bindings().clone())
+        .map_err(ReplayCommandError::Hotkeybindings)
 }
 
 /// Records with a replay buffer until Ctrl+C, saving a clip on every press of
@@ -223,7 +266,17 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
     install_ctrl_c_handler(&signal).map_err(RecordError::from)?;
     crate::shutdown::allow_ctrl_c();
 
-    let bindings = Bindings::defaults();
+    // The settings file's `hotkeys` section, resolved through the same call
+    // `serve` uses, because "what is Save replay bound to" may not have two
+    // answers depending on which subcommand asked (AGENTS.md section 55).
+    //
+    // This registered `Bindings::defaults()` until issue #444, which threw every
+    // override away in silence: on a machine where another application owns
+    // Ctrl+F10, the conflict report below told the user to choose a different
+    // combination and choosing one changed nothing. The comment on
+    // `crate::hotkeys::start`'s own test describes that failure exactly — it
+    // guards `serve` against it, and there was no equivalent here.
+    let bindings = bindings_for(&configuration)?;
     let hotkey = bindings.binding(HotkeyAction::SaveReplay).map_or_else(
         || "the replay hotkey".to_owned(),
         |hotkey| hotkey.to_string(),
@@ -508,9 +561,54 @@ fn plural(count: u64, unit: &str) -> String {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use clipped_hotkeys::ConflictCause;
+    // `Bindings` is a test-only name in this module now: production resolves
+    // the settings file rather than reaching for the shipped defaults
+    // (`bindings_for`, issue #444).
+    use clipped_hotkeys::{Bindings, ConflictCause};
 
     use super::*;
+
+    /// The wire the settings file reaches Windows down, for this subcommand.
+    ///
+    /// `replay` resolved nothing and registered the shipped defaults until
+    /// issue #444. The failure was not a hotkey that did nothing — it was that
+    /// the conflict report tells a user whose combination is already taken to
+    /// choose a different one, and choosing one changed nothing at all, so the
+    /// only documented remedy was inert.
+    ///
+    /// Asserted through [`bindings_for`], which is the one place this module
+    /// decides the question. It cannot see a `run` that called
+    /// `Bindings::defaults()` directly instead — the same limitation
+    /// `crate::hotkeys`'s equivalent states about its own half — which is why
+    /// that function's documentation says it is the only source.
+    #[test]
+    fn the_combination_replay_registers_is_the_one_the_settings_file_names() {
+        use clipped_session::config::{Configuration, HotkeyOverride, HotkeyOverrides};
+
+        let mut overrides = HotkeyOverrides::none();
+        overrides
+            .set(
+                HotkeyAction::SaveReplay,
+                Some(HotkeyOverride::Bound(
+                    "Ctrl+Shift+F8".parse().expect("Ctrl+Shift+F8 is a hotkey"),
+                )),
+            )
+            .expect("nothing else is bound to Ctrl+Shift+F8");
+        let mut configuration = Configuration::defaults();
+        configuration.set_hotkeys(overrides);
+
+        let bindings = bindings_for(&configuration).expect("the overrides resolve");
+
+        assert_eq!(
+            bindings
+                .binding(HotkeyAction::SaveReplay)
+                .map(|hotkey| hotkey.to_string())
+                .as_deref(),
+            Some("Ctrl+Shift+F8"),
+            "replay would register a combination the settings file does not name, so the \
+             overrides in it were thrown away and the user's own hotkey does nothing",
+        );
+    }
 
     /// The report for a machine where something else already owns `Ctrl`+`F10`.
     ///
