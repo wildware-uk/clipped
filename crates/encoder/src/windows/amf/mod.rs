@@ -81,7 +81,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::backend::VideoEncoder;
-use crate::codec::{Codec, EncoderKind, Resolution};
+use crate::codec::{Codec, EncoderKind, Resolution, Vendor};
 use crate::config::EncoderConfig;
 use crate::error::{EncodeContext, EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice, SourceFrame, SurfaceKind};
@@ -256,6 +256,22 @@ impl AmfEncoder {
                 ),
             }));
         };
+
+        // After every check that is about the *configuration* and before the
+        // first that is about this machine, which is the order Quick Sync's
+        // equivalent uses. A caller asking for something the backend cannot
+        // encode gets that answer whatever GPU it holds, and this is the point
+        // at which the device stops being a handle to carry and starts being
+        // hardware to ask.
+        //
+        // An AMF context initialises against the caller's Direct3D 11 device,
+        // and a device created on somebody else's adapter is refused by
+        // `InitDX11` with `AMF_INVALID_ARG` — a status code that says nothing
+        // about adapters and sends the reader looking for a driver fault
+        // (issue #443). Quick Sync has refused the same mistake by name since it
+        // was written; this is the same check through the same helper rather
+        // than a second one (AGENTS.md section 55).
+        on_this_vendors_adapter(device, &fail)?;
 
         let runtime = api::AmfRuntime::load().map_err(|failure| {
             fail(match failure {
@@ -467,6 +483,44 @@ pub(in crate::windows) fn measure_limits(device: &GraphicsDevice) -> Vec<Encoder
     // 58).
     drop(session);
     measured
+}
+
+/// Refuses a device created on an adapter AMF cannot encode from.
+///
+/// The failure this prevents is not obscure: a machine with a discrete NVIDIA
+/// card and integrated AMD graphics — the ordinary gaming laptop — captures on
+/// the default adapter, which is the NVIDIA one, and `--encoder amf` then hands
+/// AMD's runtime a device belonging to somebody else. What came back was
+/// `AMFContext::InitDX11 failed with AMF_INVALID_ARG (4)`, which reads as a
+/// broken driver rather than as the wrong GPU
+/// ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
+///
+/// It does **not** make AMF work on such a machine. Capturing on the AMD
+/// adapter, or copying frames across adapters to reach it, is the larger
+/// question that issue carries; this is the part that is right whichever way
+/// that goes.
+fn on_this_vendors_adapter(
+    device: &GraphicsDevice,
+    fail: &impl Fn(EncodeErrorKind) -> EncodeError,
+) -> Result<(), EncodeError> {
+    // SAFETY: `open` has already checked the handle is non-null, and its caller
+    // guarantees it is a live `ID3D11Device` it owns; this borrows it for the
+    // length of the call and releases nothing.
+    match unsafe { crate::windows::dxgi::device_vendor(device.as_raw()) } {
+        Some(Vendor::Amd) => Ok(()),
+        Some(other) => Err(fail(EncodeErrorKind::Configuration {
+            detail: format!(
+                "AMF encodes on AMD graphics and this device was created on a {other} \
+                 adapter; capture on the AMD adapter to encode with AMF, or use that \
+                 adapter's own encoder"
+            ),
+        })),
+        None => Err(fail(EncodeErrorKind::Configuration {
+            detail: "the graphics device did not answer as a DXGI device, so the adapter \
+                     it was created on could not be identified"
+                .to_owned(),
+        })),
+    }
 }
 
 /// The configuration checks that do not need a session.
