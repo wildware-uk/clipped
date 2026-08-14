@@ -1419,6 +1419,251 @@ fn a_real_recorder_indexes_the_recordings_folder_at_start_up_and_answers_from_it
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// How many earlier sittings the overlap test leaves for the indexer to walk.
+///
+/// Enough that the walk cannot finish inside the four seconds of recording it
+/// has to overlap. Measured rather than guessed: on the development machine
+/// (RTX 4090, NVMe) a run gets through about 2,160 sittings in 4.1 s at the
+/// background pace, so this is roughly four times what the recording's length
+/// allows for — and the run is expected to be cancelled by shutdown well before
+/// it reaches the end.
+///
+/// The test does not trust that headroom. It reads how far the run really got
+/// and how long it really lasted out of the recorder's own report, and fails
+/// with an honest "demonstrates nothing, raise this constant" if a faster
+/// machine finishes the walk before the recording ends — rather than passing
+/// against an idle recorder.
+const SITTINGS_TO_INDEX: usize = 8_000;
+
+/// Writes `count` finished session records into `recordings`, each with a file
+/// beside it, which is the state a machine that has recorded before is in.
+///
+/// **A second apart, and that is not decoration.** A session's identifier is its
+/// game's slug and the second it started
+/// (`clipped_session::automatic::SessionId::new`), and the record is persisted
+/// under that identifier — so sittings written in a loop from
+/// `SystemTime::now()` share an identifier and overwrite each other. Writing
+/// 4,000 that way leaves however many whole seconds the loop happened to take,
+/// which was eight, and an index run with eight sessions in it finishes before
+/// a recording can start.
+fn earlier_sittings(recordings: &Path, count: usize) {
+    let now = std::time::SystemTime::now();
+
+    for index in 0..count {
+        // Backwards, so that every sitting is one this recorder could plausibly
+        // have made before it started, and every one gets a second of its own.
+        let started = now - Duration::from_secs(index as u64 + 1);
+        let output = recordings.join(format!("clipped-earlier-{index:05}.mkv"));
+        std::fs::write(&output, [0u8; 1024]).expect("the recording can be written");
+        let session = clipped_session::automatic::ManualSession::start(
+            recordings,
+            output,
+            &clipped_session::config::Configuration::defaults(),
+            // Deliberately empty, for the reason the start-up test gives: a
+            // catalogue is the one input here that would otherwise come from
+            // the machine running the test (AGENTS.md section 25).
+            &clipped_game_detection::catalogue::Catalogue::default(),
+            clipped_session::automatic::RecordedProcess::new(4_242, "cs2.exe"),
+            started,
+        );
+        let _ = session.finish(
+            &clipped_session::automatic::RecordingOutcome::Failed {
+                detail: "recorded before this recorder started".to_owned(),
+            },
+            started,
+        );
+    }
+}
+
+/// How long the first index run lasted, according to the recorder's own report.
+///
+/// Read out of the log rather than measured from outside, because the question
+/// is when *the run* ended and only the recorder knows that. A run cancelled by
+/// shutdown logs too, with the time it had been going for, which is a lower
+/// bound on how long it was in flight — and a lower bound is all the assertion
+/// below needs.
+fn first_index_run(diagnostics: &str) -> &str {
+    const REPORT: &str = "the library index was reconciled against the recording folders";
+
+    diagnostics
+        .lines()
+        .find(|line| line.contains(REPORT))
+        .unwrap_or_else(|| {
+            panic!(
+                "the recorder never reported reconciling its index, so there was no run to \
+                 overlap with:\n{diagnostics}"
+            )
+        })
+}
+
+/// One `name=value` field of a log line, as a number.
+fn field(line: &str, name: &str) -> u64 {
+    let prefix = format!("{name}=");
+    let value = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(prefix.as_str()))
+        .unwrap_or_else(|| panic!("an index report should carry `{name}`: {line}"));
+
+    value
+        .trim_matches(|character: char| !character.is_ascii_digit())
+        .parse()
+        .unwrap_or_else(|error| panic!("`{value}` is not a number: {error}"))
+}
+
+#[test]
+#[ignore = "needs a GPU, an encoder and a desktop session, and writes thousands of session records"]
+fn an_index_run_in_flight_neither_delays_nor_interrupts_a_recording() {
+    // Issue #385's second acceptance criterion, which asks for this to be
+    // *demonstrated* rather than asserted.
+    //
+    // The design argues it already: the indexer owns a thread and a database
+    // connection of its own, runs at the background pace, and nothing on a
+    // recording's path takes either of its locks — which is why `finish` hands
+    // the work to `indexer.request()` instead of walking the folder on the
+    // recording thread. An argument is not a demonstration, though, and the way
+    // to tell is to make a run genuinely be in flight while a real recording
+    // starts, runs and stops, and then to check afterwards that it really was.
+    //
+    // What would fail here: an indexer that shared the reader's connection, took
+    // a lock the recording path also takes, or ran on the thread that answers
+    // commands. The recording would stall, come back short of frames, or not
+    // start until the walk had finished.
+    let Some(_tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let home = scratch_home("index-overlap");
+    let recordings = home.join("Videos").join("Clipped");
+    std::fs::create_dir_all(&recordings).expect("the recordings folder can be made");
+    earlier_sittings(&recordings, SITTINGS_TO_INDEX);
+
+    // Started before the recorder, so that the recording can begin in the first
+    // moments of the index run rather than after the window has been waited for.
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-index-overlap");
+    let output = directory.file("while-indexing.mkv");
+    let pattern = support::PatternApp::start(SOURCE_FPS, 120);
+
+    let recorder = ServedRecorder::start_under("index-overlap", Some(&home));
+    // The ready line is printed immediately before `start_indexing`, so this is
+    // the moment the run began, give or take the thread starting.
+    let indexing_began = std::time::Instant::now();
+    let mut client = recorder.client();
+
+    let started = client
+        .call(&IpcCommand::StartRecording(StartRecording {
+            pid: Some(pattern.process_id()),
+            output: Some(output.to_string_lossy().into_owned()),
+            overwrite: true,
+            microphone: Some("none".to_owned()),
+            system_audio: Some("none".to_owned()),
+            ..StartRecording::default()
+        }))
+        .expect("a recorder that is indexing still starts a recording");
+    let recording_began = std::time::Instant::now();
+
+    let recording_id = match started {
+        Reply::RecordingStarted { recording_id, .. } => recording_id,
+        other => panic!("expected a started recording, got {other:?}"),
+    };
+
+    std::thread::sleep(RECORD_FOR);
+
+    let summary = match client
+        .call(&IpcCommand::StopRecording(StopRecording {
+            recording_id: Some(recording_id),
+        }))
+        .expect("a recorder that is indexing still stops a recording")
+    {
+        Reply::RecordingStopped { summary } => summary,
+        other => panic!("expected a summary, got {other:?}"),
+    };
+    let recording_ended = std::time::Instant::now();
+
+    // The recording is whole: an indexer that interrupted one would show up
+    // here as a short file, a failed end reason, or no frames at all.
+    assert!(
+        summary.frames_encoded > 0,
+        "a recording made while the index was being walked encoded nothing: {summary:?}"
+    );
+    assert_eq!(summary.end_reason, clipped_ipc::EndReason::Stopped);
+
+    clipped_media_validation::Media::open(&output)
+        .unwrap_or_else(|error| panic!("the recording is not usable at all: {error}"))
+        .validate()
+        .video_stream_count(1)
+        .video(
+            clipped_media_validation::VideoStream::codec(&summary.codec)
+                .resolution(summary.width, summary.height)
+                .decoded_frames(summary.frames_encoded),
+        )
+        .monotonic_timestamps()
+        .assert_valid();
+
+    drop(client);
+    let diagnostics = recorder.stop();
+    let report = first_index_run(&diagnostics);
+    let indexing_lasted = Duration::from_millis(field(report, "duration_ms"));
+    let sessions_indexed = field(report, "sessions");
+    let recording_started_after = recording_began.duration_since(indexing_began);
+    let recording_ended_after = recording_ended.duration_since(indexing_began);
+
+    eprintln!(
+        "\n=== a recording made while the library index was being walked ===\n\
+         sittings written  : {SITTINGS_TO_INDEX}\n\
+         sessions indexed  : {sessions_indexed}\n\
+         index run lasted  : {} ms\n\
+         recording ran     : {} ms to {} ms after the run began\n\
+         frames encoded    : {}\n\
+         picture           : {}x{} {}\n\
+         report            : {report}\n",
+        indexing_lasted.as_millis(),
+        recording_started_after.as_millis(),
+        recording_ended_after.as_millis(),
+        summary.frames_encoded,
+        summary.width,
+        summary.height,
+        summary.codec,
+    );
+
+    // Two checks stop this passing for the wrong reason, and both are about the
+    // run rather than the recording.
+    //
+    // The run has to have done real work. A walk that finds nothing finishes in
+    // microseconds, and a recording made alongside *that* demonstrates nothing —
+    // which is not hypothetical: the first draft of this test wrote its 4,000
+    // sittings from `SystemTime::now()`, they collapsed onto eight identifiers,
+    // and the run it overlapped was a 46 ms walk of eight sessions.
+    //
+    // Not an equality against what was written, because the run is expected not
+    // to finish: the recorder is stopped while the walk is still going, which
+    // cancels it. How far it got is the machine's business; that it was
+    // genuinely walking this library is not.
+    assert!(
+        sessions_indexed >= 500,
+        "the run indexed only {sessions_indexed} sessions of the {SITTINGS_TO_INDEX} written, \
+         which is too few to have been a walk of this library: {report}"
+    );
+
+    // And it has to have been in flight for the *whole* recording, not merely
+    // to have started before it. A run that had finished by the time the
+    // recording began would make everything above a recording made against an
+    // idle recorder.
+    //
+    // `cancelled=true` in the report is the ordinary outcome and the strongest
+    // form of this: it means the walk had still not finished when the recorder
+    // was stopped, which is after the recording ended.
+    assert!(
+        indexing_lasted >= recording_ended_after,
+        "the index run finished {} ms in, and the recording ran until {} ms, so the walk was \
+         not in flight for all of it and this run demonstrates less than it claims. Raise \
+         SITTINGS_TO_INDEX: {report}",
+        indexing_lasted.as_millis(),
+        recording_ended_after.as_millis(),
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn a_recorder_whose_games_file_cannot_be_read_still_serves_and_says_so() {
     // Issue #403's third acceptance criterion, against the real process. The
