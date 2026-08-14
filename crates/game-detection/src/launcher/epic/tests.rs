@@ -155,7 +155,7 @@ fn the_deepest_installation_claims_a_path_inside_two_of_them() {
 
     let epic = Epic::read_at(&directory).expect("the directory is there");
     let app = epic
-        .app_for_path(r"D:\Epic\Inner\Binaries\inner.exe")
+        .app_for("inner.exe", r"D:\Epic\Inner\Binaries\inner.exe")
         .expect("something claims it");
 
     assert_eq!(app.app_name(), "Inner");
@@ -177,7 +177,108 @@ fn an_installation_directory_itself_is_not_a_program_in_it() {
 
     let epic = Epic::read_at(&directory).expect("the directory is there");
 
-    assert!(epic.app_for_path(r"D:\Epic\Fortnite").is_none());
+    assert!(epic.app_for("x.exe", r"D:\Epic\Fortnite").is_none());
+
+    let _ = fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn the_executable_decides_when_several_applications_share_one_directory() {
+    // Not hypothetical, and not something the fixtures showed until the
+    // provider was run against a real installation: Epic installs plugins
+    // *into* the thing they extend and gives each its own manifest, so three of
+    // ten directories on that machine were shared —
+    //
+    //     B:\Epic Games\UE_5.8  <-  QuixelBridge_5.8, FabPlugin_5.8, UE_5.8
+    //
+    // Depth cannot break that tie. Before #459 the first manifest by `AppName`
+    // won, so anything run from the engine's directory was the Fab plugin.
+    let directory = scratch("shared-directory");
+    manifest(
+        &directory,
+        "UE.item",
+        "UE_5.8",
+        "Unreal Engine",
+        r"B:\Epic Games\UE_5.8",
+        r"Engine\Binaries\Win64\UnrealEditor.exe",
+    );
+    manifest(
+        &directory,
+        "Fab.item",
+        "FabPlugin_5.8",
+        "Fab UE Plugin",
+        r"B:\Epic Games\UE_5.8",
+        r"Engine\Plugins\Fab\FabPlugin.exe",
+    );
+
+    let epic = Epic::read_at(&directory).expect("the directory is there");
+
+    // `FabPlugin_5.8` sorts before `UE_5.8`, so the old rule answered with the
+    // plugin for both of these.
+    let editor = epic
+        .app_for(
+            "UnrealEditor.exe",
+            r"B:\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe",
+        )
+        .expect("the editor's own manifest claims it");
+    assert_eq!(editor.app_name(), "UE_5.8");
+
+    let plugin = epic
+        .app_for(
+            "FabPlugin.exe",
+            r"B:\Epic Games\UE_5.8\Engine\Plugins\Fab\FabPlugin.exe",
+        )
+        .expect("the plugin's own manifest claims it");
+    assert_eq!(plugin.app_name(), "FabPlugin_5.8");
+
+    let _ = fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_shared_directory_that_no_executable_settles_is_refused_rather_than_guessed() {
+    // The other half of #459, and the reason the answer is `None` rather than
+    // whichever sorted first: a launcher identity for the wrong application is
+    // worse than none, because the catalogue's path and name rungs are a better
+    // answer than a confident wrong one.
+    let directory = scratch("shared-unsettled");
+    manifest(
+        &directory,
+        "UE.item",
+        "UE_5.8",
+        "Unreal Engine",
+        r"B:\Epic Games\UE_5.8",
+        r"Engine\Binaries\Win64\UnrealEditor.exe",
+    );
+    manifest(
+        &directory,
+        "Fab.item",
+        "FabPlugin_5.8",
+        "Fab UE Plugin",
+        r"B:\Epic Games\UE_5.8",
+        r"Engine\Plugins\Fab\FabPlugin.exe",
+    );
+
+    let epic = Epic::read_at(&directory).expect("the directory is there");
+
+    assert!(
+        epic.app_for(
+            "SomethingElse.exe",
+            r"B:\Epic Games\UE_5.8\Engine\Binaries\Win64\SomethingElse.exe"
+        )
+        .is_none(),
+        "no manifest names this executable, so neither of them owns it"
+    );
+
+    // And through the join the catalogue actually uses.
+    let candidate = epic.candidate_for(
+        "SomethingElse.exe",
+        r"B:\Epic Games\UE_5.8\Engine\Binaries\Win64\SomethingElse.exe",
+    );
+    assert_eq!(
+        candidate.launcher(),
+        None,
+        "a candidate with no identity falls back to the path and name rungs"
+    );
 
     let _ = fs::remove_dir_all(&directory);
 }
