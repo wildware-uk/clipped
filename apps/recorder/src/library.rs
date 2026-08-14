@@ -64,6 +64,7 @@ use clipped_library::index::{
 use clipped_library::search::Query;
 use clipped_library::thumbnail::{ServiceOptions, ThumbnailCache, ThumbnailService};
 use clipped_storage::Database;
+use clipped_waveform::{ServiceOptions as WaveformOptions, WaveformCache, WaveformService};
 
 /// The file the library index lives in, under Clipped's per-user directory.
 const LIBRARY_FILE: &str = "library.db";
@@ -444,6 +445,13 @@ struct Indexer {
     /// thumbnails at all
     /// ([issue #57](https://github.com/wildware-uk/clipped/issues/57)).
     thumbnails: Option<ThumbnailService>,
+    /// Makes the peaks a timeline draws, on the same terms.
+    ///
+    /// `clipped-waveform` was not a dependency of anything before this: it
+    /// appeared in the workspace root manifest and in comments and in nobody's
+    /// `[dependencies]`, so no waveform was ever generated
+    /// ([issue #66](https://github.com/wildware-uk/clipped/issues/66)).
+    waveforms: Option<WaveformService>,
 }
 
 /// The indexer's own state, which is all that a request touches.
@@ -482,6 +490,8 @@ impl LibraryIndexer {
         if let Some(shared) = Arc::get_mut(&mut indexer.shared) {
             shared.thumbnails = ThumbnailCache::in_default_directory()
                 .map(|cache| ThumbnailService::start(cache, ServiceOptions::new()));
+            shared.waveforms = WaveformCache::in_default_directory()
+                .map(|cache| WaveformService::start(cache, WaveformOptions::new()));
         }
         indexer
     }
@@ -500,6 +510,7 @@ impl LibraryIndexer {
                 state: Mutex::new(IndexerState::default()),
                 woken: Condvar::new(),
                 thumbnails: None,
+                waveforms: None,
             }),
             thread: Mutex::new(None),
         }
@@ -708,7 +719,7 @@ impl Indexer {
 }
 
 impl Indexer {
-    /// Asks for a picture of every recording the index holds.
+    /// Asks for a picture and a waveform of every recording the index holds.
     ///
     /// After the reconciliation rather than during it, and by
     /// [`ThumbnailService::request`] rather than
@@ -721,10 +732,10 @@ impl Indexer {
     /// with no picture is a tile with no picture, which is a smaller problem
     /// than an index that did not update (AGENTS.md section 17).
     fn picture_what_was_indexed(&self, database: &Database) {
-        let Some(service) = self.thumbnails.as_ref() else {
+        if self.thumbnails.is_none() && self.waveforms.is_none() {
             return;
-        };
-        let recordings = match clipped_library::thumbnail::recordings_worth_picturing(database) {
+        }
+        let recordings = match clipped_library::thumbnail::recordings_worth_reading(database) {
             Ok(recordings) => recordings,
             Err(error) => {
                 tracing::warn!(
@@ -738,12 +749,17 @@ impl Indexer {
 
         let asked = recordings.len();
         for recording in recordings {
-            let _ = service.request(&recording);
+            if let Some(service) = self.thumbnails.as_ref() {
+                let _ = service.request(&recording);
+            }
+            if let Some(service) = self.waveforms.as_ref() {
+                let _ = service.request(&recording);
+            }
         }
         if asked > 0 {
             tracing::debug!(
                 recordings = asked,
-                "asked for a picture of every recording the index holds"
+                "asked for a picture and a waveform of every recording the index holds"
             );
         }
     }
