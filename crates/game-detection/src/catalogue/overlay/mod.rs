@@ -195,11 +195,9 @@ fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
     {
         fs::create_dir_all(directory)?;
     }
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.tmp", std::process::id()));
-    let temporary = path.with_file_name(name);
-    fs::write(&temporary, text)?;
-    fs::rename(&temporary, path)
+    clipped_logging::write_atomically(path, |temporary| {
+        io::Write::write_all(temporary, text.as_bytes())
+    })
 }
 
 #[cfg(test)]

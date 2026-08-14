@@ -635,25 +635,13 @@ impl ThumbnailCache {
         // `<key>.jpg.writing`, appended rather than substituted: replacing the
         // extension would give the picture and its sidecar the same temporary
         // name, and a store would then race with itself.
-        let mut suffixed = destination.as_os_str().to_owned();
-        suffixed.push(".");
-        suffixed.push(TEMPORARY_SUFFIX);
-        let temporary = PathBuf::from(suffixed);
-        fs::write(&temporary, bytes).map_err(|cause| ThumbnailError::Cache {
-            detail: "write an entry",
-            entry: clipped_logging::RedactedPath::new(&temporary),
+        clipped_logging::write_atomically(destination, |temporary| {
+            std::io::Write::write_all(temporary, bytes)
+        })
+        .map_err(|cause| ThumbnailError::Cache {
+            detail: "replace an entry",
+            entry: clipped_logging::RedactedPath::new(destination),
             cause,
-        })?;
-        fs::rename(&temporary, destination).map_err(|cause| {
-            // The rename is what makes the write atomic, so a failure leaves the
-            // temporary behind. Remove it rather than leaving pruning to find
-            // it, since it describes nothing.
-            remove_if_present(&temporary);
-            ThumbnailError::Cache {
-                detail: "replace an entry",
-                entry: clipped_logging::RedactedPath::new(destination),
-                cause,
-            }
         })
     }
 }

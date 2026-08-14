@@ -179,16 +179,15 @@ impl ConfigurationStore {
             }
         }
 
-        let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(&temporary, text).map_err(failed)?;
-        // `rename` replaces the destination on Windows and on Unix alike, which
-        // is what makes this atomic rather than a delete and a create.
-        if let Err(error) = std::fs::rename(&temporary, &self.path) {
-            // Leaving the temporary file behind would have the next save fail
-            // for a reason unrelated to the one that actually happened.
-            let _ = std::fs::remove_file(&temporary);
-            return Err(failed(error));
-        }
-        Ok(())
+        // Through `clipped_logging`, which names the temporary after this
+        // process and sweeps the ones abandoned processes left
+        // ([issue #400](https://github.com/wildware-uk/clipped/issues/400)).
+        // The name here used to be a fixed `json.tmp`, so two processes saving
+        // settings at once shared one temporary and could rename half of it
+        // into place.
+        clipped_logging::write_atomically(&self.path, |temporary| {
+            std::io::Write::write_all(temporary, text.as_bytes())
+        })
+        .map_err(failed)
     }
 }

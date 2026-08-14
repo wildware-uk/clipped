@@ -130,12 +130,10 @@ pub(crate) fn write(directory: &Path, session: &Session) -> io::Result<PathBuf> 
     fs::create_dir_all(directory)?;
 
     let path = session.sidecar_path(directory);
-    let temporary = path.with_extension("tmp");
     let json = serde_json::to_vec_pretty(&SidecarFile::of(session))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
-    fs::write(&temporary, &json)?;
-    fs::rename(&temporary, &path)?;
+    clipped_logging::write_atomically(&path, |temporary| io::Write::write_all(temporary, &json))?;
     Ok(path)
 }
 
