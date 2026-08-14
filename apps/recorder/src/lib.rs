@@ -388,6 +388,30 @@ mod tests {
     }
 
     #[test]
+    fn a_minimised_window_is_a_failure_and_not_a_command_line_to_fix() {
+        // The one mapping in `recording_exit_code` that was argued in a comment
+        // and asserted nowhere: a verifier changed it to `EXIT_USAGE` and the
+        // whole suite stayed green
+        // ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+        //
+        // The distinction is the whole of the decision. `EXIT_USAGE` says the
+        // command line has to change, and it does not: it named the right
+        // window, and there is nothing in it to fix. What has to change is the
+        // window — which the message says — so a script that restores it and
+        // retries should see the same code it would for any other refusal to
+        // record.
+        let error = RunError::from(RecordError::TargetMinimised {
+            window: "Counter-Strike 2".to_owned(),
+        });
+
+        assert_eq!(error.exit_code(), EXIT_FAILURE);
+        assert!(
+            !error.is_usage_error(),
+            "a minimised window is not a usage error, so nothing may offer `--help` for it"
+        );
+    }
+
+    #[test]
     fn a_selector_that_named_no_window_is_a_command_line_to_fix() {
         // The same code `list-windows` uses for the same mistake, so a script
         // cannot tell them apart and does not need to.
