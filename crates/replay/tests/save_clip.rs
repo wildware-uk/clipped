@@ -112,7 +112,8 @@ fn requesting_the_previous_sixty_seconds_yields_a_clip_of_that_length_that_plays
 
     let directory = TemporaryDirectory::new("replay-save-sixty");
     let path = directory.file("clip.mkv");
-    let clip = save_clip(&lease, &path, &video.track()).expect("the clip is written");
+    let clip = save_clip(&lease, &path, &RecordingLayout::new(video.track()))
+        .expect("the clip is written");
 
     // The documented tolerance, and the whole of the keyframe-boundary
     // behaviour: never shorter than was asked for, never more than one segment
@@ -283,7 +284,8 @@ fn capture_carries_on_uninterrupted_while_a_clip_is_saved() {
     // same way. Waiting rather than sampling is what keeps this from depending on
     // how fast the machine is — a slower one simply waits longer.
     let (advanced, clip) = std::thread::scope(|scope| {
-        let saver = scope.spawn(|| save_clip(&lease, &clip_path, &video.track()));
+        let saver =
+            scope.spawn(|| save_clip(&lease, &clip_path, &RecordingLayout::new(video.track())));
         let mut advanced = 0;
         while !saver.is_finished() && advanced < CAPTURED_DURING_A_SAVE {
             advanced = pushed.load(Ordering::Acquire) - before;
@@ -467,8 +469,10 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     let during = buffer.stats();
 
     let (first_clip, second_clip) = std::thread::scope(|scope| {
-        let one = scope.spawn(|| save_clip(&first, &first_path, &track));
-        let two = scope.spawn(|| save_clip(&second, &second_path, &track));
+        let one =
+            scope.spawn(|| save_clip(&first, &first_path, &RecordingLayout::new(track.clone())));
+        let two =
+            scope.spawn(|| save_clip(&second, &second_path, &RecordingLayout::new(track.clone())));
 
         (
             one.join().expect("the first save finishes"),
@@ -545,8 +549,9 @@ fn a_clip_never_overwrites_something_already_there() {
     let directory = TemporaryDirectory::new("replay-save-existing");
     let path = directory.file("clip.mkv");
 
-    save_clip(&lease, &path, &video.track()).expect("the first clip is written");
-    let refused = save_clip(&lease, &path, &video.track())
+    save_clip(&lease, &path, &RecordingLayout::new(video.track()))
+        .expect("the first clip is written");
+    let refused = save_clip(&lease, &path, &RecordingLayout::new(video.track()))
         .expect_err("a clip must not be written over a clip");
 
     // Choosing another name belongs to the caller, which is the layer that knows

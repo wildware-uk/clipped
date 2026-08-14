@@ -246,26 +246,49 @@ with `SavedClip::is_complete` false and `shortfall` saying what was missing.
 Refusing would be worse — there is a clip to be had, and it is the clip somebody
 asked for.
 
-### Audio: there is none, and that is now a gap rather than a consequence
+### Audio: every track the recording has
 
-A replay is video only. That used to follow from the pipeline — a recording had
-no audio track at all — and it no longer does: since
-[issue #180](https://github.com/wildware-uk/clipped/issues/180) a recording has
-a system track and a microphone track, and **a clip saved out of the buffer has
-neither**. The buffer takes `clipped_encoder::EncodedPacket`s, which are coded
-*pictures*; captured audio reaches the file as PCM on the muxing thread and is
-not offered to the buffer at all (`crates/session/src/muxing.rs`).
+A clip carries the same audio tracks the recording does
+([issue #40](https://github.com/wildware-uk/clipped/issues/40)). Audio is
+appended to whichever segment is open when it arrives, so it is evicted with
+that segment and leased with it, and `save_clip` takes a `RecordingLayout`
+rather than a `VideoTrack` — the signature is what says a clip declares the
+whole set.
 
-SPEC.md section 42 asks for M3 to "preserve all audio tracks", so this is an
-unmet requirement of the milestone rather than a design decision, and it is
-[issue #40](https://github.com/wildware-uk/clipped/issues/40) — which was
-written as the *verification* of the audio path and now also owns building it.
-`apps/recorder/tests/replay_clip.rs` asserts `audio_stream_count(0)` on a saved
-clip, so the gap is stated in a test rather than assumed.
+There is no compatibility mix to carry, because this build makes none
+([issue #29](https://github.com/wildware-uk/clipped/issues/29)); when there is,
+it is a track like any other and nothing here changes.
 
-`save_clip` takes a `VideoTrack` rather than a `RecordingLayout` so that this is
-a property of the signature and not a comment: a caller cannot hand it audio
-tracks that would be silently dropped.
+Three decisions are worth knowing about, because each is a way to be quietly
+wrong rather than loudly broken.
+
+**Samples are held as the capture produced them.** Interleaved `f32`, not the
+PCM the file gets. A buffer that converted on the way in would be a second
+implementation of something `clipped-muxer` owns, and a clip would have gone
+through a different conversion from the recording beside it. It costs twice the
+memory of PCM, which is the next point.
+
+**Audio is budgeted, not merely stored.** Audio and video share one ceiling, so
+every byte of audio held evicts a byte of video. `ReplayConfig` is told what the
+recording's audio costs per second
+(`with_audio_bytes_per_second`, from the layout's rate, channels and track
+count) and raises the ceiling to match. Without it the failure is not an overrun
+but a silently shorter replay: a two-track 48 kHz stereo recording asked for
+five seconds came back holding three.
+
+**Audio is selected against the video actually written, and merged into it.**
+A clip begins at the keyframe at or before the request, which is earlier than
+what was asked for; the audio written is the audio belonging to *that* range.
+Selecting against the request instead puts the audio up to a segment ahead of
+its picture. The two are then interleaved by timestamp rather than appended one
+after the other, because `MkvWriter` forces a timestamp that goes backwards to
+be monotonic and counts it — so writing all the video first would not produce a
+badly interleaved file, it would produce one whose audio had been dragged to the
+end.
+
+`apps/recorder/tests/replay_clip.rs` pushes a distinct tone into each track,
+saves a clip and asserts each stream carries its own tone and none of the
+other's.
 
 ### Where the work happens
 
@@ -668,10 +691,6 @@ and a wrong number in a report is a smaller failure than a recording that stops
 
 ## What is not decided here
 
-- **Audio.** A clip is video only, and SPEC.md section 42 asks for M3 to keep
-  every track. See "Audio: there is none" above;
-  [issue #40](https://github.com/wildware-uk/clipped/issues/40) is where the
-  buffer learns to carry it.
 - **Interaction with a full-session recording**, and with automatic highlight
   clipping in M10. Both consume the same packets and neither has been written.
 

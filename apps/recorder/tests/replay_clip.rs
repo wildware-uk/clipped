@@ -44,7 +44,7 @@ use std::time::{Duration, SystemTime};
 
 use clipped_hotkeys::HotkeyAction;
 use clipped_media_validation::{
-    require_media_tools, CodedVideo, Media, TemporaryDirectory, VideoStream,
+    require_media_tools, AudioStream, CodedVideo, Media, TemporaryDirectory, Tone, VideoStream,
 };
 use clipped_muxer::RecordingLayout;
 use clipped_recorder::replay::{handlers_for, save};
@@ -97,11 +97,36 @@ fn coded_video() -> Option<CodedVideo> {
     )
 }
 
+/// The sampling rate every track in these tests is captured at.
+const SAMPLE_RATE: u32 = 48_000;
+
+/// How many channels each of them carries.
+const CHANNELS: u16 = 2;
+
+/// The tone the game track carries, in hertz.
+const GAME_TONE: f64 = 440.0;
+
+/// The tone the microphone track carries.
+///
+/// Far enough from [`GAME_TONE`] that a spectrum can tell them apart, which is
+/// what makes "isolated from" mean something.
+const MICROPHONE_TONE: f64 = 1_320.0;
+
+/// How long one pushed block of audio is.
+///
+/// Ten milliseconds, which is the order of magnitude a WASAPI endpoint hands
+/// over and small enough that several land inside every video segment.
+const AUDIO_BLOCK: Duration = Duration::from_millis(10);
+
 /// The layout a recording of that video would declare, as
-/// `crates/session/src/audio/mod.rs` builds one — video only, because nothing
-/// puts audio in a replay buffer yet (issue #40).
+/// `crates/session/src/audio/mod.rs` builds one.
+///
+/// Two isolated tracks and no compatibility mix, because that is what this
+/// build makes: `declare` gives the default flag to the first ordered track and
+/// says why there is no mix yet
+/// ([issue #29](https://github.com/wildware-uk/clipped/issues/29)).
 fn layout(video: &CodedVideo) -> RecordingLayout {
-    RecordingLayout::new(
+    audio_tracks(RecordingLayout::new(
         clipped_muxer::VideoTrack::new(clipped_muxer::VideoCodec::H264, WIDTH, HEIGHT)
             .with_frame_rate(
                 clipped_muxer::FrameRate::per_second(
@@ -114,7 +139,65 @@ fn layout(video: &CodedVideo) -> RecordingLayout {
             // catch.
             .with_codec_private(video.parameter_sets().to_vec())
             .with_name("Gameplay"),
-    )
+    ))
+}
+
+/// Adds the two audio tracks a recording of this video would carry.
+fn audio_tracks(layout: RecordingLayout) -> RecordingLayout {
+    layout
+        .with_audio_track(clipped_muxer::AudioTrack::for_source(
+            clipped_muxer::AudioSource::Game,
+            SAMPLE_RATE,
+            CHANNELS,
+        ))
+        .with_audio_track(clipped_muxer::AudioTrack::for_source(
+            clipped_muxer::AudioSource::Microphone,
+            SAMPLE_RATE,
+            CHANNELS,
+        ))
+}
+
+/// One block of a sine at `hertz`, interleaved across [`CHANNELS`].
+///
+/// `from` is the frame the block starts at, so the phase carries across blocks
+/// rather than restarting at every one — a tone that reset every ten
+/// milliseconds would be a buzz at 100 Hz, and would fail the spectrum
+/// assertion for a reason that has nothing to do with the buffer.
+fn tone(hertz: f64, from: u64, frames: usize) -> Vec<f32> {
+    let mut samples = Vec::with_capacity(frames * usize::from(CHANNELS));
+    for frame in 0..frames {
+        let time = (from + frame as u64) as f64 / f64::from(SAMPLE_RATE);
+        let value = (core::f64::consts::TAU * hertz * time).sin() as f32 * 0.5;
+        for _ in 0..CHANNELS {
+            samples.push(value);
+        }
+    }
+    samples
+}
+
+/// Pushes `seconds` of both audio tracks into `buffer`, as the audio threads do
+/// one block at a time (`crates/session/src/audio/mod.rs`).
+///
+/// Interleaved with nothing: the buffer takes audio and video from different
+/// threads in a real recording, and the only thing that relates them is the
+/// media clock both are timed against — which is what this passes.
+fn push_audio(buffer: &clipped_replay::ReplayBuffer, seconds: u64) {
+    let frames_per_block = (SAMPLE_RATE as u64 * AUDIO_BLOCK.as_millis() as u64 / 1_000) as usize;
+    let blocks = seconds * 1_000 / AUDIO_BLOCK.as_millis() as u64;
+    for block in 0..blocks {
+        let at = AUDIO_BLOCK * u32::try_from(block).expect("a few thousand blocks fit");
+        let from = block * frames_per_block as u64;
+        buffer.push_audio(
+            clipped_muxer::TrackId::Audio(0),
+            at,
+            &tone(GAME_TONE, from, frames_per_block),
+        );
+        buffer.push_audio(
+            clipped_muxer::TrackId::Audio(1),
+            at,
+            &tone(MICROPHONE_TONE, from, frames_per_block),
+        );
+    }
 }
 
 /// Pushes `seconds` of `video` into `buffer`, as the recording's packet loop
@@ -148,6 +231,7 @@ fn buffered(seconds: u64) -> Option<ReplayRecording> {
     let buffer = clipped_session::start_buffer(&layout(&video), generous_rate(), Some(&replay))
         .expect("a recording asked for a buffer has one once its encoder is open");
     push(&video, buffer, seconds);
+    push_audio(buffer, seconds);
 
     Some(replay)
 }
@@ -206,18 +290,37 @@ fn a_saved_replay_is_the_last_n_seconds_and_every_picture_of_it_decodes() {
     let media = Media::open(clip.path()).expect("the clip opens");
     media
         .validate()
-        .stream_count(1)
+        .stream_count(3)
         .video(
             VideoStream::codec("h264")
                 .resolution(WIDTH, HEIGHT)
                 .decoded_frames_at_least(600),
         )
-        // Video only, deliberately and temporarily: nothing puts audio in a
-        // replay buffer yet, and carrying every track into a clip is
-        // [issue #40](https://github.com/wildware-uk/clipped/issues/40).
-        // Asserting the count rather than leaving it unsaid is what makes that
-        // a stated gap instead of an assumption nobody checked.
-        .audio_stream_count(0)
+        // Every audio track the recording declared, carried into the clip
+        // ([issue #40](https://github.com/wildware-uk/clipped/issues/40)).
+        // There is no compatibility mix to assert because this build makes
+        // none — `clipped_session::audio::declare` says why, and it is
+        // [issue #29](https://github.com/wildware-uk/clipped/issues/29).
+        .audio_stream_count(2)
+        .audio(
+            0,
+            AudioStream::codec("pcm_s16le")
+                .sample_rate(SAMPLE_RATE)
+                .channels(CHANNELS),
+        )
+        .audio(
+            1,
+            AudioStream::codec("pcm_s16le")
+                .sample_rate(SAMPLE_RATE)
+                .channels(CHANNELS),
+        )
+        // And what is actually on them, which is the assertion the issue was
+        // written for: each track's own tone and none of the other's. A clip
+        // that had written both tracks from one buffer of samples, or had
+        // crossed the track indices, passes every assertion above and fails
+        // these.
+        .audio_tone(0, Tone::at(GAME_TONE).isolated_from(MICROPHONE_TONE))
+        .audio_tone(1, Tone::at(MICROPHONE_TONE).isolated_from(GAME_TONE))
         .monotonic_timestamps()
         .assert_valid();
 
@@ -305,7 +408,7 @@ fn pressing_the_replay_key_saves_a_clip_and_no_other_key_does_anything() {
     Media::open(&clip)
         .expect("the press wrote a clip that opens")
         .validate()
-        .stream_count(1)
+        .stream_count(3)
         .video(
             VideoStream::codec("h264")
                 .resolution(WIDTH, HEIGHT)
@@ -368,7 +471,7 @@ fn a_recording_pushes_into_the_buffer_it_started_and_a_clip_declares_that_record
     Media::open(saved.clip.path())
         .expect("the clip opens")
         .validate()
-        .stream_count(1)
+        .stream_count(3)
         .video(
             VideoStream::codec("h264")
                 .resolution(WIDTH, HEIGHT)
@@ -461,7 +564,7 @@ fn a_save_the_buffer_could_not_fill_still_produces_the_clip_there_is() {
     Media::open(clip.path())
         .expect("a short clip is still a clip")
         .validate()
-        .stream_count(1)
+        .stream_count(3)
         .video(VideoStream::codec("h264").decoded_frames_at_least(540))
         .assert_valid();
 }
@@ -506,7 +609,7 @@ fn a_clip_is_written_to_a_path_the_caller_named_and_never_over_one_that_exists()
     Media::open(&chosen)
         .expect("the first clip is still there")
         .validate()
-        .stream_count(1)
+        .stream_count(3)
         .video(VideoStream::codec("h264").decoded_frames_at_least(300))
         .assert_valid();
 }

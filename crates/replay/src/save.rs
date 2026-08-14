@@ -87,17 +87,36 @@
 //! own file while a clip is saved out of the same packets, and every frame of it
 //! survives.
 //!
-//! # Video only, deliberately
+//! # Audio, and the two clocks
 //!
-//! A clip has one video track and no audio, because a recording has no audio
-//! track yet ([issue #180](https://github.com/wildware-uk/clipped/issues/180))
-//! and there is nothing in the buffer to write. Carrying every audio track into
-//! a replay is [issue #40](https://github.com/wildware-uk/clipped/issues/40),
-//! which is where that is verified. The signature says so rather than leaving it
-//! implied: [`save_clip`] takes a
-//! [`VideoTrack`](clipped_muxer::VideoTrack) and not a
-//! [`RecordingLayout`](clipped_muxer::RecordingLayout), so a caller cannot pass
-//! audio tracks that would be silently dropped.
+//! A clip carries every track the recording does: the compatibility mix and
+//! each isolated source, declared from the
+//! [`RecordingLayout`](clipped_muxer::RecordingLayout) the caller passes
+//! ([issue #40](https://github.com/wildware-uk/clipped/issues/40)).
+//!
+//! Two things about that are worth stating, because both are easy to get
+//! subtly wrong and neither shows up as anything louder than drift.
+//!
+//! **A clip begins on a keyframe, and audio has none.** The video written
+//! starts at the keyframe at or before the requested start, which is earlier
+//! than what was asked for. The audio written is the audio belonging to *that*
+//! range and not to the requested one — selected against the video actually
+//! written, so the two ends agree. Selecting against the request instead would
+//! produce a clip whose audio led its video by up to a segment, which looks
+//! like an alignment bug and is a selection bug.
+//!
+//! **Blocks are written whole.** A block straddling the first keyframe is
+//! written with its own timestamp rather than trimmed, so a clip's audio may
+//! begin a few milliseconds before its video. That is the same thing the
+//! recording path does with the first block of a recording, and trimming would
+//! mean this module resampling — a second implementation of something the muxer
+//! owns (AGENTS.md section 55).
+//!
+//! The two are then **merged by timestamp**, not written one after the other.
+//! [`MkvWriter`] forces a timestamp that goes backwards to be monotonic and
+//! counts it, so appending every audio block after every video packet would not
+//! produce a badly interleaved file — it would produce one whose audio had been
+//! silently dragged forward to the end of the video.
 //!
 //! # Naming, and two saves at once
 //!
@@ -118,7 +137,7 @@ use std::path::{Path, PathBuf};
 
 use clipped_logging::RedactedPath;
 use clipped_muxer::{
-    EncodedPacket, MkvWriter, MuxError, PacketTimestamp, RecordingLayout, TrackId, VideoTrack,
+    AudioTrackWriter, EncodedPacket, MkvWriter, MuxError, PacketTimestamp, RecordingLayout, TrackId,
 };
 use tracing::info;
 
@@ -146,10 +165,11 @@ use crate::range::TimeRange;
 pub fn save_clip(
     lease: &SegmentLease,
     destination: &Path,
-    video: &VideoTrack,
+    layout: &RecordingLayout,
 ) -> Result<SavedClip, SaveError> {
     let requested = lease.requested();
     let to_write = packets_to_write(lease);
+    let video = layout.video();
     // The caller's frame rate, or nothing. Matroska stores no duration for an
     // ordinary block, so this is the hint that decides the duration of the
     // *last* one, which is otherwise taken to be zero and makes a file read as
@@ -162,12 +182,31 @@ pub fn save_clip(
         .frame_rate()
         .map(clipped_muxer::FrameRate::frame_interval);
 
-    let layout = RecordingLayout::new(video.clone());
     let mut writer =
-        MkvWriter::create(destination, &layout).map_err(|source| SaveError::Create {
+        MkvWriter::create(destination, layout).map_err(|source| SaveError::Create {
             destination: destination.to_path_buf(),
             source,
         })?;
+
+    // One writer per declared track, in the order the layout declares them,
+    // which is the order the container numbered them.
+    let mut audio_writers = Vec::with_capacity(layout.audio_tracks().len());
+    for (index, declared) in layout.audio_tracks().iter().enumerate() {
+        let track = TrackId::Audio(u16::try_from(index).unwrap_or(u16::MAX));
+        let writer =
+            AudioTrackWriter::new(track, declared).map_err(|source| SaveError::Create {
+                destination: destination.to_path_buf(),
+                source,
+            })?;
+        audio_writers.push(writer);
+    }
+
+    // The audio that belongs to the video actually being written, in timestamp
+    // order. Collected before anything is written because the selection depends
+    // on where the video ends up starting, and because a lease hands audio back
+    // in arrival order rather than in time order.
+    let mut audio = audio_to_write(lease, to_write);
+    let mut next_audio = 0;
 
     let mut packets = 0;
     let mut bytes = 0;
@@ -175,6 +214,17 @@ pub fn save_clip(
     let mut last = Duration::ZERO;
 
     for packet in lease.packets().take(to_write) {
+        // Everything captured at or before this picture goes first, so the file
+        // is interleaved rather than sorted afterwards by a writer that would
+        // rather move a timestamp than fail.
+        while let Some(block) = audio.get(next_audio) {
+            if block.at > packet.decode_time() {
+                break;
+            }
+            write_audio_block(&mut writer, &mut audio_writers, block, destination, packets)?;
+            next_audio += 1;
+        }
+
         let mut written = EncodedPacket::new(
             TrackId::Video,
             timestamp(packet.presentation_time()),
@@ -201,6 +251,17 @@ pub fn save_clip(
         // in decode order, so the last one written need not carry the latest
         // presentation time.
         last = last.max(packet.presentation_time());
+    }
+
+    // Whatever was captured after the last picture but still inside the clip.
+    for block in audio.drain(next_audio..) {
+        write_audio_block(
+            &mut writer,
+            &mut audio_writers,
+            &block,
+            destination,
+            packets,
+        )?;
     }
 
     writer.finish().map_err(|source| SaveError::Write {
@@ -231,6 +292,76 @@ pub fn save_clip(
     );
 
     Ok(clip)
+}
+
+/// One block of audio, chosen for the clip.
+///
+/// Owned rather than borrowed from the lease because the selection is sorted,
+/// and sorting borrowed slices of several segments would otherwise pin the
+/// lease's layout into this function's signature.
+struct PlannedAudio {
+    track: TrackId,
+    at: Duration,
+    samples: Vec<f32>,
+}
+
+/// The audio belonging to the video that is about to be written, in time order.
+///
+/// The window is the video's own: from the keyframe the clip opens on to the
+/// last picture written. See the module documentation for why it is not the
+/// requested range.
+fn audio_to_write(lease: &SegmentLease, to_write: usize) -> Vec<PlannedAudio> {
+    let mut first = None;
+    let mut last = Duration::ZERO;
+    for packet in lease.packets().take(to_write) {
+        first.get_or_insert(packet.presentation_time());
+        last = last.max(packet.presentation_time());
+    }
+    let Some(first) = first else {
+        return Vec::new();
+    };
+
+    let mut planned: Vec<PlannedAudio> = lease
+        .audio()
+        .filter(|block| block.at() >= first && block.at() <= last)
+        .map(|block| PlannedAudio {
+            track: block.track(),
+            at: block.at(),
+            samples: block.samples().to_vec(),
+        })
+        .collect();
+    // Stable, so two blocks captured in the same instant on different tracks
+    // keep the order they arrived in rather than swapping between saves.
+    planned.sort_by_key(|block| block.at);
+    planned
+}
+
+/// Writes one planned block through the writer for its track.
+///
+/// A block for a track the layout did not declare is dropped rather than
+/// written somewhere else: it means the caller passed a layout that disagrees
+/// with what the buffer was fed, and putting a microphone into the game track
+/// is worse than leaving it out.
+fn write_audio_block(
+    writer: &mut MkvWriter,
+    audio_writers: &mut [AudioTrackWriter],
+    block: &PlannedAudio,
+    destination: &Path,
+    packets_written: u64,
+) -> Result<(), SaveError> {
+    let TrackId::Audio(index) = block.track else {
+        return Ok(());
+    };
+    let Some(track) = audio_writers.get_mut(usize::from(index)) else {
+        return Ok(());
+    };
+    track
+        .write_samples(writer, timestamp(block.at), &block.samples)
+        .map_err(|source| SaveError::Write {
+            destination: destination.to_path_buf(),
+            packets_written,
+            source,
+        })
 }
 
 /// How many of a lease's packets belong in the clip, counted in decode order.

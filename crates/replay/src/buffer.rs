@@ -123,6 +123,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use clipped_encoder::EncodedPacket;
+use clipped_muxer::TrackId;
 
 use crate::config::ReplayConfig;
 use crate::error::LeaseError;
@@ -152,6 +153,19 @@ pub enum PushOutcome {
     /// The module documentation says why, and what it means about the encoder's
     /// keyframe interval. Reaching this at all is a misconfiguration rather than
     /// an operating condition, and it is reported once at `warn`.
+    DiscardedOverCeiling,
+}
+
+/// What one call to [`ReplayBuffer::push_audio`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPushOutcome {
+    /// The block was copied into the segment being written.
+    Appended,
+    /// No keyframe has reached the buffer yet, so there is no segment to put it
+    /// in and nothing it could be aligned against.
+    DiscardedAwaitingKeyframe,
+    /// The memory ceiling left no room, and the segment being written was
+    /// sealed rather than grown.
     DiscardedOverCeiling,
 }
 
@@ -189,6 +203,19 @@ impl ReplayBuffer {
     /// `next_packet`.
     pub fn push(&self, packet: &EncodedPacket<'_>) -> PushOutcome {
         self.locked().push(&self.config, packet)
+    }
+
+    /// Adds one block of captured audio.
+    ///
+    /// `at` is when the first frame of the block was captured, on the same
+    /// media clock the encoder's packets carry. The samples are copied, as the
+    /// coded bytes are, so the caller may reuse its buffer immediately.
+    ///
+    /// Audio arriving before the first keyframe is discarded and counted: a
+    /// segment begins on a keyframe, and audio with no video to sit beside
+    /// cannot be written into a clip.
+    pub fn push_audio(&self, track: TrackId, at: Duration, samples: &[f32]) -> AudioPushOutcome {
+        self.locked().push_audio(&self.config, track, at, samples)
     }
 
     /// The segments covering `range`, held against eviction until the lease is
@@ -290,6 +317,9 @@ struct Counters {
     segments_evicted_over_ceiling: u64,
     segments_sealed_at_the_ceiling: u64,
     packets_discarded_over_ceiling: u64,
+    audio_blocks_buffered: u64,
+    audio_blocks_discarded_before_first_keyframe: u64,
+    audio_blocks_discarded_over_ceiling: u64,
     leases_taken: u64,
 }
 
@@ -318,7 +348,9 @@ impl Inner {
         // "the ceiling binds the segment being written too". It can seal that
         // segment, and then a packet that is not a keyframe has nowhere
         // decodable to go.
-        self.make_room(config, packet.data().len());
+        self.make_room(config, |open| {
+            open.resident_bytes_after(packet.data().len()) as u64
+        });
         if self.open.is_none() && !keyframe {
             return self.discard_awaiting_keyframe();
         }
@@ -388,12 +420,8 @@ impl Inner {
     /// The cost of the append is asked for rather than assumed, because a
     /// `Vec` that has to grow costs more than the packet going into it, and a
     /// ceiling checked after the memory has been committed is not a ceiling.
-    fn make_room(&mut self, config: &ReplayConfig, incoming: usize) {
-        let Some(cost) = self
-            .open
-            .as_ref()
-            .map(|open| open.resident_bytes_after(incoming) as u64)
-        else {
+    fn make_room(&mut self, config: &ReplayConfig, cost_of: impl Fn(&OpenSegment) -> u64) {
+        let Some(cost) = self.open.as_ref().map(cost_of) else {
             // No segment is open, so this packet is a keyframe about to start
             // one. Its reservation is smaller than any permitted ceiling
             // (`ReplayConfig::with_memory_ceiling` refuses a ceiling below the
@@ -415,6 +443,40 @@ impl Inner {
         if self.sealed_bytes + cost > ceiling {
             self.seal_at_the_ceiling(config);
         }
+    }
+
+    /// Adds one block of captured audio to the segment being written.
+    fn push_audio(
+        &mut self,
+        config: &ReplayConfig,
+        track: TrackId,
+        at: Duration,
+        samples: &[f32],
+    ) -> AudioPushOutcome {
+        // Nothing to attach it to. A segment begins on a keyframe, and audio
+        // buffered before the first one could only be written into a clip that
+        // has no video to align it against.
+        if self.open.is_none() {
+            self.counters.audio_blocks_discarded_before_first_keyframe += 1;
+            return AudioPushOutcome::DiscardedAwaitingKeyframe;
+        }
+
+        // The same order the video half uses: room first, because a ceiling
+        // checked after the samples are copied in is not a ceiling. This can
+        // seal the open segment, and then there is nowhere to put the block.
+        self.make_room(config, |open| {
+            open.resident_bytes_after_audio(samples.len()) as u64
+        });
+        let Some(open) = &mut self.open else {
+            self.counters.audio_blocks_discarded_over_ceiling += 1;
+            return AudioPushOutcome::DiscardedOverCeiling;
+        };
+
+        open.append_audio(track, at, samples);
+        self.counters.audio_blocks_buffered += 1;
+        self.evict(config);
+        self.peak_bytes = self.peak_bytes.max(self.alive_bytes());
+        AudioPushOutcome::Appended
     }
 
     /// Cuts the segment being written short, because the ceiling leaves no room
@@ -656,6 +718,11 @@ impl Inner {
             segments_evicted_over_ceiling: self.counters.segments_evicted_over_ceiling,
             segments_sealed_at_the_ceiling: self.counters.segments_sealed_at_the_ceiling,
             packets_discarded_over_ceiling: self.counters.packets_discarded_over_ceiling,
+            audio_blocks_buffered: self.counters.audio_blocks_buffered,
+            audio_blocks_discarded_before_first_keyframe: self
+                .counters
+                .audio_blocks_discarded_before_first_keyframe,
+            audio_blocks_discarded_over_ceiling: self.counters.audio_blocks_discarded_over_ceiling,
             leases_taken: self.counters.leases_taken,
         }
     }
@@ -684,6 +751,9 @@ pub struct ReplayStats {
     segments_evicted_over_ceiling: u64,
     segments_sealed_at_the_ceiling: u64,
     packets_discarded_over_ceiling: u64,
+    audio_blocks_buffered: u64,
+    audio_blocks_discarded_before_first_keyframe: u64,
+    audio_blocks_discarded_over_ceiling: u64,
     leases_taken: u64,
 }
 
@@ -705,6 +775,33 @@ impl ReplayStats {
     #[must_use]
     pub const fn bytes_held(&self) -> u64 {
         self.bytes_held
+    }
+
+    /// Blocks of captured audio copied into the buffer.
+    #[must_use]
+    pub const fn audio_blocks_buffered(&self) -> u64 {
+        self.audio_blocks_buffered
+    }
+
+    /// Blocks that arrived before the first keyframe and had no segment to go
+    /// in.
+    ///
+    /// A handful at the start of every recording is ordinary: the audio threads
+    /// begin before the encoder has produced a keyframe. A number that keeps
+    /// climbing means the buffer is not holding what the file is being written
+    /// from.
+    #[must_use]
+    pub const fn audio_blocks_discarded_before_first_keyframe(&self) -> u64 {
+        self.audio_blocks_discarded_before_first_keyframe
+    }
+
+    /// Blocks dropped because the memory ceiling left no segment open.
+    ///
+    /// Non-zero means clips from this buffer have gaps in their audio, which
+    /// is worth saying out loud rather than leaving somebody to hear it.
+    #[must_use]
+    pub const fn audio_blocks_discarded_over_ceiling(&self) -> u64 {
+        self.audio_blocks_discarded_over_ceiling
     }
 
     /// The part of [`bytes_held`](Self::bytes_held) that is only alive because
@@ -1425,5 +1522,92 @@ mod tests {
             "what the buffer owns is what the ceiling governs"
         );
         drop(lease);
+    }
+
+    #[test]
+    fn audio_arriving_before_the_first_keyframe_has_nowhere_to_go_and_is_counted() {
+        // A segment begins on a keyframe. Audio that arrives before one has no
+        // segment to sit in and no picture to sit beside, so keeping it would
+        // mean holding samples that could only ever be written into a clip
+        // with no video at that instant.
+        let buffer = buffer(30);
+
+        assert_eq!(
+            buffer.push_audio(TrackId::Audio(0), Duration::ZERO, &[0.5; 480]),
+            AudioPushOutcome::DiscardedAwaitingKeyframe
+        );
+        assert_eq!(buffer.held(), None, "nothing is held yet");
+
+        // And once a keyframe has opened one, the same block is taken.
+        push(&buffer, &packet(Duration::ZERO, 1_000, true));
+        assert_eq!(
+            buffer.push_audio(TrackId::Audio(0), Duration::ZERO, &[0.5; 480]),
+            AudioPushOutcome::Appended
+        );
+    }
+
+    #[test]
+    fn audio_is_leased_with_the_segment_it_arrived_in() {
+        // What makes a clip able to contain it: the lease is the unit a save
+        // reads, so audio that did not come back through one could not be
+        // written however well it was stored.
+        let buffer = buffer(30);
+        for tenth in 0..20 {
+            let at = Duration::from_millis(tenth * 100);
+            push(&buffer, &packet(at, 1_000, tenth % 10 == 0));
+            buffer.push_audio(TrackId::Audio(0), at, &[0.25; 480]);
+            buffer.push_audio(TrackId::Audio(1), at, &[0.75; 480]);
+        }
+
+        let lease = buffer
+            .lease_last(Duration::from_secs(1))
+            .expect("a keyframe has been buffered");
+
+        let blocks: Vec<_> = lease.audio().collect();
+        assert!(
+            !blocks.is_empty(),
+            "the lease has to carry the audio of the segments it holds"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.track() == TrackId::Audio(0)),
+            "both tracks were pushed and both have to come back"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.track() == TrackId::Audio(1)),
+            "both tracks were pushed and both have to come back"
+        );
+        assert!(
+            blocks.iter().all(|block| block.samples().len() == 480),
+            "a block comes back the length it went in"
+        );
+    }
+
+    #[test]
+    fn audio_is_counted_against_the_ceiling_rather_than_held_beside_it() {
+        // The failure this prevents is not an overrun but a quietly shorter
+        // replay: audio and video share one ceiling, so audio nobody paid for
+        // evicts video. `resident_bytes` is what the ceiling is enforced
+        // against, so it is what has to grow.
+        let buffer = buffer(30);
+        push(&buffer, &packet(Duration::ZERO, 1_000, true));
+        let before = buffer.stats().bytes_held();
+
+        for block in 0..10 {
+            buffer.push_audio(
+                TrackId::Audio(0),
+                Duration::from_millis(block * 10),
+                &[0.5; 480],
+            );
+        }
+
+        let after = buffer.stats().bytes_held();
+        assert!(
+            after >= before + 10 * 480 * size_of::<f32>() as u64,
+            "the samples have to show up in what the buffer says it occupies:              {before} then {after}"
+        );
     }
 }

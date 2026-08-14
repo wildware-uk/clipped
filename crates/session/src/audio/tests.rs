@@ -427,7 +427,7 @@ fn record(
     let muxing = MuxingThread::start(writer, SpaceGuard::new(path, 0), &layout)
         .expect("every declared track can be written to");
 
-    let mut threads = AudioThreads::start(sources, &layout, clock(), &muxing);
+    let mut threads = AudioThreads::start(sources, &layout, clock(), &muxing, None);
 
     for (data, nanos, keyframe) in video.packets(seconds) {
         muxing
