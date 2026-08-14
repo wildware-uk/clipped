@@ -52,6 +52,11 @@ clipped-ipc.workspace = true
 # this package uses directly.
 clipped-library.workspace = true
 clipped-logging.workspace = true
+# The peaks a timeline draws for a recording's audio (issue #66,
+# `src/library.rs`). Named here because this package starts the service: before
+# it did, `clipped-waveform` was in the workspace root manifest and in comments
+# and in nobody's `[dependencies]`, so no waveform was ever generated.
+clipped-waveform.workspace = true
 # Copying a finished recording into MP4 without decoding it (`src/export.rs`,
 # issue #399). The recorder answers `export_recording` because it is the process
 # that may link this: the window is allowed exactly one member of this workspace

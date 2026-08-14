@@ -122,22 +122,28 @@ pub use service::{
 };
 pub use source::{SourceIdentity, UNKNOWN_MODIFIED};
 
-/// Every recording in the index that a picture could be made for.
+/// Every recording in the index worth reading a file for.
 ///
-/// What a library scan hands to [`ThumbnailService::request`], which is
-/// documented for exactly this and had nothing calling it: the service, the
-/// cache and the renderer were all finished and **unreachable**, so no thumbnail
-/// was ever made for a shipped build
-/// ([issue #57](https://github.com/wildware-uk/clipped/issues/57)).
+/// What a library scan hands to the background services that make a picture and
+/// a waveform for each one — `ThumbnailService::request` and
+/// `WaveformService::request`, both documented for exactly this and both of
+/// which had nothing calling them. The thumbnail service, its cache and its
+/// renderer were all finished and **unreachable**, and `clipped-waveform` was
+/// not a dependency of anything at all, so a shipped build produced neither
+/// ([issue #57](https://github.com/wildware-uk/clipped/issues/57),
+/// [issue #66](https://github.com/wildware-uk/clipped/issues/66)).
 ///
 /// Recordings whose file has gone or which are in the trash are left out. There
 /// is nothing to decode for either, and asking would put a failure in the log
 /// once per scan for a file the user already knows about.
 ///
+/// It lives in this module rather than in [`crate::index`] because this is where
+/// the first caller was; both consumers now read files off the same list.
+///
 /// # Errors
 ///
 /// Whatever SQLite reported.
-pub fn recordings_worth_picturing(
+pub fn recordings_worth_reading(
     database: &clipped_storage::Database,
 ) -> Result<Vec<std::path::PathBuf>, clipped_storage::rusqlite::Error> {
     let mut statement = database.connection().prepare(
@@ -152,7 +158,7 @@ pub fn recordings_worth_picturing(
 
 #[cfg(test)]
 mod scan_tests {
-    use super::recordings_worth_picturing;
+    use super::recordings_worth_reading;
 
     #[test]
     fn a_recording_whose_file_has_gone_is_not_asked_about() {
@@ -187,7 +193,7 @@ mod scan_tests {
             )
             .expect("the fixtures can be written");
 
-        let wanted = recordings_worth_picturing(&database).expect("the scan can read the index");
+        let wanted = recordings_worth_reading(&database).expect("the scan can read the index");
 
         assert_eq!(
             wanted,
