@@ -27,7 +27,10 @@
 //! Two rules, and both are in the data model:
 //!
 //! - **A favourite is never deleted automatically.** `favourited_at` is the
-//!   user saying this one matters.
+//!   user saying this one matters — and a recording whose *session* is
+//!   favourited is protected too, which is what favouriting a sitting means
+//!   ([`crate::favourites`] documents the rule and why the mark is not written
+//!   down through the children).
 //! - **Neither is a recording some clip was cut from.** The clip survives its
 //!   source going (`ON DELETE SET NULL`), but it stops being possible to go back
 //!   to the moment it came from, which is not a thing to do to somebody without
@@ -70,6 +73,13 @@ use crate::trash::{Trash, TrashError, TrashItem};
 pub enum Protection {
     /// The user marked it a favourite.
     Favourite,
+    /// The session it belongs to is a favourite.
+    ///
+    /// Distinct from [`Self::Favourite`] because the reason a person is given
+    /// should be the one that is true: "you favourited this sitting" explains
+    /// something they did, and "it is a favourite" would send them looking for a
+    /// star that is not on this row.
+    FavouriteSession,
     /// Clips were cut from it.
     SourceOfClips {
         /// How many, for a message that says what would be orphaned.
@@ -85,6 +95,9 @@ impl core::fmt::Display for Protection {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Favourite => formatter.write_str("it is a favourite"),
+            Self::FavouriteSession => {
+                formatter.write_str("the sitting it belongs to is a favourite")
+            }
             Self::SourceOfClips { clips } => {
                 write!(formatter, "{clips} clips were cut from it")
             }
@@ -192,7 +205,12 @@ pub fn excess(limits: &StorageLimits, usage: u64, free: u64) -> u64 {
 /// Whatever SQLite reported.
 pub fn candidates(database: &Database) -> Result<Vec<Candidate>, clipped_storage::rusqlite::Error> {
     let mut statement = database.connection().prepare(
-        "SELECT r.recording_id, r.path, COALESCE(r.size_bytes, 0), r.started_at,                 r.favourited_at IS NOT NULL, r.deleted_at IS NOT NULL,                 r.missing_since IS NOT NULL,                 (SELECT COUNT(*) FROM clips c WHERE c.source_recording_id = r.recording_id)          FROM recordings r",
+        "SELECT r.recording_id, r.path, COALESCE(r.size_bytes, 0), r.started_at, \
+                r.favourited_at IS NOT NULL, r.deleted_at IS NOT NULL, \
+                r.missing_since IS NOT NULL, \
+                (SELECT COUNT(*) FROM clips c WHERE c.source_recording_id = r.recording_id), \
+                COALESCE(s.favourited_at IS NOT NULL, 0) \
+         FROM recordings r LEFT JOIN sessions s ON s.session_id = r.session_id",
     )?;
 
     let rows = statement.query_map([], |row| {
@@ -204,12 +222,15 @@ pub fn candidates(database: &Database) -> Result<Vec<Candidate>, clipped_storage
         let deleted: bool = row.get(5)?;
         let missing: bool = row.get(6)?;
         let clips: i64 = row.get(7)?;
+        let session_favourite: bool = row.get(8)?;
 
         // In the order somebody would want to be told. "It is a favourite"
         // explains a decision; "its file is not on disk" explains a
         // measurement, and the first is the more useful of the two.
         let protection = if favourite {
             Some(Protection::Favourite)
+        } else if session_favourite {
+            Some(Protection::FavouriteSession)
         } else if clips > 0 {
             Some(Protection::SourceOfClips {
                 clips: u32::try_from(clips).unwrap_or(u32::MAX),
