@@ -77,6 +77,7 @@
 
 pub mod accounting;
 pub mod events;
+pub mod favourites;
 pub mod index;
 pub mod search;
 pub mod thumbnail;
