@@ -48,26 +48,41 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// far larger than a relaxed atomic store, because the assertion is not "this is
 /// fast" — it is "this never waited for a plugin", and **every** way a plugin
 /// can make something wait is longer than this by an order of magnitude: the
-/// impatient policy below allows 400 ms of silence before a hang is noticed,
+/// policy below waits [`PATIENCE`] for a plugin that has gone quiet, allows
 /// 200 ms of grace before one is killed, and starting a replacement process
 /// takes as long as the operating system takes.
 const A_RECORDING_IS_NEVER_HELD_UP_LONGER_THAN: Duration = Duration::from_millis(100);
 
-/// A policy tuned to fail fast, so the rules can be watched in a test rather
-/// than in an afternoon.
+/// A policy tuned to fail fast where a test needs it to, and nowhere else.
 ///
-/// These were the numbers `crates/plugins`' own supervisor tests used, and are
-/// no longer: 400 ms is a budget for `CreateProcess`, a loader run and a first
-/// write on a pipe, which a shared CI runner exceeded twice in a row, so that
-/// crate now holds both timeouts open and shortens one only in the test that is
-/// about it (#405). The same is worth doing here, and is
-/// [issue #415](https://github.com/wildware-uk/clipped/issues/415) rather than
-/// part of that change: three of the comments below reason from these numbers
-/// and have to move with them.
+/// Both timeouts are held open at [`PATIENCE`]. They were 400 ms — the numbers
+/// `crates/plugins`' own supervisor tests used — and 400 ms is a budget for
+/// `CreateProcess`, a Windows loader run and a first write on a pipe, which a
+/// shared CI runner exceeded twice in a row. That crate now holds both open and
+/// shortens one only in the test that is about it (#405); this is the same
+/// change here (#415).
+///
+/// The failure it prevents is not a slow test but a **wrong** one. Every test
+/// sharing this policy is about something a plugin does *after* it has
+/// introduced itself, and a start-up that overran the old budget turned each of
+/// them into a test about how busy the runner was:
+/// `nothing_a_recording_does_can_be_delayed_by_a_plugin_that_floods` would see a
+/// plugin disabled as `NeverStarted` and fail asserting it had dropped events;
+/// `a_plugin_that_crashes_is_reported_rather_than_swallowed` would spend both
+/// restart attempts on slow starts and disable the plugin for the wrong reason.
+///
+/// The one test that is about a timeout —
+/// `a_plugin_that_hangs_does_not_delay_the_end_of_a_recording` — sets the one it
+/// is about, and says why that value cannot give it the wrong answer.
+///
+/// The product half of #405 is what makes this safe: the silence timeout is
+/// asked only of a plugin that has already introduced itself, so a slow start is
+/// charged to the start-up budget alone rather than to whichever of the two
+/// numbers is smaller.
 fn impatient() -> SupervisionPolicy {
     SupervisionPolicy {
-        silence_timeout: Duration::from_millis(400),
-        hello_timeout: Duration::from_millis(400),
+        silence_timeout: PATIENCE,
+        hello_timeout: PATIENCE,
         dropped_event_budget: 4,
         protocol_fault_budget: 5,
         attempts: 2,
@@ -299,7 +314,11 @@ fn a_plugin_starts_only_once_the_recording_has_a_timeline_to_place_it_on() {
     let plugins = SessionPlugins::start(vec![plugin], session(), &progress, impatient());
 
     // Long enough that a plugin which was going to be started would have said
-    // hello: the policy above gives one 400 ms to introduce itself.
+    // hello. It is not measured against the policy's start-up budget, which is
+    // now [`PATIENCE`] and would make this sleep thirty seconds: what is being
+    // waited for is a plugin *process*, and the reason nothing is reported is
+    // that nothing was started at all. So this only has to outlast starting one
+    // and hearing from it, which is what a slow runner makes longer.
     thread::sleep(Duration::from_millis(750));
     assert!(
         plugins.take_events().is_empty(),
@@ -435,14 +454,19 @@ fn a_plugin_that_hangs_does_not_delay_the_end_of_a_recording() {
     // answering, and ignores `detach` — so ending the recording means killing
     // it, which is not possible for a thread that has stopped answering.
     //
-    // The policy below is `impatient()` with one number moved, and the reason is
-    // the whole point of the test. A silence timeout of 400 ms would have the
-    // ordinary supervision loop kill this plugin for going quiet *before* the
-    // recording ever ended, so `finish` would be handed a plugin that was
-    // already dead and the shutdown path — detach, poll, kill what ignored it —
-    // would never run. Holding the silence open past the end of the test is what
-    // makes the plugin still be hanging at the moment the recording ends, which
-    // is the case this test is named for.
+    // The policy below is `impatient()` with the one number this test is about
+    // moved, and the reason is the whole point of the test. A silence timeout
+    // this test could reach would have the ordinary supervision loop kill the
+    // plugin for going quiet *before* the recording ever ended, so `finish`
+    // would be handed a plugin that was already dead and the shutdown path —
+    // detach, poll, kill what ignored it — would never run. Holding the silence
+    // open past the end of the test is what makes the plugin still be hanging at
+    // the moment the recording ends, which is the case this test is named for.
+    //
+    // Longer than `PATIENCE` and not merely longer than the old 400 ms: every
+    // `until` in this file gives up after `PATIENCE`, so a silence timeout of
+    // exactly that would be a race between this test finishing and the
+    // supervisor killing its subject.
     let root = TemporaryDirectory::new("session-plugins-hang");
     let plugin = enabled(install(
         &root,
