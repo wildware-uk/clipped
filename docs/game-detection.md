@@ -423,10 +423,11 @@ of *its* games this is. That is the catalogue's strongest matching rung
 (`LauncherIdentity`), and until [#43] nothing produced it. Launcher detection is
 provider-based — one module per shop, so support for a new one is an addition
 rather than a change to shared logic (SPEC.md section 6). Steam is the first
-([#43]), Epic the second, Ubisoft Connect the third, Xbox the fourth and
-Battle.net the fifth ([#44], which asks for one pull request per launcher). EA,
-Riot and GOG are the rest of [#44] and are deliberately not stubbed, because a
-provider that always answers "no" is a control that silently does nothing.
+([#43]), Epic the second, Ubisoft Connect the third, Xbox the fourth,
+Battle.net the fifth and Riot the sixth ([#44], which asks for one pull request
+per launcher). EA and GOG are the rest of [#44] and are deliberately not
+stubbed, because a provider that always answers "no" is a control that silently
+does nothing.
 
 There is still no `trait LauncherProvider`. Xbox was expected to settle it and
 settled it the other way: it reads a *two-level* registry key whose entries are
@@ -440,7 +441,7 @@ repeated:
 | Module | Shared by | Extracted when |
 | --- | --- | --- |
 | `launcher/registry.rs` | Steam, Ubisoft, Xbox | Ubisoft needed the same two-call `RegGetValueW` sizing; Xbox needed the subkey enumeration twice over |
-| `launcher/claim.rs` | Epic, Ubisoft, Xbox, Battle.net | Ubisoft needed the same deepest-directory rule; every provider since uses it unchanged |
+| `launcher/claim.rs` | Epic, Ubisoft, Xbox, Battle.net, Riot | Ubisoft needed the same deepest-directory rule; every provider since uses it unchanged |
 
 Both were extracted when a second caller appeared and named exactly what the two
 had in common — which is the argument for waiting on the trait rather than
@@ -807,6 +808,57 @@ identifier is the one thing that distinguishes it, and it is what excludes it.
 **Verified against a real installation**: `examples/battlenet_probe.rs` reports
 1 game, 0 problems, 5 executables checked and none claimed by the wrong game —
 with the client correctly absent.
+
+### Riot
+
+Riot keeps one directory per product *and patchline* under
+`%ProgramData%\Riot Games\Metadata`, and each installed product's
+`<name>.product_settings.yaml` says where it is:
+
+```text
+product_install_full_path: "C:/Riot Games/League of Legends"
+product_install_root: "C:/Riot Games"
+```
+
+**A directory here is not an installation.** The machine this was read from had
+eight of them and three settings files:
+
+```text
+bacon.live                       league_of_legends.live.game_patch
+league_of_legends.live           lion.live
+teamfighttactics.live            teamfighttactics.pbe
+valorant.live                    Riot Client
+```
+
+`valorant.live`, `bacon.live` and `lion.live` held a lockfile and a preview
+manifest — games the client offers, on a machine that has none of them. A
+provider that read the listing and stopped would report three games that are not
+installed, and every one of those is a wrong answer about what somebody is
+playing rather than a missing one.
+
+**The identity is the part before the first dot.** `live` and `pbe` are the same
+game to anybody watching a recording, so both patchlines answer
+`league_of_legends` and a catalogue entry naming the product matches a player on
+either. They install to different directories, so nothing is ambiguous about
+which is running. The split is on the *first* dot because
+`league_of_legends.live.game_patch` is a component of League rather than a
+product called `league_of_legends.live`.
+
+**A product with no install path is skipped, not reported.** Teamfight Tactics
+has settings and no `product_install_full_path`, on both patchlines, because it
+is played from League's client in League's directory. That is the healthy state
+of the machine, so calling it a fault would put two warnings on every machine
+with League on it. The root is not used as a fallback either: `C:/Riot Games/`
+holds every Riot game, so a product claiming it would answer `teamfighttactics`
+for a League process, and a wrong game is worse than no game.
+
+The consequence is a limitation worth naming: **Teamfight Tactics is detected as
+League of Legends**, because there is nothing in a path or a process name to
+tell them apart.
+
+**Verified against a real installation**: `examples/riot_probe.rs` reports 1
+product, 0 problems, 6 executables checked and none claimed by the wrong product
+— with the five uninstalled products and the client itself correctly absent.
 
 ## The process watcher
 
