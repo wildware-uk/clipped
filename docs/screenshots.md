@@ -251,8 +251,24 @@ will collect.
 | Two screenshots in one second are two files | same | nothing |
 | A refused screenshot leaves no file, and no temporary one | same | nothing |
 | The rendezvous answers every waiter exactly once | same | nothing |
-| A screenshot during a real capture of a real window | `tests/capture/screenshot.rs` | `CLIPPED_REQUIRE_CAPTURE`, a desktop |
+| A screenshot during a real capture of a real window, windowed and borderless | `tests/capture/screenshot.rs` | `CLIPPED_REQUIRE_CAPTURE`, a desktop |
+| A screenshot of a subject holding a whole display, exclusively where Windows allows it | `tests/capture/screenshot_fullscreen.rs` | as above, and a display it can take |
 
-The last row is the only one that opens a window, and it is behind
+The last two rows are the only ones that open a window, and they are behind
 `CLIPPED_REQUIRE_CAPTURE` and `#[ignore]` for the reason
 [testing.md](testing.md) gives.
+
+Together they are the whole of issue #67's first acceptance criterion —
+"screenshots are correct for windowed, borderless and fullscreen games" — and
+each of the three decodes the *pattern* back out of the file that was written
+rather than checking that a file appeared. The fullscreen one is separate
+because a test can only start a binary its own package owns, and the fullscreen
+subject is a package of its own (issue #452).
+
+**Measured, not assumed.** With the grant procedure in
+[tests/capture/README.md](../tests/capture/README.md) followed and
+`CLIPPED_REQUIRE_CAPTURE` set, a screenshot of a 2560x1440 display held
+exclusively decoded back to the pattern the subject drew. A run that Windows
+refuses the display to photographs a borderless window covering it instead,
+which is worth asserting and is *not* evidence about the exclusive case — so it
+prints `NOT EXERCISED` and, under that variable, fails.
