@@ -352,8 +352,11 @@ fn write_events(
 /// ended, or during a session that wrote nothing at all.
 ///
 /// The offset itself is not stored. It is `at_nanos` minus the recording's
-/// start, and a stored copy would be a second truth to keep in step with the
-/// span it came from.
+/// `starts_at_nanos`, which is a column on `recordings` (migration `0005`)
+/// precisely so that the subtraction is a join rather than a second read of the
+/// session's sidecar -- a file the index exists so that nothing else has to
+/// open. A stored copy would be a second truth to keep in step with the span it
+/// came from.
 ///
 /// # What it refuses to lose
 ///
@@ -577,7 +580,7 @@ fn write_recording(
                     "UPDATE recordings SET path = ?2, started_at = ?3, ended_at = ?4, \
                          outcome = ?5, end_reason = ?6, duration_seconds = ?7, \
                          frames_encoded = ?8, width = ?9, height = ?10, size_bytes = ?11, \
-                         missing_since = ?12 \
+                         missing_since = ?12, starts_at_nanos = ?13 \
                      WHERE recording_id = ?1",
                 )?
                 .execute(params![
@@ -595,6 +598,7 @@ fn write_recording(
                     recording.height,
                     size_bytes,
                     judged.missing_since,
+                    recording.starts_at_nanos,
                 ])?;
             recording_id
         }
@@ -603,8 +607,8 @@ fn write_recording(
                 .prepare(
                     "INSERT INTO recordings (session_id, session_index, path, started_at, \
                          ended_at, outcome, end_reason, duration_seconds, frames_encoded, \
-                         width, height, size_bytes, missing_since) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                         width, height, size_bytes, missing_since, starts_at_nanos) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 )?
                 .execute(params![
                     session_id,
@@ -622,6 +626,7 @@ fn write_recording(
                     recording.height,
                     size_bytes,
                     judged.missing_since,
+                    recording.starts_at_nanos,
                 ])?;
             savepoint.last_insert_rowid()
         }

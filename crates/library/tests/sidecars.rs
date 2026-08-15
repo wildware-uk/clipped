@@ -179,6 +179,27 @@ fn the_documented_game_event_reaches_a_row() {
          and was not placed in it"
     );
 
+    // Where the mark is *drawn*, answered by the database alone.
+    //
+    // A timeline draws at a number of seconds into the file it is showing, and
+    // a player seeks to one; neither wants a moment on a session's timeline.
+    // The offset is not stored -- it would be a second truth to keep in step --
+    // so it has to be derivable, and that needs the recording's own start to be
+    // here rather than only in the sidecar the index exists so nothing else
+    // opens.
+    let offset_seconds: f64 = database
+        .connection()
+        .query_row(
+            "SELECT (game_events.at_nanos - recordings.starts_at_nanos) / 1000000000.0              FROM game_events              JOIN recordings ON recordings.recording_id = game_events.recording_id",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the offset into the file is a query, not a second file read");
+    assert!(
+        (offset_seconds - 137.0).abs() < f64::EPSILON,
+        "the kill is 137 s into a recording that starts at 0, and the index says {offset_seconds}"
+    );
+
     // The payload survives being stored, which is the whole argument for
     // `document` being the authority rather than the columns beside it.
     let stored: Value = serde_json::from_str(&document).expect("the stored document is JSON");

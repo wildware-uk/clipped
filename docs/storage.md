@@ -211,7 +211,7 @@ games ──┬── sessions ──┬── recordings ──┬── bookma
 | `games` | one row per game actually played, keyed by the catalogue's `game_id` | the recorder's library indexer ([#402]) |
 | `sessions` | one sitting with one game, keyed by the recorder's own session identifier | the recorder's library indexer ([#402]) |
 | `session_game_candidates` | the games the catalogue could not choose between, for an unattributed session | the recorder's library indexer ([#402]) |
-| `recordings` | one media file: path, timings, dimensions, outcome, size, whether it is still there | the recorder's library indexer ([#402]) |
+| `recordings` | one media file: path, timings, dimensions, outcome, size, whether it is still there, and where it starts on its session's timeline | the recorder's library indexer ([#402]) |
 | `clips` | a clip: the range of a recording it is, why it exists, and its file if it has one yet | a saved replay ([#38](https://github.com/wildware-uk/clipped/issues/38)); a clip with no file is stored by nothing yet ([#56](https://github.com/wildware-uk/clipped/issues/56)) |
 | `bookmarks` | a marked moment in a recording: offset, label, colour, duration | the recorder takes them ([#64](https://github.com/wildware-uk/clipped/issues/64)) and writes them to a sidecar beside each recording; nothing indexes them into this table yet (`docs/bookmarks.md`) |
 | `session_events` | what happened during a session, in the vocabulary the sidecar already writes | the recorder's library indexer ([#402]) |
