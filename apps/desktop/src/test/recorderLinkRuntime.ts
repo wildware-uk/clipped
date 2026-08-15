@@ -42,6 +42,8 @@ export interface Invocation {
  * is a state the screen already has to draw honestly.
  */
 export interface CommandAnswers {
+  /** What `library_events` answers, given the request. */
+  readonly events?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `library_sessions` answers, given the request. */
   readonly sessions?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `library_games` answers. */
@@ -188,6 +190,9 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'library_games') {
         return commands.games?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'library_events') {
+        return commands.events?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'record_target') {
         return Promise.resolve(commands.recordTarget?.() ?? null);
