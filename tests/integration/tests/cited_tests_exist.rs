@@ -28,10 +28,15 @@
 //!
 //! Two exact forms, both mechanical:
 //!
-//! 1. A path to a test file — `crates/<crate>/tests/<file>.rs` — names a file
-//!    that is there.
+//! 1. A path to a test file — `crates/<crate>/tests/<file>.rs` for a crate's
+//!    own, or `tests/<suite>/…/<file>.rs` for the suites at the repository root
+//!    — names a file that is there.
 //! 2. A path with a test named on it — `…rs::<name>` — additionally names a
 //!    `fn <name>` inside that file.
+//!
+//! The second kind of path was unchecked until there were forty-odd citations
+//! of it, most of them in `docs/`, which is the same way the first kind came to
+//! be worth checking.
 //!
 //! It does **not** try to resolve a bare backticked identifier in prose. That
 //! would need to tell a test name from a function, a type or a constant, and a
@@ -100,33 +105,64 @@ fn is_this_file(source: &Path) -> bool {
     source.file_name().and_then(|name| name.to_str()) == Some("cited_tests_exist.rs")
 }
 
-/// Every citation of the form `crates/<crate>/tests/<file>.rs[::<name>]`.
+/// Every citation of a test file, in either of the two shapes this repository
+/// writes them in.
 ///
-/// Returned as `(path, test name)` so that the two checks below can share one
-/// pass over the repository.
+/// - `crates/<crate>/tests/<file>.rs` — a crate's own integration test.
+/// - `tests/<anything>/<file>.rs` — the suites that live at the root, which is
+///   where the capture, media and workspace tests are. They are cited as often
+///   as the first kind, in `docs/` most of all, and were not checked at all
+///   until they had grown to forty-odd citations.
+///
+/// Both may carry `::<name>`. Returned as `(path, test name)` so that the two
+/// checks below share one pass over the repository.
 fn citations(text: &str) -> Vec<(String, Option<String>)> {
     let mut found = Vec::new();
-    let mut rest = text;
+    for prefix in ["crates/", "tests/"] {
+        collect(text, prefix, &mut found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
 
-    while let Some(start) = rest.find("crates/") {
-        rest = &rest[start..];
+/// Whether a citation starting at `at` really starts there.
+///
+/// `tests/` occurs inside `crates/library/tests/sidecars.rs`, and reading that
+/// as a citation of `tests/sidecars.rs` would fail on a file nobody named. A
+/// citation begins at the start of the text or after something that cannot be
+/// part of a path.
+fn starts_a_path(text: &str, at: usize) -> bool {
+    let Some(before) = text[..at].chars().next_back() else {
+        return true;
+    };
+    !(before.is_alphanumeric() || matches!(before, '/' | '\\' | '-' | '_' | '.'))
+}
+
+/// Every citation beginning with `prefix`, appended to `found`.
+fn collect(text: &str, prefix: &str, found: &mut Vec<(String, Option<String>)>) {
+    let mut at = 0;
+
+    while let Some(offset) = text[at..].find(prefix) {
+        let start = at + offset;
+        at = start + prefix.len();
+        if !starts_a_path(text, start) {
+            continue;
+        }
+
+        let rest = &text[start..];
         let Some(end) = rest.find(".rs") else {
             break;
         };
         let path = &rest[..end + 3];
-        rest = &rest[end + 3..];
+        let after = &rest[end + 3..];
+        at = start + end + 3;
 
-        // `crates/<crate>/tests/<file>.rs` and nothing else: a citation of a
-        // source file is not a claim that a test exists.
-        let segments: Vec<&str> = path.split('/').collect();
-        if segments.len() != 4 || segments[2] != "tests" {
-            continue;
-        }
-        if path.contains(char::is_whitespace) {
+        if !is_a_test_file(path) || path.contains(char::is_whitespace) {
             continue;
         }
 
-        let named = rest.strip_prefix("::").map(|after| {
+        let named = after.strip_prefix("::").map(|after| {
             after
                 .chars()
                 .take_while(|character| character.is_ascii_lowercase() || *character == '_')
@@ -135,8 +171,23 @@ fn citations(text: &str) -> Vec<(String, Option<String>)> {
 
         found.push((path.to_owned(), named.filter(|name| !name.is_empty())));
     }
+}
 
-    found
+/// Whether this path names a test file rather than a source file.
+///
+/// A citation of a module is how most of this repository's comments point at
+/// code, and reading one as a promise that a test exists would make this guard
+/// cry wolf until somebody switched it off.
+fn is_a_test_file(path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    match segments.as_slice() {
+        // `crates/<crate>/tests/<file>.rs`.
+        ["crates", _, "tests", _] => true,
+        // `tests/<suite>/…/<file>.rs`, but not `tests/<suite>/src/<file>.rs`,
+        // which is a harness's own code rather than a test.
+        ["tests", rest @ ..] => rest.len() >= 2 && !rest.contains(&"src"),
+        _ => false,
+    }
 }
 
 #[test]
@@ -234,6 +285,47 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn a_suite_at_the_repository_root_is_a_citation_too() {
+        // Forty-odd of them, in `docs/` most of all, and none was checked until
+        // this form was added.
+        let found = citations(
+            "`tests/capture/screenshot_fullscreen.rs` and              tests/integration/tests/workspace_layering.rs::the_desktop_names_one_crate",
+        );
+
+        assert_eq!(
+            found,
+            vec![
+                ("tests/capture/screenshot_fullscreen.rs".to_owned(), None),
+                (
+                    "tests/integration/tests/workspace_layering.rs".to_owned(),
+                    Some("the_desktop_names_one_crate".to_owned())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tests_directory_inside_a_crate_path_is_not_a_second_citation() {
+        // `crates/library/tests/sidecars.rs` contains `tests/sidecars.rs`.
+        // Reading that as a citation of its own would fail on a file nobody
+        // named, which is the false positive that makes a guard get switched
+        // off.
+        assert_eq!(
+            citations("`crates/library/tests/sidecars.rs`"),
+            vec![("crates/library/tests/sidecars.rs".to_owned(), None)]
+        );
+    }
+
+    #[test]
+    fn a_harnesss_own_source_under_tests_is_not_a_test() {
+        // `tests/media/src/fixture.rs` is the media harness's code. It is a
+        // real file and citing it is fine; it is not a claim that a test of
+        // that name exists, and the second check below would look for a
+        // function in it.
+        assert!(citations("`tests/media/src/fixture.rs` builds the fixtures").is_empty());
     }
 
     #[test]
