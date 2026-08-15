@@ -106,6 +106,8 @@ use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 
 use super::clock;
+use clipped_events::StoredEvent;
+
 use super::session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEvent, SessionEventKind,
 };
@@ -117,7 +119,7 @@ use crate::config::{ResolvedSettings, SettingKey};
 /// time. It exists so that whatever reads these files — M6's library index
 /// first — can tell a file it understands from one it does not, rather than
 /// half-understanding it.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Writes `session`'s sidecar into `directory`, replacing any previous one.
 ///
@@ -154,6 +156,13 @@ struct SidecarFile<'a> {
     /// Always empty; see the module documentation.
     bookmarks: Reserved,
     events: Vec<SidecarEvent>,
+    /// What plugins reported, each as its own self-describing document.
+    ///
+    /// A separate array from `events` because they are separate vocabularies —
+    /// see [`SessionEventKind`] — and each element is a whole [`StoredEvent`]
+    /// rather than fields picked out of one, so that a field a newer build
+    /// added survives being written by this one (`clipped_events::schema`).
+    game_events: Vec<StoredEvent>,
 }
 
 impl<'a> SidecarFile<'a> {
@@ -172,6 +181,12 @@ impl<'a> SidecarFile<'a> {
             clips: session.clips().iter().map(SidecarClip::of).collect(),
             bookmarks: Reserved,
             events: session.events().iter().map(SidecarEvent::of).collect(),
+            game_events: session
+                .game_events()
+                .iter()
+                .cloned()
+                .map(StoredEvent::new)
+                .collect(),
         }
     }
 }
@@ -482,6 +497,29 @@ mod tests {
     use crate::automatic::session::SessionEndReason;
     use crate::config::{Configuration, GameKey, Preferences, ResolutionSetting};
     use crate::report::EndReason;
+
+    /// The number this build writes and the number the reader it ships with
+    /// accepts are the same number.
+    ///
+    /// The two constants are deliberately not shared -- the layering table puts
+    /// the writer above the reader -- so nothing but a test stops them drifting.
+    /// The comment on `SUPPORTED_SCHEMA_VERSION` claimed a test called
+    /// `the_documented_sidecar_is_the_one_this_build_reads` in
+    /// `crates/library/tests/sidecars.rs` was doing it. No such test existed,
+    /// and the drift it was supposed to catch is silent in the worst way: the
+    /// recorder writes a sidecar every session, and a reader one version behind
+    /// refuses every one of them, so a user loses their whole library index and
+    /// nothing fails until then.
+    #[test]
+    fn the_reader_this_build_ships_understands_what_this_build_writes() {
+        assert_eq!(
+            SCHEMA_VERSION,
+            clipped_library::index::SUPPORTED_SCHEMA_VERSION,
+            "the recorder writes sidecars at version {} and the index this build              ships accepts up to {}, so every session this build records would be              refused by its own library",
+            SCHEMA_VERSION,
+            clipped_library::index::SUPPORTED_SCHEMA_VERSION,
+        );
+    }
 
     fn at(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
