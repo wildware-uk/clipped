@@ -56,7 +56,7 @@ const MISSING: readonly Missing[] = [
   {
     does: 'Open a clip, and save the edit back',
     needs:
-      'A way for the window to read and write a clip’s edit document, which today is a column of a database it cannot open. Issues #306 and #301',
+      'A command that serves a clip’s edit document and takes an edited one back. The protocol reads the library (library_sessions, library_games, library_events) and says nothing about a clip’s document. Issue #306',
   },
   {
     does: 'Trim the start and end, split, and delete a section',
@@ -70,7 +70,7 @@ const MISSING: readonly Missing[] = [
   {
     does: 'Show what a plugin reported during the recording, on the timeline, filtered by kind',
     needs:
-      'The lane, the filter and the arithmetic are built (issue #71), and the recorder serves the marks already placed in the file: library_events, which readEvents calls (issue #329). What is missing is a clip to draw them on — nothing opens one in this window yet. Issues #301 and #306',
+      'The lane, the filter and the arithmetic are built (issue #71), and the recorder serves the marks already placed in the file: library_events, which readEvents calls (issue #329). What is missing is a clip to draw them on — nothing opens one in this window yet. Issue #306',
   },
   {
     does: 'The picture at the playhead, and a waveform under each audio track',
@@ -133,13 +133,12 @@ function NothingOpen(): ReactNode {
         <h2 className="clipped-panel__heading">No clip is open</h2>
         <p className="clipped-panel__body">
           Nothing in this window can open one yet. A clip’s edit document is stored in the library’s
-          database, and this window can neither read that database nor ask the recorder for a row of
-          it: the control protocol has no command about a library, and the window has no file-system
-          permission.
+          database, and this window has no file-system permission to read it. The control protocol
+          can be asked about the library — which sittings exist, what each game holds, the marks on
+          a recording’s timeline — and says nothing about a clip’s document.
         </p>
         <p className="clipped-panel__body clipped-muted">
-          Issue #306 is the way in for a clip; issue #301 is the same gap for the library as a
-          whole.
+          Issue #306 is the way in: a command that serves a document and takes an edited one back.
         </p>
       </section>
 
