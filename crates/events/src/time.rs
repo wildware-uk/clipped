@@ -1,7 +1,8 @@
-//! Where an event sits on a recording's timeline, how precisely that is known,
+//! Where an event sits on a session's timeline, how precisely that is known,
 //! and how it becomes a position in a file.
 //!
-//! [`EventTime`] is a moment on the recording's timeline. [`EventTiming`] is
+//! [`EventTime`] is a moment on the session's timeline -- one zero for the
+//! whole sitting, however many files it wrote. [`EventTiming`] is
 //! that moment together with the two honesty fields that make it usable: how
 //! far out it might be, and how late it was heard. [`RecordedSpan`] is the part
 //! of that timeline a file actually contains, and is what turns a moment into a
@@ -16,15 +17,42 @@ use core::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// A moment on a recording's timeline, in nanoseconds from its start.
+/// A moment on **a session's** timeline, in nanoseconds from its start.
 ///
-/// This is the same quantity as `clipped_capture::MediaTime`, in the same units
-/// and against the same zero: the epoch a recording's `CaptureClock` was
-/// started at, which is the timestamp of the first video frame the recording
-/// keeps. A session converts a source timestamp into a `MediaTime` once, at the
-/// boundary of `clipped-capture`, and
-/// [`from_media_nanos`](Self::from_media_nanos) is where the result enters this
+/// This is the same quantity as `clipped_capture::MediaTime` and in the same
+/// units: signed nanoseconds from the timestamp of a first kept video frame.
+/// [`from_media_nanos`](Self::from_media_nanos) is where a reading enters this
 /// crate.
+///
+/// # One zero per session, not per file — and what that means for `MediaTime`
+///
+/// A session can write several files: a window destroyed and recreated, a game
+/// restarted inside the grace period (`docs/sessions.md`). **They share this
+/// timeline rather than each restarting at zero.** The second recording
+/// occupies a span beginning at a positive offset, and an event heard during it
+/// is stamped from the same origin as one heard during the first.
+///
+/// That is the property that makes [`RecordedSpan`]-based placement mean
+/// anything: `clipped_library::events` sorts a session's segments on one axis
+/// and asks which of them contains a moment, and both operations are nonsense
+/// if every segment has its own zero. `docs/highlights.md` draws the model, and
+/// [issue #338](https://github.com/wildware-uk/clipped/issues/338) requires
+/// every event to be stamped through **one** `SessionTimeline`.
+///
+/// So the two zeros coincide only for a session's **first** recording. A
+/// `CaptureClock` is started per recording (`docs/av-sync.md`), so the second
+/// recording's `MediaTime` counts from *its own* first frame, and its readings
+/// are not `EventTime`s. Converting one means adding where that recording
+/// starts on this timeline — which is what its [`RecordedSpan`] holds.
+/// [`from_media_nanos`](Self::from_media_nanos) takes a reading that is already
+/// on the session's timeline; it does not rebase, and it cannot, because it is
+/// handed a bare `i64`.
+///
+/// This section is explicit because the wording it replaced said "a recording's
+/// timeline" and "the epoch a *recording's* `CaptureClock` was started at". An
+/// implementer taking that literally would build a timeline per recording, and
+/// every event of the second file would be placed — confidently, and without
+/// any assertion failing anywhere — in the first.
 ///
 /// # Why it is not `MediaTime`
 ///
@@ -55,8 +83,7 @@ use serde::{Deserialize, Serialize};
 /// one thing (AGENTS.md section 39).
 ///
 /// What is owed in the meantime is that the duplication stays exactly as
-/// bounded as `docs/av-sync.md` says: one `i64` of nanoseconds against the same
-/// zero, converted at
+/// bounded as `docs/av-sync.md` says: one `i64` of nanoseconds, converted at
 /// [`from_media_nanos`](Self::from_media_nanos) and
 /// [`as_media_nanos`](Self::as_media_nanos) and nowhere else. #253 should land
 /// before the next consumer copies it a fourth time — persistence
@@ -65,12 +92,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Why it is signed
 ///
-/// For the reason `MediaTime` is. The epoch is the first video frame, and other
-/// sources were already running when it arrived, so a moment before the epoch
-/// is normal rather than a fault — a plugin attached to a game that was already
-/// running reports the match it joined, and a game event can precede the first
-/// frame Clipped kept. An unsigned time would turn a second of lead into
-/// eighteen billion seconds of lag, silently.
+/// For the reason `MediaTime` is. The epoch is the session's first kept video
+/// frame, and other sources were already running when it arrived, so a moment
+/// before the epoch is normal rather than a fault — a plugin attached to a game
+/// that was already running reports the match it joined, and a game event can
+/// precede the first frame Clipped kept. An unsigned time would turn a second
+/// of lead into eighteen billion seconds of lag, silently.
 ///
 /// A negative time is not a position in any file, which is
 /// [`RecordedSpan::position_of`]'s answer rather than something clamped here.
@@ -79,21 +106,28 @@ use serde::{Deserialize, Serialize};
 pub struct EventTime(i64);
 
 impl EventTime {
-    /// The start of the recording.
+    /// The start of the session: its first kept video frame.
     pub const ZERO: Self = Self(0);
 
-    /// Takes a `clipped_capture::MediaTime::as_nanos` reading.
+    /// Takes a `clipped_capture::MediaTime::as_nanos` reading **on the
+    /// session's timeline**.
     ///
     /// The name is the whole point: the caller is stating which timeline the
     /// number came from, and that claim is one line for a reviewer to check.
     /// Nanoseconds from any other zero — a performance counter's, a game's own
     /// match clock, a wall clock — produce an event in the wrong place.
+    ///
+    /// That includes a second recording's own `MediaTime`, which counts from
+    /// *its* first frame rather than the session's. See the type documentation:
+    /// such a reading must have the recording's start on the session timeline
+    /// added to it first, and this function cannot do that for the caller
+    /// because it is handed a bare `i64`.
     #[must_use]
     pub const fn from_media_nanos(nanos: i64) -> Self {
         Self(nanos)
     }
 
-    /// The moment, in nanoseconds from the recording's epoch.
+    /// The moment, in nanoseconds from the session's epoch.
     #[must_use]
     pub const fn as_media_nanos(self) -> i64 {
         self.0
@@ -300,16 +334,16 @@ impl fmt::Display for EventTiming {
     }
 }
 
-/// The part of a recording's timeline that a file contains.
+/// The part of a session's timeline that one file contains.
 ///
 /// # What it is for
 ///
-/// An event's [`EventTime`] is a moment in the *recording*, and a player seeks
+/// An event's [`EventTime`] is a moment in the *session*, and a player seeks
 /// by position in a *file*. For a recording written from its start those two
 /// are the same number, and it is tempting to let them stay conflated — until
 /// the replay buffer, where they are not. A saved replay clip is cut from a
 /// buffer that has been running for however long the game has: its first packet
-/// is a keyframe some way down the recording's timeline, the file starts there,
+/// is a keyframe some way down the session's timeline, the file starts there,
 /// and an event twenty minutes into the session is ten seconds into the clip.
 /// The subtraction is one line, and this type exists so that it is written once
 /// rather than at every call site that draws a marker.

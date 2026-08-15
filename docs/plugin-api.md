@@ -109,7 +109,7 @@ readable forever.
 | Field | Type | What it is |
 | --- | --- | --- |
 | `kind` | string | What happened. A [standard tag](#the-vocabulary), or a [namespaced custom name](#custom-events). |
-| `at` | integer, signed nanoseconds | When it happened, on the recording's timeline. See [Timing](#timing). |
+| `at` | integer, signed nanoseconds | When it happened, on the session's timeline. See [Timing](#timing). |
 | `precision` | integer, nanoseconds | How far either side of `at` the true moment may lie. `0` means the source timed it exactly. Required. |
 | `latency` | integer, nanoseconds | How much later than `at` the report arrived. Omitted when zero. |
 | `source` | string | Who reported it: a plugin identifier, or `clipped` for the application itself. `clipped` is reserved — `EventSource::plugin` refuses it. |
@@ -227,7 +227,7 @@ nothing on the read path refuses a document over it.
 An event's position in a recording is the whole of its usefulness, and it is the
 part a plugin cannot supply directly.
 
-**The recording's timeline is `MediaTime`** — signed nanoseconds from the
+**The session's timeline is `MediaTime`** — signed nanoseconds from the
 capture clock's epoch, which is the timestamp of the first video frame the
 recording keeps ([docs/av-sync.md](av-sync.md)). A plugin knows none of that. It
 knows a game clock ("14:22 remaining"), or a wall clock, or a moment measured in
@@ -716,11 +716,11 @@ anything.
 
 ## How long ago, not when
 
-**A plugin never reports a position on the recording's timeline.** It reports
+**A plugin never reports a position on the session's timeline.** It reports
 `ago_ns`: how long before writing the line the thing happened, measured on its
 own clock.
 
-The recording's timeline is the capture clock's, which a separate process does
+The session's timeline is the capture clock's, which a separate process does
 not have. The two ways to bridge that are a shared wall clock or a duration, and
 the duration wins on every count: two processes reading the same wall clock
 disagree by whatever NTP did in between, a clock step during a session moves
@@ -742,7 +742,7 @@ that never made that claim must not start making it by leaving a field out.
 
 `SessionTimeline` is the one place the conversion happens. It holds a reading of
 the recorder's monotonic clock taken beside the capture epoch, which is a third
-copy of the recording's timeline and is bounded exactly as `crates/events`
+copy of the session's timeline and is bounded exactly as `crates/events`
 bounds its own — one conversion, in one named function, until
 [issue #253](https://github.com/wildware-uk/clipped/issues/253) extracts the
 shared time crate.
