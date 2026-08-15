@@ -107,6 +107,7 @@ use serde::{Serialize, Serializer};
 
 use super::clock;
 use clipped_events::StoredEvent;
+use clipped_library::virtual_clip::{ClipOrigin, VirtualClip};
 
 use super::session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEvent, SessionEventKind,
@@ -178,7 +179,12 @@ impl<'a> SidecarFile<'a> {
                 .iter()
                 .map(SidecarRecording::of)
                 .collect(),
-            clips: session.clips().iter().map(SidecarClip::of).collect(),
+            clips: session
+                .clips()
+                .iter()
+                .map(SidecarClip::of)
+                .chain(generated_clips(session))
+                .collect(),
             bookmarks: Reserved,
             events: session.events().iter().map(SidecarEvent::of).collect(),
             game_events: session
@@ -289,29 +295,127 @@ struct SidecarRecording<'a> {
 /// an answer here (`docs/replay-buffer.md`).
 #[derive(Debug, Serialize)]
 struct SidecarClip {
-    path: String,
+    /// The file, when there is one.
+    ///
+    /// Omitted for a generated clip: it is a range of a recording and costs no
+    /// disk until an export is asked for. Omitted rather than empty, because
+    /// the library treats a blank path as a malformed record and refuses it
+    /// (`clipped_library::index::ingest`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
     created_at: String,
-    source_recording: u32,
-    source_start_seconds: f64,
-    source_end_seconds: f64,
-    duration_seconds: f64,
-    requested_seconds: f64,
-    complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_recording: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_start_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_end_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    complete: Option<bool>,
+    /// What the clip is, as `EditDocument::write` wrote it. Generated clips
+    /// only: a saved replay's window is the two `source_*` fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edit: Option<String>,
+    /// Why it exists. Omitted for a saved replay, which the library reads as
+    /// `replay-buffer`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'static str>,
+    /// The rest of the serialised origin, and **what identifies a clip with no
+    /// file** -- see `docs/sessions.md`, "A clip with no file".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 impl SidecarClip {
     fn of(clip: &super::session::SessionClip) -> Self {
         Self {
-            path: clip.path().display().to_string(),
+            path: Some(clip.path().display().to_string()),
             created_at: clock::rfc3339(clip.created_at()),
-            source_recording: clip.source_index(),
-            source_start_seconds: clip.source_start().as_secs_f64(),
-            source_end_seconds: clip.source_end().as_secs_f64(),
-            duration_seconds: clip.duration().as_secs_f64(),
-            requested_seconds: clip.requested().as_secs_f64(),
-            complete: clip.is_complete(),
+            source_recording: Some(clip.source_index()),
+            source_start_seconds: Some(clip.source_start().as_secs_f64()),
+            source_end_seconds: Some(clip.source_end().as_secs_f64()),
+            duration_seconds: Some(clip.duration().as_secs_f64()),
+            requested_seconds: Some(clip.requested().as_secs_f64()),
+            complete: Some(clip.is_complete()),
+            edit: None,
+            origin: None,
+            origin_detail: None,
+            title: None,
         }
     }
+
+    /// A clip generation produced, which has no file.
+    ///
+    /// `created_at` is the session's start rather than a clock reading: nothing
+    /// *happened* at the moment generation ran, and stamping it with one would
+    /// make the same session answer differently every time it is re-generated,
+    /// which is the property `record_generated` exists to keep.
+    ///
+    /// A clip whose document or origin will not serialise is skipped by the
+    /// caller rather than written half-formed; see [`generated_clips`].
+    fn generated(clip: &VirtualClip, created_at: &str) -> Option<Self> {
+        let origin = match clip.origin() {
+            ClipOrigin::Manual => "manual",
+            ClipOrigin::ReplayBuffer => "replay-buffer",
+            ClipOrigin::Highlight(_) => "highlight",
+        };
+        let detail = serde_json::to_value(clip.origin()).ok()?;
+        let detail = detail.as_object().map(|object| {
+            let rest: serde_json::Map<String, serde_json::Value> = object
+                .iter()
+                .filter(|(key, _)| key.as_str() != "origin")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            serde_json::Value::Object(rest).to_string()
+        });
+
+        Some(Self {
+            path: None,
+            created_at: created_at.to_owned(),
+            source_recording: None,
+            source_start_seconds: None,
+            source_end_seconds: None,
+            duration_seconds: clip.duration().map(|length| length.as_secs_f64()),
+            requested_seconds: None,
+            complete: None,
+            edit: clip.edit().write().ok(),
+            origin: Some(origin),
+            origin_detail: detail,
+            title: Some(clip.title().to_owned()).filter(|title| !title.is_empty()),
+        })
+    }
+}
+
+/// The session's generated clips, as sidecar entries.
+///
+/// A clip whose edit document or origin will not serialise is **left out and
+/// said**, rather than written without the field: the document is what the clip
+/// *is*, and an entry missing it is a row nothing can open. One clip failing
+/// must not cost the session its record (AGENTS.md section 17), so the rest are
+/// written.
+fn generated_clips(session: &Session) -> Vec<SidecarClip> {
+    let created_at = clock::rfc3339(session.started_at());
+    session
+        .generated()
+        .iter()
+        .filter_map(|clip| match SidecarClip::generated(clip, &created_at) {
+            Some(written) if written.edit.is_some() => Some(written),
+            _ => {
+                tracing::warn!(
+                    session = %session.id(),
+                    title = clip.title(),
+                    "a generated clip could not be written to the session's record, so it is not                      in it"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// One effective setting, as a session's record keeps it.
@@ -770,6 +874,70 @@ mod tests {
                 .iter()
                 .all(|event| event["event"] != "kill"),
             "a game event was written into the session's own history"
+        );
+    }
+
+    #[test]
+    fn a_generated_clip_is_written_with_no_file_and_with_why_it_exists() {
+        use core::time::Duration;
+
+        use clipped_edit::{RecordingId, SourceSpan, SourceTime};
+        use clipped_events::{Confidence, EventKind, EventSource, EventTime, EventTiming};
+        use clipped_library::virtual_clip::HighlightCause;
+
+        let kill = clipped_events::GameEvent::new(
+            EventKind::Kill,
+            EventTiming::new(EventTime::from_media_nanos(600_000_000_000), Duration::ZERO),
+            EventSource::plugin("acme-cs2").expect("a legal source"),
+            Confidence::CERTAIN,
+        );
+        let clip = VirtualClip::of_range(
+            "Kill",
+            RecordingId::new("1"),
+            SourceSpan::new(
+                SourceTime::from_nanos(590_000_000_000),
+                SourceTime::from_nanos(602_000_000_000),
+            )
+            .expect("a legal span"),
+            ClipOrigin::Highlight(HighlightCause::of(&kill)),
+        );
+
+        let mut session = session();
+        session.record_generated(vec![clip]);
+
+        let json = serde_json::to_string(&SidecarFile::of(&session)).expect("the shape encodes");
+        let file: Value = serde_json::from_str(&json).expect("what serde wrote is JSON");
+        let clips = file["clips"].as_array().expect("the clips are a list");
+
+        let generated = clips
+            .iter()
+            .find(|clip| clip["origin"] == "highlight")
+            .expect("the generated clip is in the record");
+
+        // No file, and **absent** rather than empty: the library refuses a
+        // blank path as a malformed record, so writing one would turn a clip
+        // that has not been exported into a clip nobody can find.
+        assert!(
+            generated.get("path").is_none(),
+            "a clip nothing has exported was written with a file: {generated}"
+        );
+        assert!(
+            generated["edit"]
+                .as_str()
+                .is_some_and(|edit| !edit.is_empty()),
+            "the document is what the clip is, and it was not written: {generated}"
+        );
+
+        // What identifies it. Without this the library has no key for a clip
+        // with no path and would write a second copy on every reconciliation.
+        let detail = generated["origin_detail"]
+            .as_str()
+            .expect("why it exists was written");
+        assert!(detail.contains("acme-cs2"), "{detail}");
+        assert!(detail.contains("600000000000"), "{detail}");
+        assert!(
+            !detail.contains("\"origin\""),
+            "the tag is the `origin` column and must not be repeated in the detail: {detail}"
         );
     }
 
