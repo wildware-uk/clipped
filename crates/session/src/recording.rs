@@ -182,6 +182,7 @@ fn record_frames(
     let layout = audio::declare(
         video_track(encoder.as_ref(), opened.codec, encode_size),
         &sources,
+        settings.compatibility_mix(),
     );
 
     // Before the first packet and after the encoder: this is the moment both

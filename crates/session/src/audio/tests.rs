@@ -413,6 +413,17 @@ fn record(
     sources: Vec<Scripted>,
     seconds: f64,
 ) -> Vec<AudioTrackReport> {
+    record_with(video, path, sources, seconds, false)
+}
+
+/// [`record`], saying whether the recording carries a compatibility mix.
+fn record_with(
+    video: &CodedVideo,
+    path: &Path,
+    sources: Vec<Scripted>,
+    seconds: f64,
+    compatibility_mix: bool,
+) -> Vec<AudioTrackReport> {
     let exhausted: Vec<Arc<AtomicBool>> = sources
         .iter()
         .map(|scripted| Arc::clone(&scripted.exhausted))
@@ -422,7 +433,7 @@ fn record(
         .map(|scripted| scripted.source)
         .collect();
 
-    let layout = declare(video.track(), &sources);
+    let layout = declare(video.track(), &sources, compatibility_mix);
     let writer = MkvWriter::create(path, &layout).expect("the recording can be created");
     let muxing = MuxingThread::start(writer, SpaceGuard::new(path, 0), &layout)
         .expect("every declared track can be written to");
@@ -743,6 +754,7 @@ fn a_layout_orders_and_names_its_tracks_from_the_model_and_flags_only_the_first(
             scripted(AudioSource::Microphone, 1, Vec::new()).source,
             scripted(AudioSource::OtherSystemAudio, 2, Vec::new()).source,
         ],
+        false,
     );
 
     let tracks = layout.audio_tracks();
@@ -773,13 +785,14 @@ fn a_microphone_only_recording_flags_the_microphone_track() {
     let layout = declare(
         VideoTrack::new(VideoCodec::H264, WIDTH, HEIGHT),
         &[scripted(AudioSource::Microphone, 1, Vec::new()).source],
+        false,
     );
     assert!(layout.audio_tracks()[0].is_default());
 }
 
 #[test]
 fn a_video_only_recording_declares_no_audio_track_at_all() {
-    let layout = declare(VideoTrack::new(VideoCodec::H264, WIDTH, HEIGHT), &[]);
+    let layout = declare(VideoTrack::new(VideoCodec::H264, WIDTH, HEIGHT), &[], false);
     assert!(
         layout.audio_tracks().is_empty(),
         "a source that was turned off must not leave an empty track behind it"
@@ -801,6 +814,7 @@ fn a_buffer_the_writer_has_no_room_for_is_dropped_and_counted_rather_than_waited
     let layout = declare(
         video.track(),
         &[scripted(AudioSource::Microphone, 1, Vec::new()).source],
+        false,
     );
     let writer = MkvWriter::create(&path, &layout).expect("the recording can be created");
     let muxing = MuxingThread::start(writer, SpaceGuard::new(&path, 0), &layout)
@@ -856,6 +870,7 @@ fn a_thread_stops_when_the_writer_has_gone_rather_than_reading_into_a_closed_que
     let layout = declare(
         video.track(),
         &[scripted(AudioSource::Microphone, 1, Vec::new()).source],
+        false,
     );
     let writer = MkvWriter::create(&path, &layout).expect("the recording can be created");
     let muxing = MuxingThread::start(writer, SpaceGuard::new(&path, 0), &layout)
@@ -887,4 +902,94 @@ fn a_thread_stops_when_the_writer_has_gone_rather_than_reading_into_a_closed_que
         muxing.finish().is_err(),
         "the refused packet has to come back from the writer thread"
     );
+}
+
+#[test]
+fn the_compatibility_track_carries_every_source_and_the_isolated_tracks_stay_isolated() {
+    // Issue #29's second acceptance criterion, end to end and in one file:
+    // track 1 contains the summed tones, and the tracks after it each contain
+    // only their own. Both halves matter — a session that wrote the mix
+    // correctly and *also* mixed it into the isolated tracks would pass the
+    // first assertion and ruin the recording.
+    let Some(video) = coded_video() else {
+        return;
+    };
+    // Shorter than the mixer's half-second `MAX_SOURCE_LAG`, and that is the
+    // whole reason for the number. These sources are scripted and hand their
+    // blocks over as fast as the threads will take them, so one can run ahead of
+    // the other in *media* time — and the mixer deliberately carries on without
+    // a source that has lagged too far, which is what stops one stalled capture
+    // silencing a recording. Keeping the entire script inside that window means
+    // no source can ever be far enough behind to be left out, whichever order
+    // the threads happen to run in. A real capture produces at wall-clock rate
+    // and the two stay milliseconds apart.
+    const SCRIPT_SECONDS: f64 = 0.4;
+
+    let directory = TemporaryDirectory::new("session-compatibility-mix");
+    let path = directory.file("recording.mkv");
+
+    record_with(
+        video,
+        &path,
+        vec![
+            scripted(
+                AudioSource::OtherSystemAudio,
+                2,
+                tone(SYSTEM_TONE, 2, SCRIPT_SECONDS, 0),
+            ),
+            scripted(
+                AudioSource::Microphone,
+                1,
+                tone(MICROPHONE_TONE, 1, SCRIPT_SECONDS, 0),
+            ),
+        ],
+        SCRIPT_SECONDS,
+        true,
+    );
+
+    let media = Media::open(&path).expect("a finished recording opens");
+
+    // Both tones are on the mix, measured rather than inferred. `Tone::at`
+    // cannot say this: it asserts the *dominant* frequency, and a mix of two
+    // equal tones has no dominant one — which is the whole point of it.
+    let opening = media
+        .audio_content(0)
+        .expect("the compatibility track can be decoded");
+    let quiet = opening.peak_amplitude() as f64 / 8.0;
+    let system = opening.magnitude_at(SYSTEM_TONE);
+    let microphone = opening.magnitude_at(MICROPHONE_TONE);
+
+    media
+        .validate()
+        .that(system > quiet, || {
+            format!(
+                "a:0 should carry the system source at {SYSTEM_TONE} Hz, and it measures                  {system:.4} against a peak of {:.4}",
+                opening.peak_amplitude()
+            )
+        })
+        .that(microphone > quiet, || {
+            format!(
+                "a:0 should carry the microphone at {MICROPHONE_TONE} Hz, and it measures                  {microphone:.4} against a peak of {:.4}",
+                opening.peak_amplitude()
+            )
+        })
+        // Three audio tracks now: the mix, and the two it was made from.
+        .audio_stream_count(3)
+        .audio(
+            0,
+            AudioStream::codec("pcm_s16le")
+                .sample_rate(SAMPLE_RATE)
+                .title("Compatibility Mix")
+                // The whole point of it: a player that takes one track
+                // arbitrarily takes this one.
+                .default_track(true),
+        )
+        .audio(1, AudioStream::codec("pcm_s16le").default_track(false))
+        .audio(2, AudioStream::codec("pcm_s16le").default_track(false))
+        // And mixing changed neither of the tracks it read.
+        .audio_tone(1, Tone::at(SYSTEM_TONE).isolated_from(MICROPHONE_TONE))
+        .audio_tone(2, Tone::at(MICROPHONE_TONE).isolated_from(SYSTEM_TONE))
+        .monotonic_timestamps()
+        .synchronised_within(Duration::from_millis(40))
+        .assert_valid();
 }
