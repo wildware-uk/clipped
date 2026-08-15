@@ -75,6 +75,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "game_events",
         sql: include_str!("../migrations/0003_game_events.sql"),
     },
+    Migration {
+        version: 4,
+        name: "clips_without_a_file",
+        sql: include_str!("../migrations/0004_clips_without_a_file.sql"),
+    },
 ];
 
 /// The checksum of every migration that has been released.
@@ -89,6 +94,7 @@ const CHECKSUMS: &[(u32, &str)] = &[
     (1, "afab7973dd06f9d1"),
     (2, "58c7954428d814fa"),
     (3, "d2cf76386a1d8bbe"),
+    (4, "86f00947424c4989"),
 ];
 
 /// The newest schema version this build understands.

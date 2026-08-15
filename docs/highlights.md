@@ -512,19 +512,13 @@ The behaviour, which `SourceDeletion` states as a type rather than as prose:
 A clip that draws on more than one recording ([#88]) takes the worst answer of
 its sources, because a clip that needs two recordings and has one does not play.
 
-## Persistence, which does not exist yet
+## Persistence
 
-**A virtual clip cannot currently be stored, and this ticket did not add the
-ability.** The `clips` table from [#55] requires `path TEXT NOT NULL UNIQUE`,
-which is precisely the column a virtual clip does not have, and it holds no
-edit document and no origin. Storing one therefore needs a migration, and that
-migration is [#269] rather than part of this change: `docs/storage.md`'s rule is
-that a table that is wrong is worse than a table that is missing, and columns
-that nothing writes and nothing reads would be a guess at a shape two open
-issues are still deciding.
-
-The shape [#269] should add, recorded here so the model and the schema are
-argued in one place:
+The `clips` table from [#55] required `path TEXT NOT NULL UNIQUE` — precisely
+the column a virtual clip does not have — and held no edit document and no
+origin. Migration `0004_clips_without_a_file.sql` ([#269]) is what changed that,
+in the shape argued here so that the model and the schema stay argued in one
+place:
 
 - `path` becomes nullable — a clip with no file is the normal case, and a file
   is what an export adds.
@@ -539,9 +533,11 @@ argued in one place:
   "what depends on this recording" is asked before every deletion, and scanning
   every clip's document to answer it would not scale.
 
-Until that lands, a clip does not survive a restart and does not appear in the
-library or in search; the library index itself is [#56] and search is [#59],
-both M6 and both open.
+The table can hold one now; **nothing writes one yet.** Reading and writing
+these rows belongs with the library index ([#56]) and search is [#59], both M6
+and both open — so a virtual clip still does not survive a restart, and
+[#76]'s generated highlights still have nowhere to go. What has changed is that
+the obstacle is code rather than schema.
 
 ## Where the events themselves live
 
