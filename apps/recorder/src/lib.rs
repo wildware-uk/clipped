@@ -51,6 +51,7 @@ pub mod hotkeys;
 pub mod library;
 pub mod list_windows;
 pub mod options;
+pub mod plugins;
 pub mod record;
 pub mod recover;
 pub mod replay;
@@ -106,6 +107,8 @@ pub enum RunError {
     Recover(recover::RecoverError),
     /// `replay` failed.
     Replay(replay::ReplayCommandError),
+    /// `plugins` failed.
+    Plugins(plugins::PluginsError),
 }
 
 impl RunError {
@@ -130,6 +133,10 @@ impl RunError {
                 | replay::ReplayCommandError::Hotkeybindings(_),
             ) => EXIT_USAGE,
             Self::Replay(replay::ReplayCommandError::Hotkeys(_)) => EXIT_FAILURE,
+            // Nothing this command does can lose a recording, so every failure
+            // is the same ordinary one: it did not do what was asked, and said
+            // why.
+            Self::Plugins(_) => EXIT_FAILURE,
             // A selector that named no window, or more than one, is a command
             // line to fix; a desktop that could not be enumerated is not.
             Self::ListWindows(list_windows::ListWindowsError::Resolution(_)) => EXIT_USAGE,
@@ -196,6 +203,7 @@ impl fmt::Display for RunError {
             Self::Watch(error) => write!(formatter, "{error}"),
             Self::Recover(error) => write!(formatter, "{error}"),
             Self::Replay(error) => write!(formatter, "{error}"),
+            Self::Plugins(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -211,6 +219,7 @@ impl Error for RunError {
             Self::Watch(error) => Some(error),
             Self::Recover(error) => Some(error),
             Self::Replay(error) => Some(error),
+            Self::Plugins(error) => Some(error),
         }
     }
 }
@@ -321,6 +330,7 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::Watch(args) => watch::run(args).map_err(RunError::from),
         Command::Recover(args) => recover::run(args).map_err(RunError::from),
         Command::Replay(args) => replay::run(args).map_err(RunError::from),
+        Command::Plugins(args) => plugins::run(args).map_err(RunError::Plugins),
     }
 }
 
