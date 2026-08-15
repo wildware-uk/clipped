@@ -211,6 +211,7 @@ describe('the application shell', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: { state: 'idle' },
     });
 

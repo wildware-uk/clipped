@@ -88,7 +88,7 @@ const STATES: readonly (readonly [string, RecorderLinkState | null, string, RegE
   ],
   [
     'when a recorder is attached',
-    { link: 'attached', recorder_process_id: 7, status: { state: 'idle' } },
+    { link: 'attached', recorder_process_id: 7, features: [], status: { state: 'idle' } },
     'This recorder is not detecting games',
     /clipped-recorder serve.*clipped-recorder watch/,
   ],
@@ -211,6 +211,7 @@ describe('the Games screen', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
 
@@ -273,6 +274,7 @@ describe('the Games screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
@@ -297,6 +299,7 @@ describe('the Games screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
@@ -337,6 +340,7 @@ describe('the Games screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();

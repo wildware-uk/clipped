@@ -1,4 +1,9 @@
-import { type ProtocolError, type RecorderStatus, type RecordingStatus } from '@clipped/shared';
+import {
+  type Feature,
+  type ProtocolError,
+  type RecorderStatus,
+  type RecordingStatus,
+} from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useRef, useState } from 'react';
@@ -20,6 +25,21 @@ export type RecorderLinkState =
   | {
       readonly link: 'attached';
       readonly recorder_process_id: number;
+      /**
+       * What this recorder can do, from its handshake.
+       *
+       * Asked before a control that maps to a feature-gated command draws
+       * itself. Without it the control is drawn against an older recorder, the
+       * user chooses a file name, and *then* the command is refused with
+       * `unknown_command` — a refusal arriving after the only part of the
+       * interaction that cost them anything (issue #447).
+       *
+       * The names are `@clipped/shared`'s `FEATURES`. An unknown one is
+       * carried, not refused: a newer recorder may name a capability this build
+       * has no control for, and dropping it would make the list describe this
+       * build rather than that recorder.
+       */
+      readonly features: readonly string[];
       readonly status: RecorderStatus;
     }
   | {
@@ -331,4 +351,20 @@ export function describeInterruption(interrupted: InterruptedRecording | null): 
   }
 
   return `Recording interrupted. Not resumed. The file is at ${interrupted.output}.`;
+}
+
+/**
+ * Whether the recorder this window is attached to can do `feature`.
+ *
+ * The check a control makes before it draws itself. `false` while connecting,
+ * reconnecting or unavailable, which is the honest answer: there is no recorder
+ * to have the capability, and a control drawn on the strength of the last one
+ * is a control that refuses when pressed.
+ *
+ * Takes the link rather than a `Welcome` because that is what a window holds —
+ * `hasFeature` in `@clipped/shared` is the same question asked of the handshake
+ * itself, which only `crates/ipc` ever sees.
+ */
+export function recorderCanDo(link: RecorderLinkState | null, feature: Feature): boolean {
+  return link?.link === 'attached' && link.features.includes(feature);
 }

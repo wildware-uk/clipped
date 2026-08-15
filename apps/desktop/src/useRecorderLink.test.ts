@@ -9,6 +9,7 @@ import { stubRecorderLinkRuntime } from './test/recorderLinkRuntime';
 import {
   describeInterruption,
   describeRecorderLink,
+  recorderCanDo,
   useRecorderLink,
   type InterruptedRecording,
   type RecorderLinkState,
@@ -44,6 +45,7 @@ describe('what the status block says about the recorder', () => {
     const idle = describeRecorderLink({
       link: 'attached',
       recorder_process_id: 4242,
+      features: [],
       status: { state: 'idle' },
     });
     expect(idle.state).toBe('Idle');
@@ -52,6 +54,7 @@ describe('what the status block says about the recorder', () => {
     const recording = describeRecorderLink({
       link: 'attached',
       recorder_process_id: 4242,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-1',
@@ -195,6 +198,7 @@ describe('following the recorder link inside the window', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-7',
@@ -212,6 +216,7 @@ describe('following the recorder link inside the window', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: { state: 'idle' },
     });
 
@@ -219,6 +224,7 @@ describe('following the recorder link inside the window', () => {
       expect(result.current.link).toEqual({
         link: 'attached',
         recorder_process_id: 91,
+        features: [],
         status: { state: 'idle' },
       });
     });
@@ -244,6 +250,7 @@ describe('following the recorder link inside the window', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-1',
@@ -312,12 +319,14 @@ describe('following the recorder link inside the window', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: { state: 'idle' },
     });
     await waitFor(() => {
       expect(result.current.link).toEqual({
         link: 'attached',
         recorder_process_id: 91,
+        features: [],
         status: { state: 'idle' },
       });
     });
@@ -381,5 +390,53 @@ describe('following the recorder link inside the window', () => {
     for (const permission of permissionsNeeded) {
       expect(capabilities.permissions).toContain(permission);
     }
+  });
+});
+
+describe('recorderCanDo', () => {
+  const attached = (features: readonly string[]): RecorderLinkState => ({
+    link: 'attached',
+    recorder_process_id: 91,
+    features,
+    status: { state: 'idle' },
+  });
+
+  it('answers for the recorder this window is attached to', () => {
+    const link = attached(['recording', 'library']);
+
+    expect(recorderCanDo(link, 'library')).toBe(true);
+    expect(recorderCanDo(link, 'export')).toBe(false);
+  });
+
+  it('refuses while there is no recorder to have the capability', () => {
+    // The honest answer for all three: a control drawn on the strength of the
+    // recorder that was there is a control that refuses when pressed, which is
+    // the failure issue #447 is about arriving one step later.
+    expect(recorderCanDo(null, 'export')).toBe(false);
+    expect(recorderCanDo({ link: 'connecting' }, 'export')).toBe(false);
+    expect(
+      recorderCanDo(
+        {
+          link: 'reconnecting',
+          attempt: 1,
+          attempts_allowed: 4,
+          delay_ms: 500,
+          reason: 'the connection ended',
+        },
+        'export',
+      ),
+    ).toBe(false);
+    expect(recorderCanDo({ link: 'unavailable', reason: 'no recorder' }, 'export')).toBe(false);
+  });
+
+  it('carries a capability this build has no control for', () => {
+    // A newer recorder may name one. Dropping it would make the list describe
+    // this build rather than that recorder, and the next control added here
+    // would read `false` against a recorder that can in fact do it.
+    const link = attached(['recording', 'something_this_build_has_never_heard_of']);
+
+    expect(link.link === 'attached' && link.features).toContain(
+      'something_this_build_has_never_heard_of',
+    );
   });
 });

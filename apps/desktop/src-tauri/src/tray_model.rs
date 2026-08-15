@@ -332,6 +332,7 @@ mod tests {
     fn attached(status: RecorderStatus) -> RecorderLinkState {
         RecorderLinkState::Attached {
             recorder_process_id: 4_242,
+            features: Vec::new(),
             status,
         }
     }
