@@ -457,6 +457,21 @@ cost the user the Steam games on the same machine.
 carry an `app_id`, so only they can reach the rung; the other launchers'
 entries have none, and [#514] is why adding them is not yet safe.
 
+**Verified against this machine**, by `examples/launchers_probe.rs`, which asks
+every launcher about every running process — or about one path, so that an
+answer costs nobody a game launch:
+
+```text
+portal2.exe      — Steam 620              → portal-2
+LeagueClient.exe — Riot league_of_legends → no catalogue entry names it
+```
+
+The first line is the whole feature working from disk to game identity: Steam's
+own installation, a real path on a real drive, and the shipped catalogue placing
+it by the identity rather than by the executable's name. The second is exactly
+what [#514] describes — an identity produced with nothing to match it — which is
+what makes that decision the one blocking the other five launchers.
+
 [#522]: https://github.com/wildware-uk/clipped/issues/522
 [#514]: https://github.com/wildware-uk/clipped/issues/514
 
