@@ -97,6 +97,7 @@ pub use browse::{
 };
 pub use error::{IndexError, IndexProblem};
 pub use scan::UnavailableRoot;
+pub use sidecar::SUPPORTED_SCHEMA_VERSION;
 pub use summary::{game_summaries, GameSummary};
 
 /// How many problems a run writes to the log before it stops repeating itself.

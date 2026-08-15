@@ -25,6 +25,17 @@
 //! Neither test is a restatement of the reader's own assumptions: one comes from
 //! the prose that documents the format and the other from the code that writes
 //! it.
+//!
+//! There is a third thing the compiler cannot hold in step, and it lived
+//! unguarded until issue #71 moved the format: **the version number itself**.
+//! `SUPPORTED_SCHEMA_VERSION` here and `SCHEMA_VERSION` in the writer are two
+//! constants, and the comment on the first used to claim a test in this file
+//! called `the_documented_sidecar_is_the_one_this_build_reads` was keeping them
+//! equal. No test of that name has ever existed. The drift it named is the
+//! worst kind — the recorder writes a sidecar every session and a reader one
+//! version behind refuses *every* one of them — so the guard now exists, in
+//! `clipped_session::automatic::sidecar`, which is the crate that can see both
+//! numbers.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -89,6 +100,80 @@ fn documented_sidecar() -> String {
             )
         });
     block.to_owned()
+}
+
+/// The game event the documentation prints reaches a row, field for field.
+///
+/// Separate from the whole-file test below because a document this build cannot
+/// read is *skipped* by the ingest rather than refused — which is the right
+/// behaviour for a file a newer build wrote, and which means a wrong example
+/// would otherwise index cleanly and silently produce nothing. This asserts the
+/// row, so the shape printed in `docs/sessions.md` has to be the real one.
+#[test]
+fn the_documented_game_event_reaches_a_row() {
+    let root = scratch_directory("documented-game-event");
+    let text = documented_sidecar().replace(
+        "D:\\\\clips",
+        &root.display().to_string().replace('\\', "\\\\"),
+    );
+    fs::write(
+        root.join("clipped-counter-strike-2-20260811-143205.session.json"),
+        &text,
+    )
+    .expect("the documented sidecar can be written");
+    fs::write(
+        root.join("clipped-counter-strike-2-20260811-143205.mkv"),
+        [0u8; 128],
+    )
+    .expect("the recording it names can be written");
+    fs::write(
+        root.join("clipped-counter-strike-2-20260811-143205-replay-1.mkv"),
+        [0u8; 64],
+    )
+    .expect("the clip it names can be written");
+
+    let database = index(&root);
+
+    let (session, recording, at_nanos, kind, source, document): (
+        String,
+        Option<i64>,
+        i64,
+        String,
+        String,
+        String,
+    ) = database
+        .connection()
+        .query_row(
+            "SELECT session_id, recording_id, at_nanos, kind, source, document FROM game_events",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("the documented game event was indexed");
+
+    assert_eq!(session, "counter-strike-2-20260811-143205");
+    assert_eq!(at_nanos, 137_000_000_000);
+    assert_eq!(kind, "kill");
+    assert_eq!(source, "cs2");
+    assert_eq!(
+        recording, None,
+        "an event was placed in a recording, which nothing can do yet: the sidecar \
+         records no media-timeline span per recording (see `write_game_events`)"
+    );
+
+    // The payload survives being stored, which is the whole argument for
+    // `document` being the authority rather than the columns beside it.
+    let stored: Value = serde_json::from_str(&document).expect("the stored document is JSON");
+    assert_eq!(stored["data"]["weapon"], Value::from("ak47"));
+    assert_eq!(stored["data"]["headshot"], Value::from(true));
 }
 
 /// The documented file is the file this build reads, field for field.

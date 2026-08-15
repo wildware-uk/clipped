@@ -34,6 +34,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use clipped_events::GameEvent;
+
 use crate::config::ResolvedSettings;
 use crate::report::{EndReason, RecordingReport};
 
@@ -526,6 +528,8 @@ pub struct Session {
     pub(crate) recordings: Vec<SessionRecording>,
     pub(crate) clips: Vec<SessionClip>,
     pub(crate) events: Vec<SessionEvent>,
+    /// What plugins reported, ordered by the moment each event describes.
+    pub(crate) game_events: Vec<GameEvent>,
 }
 
 impl Session {
@@ -539,6 +543,7 @@ impl Session {
             recordings: Vec::new(),
             clips: Vec::new(),
             events: Vec::new(),
+            game_events: Vec::new(),
         }
     }
 
@@ -583,6 +588,17 @@ impl Session {
     #[must_use]
     pub fn events(&self) -> &[SessionEvent] {
         &self.events
+    }
+
+    /// What happened *in the game*, oldest first.
+    ///
+    /// A different list from [`events`](Self::events) and deliberately so: those
+    /// are the things the session manager did and this is what a plugin
+    /// reported. See [`SessionEventKind`] for why the two vocabularies are not
+    /// merged, and `docs/highlights.md` for why they are stored in two tables.
+    #[must_use]
+    pub fn game_events(&self) -> &[GameEvent] {
+        &self.game_events
     }
 
     /// Where the sidecar for this session goes, given the recordings directory.
@@ -643,6 +659,26 @@ impl Session {
     /// Adds an event.
     pub(crate) fn record(&mut self, at: SystemTime, kind: SessionEventKind) {
         self.events.push(SessionEvent { at, kind });
+    }
+
+    /// Adds something a plugin reported.
+    ///
+    /// Kept in the order events happened rather than the order they arrived: a
+    /// plugin observes a game telling it something, so two events can be heard
+    /// out of order and the moment each *describes* is the one a timeline draws
+    /// at. `EventTiming` keeps those apart precisely so that this can sort by
+    /// the former.
+    ///
+    /// Nothing is dropped and nothing is deduplicated here. An event this build
+    /// does not recognise is still the session's, and deciding what is worth a
+    /// clip is the highlight rules' job rather than the session's
+    /// (`crates/session/src/highlights/`).
+    pub fn record_game_event(&mut self, event: GameEvent) {
+        let at = event.timing().at();
+        let position = self
+            .game_events
+            .partition_point(|existing| existing.timing().at() <= at);
+        self.game_events.insert(position, event);
     }
 
     /// Adds a recording that has just started, with the settings it was

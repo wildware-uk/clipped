@@ -176,6 +176,7 @@ pub(crate) fn write(
 
     write_candidates(savepoint, session)?;
     write_events(savepoint, session)?;
+    write_game_events(savepoint, session)?;
     let written = write_recordings(savepoint, prepared, observed_at, problems)?;
     // After the recordings, because a clip points at the one it was cut from
     // and the row it points at has to exist.
@@ -316,6 +317,75 @@ fn write_events(
             event.at,
             event.event,
             event.detail_json(),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Replaces the session's game events.
+///
+/// Wholesale, for the same reason [`write_events`] is: they are wholly derived
+/// from the sidecar, and nothing a user can have changed lives in one of these
+/// rows.
+///
+/// # What this does not do
+///
+/// **It does not place an event in a recording.** `recording_id` is left null
+/// and `crates/library/src/events.rs` -- which is written, and does exactly
+/// this -- is not called, because placing a moment needs each recording's span
+/// on the session's *media* timeline and the sidecar records no such thing: a
+/// `SidecarRecording` has a wall-clock `started_at` and a duration, and an
+/// `EventTime` is nanoseconds from the first video frame. Deriving one from the
+/// other across a machine that slept would be a guess, and a kill drawn on the
+/// wrong second is worse than one not drawn yet (AGENTS.md section 27).
+///
+/// So this persists what was heard, in full and in order, and the placement is
+/// the next piece of
+/// [issue #71](https://github.com/wildware-uk/clipped/issues/71).
+///
+/// # What it refuses to lose
+///
+/// An event whose document this build cannot interpret is still stored: `read`
+/// keeps the envelope and the fields it had no name for, and `to_json` puts
+/// them back, so re-indexing a library with an older Clipped does not strip
+/// what a newer one wrote (AGENTS.md section 56). Only a document that is not a
+/// readable event at all is skipped, and it is said.
+fn write_game_events(
+    savepoint: &Savepoint<'_>,
+    session: &SessionSidecar,
+) -> Result<(), clipped_storage::rusqlite::Error> {
+    savepoint
+        .prepare("DELETE FROM game_events WHERE session_id = ?1")?
+        .execute(params![session.session_id])?;
+
+    let mut insert = savepoint.prepare(
+        "INSERT INTO game_events (session_id, recording_id, at_nanos, kind, source, document)          VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+    )?;
+    for document in &session.game_events {
+        let read = match clipped_events::schema::read_value(document.clone()) {
+            Ok(read) => read,
+            Err(error) => {
+                debug!(
+                    session = %session.session_id,
+                    %error,
+                    "a game event that is not a readable event was skipped"
+                );
+                continue;
+            }
+        };
+        let Ok(text) = read.to_json() else {
+            debug!(
+                session = %session.session_id,
+                "a game event that could not be written back was skipped"
+            );
+            continue;
+        };
+        insert.execute(params![
+            session.session_id,
+            read.event.timing().at().as_media_nanos(),
+            read.event.kind().to_string(),
+            read.event.source().as_str(),
+            text,
         ])?;
     }
     Ok(())
