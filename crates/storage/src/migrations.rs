@@ -80,6 +80,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "clips_without_a_file",
         sql: include_str!("../migrations/0004_clips_without_a_file.sql"),
     },
+    Migration {
+        version: 5,
+        name: "recording_spans",
+        sql: include_str!("../migrations/0005_recording_spans.sql"),
+    },
 ];
 
 /// The checksum of every migration that has been released.
@@ -95,6 +100,7 @@ const CHECKSUMS: &[(u32, &str)] = &[
     (2, "58c7954428d814fa"),
     (3, "d2cf76386a1d8bbe"),
     (4, "86f00947424c4989"),
+    (5, "55ed6d143c4f7fe7"),
 ];
 
 /// The newest schema version this build understands.
