@@ -63,6 +63,7 @@ import type {
   LibraryClip,
   LibraryGame,
   LibraryEventsReply,
+  PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
   LibrarySession,
@@ -457,6 +458,11 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     lane: 'required',
   }),
+  'reply.plugins': fields<PluginsReply>({
+    reply: 'required',
+    installed: 'required',
+    refused: 'required',
+  }),
   'reply.recording_exported': fields<RecordingExportedReply>({
     reply: 'required',
     export: 'required',
@@ -577,6 +583,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'plugins',
+    params: null,
+    reply: 'reply.plugins',
+    available_in_this_build: true,
+  },
+  {
     name: 'export_recording',
     params: 'export_recording',
     reply: 'reply.recording_exported',
@@ -635,6 +647,8 @@ function replyDiscriminant(reply: Reply): string {
       return reply.page.next_cursor === undefined ? 'library_sessions' : 'library_sessions.more';
     case 'library_games':
       return 'library_games';
+    case 'plugins':
+      return 'plugins';
     case 'library_events':
       // One discriminant, unlike `library_sessions`: an empty lane is not a
       // different shape, it is the same shape carrying nothing. What tells

@@ -143,6 +143,7 @@ export const COMMANDS = [
   'library_sessions',
   'library_games',
   'library_events',
+  'plugins',
   'export_recording',
   'get_hotkeys',
   'shutdown',
@@ -224,6 +225,7 @@ export const REPLIES = [
   'library_sessions',
   'library_games',
   'library_events',
+  'plugins',
   'recording_exported',
   'hotkeys',
   'shutting_down',
@@ -844,6 +846,72 @@ export interface LibraryEventsReply {
   readonly lane: LibraryEventLane;
 }
 
+/**
+ * Whether a plugin will start, and why not when it will not.
+ *
+ * Four states rather than a boolean: a plugin nobody has enabled needs an
+ * invitation, one that was turned off needs nothing, and one whose consent has
+ * lapsed needs somebody to look at what changed.
+ */
+export type PluginState =
+  | { readonly state: 'enabled' }
+  | { readonly state: 'not-enabled' }
+  | { readonly state: 'turned-off' }
+  | {
+      readonly state: 'needs-consent-again';
+      /** What the user agreed to. */
+      readonly agreed_to: string;
+      /** What it declares now. */
+      readonly now_declares: string;
+    };
+
+/** One installed plugin, and what it asks for. */
+export interface PluginDeclaration {
+  /** The plugin's identifier, as its manifest gives it. */
+  readonly id: string;
+  /** What to call it on a screen. */
+  readonly name: string;
+  /** Its own version. Free text: nothing compares two of them. */
+  readonly version: string;
+  /** What it says it does. */
+  readonly description: string;
+  /**
+   * What it will do with the network, one plain sentence per grant.
+   *
+   * Empty means it declares none, which a screen must **say** rather than draw
+   * as a blank row.
+   */
+  readonly network: readonly string[];
+  /**
+   * What Clipped can and cannot promise about the sentences above.
+   *
+   * Sent with every declaration rather than kept here, because it is part of
+   * what somebody agrees to and a second copy could drift from what the
+   * recorder enforces.
+   */
+  readonly enforcement: string;
+  /** What this build will do about the plugin. */
+  readonly state: PluginState;
+}
+
+/** Something under the plugins directory that is not a usable plugin. */
+export interface RefusedPlugin {
+  /** Where it is. */
+  readonly directory: string;
+  /** Why it was refused, in the words the recorder used. */
+  readonly reason: string;
+}
+
+/** What plugins are installed, and what each of them asks for. */
+export interface PluginsReply {
+  /** The tag. */
+  readonly reply: 'plugins';
+  /** Every plugin discovery could read. */
+  readonly installed: readonly PluginDeclaration[];
+  /** Everything that is not one, and why. Always present. */
+  readonly refused: readonly RefusedPlugin[];
+}
+
 /** A recording was copied into MP4, and the file is finished. */
 export interface RecordingExportedReply {
   /** The tag. */
@@ -957,6 +1025,7 @@ export type Reply =
   | LibrarySessionsReply
   | LibraryGamesReply
   | LibraryEventsReply
+  | PluginsReply
   | RecordingExportedReply
   | HotkeysReply
   | ShuttingDownReply;

@@ -567,6 +567,19 @@ impl CommandHandler for RecorderService {
             Command::LibraryEvents(request) => Ok(Reply::LibraryEvents {
                 lane: self.library.events(&request)?,
             }),
+            // Also on the connection thread: reading a handful of manifests and
+            // one settings file is bounded local work that shares nothing with
+            // a recording, which is the same argument the library reads above
+            // are answered here under.
+            Command::Plugins => {
+                let (installed, refused) = crate::plugins::declarations().map_err(|error| {
+                    ProtocolError::new(
+                        ErrorCode::Internal,
+                        format!("the installed plugins could not be read: {error}"),
+                    )
+                })?;
+                Ok(Reply::Plugins { installed, refused })
+            }
             // Also on the connection thread, and for the same reason a library
             // read is: it touches no recording, takes no lock a recording takes
             // and opens a file of its own (`crate::export`). It is the slower

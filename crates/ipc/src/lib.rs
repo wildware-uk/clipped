@@ -119,6 +119,7 @@ pub mod frame;
 pub mod hotkeys;
 pub mod library;
 pub mod message;
+mod plugins;
 pub mod schema;
 pub mod server;
 pub mod status;
@@ -141,6 +142,7 @@ pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
+pub use plugins::{PluginDeclaration, PluginState, RefusedPlugin};
 pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,
     MAX_CONCURRENT_CONNECTIONS,
