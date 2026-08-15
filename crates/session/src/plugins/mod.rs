@@ -93,6 +93,16 @@
 //!
 //! # What is not here
 //!
+//! **One timeline for the whole session.** This type is created per recording
+//! and takes its epoch from that recording's first kept frame, so a session
+//! that writes two files stamps the second one's events from the second one's
+//! zero. The model says otherwise — `docs/av-sync.md` and
+//! [issue #338](https://github.com/wildware-uk/clipped/issues/338) both say one
+//! timeline per session — and reconciling them is
+//! [issue #488](https://github.com/wildware-uk/clipped/issues/488). It is
+//! latent while nothing starts a plugin in a shipped build
+//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)).
+//!
 //! **Deciding which file an event landed in.** The row's `recording_id` is null
 //! until something writes each recording's span on the session's timeline into
 //! the sidecar; `clipped_library::events` does the placing and has nothing to
