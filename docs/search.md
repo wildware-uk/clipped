@@ -288,9 +288,20 @@ walks the tree instead of calling `Query::matches`:
   every text column, or one denormalised folded column holding all of them.
   Either satisfies the definition here.
 
+- **Every leaf has to be `IFNULL(<condition>, 0)`.** A row with no date does not
+  satisfy `date:>2026-08-01`, and *is* selected by `-date:>2026-08-01`, which is
+  what `Expr::Not` means here. SQL disagrees: `NOT (NULL > x)` is `NULL`, which
+  is not true, so a session with no recording whose duration is known would be
+  dropped by a negation that should keep it. It is the one place the two
+  languages differ by default, and it is invisible until somebody searches for
+  what they have *not* recorded.
+
 `Query::matches` stays the reference answer. Where a database executor disagrees
 with it, the executor is wrong — the tests in `matcher.rs` are what "matching"
-means.
+means. Note that what a *session* is searchable by is the projection
+`crate::index::browse` builds, not this module: it is what decides that `title:`
+looks at every clip's title and that `event:` looks at the kinds a sitting's
+plugins reported (issue #520).
 
 ## Measured cost
 

@@ -67,13 +67,13 @@ fn matches_text(field: TextField, needle: &FoldedText, row: &Row) -> bool {
         // which is what a user expects a search box to do, and why the field
         // prefixes exist for the times they want to be specific.
         TextField::Anywhere => {
-            contains(row.title())
+            contains_any(row.titles())
                 || contains(row.game())
                 || contains(row.session())
                 || contains_any(row.tags())
                 || contains_any(row.events())
         }
-        TextField::Title => contains(row.title()),
+        TextField::Title => contains_any(row.titles()),
         TextField::Game => contains(row.game()),
         TextField::Session => contains(row.session()),
         TextField::Tag => contains_any(row.tags()),

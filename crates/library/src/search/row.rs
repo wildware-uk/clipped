@@ -36,7 +36,7 @@ use super::text::FoldedText;
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Row {
-    title: Option<FoldedText>,
+    titles: Vec<FoldedText>,
     game: Option<FoldedText>,
     session: Option<FoldedText>,
     tags: Vec<FoldedText>,
@@ -59,10 +59,18 @@ impl Row {
         Self::default()
     }
 
-    /// The title of the recording, clip or screenshot.
+    /// A title of something the row covers: a recording, a clip or a
+    /// screenshot.
+    ///
+    /// Added rather than replacing, the way [`with_tag`](Self::with_tag) is. A
+    /// row is often a *sitting* rather than a single file — the library screen
+    /// lists sessions — and a sitting that produced three named clips is
+    /// searchable by all three. Assigning here kept only the last, so two of
+    /// them could not be found by name at all
+    /// ([issue #520](https://github.com/wildware-uk/clipped/issues/520)).
     #[must_use]
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
-        self.title = Some(FoldedText::new(title));
+        self.titles.push(FoldedText::new(title));
         self
     }
 
@@ -115,8 +123,8 @@ impl Row {
         self
     }
 
-    pub(super) fn title(&self) -> Option<&FoldedText> {
-        self.title.as_ref()
+    pub(super) fn titles(&self) -> &[FoldedText] {
+        &self.titles
     }
 
     pub(super) fn game(&self) -> Option<&FoldedText> {
