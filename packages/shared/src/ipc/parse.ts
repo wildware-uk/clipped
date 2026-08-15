@@ -51,6 +51,8 @@ import type {
   JsonObject,
   JsonValue,
   LibraryClip,
+  LibraryEventLane,
+  LibraryEventMark,
   LibraryGame,
   LibraryRecording,
   LibrarySession,
@@ -349,6 +351,8 @@ function readReply(value: JsonValue | undefined): Reply {
         reply: 'library_games',
         games: arrayField(reply['games'], 'a games list', readLibraryGame),
       };
+    case 'library_events':
+      return { reply: 'library_events', lane: readEventLane(reply['lane']) };
     case 'recording_exported':
       return { reply: 'recording_exported', export: readExport(reply['export']) };
     case 'hotkeys':
@@ -614,6 +618,37 @@ function readLibraryClip(value: JsonValue | undefined): LibraryClip {
     ...(missing === undefined ? {} : { missing_since: missing }),
     favourite: booleanField(clip, 'favourite', what),
     tags: stringArrayField(clip, 'tags', what),
+  };
+}
+
+/**
+ * One recording's marks.
+ *
+ * `marks` is required rather than defaulted: an absent array and an empty one
+ * would otherwise be indistinguishable, and they are "the recorder did not
+ * answer this" and "there are none" — different things to draw.
+ */
+function readEventLane(value: JsonValue | undefined): LibraryEventLane {
+  const lane = object(value, 'an event lane');
+  return { marks: arrayField(lane['marks'], 'a marks list', readEventMark) };
+}
+
+/**
+ * One mark.
+ *
+ * `kind` is read as a plain string and checked against nothing. A kind added
+ * after this build shipped, and a plugin's namespaced custom name, both arrive
+ * here, and a reader that refused one would delete exactly the marks that have
+ * to survive.
+ */
+function readEventMark(value: JsonValue | undefined): LibraryEventMark {
+  const mark = object(value, 'a mark');
+  const what = 'a mark';
+  return {
+    recording: stringField(mark, 'recording', what),
+    at: numberField(mark, 'at', what),
+    kind: stringField(mark, 'kind', what),
+    source: stringField(mark, 'source', what),
   };
 }
 

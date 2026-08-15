@@ -43,7 +43,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
-use crate::library::{LibraryGame, LibrarySessionPage, LibrarySessions};
+use crate::library::{
+    LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage, LibrarySessions,
+};
 use crate::message::Request;
 use crate::status::{
     BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
@@ -72,6 +74,9 @@ pub enum Command {
     LibrarySessions(LibrarySessions),
     /// Read what the library holds per game (SPEC.md section 17).
     LibraryGames,
+
+    /// The game events of one recording, placed in its file.
+    LibraryEvents(LibraryEvents),
     /// Copy a finished recording into MP4, without re-encoding it.
     ExportRecording(ExportRecording),
     /// What every global hotkey is bound to, and whether it works.
@@ -110,6 +115,7 @@ impl Command {
             Self::SaveReplay(_) => "save_replay",
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
+            Self::LibraryEvents(_) => "library_events",
             Self::ExportRecording(_) => "export_recording",
             Self::GetHotkeys => "get_hotkeys",
             Self::Shutdown(_) => "shutdown",
@@ -136,6 +142,7 @@ impl Command {
             "save_replay" => Ok(Self::SaveReplay(parse_params(request)?)),
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
+            "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
@@ -164,6 +171,7 @@ impl Command {
                 Ok(serde_json::Value::Null)
             }
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
+            Self::LibraryEvents(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
@@ -614,6 +622,14 @@ pub enum Reply {
         /// [`ErrorCode::LibraryUnavailable`](crate::ErrorCode::LibraryUnavailable)
         /// and says why.
         page: LibrarySessionPage,
+    },
+    /// The marks of one recording's timeline.
+    LibraryEvents {
+        /// The events, placed in that recording's file, earliest first.
+        ///
+        /// Always sent, so that "none" and "not asked" are told apart by
+        /// whether the reply arrived rather than by guessing at an empty field.
+        lane: LibraryEventLane,
     },
     /// What the library holds per game.
     LibraryGames {

@@ -42,6 +42,7 @@
         "save_replay",
         "library_sessions",
         "library_games",
+        "library_events",
         "export_recording",
         "get_hotkeys",
         "shutdown",
@@ -157,7 +158,8 @@
         "library_games",
         "recording_exported",
         "hotkeys",
-        "shutting_down"
+        "shutting_down",
+        "library_events"
       ],
       "tolerates_unrecognised": false
     },
@@ -477,6 +479,13 @@
       ],
       "optional": []
     },
+    "reply.library_events": {
+      "required": [
+        "lane",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.library_games": {
       "required": [
         "games",
@@ -689,6 +698,12 @@
       "name": "library_games",
       "params": null,
       "reply": "reply.library_games",
+      "available_in_this_build": true
+    },
+    {
+      "name": "library_events",
+      "params": "library_events",
+      "reply": "reply.library_events",
       "available_in_this_build": true
     },
     {
@@ -1243,6 +1258,37 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_sessions"
+    },
+    {
+      "name": "the marks on one recording's timeline",
+      "direction": "server",
+      "frame": {
+        "id": 11,
+        "outcome": {
+          "ok": {
+            "lane": {
+              "marks": [
+                {
+                  "at": 4000000000,
+                  "kind": "kill",
+                  "recording": "1",
+                  "source": "counter-strike-2"
+                },
+                {
+                  "at": 9500000000,
+                  "kind": "acme-cs2.flashbang_blinded_five",
+                  "recording": "1",
+                  "source": "acme-cs2"
+                }
+              ]
+            },
+            "reply": "library_events"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_events"
     },
     {
       "name": "what the library holds per game",

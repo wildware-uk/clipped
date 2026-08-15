@@ -490,6 +490,7 @@ when a command's parameters are all optional.
 | `save_replay` | all optional, below | `replay_saved` | yes |
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
+| `library_events` | `recording` | `library_events` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
@@ -781,6 +782,55 @@ nothing — the space it is not occupying is not being used — and is counted i
 `missing` instead. Anything in the trash contributes to neither.
 
 Refused with `library_unavailable` on the same terms as `library_sessions`.
+
+### `library_events`
+
+The marks on one recording's timeline: what a plugin reported while it was being
+recorded, **placed in that recording's file**.
+
+```json
+{"type":"request","id":11,"command":"library_events","params":{"recording":"1"}}
+```
+
+```json
+{"type":"response","id":11,"outcome":{"ok":{
+  "reply":"library_events",
+  "lane":{"marks":[
+    {"recording":"1","at":4000000000,"kind":"kill","source":"counter-strike-2"},
+    {"recording":"1","at":9500000000,
+     "kind":"acme-cs2.flashbang_blinded_five","source":"acme-cs2"}]}}}}
+```
+
+`at` is nanoseconds **into that recording's file**, which is what a timeline
+draws at and a player seeks to — not a moment on the session's timeline, which
+is how the events are stored. A session can write several files and a recording
+can begin after the game did, so the two are different numbers; the recorder
+does the subtraction because it needs the recording's span, which the window has
+no way to know ([av-sync.md](av-sync.md), "One epoch per recording, one timeline
+per session").
+
+Three properties of this reply are deliberate:
+
+- **`kind` is not a closed vocabulary.** The second mark above is a plugin's own
+  namespaced name, and a kind added after the window shipped arrives the same
+  way. A client that validated `kind` against a list would delete exactly the
+  marks that have to survive, which is the compatibility rule at the top of this
+  document applied to an open set.
+- **The payload does not travel.** A plugin's own detail can be kilobytes and
+  nothing above the plugin interprets it, so it is not sent for a mark two
+  pixels wide. It stays in the library.
+- **`marks` is always present.** An empty array means the recording has no
+  events; it does not mean the question was not asked. Those are different
+  things to draw, and a client that could not tell them apart would have to
+  guess whether to show an empty lane or say nothing is known.
+
+A recording whose span the library does not know — one that produced no frame,
+or a row indexed before the span was recorded — has no marks rather than marks
+in the wrong place.
+
+Refused with `invalid_parameters` if `recording` is not an identifier this
+library uses, and with `library_unavailable` on the same terms as
+`library_sessions`.
 
 ### `export_recording`
 

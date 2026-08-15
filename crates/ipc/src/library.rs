@@ -48,6 +48,59 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Asking for the game events of one recording.
+///
+/// Placed events, not stored ones: the offset is into *that recording's file*,
+/// which is what a timeline draws at and a player seeks to. Turning a moment on
+/// a session's timeline into one of those needs the recording's span, which the
+/// window has no way to know, so the recorder does it
+/// ([issue #329](https://github.com/wildware-uk/clipped/issues/329)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryEvents {
+    /// The recording to draw a lane for, as the library identifies it.
+    pub recording: String,
+}
+
+/// One mark on a recording's timeline.
+///
+/// # Two rules this shape keeps
+///
+/// **`kind` is not a closed vocabulary on the wire.** A kind added after the
+/// window shipped, and a plugin's namespaced custom name, must both arrive and
+/// both be drawn -- a protocol validating against a list would delete exactly
+/// the marks that need to survive. It is the string
+/// `clipped_events::EventKind::as_str` produces, and nothing here checks it
+/// against anything.
+///
+/// **The payload does not travel.** A plugin's own detail can be kilobytes and
+/// nothing above the plugin interprets it, so there is no reason for it to
+/// cross this boundary for a mark two pixels wide. It stays in the library.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LibraryEventMark {
+    /// The recording this mark is on, as the library identifies it.
+    pub recording: String,
+    /// How far into that recording's file the event is, in nanoseconds.
+    pub at: i64,
+    /// What happened, as an open string.
+    pub kind: String,
+    /// Who reported it: a plugin's identifier, or `clipped` for the parts of
+    /// the application that report events themselves.
+    pub source: String,
+}
+
+/// The marks of one recording.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LibraryEventLane {
+    /// The marks, earliest first.
+    ///
+    /// **Empty means none, and is not the same as not having asked.** A window
+    /// that cannot tell those apart has to guess whether to draw an empty lane
+    /// or say nothing is known, and the two are different things to show
+    /// somebody (AGENTS.md section 27). This field is always present, so
+    /// receiving the reply at all is the answer to "was it asked".
+    pub marks: Vec<LibraryEventMark>,
+}
+
 /// Which page of the library to read.
 ///
 /// Every field is optional: a window opening on the newest sessions sends no
