@@ -107,15 +107,14 @@ cannot rebase, because it is handed a bare `i64`. Getting this wrong is silent:
 every event of the second file lands in the first, and no assertion anywhere
 fails.
 
-**The recorder does not do this yet, and that is
-[issue #488](https://github.com/wildware-uk/clipped/issues/488).** A
-`SessionPlugins` is created per recording and takes its epoch from that
-recording's first kept frame, so a session's second file currently stamps its
-events from its own zero — exactly the failure the paragraph above describes. It
-is latent because nothing starts a plugin in a shipped build ([issue
-#282](https://github.com/wildware-uk/clipped/issues/282)), and it is written
-down here rather than left for somebody to discover from a timeline that looks
-subtly wrong.
+The recorder keeps this rule by holding one epoch per session
+([issue #488](https://github.com/wildware-uk/clipped/issues/488)). A
+`SessionPlugins` is still created per recording — a plugin does not outlive the
+recording that started it — but the second one is handed the session's zero
+rather than taking its own, and the driver lets that zero go when the session
+ends. Holding it past the end would stamp the *next* session's events against
+the previous session's first frame, which is the same failure an hour further
+out.
 
 ### Start-time alignment: what happens to audio before the epoch
 
