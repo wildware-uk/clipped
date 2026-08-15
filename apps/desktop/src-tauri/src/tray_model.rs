@@ -258,12 +258,17 @@ pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str
 /// what AGENTS.md section 27 rules out, so each refusal is a label.
 ///
 /// It said `needs a recording with a replay buffer (#38)` until that issue,
-/// which built the buffer's driver and the command. **In practice it is still
-/// always disabled**, and the reason has changed rather than gone: nothing in
-/// this window asks `start_recording` for a buffer, so no recording it started
-/// has one ([issue #427](https://github.com/wildware-uk/clipped/issues/427)).
-/// Saying *that* is the difference between a stale claim about the build and a
-/// true one about this recording.
+/// which built the buffer's driver and the command. When it is live, clicking
+/// it now saves a clip — `tray::save_replay` — which it did not until
+/// [issue #427](https://github.com/wildware-uk/clipped/issues/427).
+///
+/// A recording started **from this window** still keeps no buffer, because
+/// nothing here asks `start_recording` for one and the length to ask for lives
+/// in a setting this window has no way to read (#427 again). So this reason is
+/// the usual one, and it is a fact about *this recording* rather than a stale
+/// claim about the build — which is the whole difference. A recording started
+/// by `clipped-recorder replay --duration` has a buffer, and against that one
+/// the item is live.
 ///
 /// The capability is asked first, and is a different question again: a recorder
 /// that never advertised `replay` has no `save_replay` command, so no recording
