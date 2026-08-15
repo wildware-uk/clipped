@@ -27,7 +27,7 @@
 //!   "started_at": "2026-08-11T14:32:05+01:00",
 //!   "ended_at": null,
 //!   "recordings": [ { …, "settings": { … } } ],
-//!   "clips": [],
+//!   "clips": [ { "path": "…-replay-1.mkv", "source_recording": 1, … } ],
 //!   "bookmarks": [],
 //!   "events": [ … ]
 //! }
@@ -67,24 +67,27 @@
 //! is worth more than the one field nobody could interpret, so adding a kind is
 //! an addition to the file rather than a change to its shape.
 //!
-//! `clips` and `bookmarks` are reserved and are **always empty in this build**.
-//! Nothing here can create either, and for two different reasons now. A clip
-//! needs a recording running a replay buffer to save from, which is
-//! [issue #38](https://github.com/wildware-uk/clipped/issues/38). Bookmarks
-//! *exist* ([issue #64](https://github.com/wildware-uk/clipped/issues/64)) and
-//! are not kept here: a bookmark is an offset into one recording rather than a
-//! moment in a session, so it lives in that recording's own sidecar beside it
+//! **`clips` is written** since
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38). A save from a
+//! recording's replay buffer produces a shorter file beside it, and this is
+//! where the session says what that file is and which part of which recording
+//! it came from ([`SidecarClip`]). The key was reserved from the first version
+//! of this schema for exactly this, so filling it is an addition to the file
+//! rather than a change to its shape and the version is unchanged (AGENTS.md
+//! section 43). A session that produced none writes an empty list, as every
+//! session did before.
+//!
+//! `bookmarks` **is still reserved and always empty**. Bookmarks *exist*
+//! ([issue #64](https://github.com/wildware-uk/clipped/issues/64)) and are not
+//! kept here: a bookmark is an offset into one recording rather than a moment
+//! in a session, so it lives in that recording's own sidecar beside it
 //! (`crate::bookmarks`, `docs/bookmarks.md`) — which is also the shape
 //! `clipped-storage`'s `bookmarks` table has. What no build has is a way to
 //! *take* one during an automatic session: `watch` serves no protocol, so
 //! nothing can reach it with an `add_bookmark`, and joining the two is
-//! [issue #232](https://github.com/wildware-uk/clipped/issues/232).
-//!
-//! Both keys are named here so that filling them later is an addition to the
-//! file rather than a change to its shape (AGENTS.md section 43). A reader must
-//! not infer from their presence that a session has none — for bookmarks, the
-//! answer is in the recordings' own files; `docs/sessions.md` says so in the
-//! same words.
+//! [issue #232](https://github.com/wildware-uk/clipped/issues/232). A reader
+//! must not infer from the empty list that a session has none; the answer is in
+//! the recordings' own files, and `docs/sessions.md` says so in the same words.
 //!
 //! # Writing it safely
 //!
@@ -103,6 +106,9 @@ use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 
 use super::clock;
+use clipped_events::StoredEvent;
+use clipped_library::virtual_clip::{ClipOrigin, VirtualClip};
+
 use super::session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionEvent, SessionEventKind,
 };
@@ -114,7 +120,7 @@ use crate::config::{ResolvedSettings, SettingKey};
 /// time. It exists so that whatever reads these files — M6's library index
 /// first — can tell a file it understands from one it does not, rather than
 /// half-understanding it.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Writes `session`'s sidecar into `directory`, replacing any previous one.
 ///
@@ -127,12 +133,10 @@ pub(crate) fn write(directory: &Path, session: &Session) -> io::Result<PathBuf> 
     fs::create_dir_all(directory)?;
 
     let path = session.sidecar_path(directory);
-    let temporary = path.with_extension("tmp");
     let json = serde_json::to_vec_pretty(&SidecarFile::of(session))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
-    fs::write(&temporary, &json)?;
-    fs::rename(&temporary, &path)?;
+    clipped_logging::write_atomically(&path, |temporary| io::Write::write_all(temporary, &json))?;
     Ok(path)
 }
 
@@ -149,11 +153,17 @@ struct SidecarFile<'a> {
     started_at: String,
     ended_at: Option<String>,
     recordings: Vec<SidecarRecording<'a>>,
-    /// Always empty; see the module documentation.
-    clips: Reserved,
+    clips: Vec<SidecarClip>,
     /// Always empty; see the module documentation.
     bookmarks: Reserved,
     events: Vec<SidecarEvent>,
+    /// What plugins reported, each as its own self-describing document.
+    ///
+    /// A separate array from `events` because they are separate vocabularies —
+    /// see [`SessionEventKind`] — and each element is a whole [`StoredEvent`]
+    /// rather than fields picked out of one, so that a field a newer build
+    /// added survives being written by this one (`clipped_events::schema`).
+    game_events: Vec<StoredEvent>,
 }
 
 impl<'a> SidecarFile<'a> {
@@ -169,17 +179,27 @@ impl<'a> SidecarFile<'a> {
                 .iter()
                 .map(SidecarRecording::of)
                 .collect(),
-            clips: Reserved,
+            clips: session
+                .clips()
+                .iter()
+                .map(SidecarClip::of)
+                .chain(generated_clips(session))
+                .collect(),
             bookmarks: Reserved,
             events: session.events().iter().map(SidecarEvent::of).collect(),
+            game_events: session
+                .game_events()
+                .iter()
+                .cloned()
+                .map(StoredEvent::new)
+                .collect(),
         }
     }
 }
 
 /// A list this build always writes empty.
 ///
-/// A type rather than an empty `Vec` of something, because nothing in an
-/// automatic session fills either list: no clip can be made at all, and a
+/// A type rather than an empty `Vec` of something, because nothing fills it: a
 /// bookmark belongs to a recording's own sidecar rather than to this file. See
 /// the module documentation.
 #[derive(Debug)]
@@ -232,6 +252,20 @@ struct SidecarRecording<'a> {
     frames_encoded: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_seconds: Option<f64>,
+    /// Where this file starts on the session's timeline, in nanoseconds.
+    ///
+    /// With `duration_seconds` this is the span the file covers, and a span is
+    /// what turns a moment on that timeline into a position in *this* file --
+    /// which is how an event ends up drawn on the right second of the right
+    /// recording when a session wrote several
+    /// ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+    ///
+    /// Omitted when there is none, and the schema version is deliberately
+    /// unchanged: a reader that does not know the key ignores it and every
+    /// other field means exactly what it did, which is the same argument the
+    /// `settings` key was added under (`docs/sessions.md`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    starts_at_nanos: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,6 +277,154 @@ struct SidecarRecording<'a> {
     /// What this recording was made with, and which layer each answer came
     /// from. See [`SidecarSetting`].
     settings: BTreeMap<&'static str, SidecarSetting>,
+}
+
+/// One clip the session produced.
+///
+/// `source_start_seconds` and `source_end_seconds` are offsets into the
+/// recording named by `source_recording`, on that recording's own timeline —
+/// not wall-clock times — so they still mean something after the files have
+/// been moved to another machine. They are the two columns
+/// `clipped-storage`'s `clips` table already has for exactly this
+/// (`crates/storage/migrations/0001_initial.sql`).
+///
+/// `requested_seconds` and `complete` are the two figures the library does not
+/// store and a person reading the file wants: a replay clip is bought at
+/// keyframe granularity and a buffer that has not filled yet gives less than
+/// was asked for, so "I pressed the key for thirty seconds and got twelve" has
+/// an answer here (`docs/replay-buffer.md`).
+#[derive(Debug, Serialize)]
+struct SidecarClip {
+    /// The file, when there is one.
+    ///
+    /// Omitted for a generated clip: it is a range of a recording and costs no
+    /// disk until an export is asked for. Omitted rather than empty, because
+    /// the library treats a blank path as a malformed record and refuses it
+    /// (`clipped_library::index::ingest`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_recording: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_start_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_end_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    complete: Option<bool>,
+    /// What the clip is, as `EditDocument::write` wrote it. Generated clips
+    /// only: a saved replay's window is the two `source_*` fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edit: Option<String>,
+    /// Why it exists. Omitted for a saved replay, which the library reads as
+    /// `replay-buffer`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'static str>,
+    /// The rest of the serialised origin, and **what identifies a clip with no
+    /// file** -- see `docs/sessions.md`, "A clip with no file".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+impl SidecarClip {
+    fn of(clip: &super::session::SessionClip) -> Self {
+        Self {
+            path: Some(clip.path().display().to_string()),
+            created_at: clock::rfc3339(clip.created_at()),
+            source_recording: Some(clip.source_index()),
+            source_start_seconds: Some(clip.source_start().as_secs_f64()),
+            source_end_seconds: Some(clip.source_end().as_secs_f64()),
+            duration_seconds: Some(clip.duration().as_secs_f64()),
+            requested_seconds: Some(clip.requested().as_secs_f64()),
+            complete: Some(clip.is_complete()),
+            edit: None,
+            origin: None,
+            origin_detail: None,
+            title: None,
+        }
+    }
+
+    /// A clip generation produced, which has no file.
+    ///
+    /// `created_at` is the session's start rather than a clock reading: nothing
+    /// *happened* at the moment generation ran, and stamping it with one would
+    /// make the same session answer differently every time it is re-generated,
+    /// which is the property `record_generated` exists to keep.
+    ///
+    /// A clip whose document or origin will not serialise is skipped by the
+    /// caller rather than written half-formed; see [`generated_clips`].
+    fn generated(clip: &VirtualClip, created_at: &str) -> Option<Self> {
+        let origin = match clip.origin() {
+            ClipOrigin::Manual => "manual",
+            ClipOrigin::ReplayBuffer => "replay-buffer",
+            ClipOrigin::Highlight(_) => "highlight",
+        };
+        let detail = serde_json::to_value(clip.origin()).ok()?;
+        let detail = detail.as_object().map(|object| {
+            let rest: serde_json::Map<String, serde_json::Value> = object
+                .iter()
+                .filter(|(key, _)| key.as_str() != "origin")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            serde_json::Value::Object(rest).to_string()
+        });
+
+        Some(Self {
+            path: None,
+            created_at: created_at.to_owned(),
+            // The recording the document is cut from, by the ordinal a sidecar
+            // names one with -- which is what the library resolves back to a
+            // row. Without it a generated clip would be indexed with no link to
+            // the footage it is a range of, and "what depends on this
+            // recording?" would answer wrongly before a deletion (issue #111).
+            source_recording: clip
+                .edit()
+                .sources
+                .first()
+                .and_then(|source| source.recording.as_str().parse().ok()),
+            source_start_seconds: None,
+            source_end_seconds: None,
+            duration_seconds: clip.duration().map(|length| length.as_secs_f64()),
+            requested_seconds: None,
+            complete: None,
+            edit: clip.edit().write().ok(),
+            origin: Some(origin),
+            origin_detail: detail,
+            title: Some(clip.title().to_owned()).filter(|title| !title.is_empty()),
+        })
+    }
+}
+
+/// The session's generated clips, as sidecar entries.
+///
+/// A clip whose edit document or origin will not serialise is **left out and
+/// said**, rather than written without the field: the document is what the clip
+/// *is*, and an entry missing it is a row nothing can open. One clip failing
+/// must not cost the session its record (AGENTS.md section 17), so the rest are
+/// written.
+fn generated_clips(session: &Session) -> Vec<SidecarClip> {
+    let created_at = clock::rfc3339(session.started_at());
+    session
+        .generated()
+        .iter()
+        .filter_map(|clip| match SidecarClip::generated(clip, &created_at) {
+            Some(written) if written.edit.is_some() => Some(written),
+            _ => {
+                tracing::warn!(
+                    session = %session.id(),
+                    title = clip.title(),
+                    "a generated clip could not be written to the session's record, so it is not                      in it"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// One effective setting, as a session's record keeps it.
@@ -269,6 +451,7 @@ impl<'a> SidecarRecording<'a> {
             outcome: recording.outcome().map(RecordingOutcomeSummary::token),
             frames_encoded: None,
             duration_seconds: None,
+            starts_at_nanos: recording.starts_at_nanos(),
             width: None,
             height: None,
             end_reason: None,
@@ -390,6 +573,10 @@ impl SidecarEvent {
                 written.index = Some(*index);
                 written.outcome = Some(outcome.clone());
             }
+            SessionEventKind::ReplaySaved { index, output } => {
+                written.index = Some(*index);
+                written.output = Some(output.display().to_string());
+            }
             SessionEventKind::GameExited { pid } | SessionEventKind::GameRelaunched { pid } => {
                 written.pid = Some(*pid);
             }
@@ -418,6 +605,7 @@ fn token(kind: &SessionEventKind) -> &'static str {
         SessionEventKind::Started { .. } => "session-started",
         SessionEventKind::RecordingStarted { .. } => "recording-started",
         SessionEventKind::RecordingEnded { .. } => "recording-ended",
+        SessionEventKind::ReplaySaved { .. } => "replay-saved",
         SessionEventKind::GameExited { .. } => "game-exited",
         SessionEventKind::GameRelaunched { .. } => "game-relaunched",
         SessionEventKind::AnotherGameStarted { .. } => "another-game-started",
@@ -437,6 +625,29 @@ mod tests {
     use crate::automatic::session::SessionEndReason;
     use crate::config::{Configuration, GameKey, Preferences, ResolutionSetting};
     use crate::report::EndReason;
+
+    /// The number this build writes and the number the reader it ships with
+    /// accepts are the same number.
+    ///
+    /// The two constants are deliberately not shared -- the layering table puts
+    /// the writer above the reader -- so nothing but a test stops them drifting.
+    /// The comment on `SUPPORTED_SCHEMA_VERSION` claimed a test called
+    /// `the_documented_sidecar_is_the_one_this_build_reads` in
+    /// `crates/library/tests/sidecars.rs` was doing it. No such test existed,
+    /// and the drift it was supposed to catch is silent in the worst way: the
+    /// recorder writes a sidecar every session, and a reader one version behind
+    /// refuses every one of them, so a user loses their whole library index and
+    /// nothing fails until then.
+    #[test]
+    fn the_reader_this_build_ships_understands_what_this_build_writes() {
+        assert_eq!(
+            SCHEMA_VERSION,
+            clipped_library::index::SUPPORTED_SCHEMA_VERSION,
+            "the recorder writes sidecars at version {} and the index this build              ships accepts up to {}, so every session this build records would be              refused by its own library",
+            SCHEMA_VERSION,
+            clipped_library::index::SUPPORTED_SCHEMA_VERSION,
+        );
+    }
 
     fn at(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
@@ -617,6 +828,217 @@ mod tests {
             ]
         );
         assert_eq!(file["events"][3]["reason"], Value::from("game-exited"));
+    }
+
+    #[test]
+    fn what_a_plugin_reported_reaches_the_file_in_the_order_it_happened() {
+        use core::time::Duration;
+
+        use clipped_events::{Confidence, EventKind, EventSource, EventTime, EventTiming};
+
+        let kill = |seconds: i64| {
+            clipped_events::GameEvent::new(
+                EventKind::Kill,
+                EventTiming::new(
+                    EventTime::from_media_nanos(seconds * 1_000_000_000),
+                    Duration::ZERO,
+                ),
+                EventSource::plugin("cs2").expect("a legal source"),
+                Confidence::CERTAIN,
+            )
+        };
+
+        let mut session = session();
+        // Out of order on purpose: a plugin observes a game telling it
+        // something, so two reports can arrive the wrong way round. The file
+        // must carry the order things *happened*.
+        session.record_game_event(kill(9));
+        session.record_game_event(kill(4));
+
+        let json = serde_json::to_string(&SidecarFile::of(&session)).expect("the shape encodes");
+        let file: Value = serde_json::from_str(&json).expect("what serde wrote is JSON");
+
+        let events = file["game_events"]
+            .as_array()
+            .expect("the game events are a list");
+        let moments: Vec<i64> = events
+            .iter()
+            .map(|event| event["at"].as_i64().expect("each carries its moment"))
+            .collect();
+        assert_eq!(
+            moments,
+            [4_000_000_000, 9_000_000_000],
+            "the file kept the order the reports arrived rather than the order things happened"
+        );
+
+        // A separate array from the session's own history, which is the whole
+        // reason `SessionEventKind` has no game-event variant.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["kind"], Value::from("kill"));
+        assert_eq!(events[0]["source"], Value::from("cs2"));
+        assert!(
+            file["events"]
+                .as_array()
+                .expect("the session's own events are a list")
+                .iter()
+                .all(|event| event["event"] != "kill"),
+            "a game event was written into the session's own history"
+        );
+    }
+
+    /// A kill `seconds` into the session's timeline.
+    fn a_kill(seconds: i64) -> clipped_events::GameEvent {
+        use core::time::Duration;
+
+        use clipped_events::{Confidence, EventKind, EventSource, EventTiming};
+
+        clipped_events::GameEvent::new(
+            EventKind::Kill,
+            EventTiming::new(
+                clipped_events::EventTime::from_media_nanos(seconds * 1_000_000_000),
+                Duration::ZERO,
+            ),
+            EventSource::plugin("acme-cs2").expect("a legal source"),
+            Confidence::CERTAIN,
+        )
+    }
+
+    #[test]
+    fn a_kill_during_a_session_is_a_clip_in_its_record_when_it_ends() {
+        // Issue #76, end to end within this crate: a plugin reports a kill, the
+        // session ends, and the range it was worth is in the file the library
+        // reads. Nothing is rendered -- a generated clip is a description until
+        // somebody asks for a file.
+        // Three seconds into a recording that runs for six, so the moment is
+        // one the footage actually covers.
+        let mut session = session();
+        session.record_game_event(a_kill(3));
+        session.recordings[0].starts_at_nanos = Some(0);
+        session.end(SessionEndReason::GameExited, at(1_786_458_800));
+
+        let json = serde_json::to_string(&SidecarFile::of(&session)).expect("the shape encodes");
+        let file: Value = serde_json::from_str(&json).expect("what serde wrote is JSON");
+
+        let generated: Vec<&Value> = file["clips"]
+            .as_array()
+            .expect("the clips are a list")
+            .iter()
+            .filter(|clip| clip["origin"] == "highlight")
+            .collect();
+
+        assert_eq!(
+            generated.len(),
+            1,
+            "a kill 3 s into a recording that covers it produced no clip: {}",
+            file["clips"]
+        );
+        assert!(
+            generated[0].get("path").is_none(),
+            "the clip was written with a file it does not have"
+        );
+        assert_eq!(
+            generated[0]["source_recording"],
+            Value::from(1),
+            "the clip is not linked to the recording it is a range of, so nothing could answer              what depends on that recording before deleting it"
+        );
+    }
+
+    #[test]
+    fn a_session_whose_recording_has_no_span_generates_nothing() {
+        // A clip is a range *of a recording*. A recording that produced no
+        // frame has no span, so there is nothing for a range to be of, and the
+        // honest answer is no clip rather than one pointing at footage that
+        // does not exist (AGENTS.md section 27).
+        let mut session = session();
+        session.record_game_event(a_kill(3));
+        session.end(SessionEndReason::GameExited, at(1_786_458_800));
+
+        assert!(
+            session.generated().is_empty(),
+            "a session with no placed recording generated a clip anyway"
+        );
+        assert_eq!(
+            session.game_events().len(),
+            1,
+            "the event is still the session's, and was lost"
+        );
+    }
+
+    #[test]
+    fn a_generated_clip_is_written_with_no_file_and_with_why_it_exists() {
+        use core::time::Duration;
+
+        use clipped_edit::{RecordingId, SourceSpan, SourceTime};
+        use clipped_events::{Confidence, EventKind, EventSource, EventTime, EventTiming};
+        use clipped_library::virtual_clip::HighlightCause;
+
+        let kill = clipped_events::GameEvent::new(
+            EventKind::Kill,
+            EventTiming::new(EventTime::from_media_nanos(600_000_000_000), Duration::ZERO),
+            EventSource::plugin("acme-cs2").expect("a legal source"),
+            Confidence::CERTAIN,
+        );
+        let clip = VirtualClip::of_range(
+            "Kill",
+            RecordingId::new("1"),
+            SourceSpan::new(
+                SourceTime::from_nanos(590_000_000_000),
+                SourceTime::from_nanos(602_000_000_000),
+            )
+            .expect("a legal span"),
+            ClipOrigin::Highlight(HighlightCause::of(&kill)),
+        );
+
+        let mut session = session();
+        session.record_generated(vec![clip]);
+
+        let json = serde_json::to_string(&SidecarFile::of(&session)).expect("the shape encodes");
+        let file: Value = serde_json::from_str(&json).expect("what serde wrote is JSON");
+        let clips = file["clips"].as_array().expect("the clips are a list");
+
+        let generated = clips
+            .iter()
+            .find(|clip| clip["origin"] == "highlight")
+            .expect("the generated clip is in the record");
+
+        // No file, and **absent** rather than empty: the library refuses a
+        // blank path as a malformed record, so writing one would turn a clip
+        // that has not been exported into a clip nobody can find.
+        assert!(
+            generated.get("path").is_none(),
+            "a clip nothing has exported was written with a file: {generated}"
+        );
+        assert!(
+            generated["edit"]
+                .as_str()
+                .is_some_and(|edit| !edit.is_empty()),
+            "the document is what the clip is, and it was not written: {generated}"
+        );
+
+        // What identifies it. Without this the library has no key for a clip
+        // with no path and would write a second copy on every reconciliation.
+        let detail = generated["origin_detail"]
+            .as_str()
+            .expect("why it exists was written");
+        assert!(detail.contains("acme-cs2"), "{detail}");
+        assert!(detail.contains("600000000000"), "{detail}");
+        assert!(
+            !detail.contains("\"origin\""),
+            "the tag is the `origin` column and must not be repeated in the detail: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_session_that_heard_nothing_writes_an_empty_list_rather_than_no_key() {
+        // A reader that defaults a missing key and one that reads an empty list
+        // agree; a reader that treats the key's absence as "unknown" does not.
+        // The session's own `clips` and `bookmarks` are written the same way.
+        let file = written();
+        assert_eq!(
+            file["game_events"],
+            Value::Array(Vec::new()),
+            "a session with no game events must still say so"
+        );
     }
 
     #[test]

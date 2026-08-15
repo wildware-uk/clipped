@@ -405,8 +405,10 @@ impl Workspace {
                 &self.clips().to_string_lossy(),
                 "--window-timeout",
                 WINDOW_TIMEOUT,
-                // The session cannot record audio yet and would warn on every
-                // recording; a test should ask for what it expects to get.
+                // Asked for explicitly, so this test asserts what it
+                // configured rather than what the machine happened to have: a
+                // CI runner with no audio device and one with two produce
+                // different files otherwise, and the assertion below is exact.
                 "--microphone",
                 "none",
                 "--system-audio",
@@ -804,9 +806,9 @@ fn assert_media_decodes(recording: &Value, client: (u32, u32), diagnostics: &str
 
     media
         .validate()
-        // One video stream and nothing else: there is no audio track yet, and
-        // "at least one video stream" would not notice one appearing
-        // half-wired.
+        // One video stream and nothing else, because this recording asked for
+        // no audio. "At least one video stream" would not notice a track
+        // appearing half-wired, which is the failure worth catching here.
         .stream_count(1)
         .video_stream_count(1)
         .video(

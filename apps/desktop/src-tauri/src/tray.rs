@@ -40,7 +40,8 @@ use std::sync::{Arc, Mutex};
 
 use clipped_ipc::supervisor::{wait_for_recorder_to_exit, RecorderCallError, ShutdownOutcome};
 use clipped_ipc::{
-    AddBookmark, Command, RecorderLink, RecorderLinkState, Reply, StartRecording, StopRecording,
+    AddBookmark, Command, RecorderLink, RecorderLinkState, Reply, SaveReplay, StartRecording,
+    StopRecording,
 };
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -320,13 +321,15 @@ enum MenuAction {
     Record,
     /// Mark this moment in the recording that is running.
     Bookmark,
+    /// Write out the last stretch of the running recording's replay buffer.
+    SaveReplay,
     /// Stop the recorder and then this process.
     Exit,
     /// A line of the menu that is not a control.
     ///
-    /// The status line and the one unbuilt command. Both are disabled, so
-    /// Windows raises no event for them; naming them anyway is what tells an
-    /// item with no handler apart from an item with nothing to do.
+    /// The status line, which is a sentence. It is disabled, so Windows raises
+    /// no event for it; naming it anyway is what tells an item with no handler
+    /// apart from an item with nothing to do.
     Inert,
     /// An identifier this build does not know.
     Unknown,
@@ -339,8 +342,9 @@ fn action_for(id: &str) -> MenuAction {
         ids::SETTINGS => MenuAction::Navigate("/settings"),
         ids::RECORD => MenuAction::Record,
         ids::ADD_BOOKMARK => MenuAction::Bookmark,
+        ids::SAVE_REPLAY => MenuAction::SaveReplay,
         ids::EXIT => MenuAction::Exit,
-        ids::STATUS | ids::SAVE_REPLAY => MenuAction::Inert,
+        ids::STATUS => MenuAction::Inert,
         _ => MenuAction::Unknown,
     }
 }
@@ -359,6 +363,9 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         }
         MenuAction::Bookmark => {
             std::thread::spawn(move || bookmark(&app));
+        }
+        MenuAction::SaveReplay => {
+            std::thread::spawn(move || save_replay(&app));
         }
         MenuAction::Exit => {
             std::thread::spawn(move || exit(&app));
@@ -471,8 +478,66 @@ fn bookmark(app: &AppHandle) {
     }
 }
 
+/// Writes out the last stretch of the running recording's replay buffer.
+///
+/// Nothing is named, for the reason [`bookmark`] names nothing: the item is one
+/// click in a menu with nowhere to type, so it saves *the* recording's buffer,
+/// for the length that buffer was started with, into the place the recorder
+/// puts a clip. Every one of those is a decision the recorder already has an
+/// answer to, and a second answer here would be one the user never chose
+/// (`docs/ipc.md` on `save_replay`'s three optional fields).
+///
+/// # Why the clip's path is said and the bookmark's offset is not
+///
+/// A bookmark goes *into* the recording somebody is already making. A replay is
+/// a **new file**, in a place the user did not name, and a file whose location
+/// nobody is told is a file nobody finds. So the outcome is spelled in full,
+/// with the length, and with whether the buffer held everything that was asked
+/// for — a clip that is shorter than the window is not a failure, it is a
+/// buffer that had not been filling for long enough, and saying so is the
+/// difference between a working feature and a mysterious one.
+///
+/// The item is only enabled while a recording is keeping a buffer, so the
+/// refusals below are for the click that lands between the menu being drawn and
+/// the recording ending. They are reported rather than swallowed: the user
+/// asked for a file and there is none.
+fn save_replay(app: &AppHandle) {
+    let Some(link) = app.try_state::<RecorderLink>() else {
+        return;
+    };
+
+    let outcome = match link.call(&Command::SaveReplay(SaveReplay::default())) {
+        Ok(Reply::ReplaySaved { clip }) => {
+            let complete = if clip.complete {
+                String::new()
+            } else {
+                format!(
+                    ", {:.1}s short of the buffer's window",
+                    clip.shortfall_seconds
+                )
+            };
+            tracing_line(&format!(
+                "saved {:.1}s of replay to {}{complete}",
+                clip.duration_seconds, clip.path
+            ));
+            Ok(())
+        }
+        Ok(other) => Err(format!("The recorder answered a replay with {other:?}.")),
+        Err(error) => Err(format!("The replay could not be saved. {error}")),
+    };
+
+    if let Err(message) = outcome {
+        report(app, &message);
+    }
+}
+
 /// Opens the window at a screen.
-fn open_screen(app: &AppHandle, path: &str) {
+///
+/// Reachable from [`crate::notifications`] as well as from the menu: a
+/// notification's action is the same "raise the window somewhere useful" the
+/// tray performs, and a second implementation of it would be a second answer to
+/// how a screen is opened (AGENTS.md section 55).
+pub(crate) fn open_screen(app: &AppHandle, path: &str) {
     show_window(app);
     if let Err(error) = app.emit(NAVIGATE_EVENT, path) {
         eprintln!("the window could not be sent to {path}: {error}");
@@ -645,15 +710,55 @@ mod tests {
         // the command would be enabled in the menu and silently do nothing when
         // clicked, which is the failure AGENTS.md section 27 names.
         assert_eq!(action_for(ids::ADD_BOOKMARK), MenuAction::Bookmark);
+        // And issue #427 is the same thing happening to Save Replay: the
+        // recorder has had the command since issue #38, and until now the item
+        // was `Inert` — so a recording started with a buffer drew an enabled
+        // control that did nothing at all when clicked.
+        assert_eq!(action_for(ids::SAVE_REPLAY), MenuAction::SaveReplay);
     }
 
     #[test]
-    fn the_lines_that_are_not_controls_are_named_rather_than_left_over() {
-        // Both are disabled, so Windows raises no event for them. Naming them
-        // anyway is what makes `Unknown` mean "somebody added an item and
-        // forgot" rather than "one of the lines that never does anything".
-        for id in [ids::STATUS, ids::SAVE_REPLAY] {
-            assert_eq!(action_for(id), MenuAction::Inert, "{id}");
+    fn the_line_that_is_not_a_control_is_named_rather_than_left_over() {
+        // The status line is a sentence, and it is disabled, so Windows raises
+        // no event for it. Naming it anyway is what makes `Unknown` mean
+        // "somebody added an item and forgot" rather than "the line that never
+        // does anything".
+        assert_eq!(action_for(ids::STATUS), MenuAction::Inert);
+    }
+
+    #[test]
+    fn every_enabled_item_the_model_can_produce_sends_something() {
+        // The property behind the two tests above, and the one that catches the
+        // next item added: an item the tray is willing to *enable* must have an
+        // action that is not `Inert`. Walked over every link state, because
+        // which items are enabled is exactly what the state decides.
+        let recording = RecorderLinkState::Attached {
+            recorder_process_id: 7,
+            features: clipped_ipc::features::ALL
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            status: clipped_ipc::RecorderStatus::Recording(clipped_ipc::ActiveRecording {
+                recording_id: "r-1".to_owned(),
+                output: r"D:\clips\session.mkv".to_owned(),
+                target: "process `cs2.exe`".to_owned(),
+                elapsed_ms: 1_000,
+                replay_seconds: Some(300),
+            }),
+        };
+
+        for link in [RecorderLinkState::Connecting, recording] {
+            let model = crate::tray_model::tray_model(&link, None);
+            for (id, entry) in menu_entries(&model) {
+                if entry.enabled {
+                    assert_ne!(
+                        action_for(id),
+                        MenuAction::Inert,
+                        "`{id}` (`{}`) can be clicked and does nothing",
+                        entry.label
+                    );
+                }
+            }
         }
     }
 

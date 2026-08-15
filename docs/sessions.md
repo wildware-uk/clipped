@@ -133,12 +133,14 @@ Three facts about it are worth having in one place:
   it is placed on, so there has to be a timeline first. A recording that never
   captured a frame — no window appeared — starts no plugin, and a session with
   two recordings in it runs its plugins twice, once per file.
-- **Nothing is enabled, so nothing starts.** Starting a plugin needs the consent
-  the user recorded against what it declares, and nothing records that yet
-  ([#282](https://github.com/wildware-uk/clipped/issues/282)). `watch` reads the
-  plugins directory, says what is installed and what was refused, and names any
+- **Only what the settings file enables starts.** The `plugins` section records
+  which plugins the user turned on and the consent token each was enabled with
+  ([#282](https://github.com/wildware-uk/clipped/issues/282)); a plugin it does
+  not mention is off, and one whose declaration no longer matches its token is
+  refused and reported rather than started. `watch` reads the plugins
+  directory, says what is installed and what was refused, and names any
   installed plugin that claims the game it is about to record as one it is not
-  starting. [docs/privacy.md](privacy.md) is why enabling one uninvited is not
+  starting, with the reason. [docs/privacy.md](privacy.md) is why enabling one uninvited is not
   an option. What a plugin reports is likewise handed over rather than kept:
   storing events against the recording is
   [#71](https://github.com/wildware-uk/clipped/issues/71).
@@ -351,7 +353,7 @@ one sitting, one file — produces a file named after the session and nothing el
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "session_id": "counter-strike-2-20260811-143205",
   "game": {
     "kind": "known",
@@ -369,6 +371,7 @@ one sitting, one file — produces a file named after the session and nothing el
       "outcome": "recorded",
       "frames_encoded": 65040,
       "duration_seconds": 1084.0,
+      "starts_at_nanos": 0,
       "width": 2560,
       "height": 1440,
       "end_reason": "target-lost",
@@ -384,13 +387,36 @@ one sitting, one file — produces a file named after the session and nothing el
       }
     }
   ],
-  "clips": [],
+  "clips": [
+    {
+      "path": "D:\\clips\\clipped-counter-strike-2-20260811-143205-replay-1.mkv",
+      "created_at": "2026-08-11T14:41:52+01:00",
+      "source_recording": 1,
+      "source_start_seconds": 553.017,
+      "source_end_seconds": 583.0,
+      "duration_seconds": 29.983,
+      "requested_seconds": 30.0,
+      "complete": true
+    }
+  ],
   "bookmarks": [],
   "events": [
     { "at": "2026-08-11T14:32:05+01:00", "event": "session-started", "pid": 4242, "image_name": "cs2.exe" },
     { "at": "2026-08-11T14:32:09+01:00", "event": "recording-started", "index": 1, "output": "…" },
     { "at": "2026-08-11T14:50:13+01:00", "event": "recording-ended", "index": 1, "outcome": "recorded" },
     { "at": "2026-08-11T15:31:21+01:00", "event": "session-ended", "reason": "game-exited" }
+  ],
+  "game_events": [
+    {
+      "schema": 1,
+      "kind": "kill",
+      "at": 137000000000,
+      "precision": 0,
+      "latency": 250000000,
+      "source": "cs2",
+      "confidence": 1.0,
+      "data": { "weapon": "ak47", "headshot": true }
+    }
   ]
 }
 ```
@@ -403,17 +429,81 @@ and change. It is per recording rather than per session because that is where
 the answer can differ — a session that spans a settings change holds one
 recording made at the old settings and one at the new.
 
-The key was added after the schema shipped and the `schema_version` is
+`starts_at_nanos` is where that recording begins on the **session's** timeline,
+whose zero is the first video frame the session kept. The first recording starts
+at zero by definition; a second one — a window destroyed and recreated, a game
+relaunched inside its restart grace — starts wherever it began relative to that
+same origin, never back at zero. With `duration_seconds` it is the span the file
+covers, and a span is what turns a moment on the session's timeline into a
+position in *this* file, which is how a kill ends up drawn on the right second
+of the right recording ([#71](https://github.com/wildware-uk/clipped/issues/71),
+[docs/av-sync.md](av-sync.md)).
+
+It is absent for a recording that produced no frame: there is no timeline for it
+to start on, and no moment it can cover. An event that falls in such a gap
+belongs to the session and to no file, which the library stores as a null
+`recording_id` rather than as the nearest guess.
+
+Both keys were added after the schema shipped and the `schema_version` is
 deliberately unchanged: every other field means exactly what it did, and a
 reader that does not know the key ignores it. A sidecar written by an older
 build has no `settings` on its recordings, which is not the same as a recording
 made at the defaults.
 
-`clips` and `bookmarks` are **always empty in this build**. They are written so
-that a reader can tell "no clips" from "a file that predates clips", and so that
-filling either is an addition rather than a change of shape (AGENTS.md section
-43). Their presence is not a claim that a session has none: no build can make a
-clip at all ([#38]), and a session's bookmarks are in its recordings' own files
+`clips` is **one entry per replay saved out of this session's recordings**
+([#38]). A save takes the last N seconds out of the recording's replay buffer
+and writes a shorter file beside it, and this is where the session says what
+that file is and which part of which recording it came from:
+
+- `source_recording` is a recording's `index` in the list above, and
+  `source_start_seconds`/`source_end_seconds` are offsets into *that recording's
+  own timeline* rather than wall-clock times, so they still mean something after
+  the folder has been moved to another drive. They are the two columns
+  `clipped-storage`'s `clips` table already has for exactly this.
+- `requested_seconds` and `complete` are what the library does not store and a
+  person reading the file wants. A clip is bought at keyframe granularity, so it
+  is usually slightly longer at the front than was asked for; and a buffer that
+  had not filled yet gives less, which is what `complete: false` records. "I
+  pressed the key for thirty seconds and got twelve" has an answer here
+  (`docs/replay-buffer.md`).
+
+### A clip with no file
+
+`path` is **absent** for a clip nothing has exported yet — a generated
+highlight is a range of a recording and costs no disk until somebody asks for a
+file (SPEC.md sections 19, 20 and 44). A saved replay has one from the moment it
+is written, because the packets it is made of were about to be evicted from
+memory. Absent and empty are not the same thing: a `path` that is present and
+blank is a malformed record and is still refused.
+
+Such a clip carries three keys instead:
+
+- `edit` is what the clip *is*, as `clipped_edit::EditDocument::write` wrote it.
+  The library stores the text without interpreting it.
+- `origin` is `manual`, `replay-buffer` or `highlight`. **Absent means
+  `replay-buffer`**, because until a clip with no file could be stored that was
+  the only kind there was.
+- `origin_detail` is the rest of the serialised origin: for a highlight,
+  `{"kind":…,"at":…,"source":…}` — what happened, when, and which plugin said
+  so.
+
+`origin_detail` is not only description. **It is what identifies the clip.** A
+clip with a file is identified by that file, which is why `clips.path` is
+unique; a clip with none has nothing else unique about it, so the library
+matches one on its session and its cause. Two highlights of one session cannot
+share both, because the generator refuses to cut a second clip over a window it
+has already taken. Getting that wrong duplicates every generated clip on every
+reconciliation — which is why `crates/library/tests/reconciliation.rs` indexes
+the same session twice and counts.
+
+The key was reserved from the first version of this schema and is filled now, so
+the `schema_version` is unchanged: a reader that ignores it loses the clips and
+still indexes the sitting. A session that saved none writes an empty list, as
+every session did before.
+
+`bookmarks` is **still always empty**. It is written so that a reader can tell
+"no bookmarks" from "a file that predates them", and its presence is not a claim
+that a session has none: a session's bookmarks are in its recordings' own files
 (`docs/bookmarks.md`). Nothing can take a bookmark during an automatic session
 yet either: `watch` serves no protocol, so no `add_bookmark` can reach it, and
 it registers no hotkey either — the global hotkeys belong to `serve`
@@ -439,8 +529,11 @@ met as unattributed and reports it, instead of refusing the whole sitting over
 one word it could not interpret.
 
 `event` values are `session-started`, `recording-started`, `recording-ended`,
-`game-exited`, `game-relaunched`, `another-game-started`, `system-resumed`,
-`recording-limit-reached` and `session-ended`. These are events about the
+`replay-saved`, `game-exited`, `game-relaunched`, `another-game-started`,
+`system-resumed`, `recording-limit-reached` and `session-ended`. A
+`replay-saved` carries the `index` of the recording it came out of and the
+`output` it was written to — the same clip `clips` describes, in the session's
+history, so that "what happened during this sitting" reads in order. These are events about the
 *session*; game events — a kill, a round starting — are a different vocabulary
 entirely, they come from plugins, and they are M9's `clipped-events`.
 

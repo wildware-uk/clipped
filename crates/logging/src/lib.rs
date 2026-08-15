@@ -71,6 +71,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+pub mod atomic;
 mod context;
 mod directories;
 mod error;
@@ -79,6 +80,7 @@ mod frame;
 mod init;
 mod redact;
 
+pub use atomic::{sweep_orphaned_temporaries, temporary_path, write_atomically};
 pub use context::{AudioSource, CaptureBackend, GameId, SessionContext, SessionId, VideoEncoder};
 pub use directories::application_directory;
 pub use error::{IdentifierRejection, LoggingError};

@@ -109,6 +109,25 @@ pub enum LeaseError {
         /// What the buffer holds.
         held: TimeRange,
     },
+    /// A segment the buffer had spilled to disk could not be read back.
+    ///
+    /// The lease is refused rather than returned short. A clip written from
+    /// the segments that *did* read would be missing the middle of itself and
+    /// would say nothing about it, which is the one outcome worse than no clip
+    /// (AGENTS.md section 22).
+    Unreadable {
+        /// The segment that would not read.
+        segment: crate::SegmentId,
+        /// What kind of failure it was.
+        ///
+        /// The kind and the message rather than the `io::Error` itself, because
+        /// this type is `Clone` and comparable and an `io::Error` is neither —
+        /// and a caller that wants to tell "the drive went away" from "the file
+        /// is corrupt" needs the kind rather than the object.
+        kind: std::io::ErrorKind,
+        /// What the filesystem said.
+        detail: String,
+    },
 }
 
 impl fmt::Display for LeaseError {
@@ -119,6 +138,13 @@ impl fmt::Display for LeaseError {
             Self::OutsideBuffer { requested, held } => write!(
                 formatter,
                 "the replay buffer holds {held} and nothing of the requested {requested}"
+            ),
+            Self::Unreadable {
+                segment, detail, ..
+            } => write!(
+                formatter,
+                "the replay buffer had spilled {segment} to disk and could not read it back: \
+                 {detail}"
             ),
         }
     }

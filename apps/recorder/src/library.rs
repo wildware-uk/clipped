@@ -54,15 +54,18 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use clipped_ipc::{
-    ErrorCode, LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage,
-    LibrarySessions, ProtocolError, MAX_FRAME_BYTES,
+    ErrorCode, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
+    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, ProtocolError,
+    MAX_FRAME_BYTES,
 };
 use clipped_library::index::{
     cursor_of, game_summaries, list_sessions, reconcile, GameSummary, IndexControl, IndexReport,
     IndexSettings, IndexedClip, IndexedRecording, IndexedSession, SessionListing,
 };
 use clipped_library::search::Query;
+use clipped_library::thumbnail::{ServiceOptions, ThumbnailCache, ThumbnailService};
 use clipped_storage::Database;
+use clipped_waveform::{ServiceOptions as WaveformOptions, WaveformCache, WaveformService};
 
 /// The file the library index lives in, under Clipped's per-user directory.
 const LIBRARY_FILE: &str = "library.db";
@@ -151,6 +154,62 @@ impl LibraryReader {
         })
     }
 
+    /// The game events of one recording, placed in that recording's file.
+    ///
+    /// The offset is a subtraction the index can do because both halves are
+    /// columns: an event's moment on the session's timeline, and where that
+    /// recording starts on the same timeline (`starts_at_nanos`, migration
+    /// `0005`). Nothing opens a file, and nothing re-reads a sidecar.
+    ///
+    /// A recording with no events answers with an empty lane rather than an
+    /// error. "None" and "the question was never asked" are different things to
+    /// draw, and the reply arriving at all is what tells them apart
+    /// (AGENTS.md section 27).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] if the recording is not named by an
+    /// identifier the library uses, and [`ErrorCode::LibraryUnavailable`] if
+    /// the index could not be read.
+    pub fn events(&self, request: &LibraryEvents) -> Result<LibraryEventLane, ProtocolError> {
+        // Before the database is opened, for the reason `sessions` parses its
+        // query first: a malformed identifier is the caller's mistake and is
+        // worth saying so even on a machine whose library cannot be read.
+        let recording: i64 = request.recording.parse().map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidParameters,
+                format!(
+                    "`library_events` was given `{}`, which is not a recording identifier this                      library uses",
+                    request.recording
+                ),
+            )
+        })?;
+
+        self.with_database(|database| {
+            let mut statement = database
+                .connection()
+                .prepare(
+                    "SELECT game_events.at_nanos - recordings.starts_at_nanos, \n                            game_events.kind, game_events.source \n                     FROM game_events \n                     JOIN recordings \n                         ON recordings.recording_id = game_events.recording_id \n                     WHERE game_events.recording_id = ?1 \n                       AND recordings.starts_at_nanos IS NOT NULL \n                     ORDER BY game_events.at_nanos",
+                )
+                .map_err(unreadable)?;
+
+            let marks = statement
+                .query_map([recording], |row| {
+                    Ok(LibraryEventMark {
+                        recording: request.recording.clone(),
+                        at: row.get(0)?,
+                        kind: row.get(1)?,
+                        source: row.get(2)?,
+                    })
+                })
+                .map_err(unreadable)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(unreadable)?;
+
+            Ok(LibraryEventLane { marks })
+        })
+    }
+
     /// Runs a read against the open database, opening it if this is the first
     /// question or if the last attempt failed.
     ///
@@ -207,6 +266,16 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> ProtocolError {
 }
 
 /// A read the index refused.
+fn unreadable(error: clipped_storage::rusqlite::Error) -> ProtocolError {
+    // The same code a failed index read answers with, because it is the same
+    // thing from the caller's side: the library is there and could not be
+    // asked. A window shows one message for both and retries the same way.
+    ProtocolError::new(
+        ErrorCode::LibraryUnavailable,
+        format!("the recording library could not be read: {error}"),
+    )
+}
+
 fn unavailable(error: clipped_library::index::IndexError) -> ProtocolError {
     ProtocolError::new(
         ErrorCode::LibraryUnavailable,
@@ -433,6 +502,23 @@ struct Indexer {
     control: IndexControl,
     state: Mutex<IndexerState>,
     woken: Condvar,
+    /// Makes the pictures the library screens draw, or [`None`] on a machine
+    /// with nowhere to keep them.
+    ///
+    /// Started with the indexer and asked for a picture per recording after
+    /// every successful reconciliation. Before this, `ThumbnailService` was
+    /// referenced by nothing but its own tests: the service, the cache and the
+    /// renderer were all finished and unreachable, so a shipped build made no
+    /// thumbnails at all
+    /// ([issue #57](https://github.com/wildware-uk/clipped/issues/57)).
+    thumbnails: Option<ThumbnailService>,
+    /// Makes the peaks a timeline draws, on the same terms.
+    ///
+    /// `clipped-waveform` was not a dependency of anything before this: it
+    /// appeared in the workspace root manifest and in comments and in nobody's
+    /// `[dependencies]`, so no waveform was ever generated
+    /// ([issue #66](https://github.com/wildware-uk/clipped/issues/66)).
+    waveforms: Option<WaveformService>,
 }
 
 /// The indexer's own state, which is all that a request touches.
@@ -459,12 +545,22 @@ impl LibraryIndexer {
     /// library is issue #272's question rather than this one's.
     #[must_use]
     pub fn for_this_user() -> Self {
-        Self::at(
+        let mut indexer = Self::at(
             clipped_logging::application_directory().map(|directory| directory.join(LIBRARY_FILE)),
             crate::config::default_output_directory()
                 .into_iter()
                 .collect(),
-        )
+        );
+        // Only here, and deliberately not in `at`: a test must not write
+        // pictures into the cache of whoever is running it (AGENTS.md section
+        // 25), and `at` is what every test uses.
+        if let Some(shared) = Arc::get_mut(&mut indexer.shared) {
+            shared.thumbnails = ThumbnailCache::in_default_directory()
+                .map(|cache| ThumbnailService::start(cache, ServiceOptions::new()));
+            shared.waveforms = WaveformCache::in_default_directory()
+                .map(|cache| WaveformService::start(cache, WaveformOptions::new()));
+        }
+        indexer
     }
 
     /// An indexer for a named library and named recording folders.
@@ -480,6 +576,8 @@ impl LibraryIndexer {
                 control: IndexControl::new(),
                 state: Mutex::new(IndexerState::default()),
                 woken: Condvar::new(),
+                thumbnails: None,
+                waveforms: None,
             }),
             thread: Mutex::new(None),
         }
@@ -667,7 +765,10 @@ impl Indexer {
 
         let open = database.as_mut().expect("the database was just opened");
         match reconcile(open, &self.settings, &self.control, SystemTime::now()) {
-            Ok(report) => report_unindexed(&report),
+            Ok(report) => {
+                report_unindexed(&report);
+                self.picture_what_was_indexed(open);
+            }
             Err(error) => {
                 // The connection is dropped rather than kept: a database that
                 // refused may have gone with its drive, and the next run should
@@ -680,6 +781,53 @@ impl Indexer {
                      try again"
                 );
             }
+        }
+    }
+}
+
+impl Indexer {
+    /// Asks for a picture and a waveform of every recording the index holds.
+    ///
+    /// After the reconciliation rather than during it, and by
+    /// [`ThumbnailService::request`] rather than
+    /// [`ThumbnailService::thumbnail`], because a scan has thousands of files
+    /// and wants none of the pictures yet — the service reads its own cache and
+    /// does the work on a background thread at the lowest priority it can get
+    /// (`clipped_library::thumbnail`).
+    ///
+    /// Nothing here waits, and nothing here fails a reconciliation. A recording
+    /// with no picture is a tile with no picture, which is a smaller problem
+    /// than an index that did not update (AGENTS.md section 17).
+    fn picture_what_was_indexed(&self, database: &Database) {
+        if self.thumbnails.is_none() && self.waveforms.is_none() {
+            return;
+        }
+        let recordings = match clipped_library::thumbnail::recordings_worth_reading(database) {
+            Ok(recordings) => recordings,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "the library index could not be asked which recordings need a picture, so \
+                     none were made this time"
+                );
+                return;
+            }
+        };
+
+        let asked = recordings.len();
+        for recording in recordings {
+            if let Some(service) = self.thumbnails.as_ref() {
+                let _ = service.request(&recording);
+            }
+            if let Some(service) = self.waveforms.as_ref() {
+                let _ = service.request(&recording);
+            }
+        }
+        if asked > 0 {
+            tracing::debug!(
+                recordings = asked,
+                "asked for a picture and a waveform of every recording the index holds"
+            );
         }
     }
 }

@@ -24,6 +24,8 @@
 //!   ([issue #46](https://github.com/wildware-uk/clipped/issues/46)).
 //! - `recover` — the footage a killed recorder left behind
 //!   ([issue #103](https://github.com/wildware-uk/clipped/issues/103)).
+//! - `replay` — record with a rolling buffer and save the last N seconds on a
+//!   hotkey ([issue #38](https://github.com/wildware-uk/clipped/issues/38)).
 //!
 //! Nothing is currently specified without being declared here. A subcommand
 //! that parses arguments and then does nothing is a control that silently
@@ -35,7 +37,10 @@ use std::path::PathBuf;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use clipped_windows::{TargetSelector, WindowHandle};
 
-use crate::options::{AudioDeviceSelection, EncoderSelection, Framerate, Resolution, VideoCodec};
+use crate::options::{
+    AudioDeviceSelection, EncoderSelection, Framerate, ReplayLength, ReplayWindow, Resolution,
+    VideoCodec,
+};
 
 /// Text appended to the top-level `--help`.
 const AFTER_HELP: &str = "\
@@ -82,6 +87,14 @@ pub enum Command {
     /// Record a window or process to a file.
     Record(RecordArgs),
 
+    /// Record with a replay buffer, and keep the last N seconds on a hotkey.
+    ///
+    /// What the category of application exists for (SPEC.md sections 15 and
+    /// 16): the recording runs, the last few minutes are kept in memory, and
+    /// Ctrl+F10 turns that into a clip of the thing that just happened. Ctrl+C
+    /// stops, finishing the recording first.
+    Replay(ReplayArgs),
+
     /// Watch for games and record them without being asked.
     ///
     /// The mode the product exists for (SPEC.md section 2): a game launching
@@ -92,6 +105,15 @@ pub enum Command {
 
     /// List the windows that can be captured.
     ListWindows(ListWindowsArgs),
+
+    /// See what a plugin declares, and allow or stop one.
+    ///
+    /// A plugin is a program somebody else wrote, and every bundled one opens a
+    /// loopback socket. Enabling one **is** the consent to what it declares, so
+    /// the declaration is printed before it is taken and again whenever it
+    /// changes (`docs/privacy.md`). The screen that will do this in the window
+    /// is issue #281.
+    Plugins(PluginsArgs),
 
     /// Report the encoders and codecs detected on this machine.
     ///
@@ -249,6 +271,44 @@ pub struct WatchArgs {
     /// device name.
     #[arg(long, value_name = "DEVICE", default_value_t = AudioDeviceSelection::Default)]
     pub system_audio: AudioDeviceSelection,
+}
+
+/// Arguments to `clipped-recorder plugins`.
+#[derive(Debug, Args)]
+pub struct PluginsArgs {
+    /// What to do.
+    #[command(subcommand)]
+    pub action: PluginsAction,
+}
+
+/// What `plugins` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum PluginsAction {
+    /// Show what is installed, what each asks for, and what you have agreed to.
+    ///
+    /// The reading action, and the one to run before any other: enabling a
+    /// plugin is agreeing to the network access it declares, and this is where
+    /// that declaration is printed.
+    List,
+
+    /// Allow a plugin to run, agreeing to what it declares now.
+    ///
+    /// The declaration is printed first, every time, including when you have
+    /// enabled this plugin before — consent to something you were not shown is
+    /// not consent (`docs/privacy.md`).
+    Enable {
+        /// The plugin's identifier, as `plugins list` prints it.
+        plugin: String,
+    },
+
+    /// Stop a plugin running, keeping what you agreed to.
+    ///
+    /// Turning it back on will not ask again unless its declaration has
+    /// changed in the meantime.
+    Disable {
+        /// The plugin's identifier, as `plugins list` prints it.
+        plugin: String,
+    },
 }
 
 /// Arguments to `clipped-recorder start-at-login`.
@@ -518,6 +578,57 @@ pub struct RecordArgs {
     pub system_audio: AudioDeviceSelection,
 }
 
+/// Arguments to `clipped-recorder replay`.
+///
+/// Every `record` option, and the same defaults, plus the two the buffer needs.
+/// It is a flattened [`RecordArgs`] rather than a copy of its fields for the
+/// reason `serve` routes `start_recording` through the same type: a resolution's
+/// bounds, a frame rate's range and an output path that must end in `.mkv` are
+/// one set of rules, and a second copy of them reachable only from this
+/// subcommand would be a second set of answers (AGENTS.md section 55).
+///
+/// # What it does that `record` does not
+///
+/// It keeps the last [`Self::duration`] seconds of encoded video in memory and
+/// saves them to a clip when Ctrl+F10 is pressed. **It also writes the ordinary
+/// recording**, because the buffer is filled from the packets that recording
+/// produces — there is one encoder and two consumers of it, not two encodes
+/// (`docs/replay-buffer.md`). A capture that keeps *only* the buffer and writes
+/// no continuous file is SPEC.md section 4's Manual/Replay capture mode and is
+/// [issue #423](https://github.com/wildware-uk/clipped/issues/423).
+#[derive(Debug, Args)]
+pub struct ReplayArgs {
+    /// Everything `record` takes, meaning exactly what it means there.
+    #[command(flatten)]
+    pub record: RecordArgs,
+
+    /// Seconds of video to keep in the buffer, from 30 to 1800. [default: the
+    /// configured replay window, which is 300 unless it has been changed]
+    ///
+    /// This is what a save can reach back through, and what the buffer's memory
+    /// is spent on: about 140 MiB a minute at 1080p60, and about 4 GiB at the
+    /// half-hour maximum. `docs/replay-buffer.md` has the table.
+    //
+    // The default is stated in the summary rather than through a
+    // `default_value` because it comes from the settings file, and `-h` should
+    // still show what it will be.
+    #[arg(short, long, value_name = "SECONDS")]
+    pub duration: Option<ReplayWindow>,
+
+    /// Seconds to keep when a replay is saved. [default: the whole of
+    /// --duration]
+    ///
+    /// SPEC.md section 15's periods — 15, 30, 60, 120, 300 — are the ones a
+    /// user interface will offer; any whole number of seconds up to the buffer's
+    /// own duration is accepted here, which is what "and custom" means.
+    //
+    // The default is stated in the summary rather than through a `default_value`
+    // because it is another argument's value, and `-h` should still show what it
+    // will be.
+    #[arg(short, long, value_name = "SECONDS")]
+    pub save_duration: Option<ReplayLength>,
+}
+
 #[cfg(test)]
 mod tests {
     use clap::error::ErrorKind;
@@ -657,6 +768,132 @@ mod tests {
                 "the error should offer {expected}: {rendered}"
             );
         }
+    }
+
+    fn replay_args(arguments: &[&str]) -> ReplayArgs {
+        let Command::Replay(args) = parse(arguments).expect("the arguments are valid").command
+        else {
+            panic!("expected the replay subcommand");
+        };
+        args
+    }
+
+    #[test]
+    fn a_replay_needs_only_a_target_and_takes_its_durations_from_the_settings() {
+        // What SPEC.md section 42 asks for, minus the duration: nothing about a
+        // buffer has to be typed, because how much Clipped keeps is a setting.
+        let args = replay_args(&["replay", "--window", "Counter-Strike 2"]);
+
+        assert_eq!(args.record.window.as_deref(), Some("Counter-Strike 2"));
+        assert_eq!(args.duration, None, "the configured window is the default");
+        assert_eq!(args.save_duration, None, "and a save keeps the whole of it");
+        // Every `record` option is here and means the same thing, because they
+        // are the same arguments.
+        assert_eq!(args.record.framerate, Framerate::DEFAULT);
+        assert_eq!(args.record.microphone, AudioDeviceSelection::Default);
+    }
+
+    #[test]
+    fn a_replay_takes_the_same_options_a_record_does() {
+        let args = replay_args(&[
+            "replay",
+            "--process",
+            "cs2.exe",
+            "--duration",
+            "120",
+            "--save-duration",
+            "15",
+            "--framerate",
+            "144",
+            "--microphone",
+            "none",
+        ]);
+
+        assert_eq!(args.duration.expect("a duration").seconds(), 120);
+        assert_eq!(args.save_duration.expect("a save").seconds(), 15);
+        assert_eq!(args.record.framerate.frames_per_second(), 144);
+        assert_eq!(args.record.microphone, AudioDeviceSelection::Disabled);
+    }
+
+    #[test]
+    fn a_replay_with_no_target_is_a_usage_error_naming_the_three_selectors() {
+        // The flattened `record` arguments bring their own required group with
+        // them, so `replay` cannot be started without saying what to record.
+        let error = parse(&["replay"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        let rendered = error.to_string();
+        for expected in ["--window <TITLE>", "--process <NAME>", "--pid <PID>"] {
+            assert!(
+                rendered.contains(expected),
+                "the error should name {expected}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_replay_duration_no_buffer_can_hold_is_rejected_with_the_range() {
+        // Issue #38's third acceptance criterion, at the value's own parser, so
+        // that clap reports it where every other rejected value is reported —
+        // and before a capture session exists.
+        for duration in ["29", "1801", "0", "an hour"] {
+            let error = parse(&["replay", "--window", "cs2", "--duration", duration]).unwrap_err();
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("30") && rendered.contains("1800")
+                    || rendered.contains("whole number"),
+                "`--duration {duration}` should be refused with the range or the expected \
+                 form: {rendered}"
+            );
+        }
+
+        assert!(parse(&["replay", "--window", "cs2", "--duration", "30"]).is_ok());
+        assert!(parse(&["replay", "--window", "cs2", "--duration", "1800"]).is_ok());
+    }
+
+    #[test]
+    fn a_save_duration_of_zero_is_rejected_and_a_short_one_is_not() {
+        // A save has no floor of thirty seconds — SPEC.md section 15 offers
+        // fifteen — but zero seconds is not a clip.
+        let error = parse(&["replay", "--window", "cs2", "--save-duration", "0"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(
+            error.to_string().contains("1-1800"),
+            "unexpected message: {error}"
+        );
+
+        assert!(parse(&["replay", "--window", "cs2", "--save-duration", "15"]).is_ok());
+    }
+
+    #[test]
+    fn replay_help_states_a_default_for_every_optional_argument() {
+        // The same property `record` is held to, for the same reason: an option
+        // whose default nobody can see is an option nobody can reason about.
+        // `--duration` and `--save-duration` have no `default_value` — one
+        // comes from the settings file and the other from the first — so both
+        // have to say so in the summary, which is the part `-h` prints.
+        let command = Cli::command();
+        let replay = command
+            .find_subcommand("replay")
+            .expect("replay is a subcommand");
+
+        let mut checked = 0;
+        for argument in replay.get_arguments() {
+            let name = argument.get_id().as_str();
+            if TARGET_ARGUMENTS.contains(&name) || matches!(name, "help" | "version") {
+                continue;
+            }
+
+            let summary = argument
+                .get_help()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                !argument.get_default_values().is_empty() || summary.contains("[default:"),
+                "`--{name}` documents no default, so `replay -h` cannot show one: {summary}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no optional arguments were found to check");
     }
 
     #[test]

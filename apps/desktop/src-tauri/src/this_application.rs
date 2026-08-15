@@ -67,14 +67,23 @@
 //! parent identifier that has been reused.
 //!
 //! Those are the two comparisons `clipped_windows::ProcessTree` makes about the
-//! same hazard, for the same reason, and the rule for an unknown start time is
-//! the one difference — see [`consistent_with`]. They are made again here
-//! rather than shared, and that is not a second implementation by accident:
+//! same hazard, for the same reason. They are made again here rather than
+//! shared, and that is not a second implementation by accident:
 //! `tests/integration/tests/workspace_layering.rs` allows this crate exactly
 //! one member of the recorder's workspace, `clipped-ipc`, so that closing this
 //! window can never reach capture or encoding (ADR 0002). `clipped-windows` is
 //! not that one, and linking it to borrow a two-line comparison would put the
 //! capture layer inside the window's process.
+//!
+//! The two copies differ in two places, and both are written down rather than
+//! left to be discovered. The rule for an unknown start time is one — see
+//! [`consistent_with`]. The clock the second comparison is made against is the
+//! other: that crate still reads its moment from Windows' coarse system clock,
+//! which is exactly what
+//! [issue #406](https://github.com/wildware-uk/clipped/issues/406) found here
+//! and is raised for it as
+//! [issue #432](https://github.com/wildware-uk/clipped/issues/432). See
+//! [`file_time_now`], which is where this one reads its own.
 //!
 //! # Cost, measured
 //!
@@ -109,7 +118,7 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, FILETIME, HAN
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -287,6 +296,15 @@ fn started_by(
 /// enumerated, and demanding a strict inequality would refuse a webview host
 /// started in the same tick as the window.
 ///
+/// Both halves compare two moments, and neither means anything unless the two
+/// were read from the same clock. `parent` and `process` always are: they are
+/// what `GetProcessTimes` says about two processes. `table_read_at` is the one
+/// that had to be *chosen*, and choosing wrongly is not a rounding error —
+/// reading it from Windows' coarse system clock made this refuse real children
+/// of this process, because that clock stands still between the machine's timer
+/// ticks while a creation time does not (issue #406, and see [`file_time_now`],
+/// which is where the choice is made and argued).
+///
 /// A start time [`None`] is one Windows would not give, which is a question
 /// unanswered rather than evidence of a stranger, so the table decides that
 /// link alone. That is where this parts company with
@@ -422,15 +440,41 @@ fn this_process_started_at() -> Option<u64> {
     *STARTED.get_or_init(|| creation_time(unsafe { GetCurrentProcess() }))
 }
 
-/// Now, in the same 100-nanosecond ticks a creation time is expressed in.
+/// Now, in the same 100-nanosecond ticks a creation time is expressed in, and
+/// read from the same clock.
 ///
-/// The coarse clock rather than `GetSystemTimePreciseAsFileTime`: this is
-/// compared against process creation times, which Windows records at the same
-/// resolution, so the precise one would cost a serialising instruction to
-/// produce digits nothing on the other side of the comparison has.
+/// `GetSystemTimePreciseAsFileTime` and not `GetSystemTimeAsFileTime`, which
+/// this read until [issue #406](https://github.com/wildware-uk/clipped/issues/406).
+/// The two are not one clock at two resolutions; the second is a *stale copy*
+/// of the first. It answers with the value written at the machine's last timer
+/// tick — 15.625 ms apart by default, and shorter only while some process on
+/// the machine is holding the timer resolution down — where a creation time is
+/// stamped by the kernel at the moment the process is created, in between
+/// ticks. Measured over 400 spawns on a developer machine, not one creation
+/// time landed on the coarse clock's grid.
+///
+/// A process created a millisecond *before* this was called was therefore
+/// answered a moment older than itself, and [`consistent_with`]'s `process <=
+/// table_read_at` refused it: 27 of those 400 real children of the test
+/// process, on a machine whose timer another application was holding down to
+/// half a millisecond. Judged against a modelled 15.625 ms tick — a machine
+/// with nothing holding it down, which is the default and is what a CI runner
+/// often is — the same 400 spawns refuse 373. That is the bug issue #390
+/// exists to prevent, offering to record Clipped's own webview host, and it
+/// needs only that the host be started within one tick of the foreground
+/// change being judged. It was found as a test that failed on CI and passed
+/// on a re-run, which is what a real defect looks like from a distance.
+///
+/// The alternative repair — keeping the coarse clock and allowing a tick of
+/// slack on the comparison — was not taken. It would widen the window in which
+/// a recycled identifier is admitted to a whole tick, to work around a
+/// staleness that is not there once the right clock is read. Reading the
+/// precise one costs a serialising instruction against the performance
+/// counter: tens of nanoseconds, beside the 5.6 ms `CreateToolhelp32Snapshot`
+/// it is sampled next to.
 fn file_time_now() -> u64 {
     // SAFETY: takes nothing and returns a `FILETIME` by value.
-    ticks(unsafe { GetSystemTimeAsFileTime() })
+    ticks(unsafe { GetSystemTimePreciseAsFileTime() })
 }
 
 /// When the process behind `process` started, in 100-nanosecond ticks.
@@ -851,6 +895,68 @@ mod tests {
             child_started.is_some_and(|started| started >= before_it_started),
             "and it is the moment the process started, which was after this one was read: \
              {child_started:?} against {before_it_started}"
+        );
+    }
+
+    #[test]
+    fn a_process_created_just_before_the_table_was_read_is_not_refused_as_younger_than_it() {
+        // The defect behind issue #406, which arrived looking like a flaky
+        // test: `a_process_this_one_started_is_part_of_this_application_and_
+        // its_creator_is_not` failed on CI and passed on a re-run of the same
+        // commit, five times over two days, on branches touching none of this.
+        // It was not flaky. It was reporting that `consistent_with`'s `process
+        // <= table_read_at` refuses a real child of this process, and it is
+        // the only test in this module that could — every written-down tree
+        // above supplies both sides of that comparison itself, so all of them
+        // pass whichever clock `file_time_now` reads.
+        //
+        // The two sides came from different clocks. A creation time is stamped
+        // by the kernel when the process is created; `table_read_at` came from
+        // `GetSystemTimeAsFileTime`, which does not read the clock at all — it
+        // answers with the value written at the machine's last timer tick,
+        // 15.625 ms apart by default. A process created in between two ticks
+        // therefore carried a moment *later* than the "now" sampled after it,
+        // and was refused as one that did not exist when the table was read.
+        //
+        // Which is why this is written with no process in it. A creation time
+        // is a reading of the system clock taken by the kernel, so a reading
+        // of the system clock taken here stands in for one exactly, and does
+        // it without waiting on a spawn — whose several milliseconds are the
+        // only reason the failure needs a machine at the default tick to show
+        // up at all. Measured over 400 real spawns: none of their creation
+        // times landed on the coarse clock's grid, 27 were refused outright on
+        // a machine whose timer another application was holding down to half a
+        // millisecond, and 373 are refused when the same samples are judged
+        // against a modelled 15.625 ms tick.
+        //
+        // Both directions are asserted, because both are ways of getting the
+        // moment wrong and only one of them is the bug that was found. A
+        // `table_read_at` behind the clock refuses this application's own
+        // webview host, which is the defect issue #390 exists to prevent; one
+        // *ahead* of the clock — a slack term, or a constant — would admit an
+        // identifier recycled after the table was read, which is the hazard
+        // the comparison is there for in the first place. The moment has to be
+        // the moment.
+        //
+        // SAFETY: takes nothing and returns a `FILETIME` by value.
+        let created = ticks(unsafe { GetSystemTimePreciseAsFileTime() });
+        let table_read_at = file_time_now();
+
+        assert!(
+            consistent_with(Some(created), Some(created), table_read_at),
+            "a process created at {created} existed when the table was read, and the moment that \
+             read was judged by is {} ticks behind it",
+            created.saturating_sub(table_read_at)
+        );
+
+        let table_read_at = file_time_now();
+        // SAFETY: as above.
+        let by_now = ticks(unsafe { GetSystemTimePreciseAsFileTime() });
+
+        assert!(
+            table_read_at <= by_now,
+            "and the moment is not ahead of the clock either, which would admit an identifier \
+             recycled after the table was read: {table_read_at} against {by_now}"
         );
     }
 

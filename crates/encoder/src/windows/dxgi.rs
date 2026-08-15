@@ -14,6 +14,43 @@ use crate::adapter::{Adapter, AdapterId, DriverVersion};
 use crate::codec::Vendor;
 use crate::probe::ProbeError;
 
+/// Which vendor's adapter a graphics device was created on.
+///
+/// [`None`] when the device is null or does not answer as a DXGI device, which
+/// is a question unanswered rather than evidence of a particular vendor — the
+/// callers say so in those words rather than guessing.
+///
+/// **Shared by every backend that cares**, and each of them does for the same
+/// reason: a vendor's encoder runtime initialises against a Direct3D device, and
+/// a device created on somebody else's adapter is refused by that runtime with a
+/// status code that says nothing about adapters. Quick Sync has checked this
+/// since it was written; AMF did not, and the result was that
+/// `--encoder amf` on a machine with a discrete NVIDIA card and integrated AMD
+/// graphics failed with `AMFContext::InitDX11 failed with AMF_INVALID_ARG (4)`
+/// ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
+///
+/// # Safety
+///
+/// `device` must be null or a live `ID3D11Device` owned by the caller.
+pub(super) unsafe fn device_vendor(device: *mut core::ffi::c_void) -> Option<Vendor> {
+    if device.is_null() {
+        return None;
+    }
+
+    // SAFETY: the caller guarantees `device` is a live COM object it owns.
+    // `from_raw_borrowed` takes no reference of its own, so the borrow ends
+    // with this function and nothing here releases the caller's device.
+    let unknown = unsafe { windows::core::IUnknown::from_raw_borrowed(&device) }?;
+    let dxgi: IDXGIDevice = unknown.cast().ok()?;
+
+    // SAFETY: `dxgi` is a live DXGI device obtained by querying the caller's
+    // device, and both calls are ordinary queries that return by value or as a
+    // new reference this function drops.
+    let description = unsafe { dxgi.GetAdapter().ok()?.GetDesc().ok()? };
+
+    Some(Vendor::from_pci_id(description.VendorId))
+}
+
 /// Enumerates every display adapter DXGI knows about.
 ///
 /// Includes the ones that cannot encode — the Microsoft Basic Render Driver,
@@ -114,6 +151,18 @@ fn api_error(operation: &'static str, error: &windows::core::Error) -> ProbeErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_device_has_no_vendor() {
+        // A device nobody supplied is a question unanswered, not a vendor. The
+        // callers turn `None` into "the adapter could not be identified" rather
+        // than into a guess about which GPU it was.
+        //
+        // SAFETY: null is one of the two values the contract permits.
+        let vendor = unsafe { device_vendor(core::ptr::null_mut()) };
+
+        assert_eq!(vendor, None);
+    }
 
     #[test]
     fn every_adapter_in_this_machine_is_described() {

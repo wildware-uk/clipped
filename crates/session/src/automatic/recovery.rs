@@ -424,11 +424,9 @@ fn close_recording(
 /// whole job is recovering from a killed recorder, would be an unusually
 /// pointed bug.
 fn write_atomically(path: &Path, file: &Value) -> io::Result<()> {
-    let temporary = path.with_extension("tmp");
     let json = serde_json::to_vec_pretty(file)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    fs::write(&temporary, &json)?;
-    fs::rename(&temporary, path)
+    clipped_logging::write_atomically(path, |temporary| io::Write::write_all(temporary, &json))
 }
 
 #[cfg(test)]

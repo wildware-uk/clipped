@@ -313,6 +313,17 @@ jobs:
       # neither can be checked by reading - the notices are 2 MB of reproduced
       # licence text and the source pin is one asset name.
       #
+      # And what decides whether a release may happen at all
+      # (docs/releasing.md): the gates release.yml runs before it builds
+      # anything, and the notes it publishes beside an unsigned installer. Those
+      # two suites are here rather than in release.yml because release.yml runs
+      # on a tag, and a tag is the worst possible moment to discover that the
+      # thing which decides whether a release is permitted has stopped working.
+      # Their failure mode is silence in both directions: a gate that has
+      # stopped refusing looks exactly like a release that was allowed, and a
+      # release note missing its SmartScreen paragraph looks exactly like one
+      # that has it.
+      #
       # Here rather than left to a contributor's hand, unlike
       # test-check-prerequisites.ps1: that one guards a developer's setup and
       # fails visibly for whoever broke it, whereas these guard what a user is
@@ -327,12 +338,16 @@ jobs:
       # Invoked through the Windows PowerShell 5.1 host each script declares,
       # for the same reason the prerequisite check is: what CI exercises should
       # be what a contributor pastes.
-      - name: Check the release licence tooling
+      - name: Check the release tooling
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
           $failed = @()
-          foreach ($suite in @('scripts/test-collect-notices.ps1', 'scripts/test-fetch-ffmpeg-source.ps1')) {
+          foreach ($suite in @(
+                  'scripts/test-collect-notices.ps1',
+                  'scripts/test-fetch-ffmpeg-source.ps1',
+                  'scripts/test-check-release-gates.ps1',
+                  'scripts/test-write-release-notes.ps1')) {
               Write-Host "== $suite"
               $output = & powershell -ExecutionPolicy Bypass -File $suite 2>&1 | Out-String
               $code = $LASTEXITCODE

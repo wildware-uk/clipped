@@ -62,6 +62,7 @@ describe('the clip playback screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: { state: 'idle' },
     });
     openClip('r-99');
@@ -130,6 +131,7 @@ describe('the clip playback screen', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-3',
@@ -149,6 +151,7 @@ describe('the clip playback screen', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: { state: 'idle' },
     });
 

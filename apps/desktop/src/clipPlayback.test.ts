@@ -47,6 +47,7 @@ function recording(recordingId: string): RecorderLinkView {
     link: {
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: {
         state: 'recording',
         recording_id: recordingId,
@@ -127,7 +128,7 @@ describe('resolving a recording', () => {
       { link: 'connecting' },
       { link: 'unavailable', reason: 'no recorder' },
       { link: 'reconnecting', attempt: 1, attempts_allowed: 4, delay_ms: 500, reason: 'gone' },
-      { link: 'attached', recorder_process_id: 91, status: { state: 'idle' } },
+      { link: 'attached', recorder_process_id: 91, features: [], status: { state: 'idle' } },
     ] as const) {
       expect(resolveClip('r-3', { ...NOTHING, link, observedAt: OBSERVED_AT }).found).toBe(
         'unindexed',

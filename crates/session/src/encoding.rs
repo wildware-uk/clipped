@@ -70,6 +70,15 @@ pub(crate) struct OpenedEncoder {
     pub(crate) kind: EncoderKind,
     /// What it is producing.
     pub(crate) codec: Codec,
+    /// How many bits a second it was configured for.
+    ///
+    /// Carried out of here rather than recomputed by whoever wants it, because
+    /// it is chosen from the size capture is *actually* producing rather than
+    /// the size that was asked for — and a replay buffer sizes its memory
+    /// ceiling from it (`crate::replay`, `docs/replay-buffer.md`). Two places
+    /// deriving a bitrate from a picture would be two answers (AGENTS.md
+    /// section 55).
+    pub(crate) bitrate: BitRate,
 }
 
 /// Opens an encoder for `settings`, against the device the frames are on.
@@ -99,13 +108,15 @@ pub(crate) fn open(
         Probing::WithoutSessions,
     )?;
 
+    let bitrate = bitrate_for(size, frame_rate);
+
     let mut attempts = Vec::new();
     for (kind, codec) in candidates(settings, detection.report()) {
         let config = EncoderConfig::new(
             codec,
             resolution,
             frame_rate,
-            rate_control(size, frame_rate),
+            RateControl::constant(bitrate),
         )
         .with_keyframe_interval(KeyframeInterval::every(
             KeyframeInterval::DEFAULT,
@@ -138,6 +149,7 @@ pub(crate) fn open(
                     encoder,
                     kind,
                     codec,
+                    bitrate,
                 });
             }
             Err(error) => {
@@ -244,17 +256,21 @@ fn open_one(
 }
 
 /// How many bits a second a recording of this size and rate is given.
-fn rate_control(size: (u32, u32), frame_rate: FrameRate) -> RateControl {
+///
+/// The rate itself rather than the [`RateControl`] wrapping it, because two
+/// things need the answer: the encoder is configured with it, and a replay
+/// buffer running alongside the recording sizes its memory ceiling from it
+/// (`crate::replay`). Deriving it twice would be two answers to one question
+/// (AGENTS.md section 55).
+fn bitrate_for(size: (u32, u32), frame_rate: FrameRate) -> BitRate {
     let bits =
         f64::from(size.0) * f64::from(size.1) * frame_rate.as_f64() * BITS_PER_PIXEL_PER_FRAME;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let clamped = bits.clamp(f64::from(MINIMUM_BITRATE), f64::from(MAXIMUM_BITRATE)) as u32;
 
-    RateControl::constant(
-        BitRate::bits_per_second(clamped)
-            .unwrap_or_else(|| BitRate::megabits_per_second(MINIMUM_BITRATE / 1_000_000)),
-    )
+    BitRate::bits_per_second(clamped)
+        .unwrap_or_else(|| BitRate::megabits_per_second(MINIMUM_BITRATE / 1_000_000))
 }
 
 /// What the encoder should be told the incoming frames look like.
@@ -298,10 +314,13 @@ mod tests {
     }
 
     fn rate_of(width: u32, height: u32, fps: u32) -> u32 {
-        match rate_control(
+        // Through `RateControl` rather than reading the bitrate directly, so
+        // that what these figures describe is still what the encoder is
+        // configured with.
+        match RateControl::constant(bitrate_for(
             (width, height),
             FrameRate::new(fps, 1).expect("a real rate"),
-        ) {
+        )) {
             RateControl::Bitrate { average, .. } => average.as_bits_per_second(),
             other => panic!("expected a bitrate, got {other}"),
         }
@@ -432,5 +451,106 @@ mod tests {
         for (_, codec) in candidates(&settings, &bare_machine()) {
             assert_eq!(codec, Codec::Hevc);
         }
+    }
+
+    /// A Direct3D 11 device, made directly rather than out of a captured frame.
+    ///
+    /// Capture needs a display that is scanning something out
+    /// (`clipped_capture`, issue #461); opening a device does not. Making one
+    /// here is what lets the substitution test below run on a machine whose
+    /// screen has gone to sleep.
+    fn a_device() -> Option<windows::Win32::Graphics::Direct3D11::ID3D11Device> {
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+        };
+
+        let mut device = None;
+        // SAFETY: no adapter is named, so a driver type must be; the module
+        // handle is null as that requires, and the out parameter is a live
+        // local of the projected type.
+        let created = unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&raw mut device),
+                None,
+                None,
+            )
+        };
+        created.ok().and(device)
+    }
+
+    #[test]
+    fn an_encoder_this_machine_does_not_have_records_with_another_one_rather_than_not_at_all() {
+        // The second acceptance criterion of
+        // [issue #61](https://github.com/wildware-uk/clipped/issues/61), end to
+        // end rather than as a candidate list. `a_configured_encoder_is_tried_first…`
+        // above proves the ranking; this proves that `open` actually falls back
+        // when the configured encoder is not there, which is the part a user
+        // meets.
+        //
+        // A settings file naming an encoder is a choice made once, possibly
+        // before this machine had the graphics card it has now, and a game that
+        // launches with nobody watching must not go unrecorded because of it.
+        use clipped_encoder::DeviceKind;
+        use windows::core::Interface as _;
+
+        let Some(device) = a_device() else {
+            note("this machine would not create a Direct3D 11 device");
+            return;
+        };
+        // SAFETY: `device` is live for the whole of this test, and the handle
+        // is borrowed rather than owned, so it does not outlive it.
+        let graphics = unsafe { GraphicsDevice::new(DeviceKind::D3d11, device.as_raw()) };
+
+        // Every encoder kind in turn: whichever ones this machine lacks are the
+        // ones worth asking for, and a machine that has them all simply has
+        // nothing to prove here.
+        let mut substituted = 0;
+        for kind in [EncoderKind::Nvenc, EncoderKind::Amf, EncoderKind::QuickSync] {
+            let settings = settings()
+                .with_encoder(EncoderPreference::Fixed(kind))
+                .with_unavailable_choice(UnavailableChoice::Substitute);
+
+            let Ok(opened) = open(&graphics, &settings, (1280, 720), PixelFormat::Bgra8Unorm)
+            else {
+                // Nothing at all opened, which is a machine with no encoder
+                // rather than a failure to substitute.
+                continue;
+            };
+            if opened.kind != kind {
+                substituted += 1;
+                note(&format!(
+                    "{} is not on this machine and it recorded with {} instead",
+                    kind.log_encoder_family(),
+                    opened.kind.log_encoder_family()
+                ));
+
+                // The half that stops this passing for the wrong reason. If the
+                // same request refuses to substitute, it has to fail — otherwise
+                // the encoder was available all along and nothing was
+                // substituted.
+                let refusing = settings.with_unavailable_choice(UnavailableChoice::Refuse);
+                assert!(
+                    open(&graphics, &refusing, (1280, 720), PixelFormat::Bgra8Unorm).is_err(),
+                    "{} opened when it was told not to substitute, so the fallback above                      proved nothing",
+                    kind.log_encoder_family()
+                );
+            }
+        }
+
+        if substituted == 0 {
+            note("every encoder asked for is present here, so nothing had to be substituted");
+        }
+    }
+
+    /// Says something a person reading the test output would want to know.
+    fn note(message: &str) {
+        println!("note: {message}");
     }
 }

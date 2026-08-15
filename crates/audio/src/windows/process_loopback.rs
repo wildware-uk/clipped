@@ -7,9 +7,17 @@
 //! recorder that writes one mixed stream
 //! ([ADR 0003](../../../../docs/adr/0003-process-specific-audio-capture.md)).
 //! Windows scopes a capture client to a process and the processes it started
-//! through `ActivateAudioInterfaceAsync` with
-//! `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`; `activation.rs` is that
-//! call, and this is what a recording does with it.
+//! through `ActivateAudioInterfaceAsync`, and it offers **both sides**:
+//! `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` for what the tree
+//! played, and `..._EXCLUDE_...` for everything the machine played except it.
+//! `activation.rs` is that call, [`TreeScope`] is which side, and this is what
+//! a recording does with them.
+//!
+//! A session needs both or neither ([issue
+//! #27](https://github.com/wildware-uk/clipped/issues/27)): a recording with a
+//! `Game` track scoped to the tree *and* a system track that is the whole
+//! endpoint has the game's audio on two tracks, which is worse than one honest
+//! track and a note saying separation was unavailable (ADR 0003).
 //!
 //! Everything after the activation is `endpoint_capture.rs`: the same packet
 //! loop, the same timeline that keeps a track as long as its recording, the
@@ -77,7 +85,8 @@ use core::time::Duration;
 use clipped_windows::{ProcessTree, WindowsError};
 use windows::Win32::Media::Audio::{
     eRender, IAudioClient, IMMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, PROCESS_LOOPBACK_MODE,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
     PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     WAVEFORMATEXTENSIBLE_0,
 };
@@ -122,6 +131,43 @@ fn describe(root: u32) -> String {
 /// The [`CaptureSource`] arm of a process-scoped capture. It owns the tree, the
 /// format that was accepted, and the decision to re-scope; the engine owns
 /// everything that happens to the samples afterwards.
+/// Which side of a process tree a capture takes.
+///
+/// Windows offers both, and a session needs **both or neither**: a recording
+/// with a `Game` track scoped to the tree and a system track that is the whole
+/// endpoint has the game's audio on two tracks, which is worse than having one
+/// track and saying so (`clipped_session::audio`, ADR 0003).
+///
+/// The two are the same activation with one constant changed, which is why they
+/// are one type rather than two capture implementations
+/// ([issue #27](https://github.com/wildware-uk/clipped/issues/27)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TreeScope {
+    /// Everything the tree played, and nothing else. The game's own track.
+    Only,
+    /// Everything the machine played **except** the tree. The other-system-audio
+    /// track that can sit beside a game track without doubling it.
+    Except,
+}
+
+impl TreeScope {
+    /// The Windows constant for this side.
+    const fn mode(self) -> PROCESS_LOOPBACK_MODE {
+        match self {
+            Self::Only => PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            Self::Except => PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+        }
+    }
+
+    /// How this reads in a log line.
+    pub(super) const fn log_value(self) -> &'static str {
+        match self {
+            Self::Only => "the process tree",
+            Self::Except => "everything but the process tree",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ProcessLoopbackSource {
     /// The game, as the session identified it. Never changes: it is what the
@@ -130,6 +176,8 @@ pub(super) struct ProcessLoopbackSource {
     /// The process the current activation names, which is [`Self::root`] until
     /// that process exits with descendants still running.
     scoped_to: u32,
+    /// Which side of the tree this capture takes.
+    scope: TreeScope,
     /// The membership this capture is really about, maintained live
     /// (issue #25).
     tree: ProcessTree,
@@ -156,7 +204,7 @@ impl ProcessLoopbackSource {
     /// it has already exited, or it runs at a higher integrity level than
     /// Clipped. Either way there is no tree to scope a capture to, so it is a
     /// failure rather than an empty capture.
-    pub(super) fn new(root: u32) -> Result<Self, AudioError> {
+    pub(super) fn new(root: u32, scope: TreeScope) -> Result<Self, AudioError> {
         let tree = ProcessTree::rooted_at(root).map_err(|error| match error {
             WindowsError::ProcessUnavailable { process_id } => {
                 AudioError::ProcessUnavailable { process_id }
@@ -170,6 +218,7 @@ impl ProcessLoopbackSource {
         Ok(Self {
             root,
             scoped_to: root,
+            scope,
             tree,
             format: None,
             change: None,
@@ -314,10 +363,7 @@ impl ProcessLoopbackSource {
             return Ok(None);
         }
 
-        let client = activate_process_loopback(
-            self.scoped_to,
-            PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-        )?;
+        let client = activate_process_loopback(self.scoped_to, self.scope.mode())?;
 
         let candidates = match self.format {
             // A reopen mid-recording: the shape is already decided, and asking
@@ -327,7 +373,7 @@ impl ProcessLoopbackSource {
             None => candidate_formats(enumerator),
         };
 
-        let (client, format, wake) = initialise(client, &candidates, self.scoped_to)?;
+        let (client, format, wake) = initialise(client, &candidates, self.scoped_to, self.scope)?;
         self.format = Some(format);
 
         Ok(Some(StreamParts {
@@ -410,6 +456,7 @@ fn initialise(
     client: IAudioClient,
     candidates: &[AudioFormat],
     target: u32,
+    scope: TreeScope,
 ) -> Result<(IAudioClient, AudioFormat, Wake), AudioError> {
     let mut client = client;
     let mut refused = Vec::new();
@@ -418,10 +465,10 @@ fn initialise(
         if attempt > 0 {
             // A client whose `Initialize` failed is spent, whatever it failed
             // for.
-            client = activate_process_loopback(
-                target,
-                PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-            )?;
+            // The same side of the tree the first attempt asked for: a
+            // retry that quietly swapped to the other one would record the
+            // opposite of what the caller asked for.
+            client = activate_process_loopback(target, scope.mode())?;
         }
 
         match initialise_with(&client, *format) {
@@ -430,6 +477,10 @@ fn initialise(
                     audio_source = %SourceKind::GameAudio.audio_source(),
                     format = %format,
                     wake = ?wake,
+                    // Which side of the tree, because a recording with both
+                    // will open two of these and the log has to say which is
+                    // which (issue #27).
+                    scope = scope.log_value(),
                     "the audio engine accepted this shape for a process-scoped capture"
                 );
                 return Ok((client, *format, wake));
@@ -592,7 +643,28 @@ impl ProcessLoopbackCapture {
     /// shape this crate asks for, and [`AudioError::Platform`] when Windows
     /// refuses something outright.
     pub fn open(root_process: u32) -> Result<Self, AudioError> {
-        let source = ProcessLoopbackSource::new(root_process)?;
+        Self::open_scoped(root_process, TreeScope::Only)
+    }
+
+    /// Everything the machine played **except** `root_process` and its tree.
+    ///
+    /// The other half of the model, and the one that makes a `Game` track
+    /// possible: with only the including side, a recording that also captures
+    /// the whole endpoint has the game's audio on two tracks
+    /// ([issue #27](https://github.com/wildware-uk/clipped/issues/27)).
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`open`](Self::open)'s: this is the same activation with one
+    /// constant changed, so a machine that cannot do one cannot do the other.
+    pub fn open_excluding(root_process: u32) -> Result<Self, AudioError> {
+        Self::open_scoped(root_process, TreeScope::Except)
+    }
+
+    /// [`open`](Self::open) and [`open_excluding`](Self::open_excluding), which
+    /// differ only in which side of the tree they take.
+    fn open_scoped(root_process: u32, scope: TreeScope) -> Result<Self, AudioError> {
+        let source = ProcessLoopbackSource::new(root_process, scope)?;
         let capture = EndpointCapture::open(CaptureSource::ProcessTree(source))?
             // The tree was built a moment ago and had a member in it, so there
             // is only one way to be here: every process of the game exited
@@ -784,6 +856,32 @@ mod tests {
                  give or take the {slack:.3} s the audio engine holds; got {seconds:.3} s"
             );
         }
+
+        /// Asserts that the audio covers *at least* the time it was read over.
+        ///
+        /// The one-sided form, for a drain that follows a deliberate stall.
+        /// What would mean audio was lost there is a drain **shorter** than the
+        /// period the reader was away for. A longer one means the engine was
+        /// holding more than [`ENGINE_BACKLOG`] describes, which is what a
+        /// machine under load does to it and not a defect: CI has produced
+        /// 0.793 s of drain against a 0.500 s stall, so an engine holding
+        /// 0.293 s where 0.200 s was allowed for (#387).
+        ///
+        /// Deliberately not the wider tolerance that would also silence the
+        /// two-sided assertion everywhere else. A stall is the one place a long
+        /// drain is the expected outcome, because the reader was made slow on
+        /// purpose; everywhere else both directions are still suspicious.
+        fn assert_covered_at_least_as_long_as_it_took(&self, what: &str) {
+            let took = self.elapsed.as_secs_f64();
+            let slack = ENGINE_BACKLOG.as_secs_f64();
+            let seconds = self.timeline.seconds();
+            assert!(
+                seconds >= took - slack,
+                "{what}: {took:.3} s passed, so the drain has to cover at least that much, \
+                 give or take the {slack:.3} s the audio engine holds; got {seconds:.3} s, \
+                 which is a drain that lost some of the period the reader was away for"
+            );
+        }
     }
 
     /// Opens a capture of a process tree, or reports why this machine cannot.
@@ -793,7 +891,20 @@ mod tests {
     /// they read is silence, and they are exempt from the "does this machine
     /// want quiet" check every test that plays a tone begins with. What they
     /// do need is a machine whose Windows can scope a capture to a process at
-    /// all, which a GitHub runner cannot, so they skip loudly there.
+    /// all; where it cannot, they skip loudly rather than failing.
+    ///
+    /// **They are not a local-only suite.** This comment used to say a GitHub
+    /// runner cannot scope a capture and that they skip there, which is false
+    /// and cost somebody an afternoon
+    /// ([issue #441](https://github.com/wildware-uk/clipped/issues/441)): the
+    /// CI failures behind
+    /// [#341](https://github.com/wildware-uk/clipped/issues/341),
+    /// [#387](https://github.com/wildware-uk/clipped/issues/387) and
+    /// [#425](https://github.com/wildware-uk/clipped/issues/425) all quote
+    /// measured track lengths, which a skipped test cannot produce. Whether a
+    /// given runner can scope a capture is a property of that machine, and the
+    /// skip below is what finds out — it is not a statement about where these
+    /// run.
     fn open(root: u32) -> Option<ProcessLoopbackCapture> {
         match ProcessLoopbackCapture::open(root) {
             Ok(capture) => Some(capture),
@@ -827,24 +938,60 @@ mod tests {
         let mut from_the_client = 0u64;
         let started = Instant::now();
         let until = started + duration;
-        while Instant::now() < until {
+
+        // Reading stops on the clock; **collecting does not**.
+        //
+        // A read hands over at most one silence instalment -- 100 ms, so that
+        // the memory this crate uses stays fixed however long a consumer stalls
+        // (`crate::timeline`'s `SILENCE_CHUNK`). A reader that is descheduled
+        // therefore does not lose the audio for the period it was away: it is
+        // *owed*, and arrives on the reads that follow.
+        //
+        // Stopping on the clock alone measured how often this thread was
+        // scheduled rather than what the capture produced. CI failed with
+        // 0.100 s of track against 1.200 s of reading -- exactly one instalment,
+        // which is a loop that went round once
+        // ([issue #425](https://github.com/wildware-uk/clipped/issues/425)).
+        // Draining what is still owed is what makes the assertions below
+        // statements about the capture rather than about the machine.
+        let collect = |capture: &mut ProcessLoopbackCapture,
+                       timeline: &mut Contiguity,
+                       from_the_client: &mut u64| {
             match capture
                 .read(Duration::from_millis(100))
                 .expect("a healthy capture does not fail")
             {
                 Capture::Samples(samples) => {
                     if samples.origin() == SampleOrigin::Endpoint {
-                        from_the_client += samples.frames() as u64;
+                        *from_the_client += samples.frames() as u64;
                     }
                     timeline.accept(&samples);
                 }
                 Capture::Idle | Capture::FormatChanged(_) => {}
             }
+        };
+
+        while Instant::now() < until {
+            collect(capture, &mut timeline, &mut from_the_client);
         }
+        let elapsed = started.elapsed();
+
+        // Bounded, so that a capture which genuinely stopped producing fails
+        // the assertion rather than hanging here. Covering the window needs
+        // about one read per instalment, and ten times that leaves room for
+        // every one of them to have been a wasted trip.
+        let attempts = (elapsed.as_millis() / 100 + 1) * 10;
+        for _ in 0..attempts {
+            if timeline.seconds() >= elapsed.as_secs_f64() {
+                break;
+            }
+            collect(capture, &mut timeline, &mut from_the_client);
+        }
+
         Reading {
             timeline,
             from_the_client,
-            elapsed: started.elapsed(),
+            elapsed,
         }
     }
 
@@ -1039,8 +1186,10 @@ mod tests {
             drain.timeline.frames
         );
         // And the recording does not lose the period the reader was away for:
-        // the drain covers it, however long it really was.
-        drain.assert_as_long_as_it_took("draining after a stall");
+        // the drain covers it, however long it really was — which is the whole
+        // property here, so it is asserted in that direction only. See
+        // `assert_covered_at_least_as_long_as_it_took`.
+        drain.assert_covered_at_least_as_long_as_it_took("draining after a stall");
         assert_eq!(
             capture.stats().frames - before,
             drain.timeline.frames,
@@ -1206,7 +1355,8 @@ mod tests {
         // opened on any machine, which makes it the only deterministic negative
         // case available (AGENTS.md section 25). It needs no audio hardware, so
         // it runs in the pull-request CI job.
-        let error = ProcessLoopbackSource::new(0).expect_err("the idle process cannot be followed");
+        let error = ProcessLoopbackSource::new(0, TreeScope::Only)
+            .expect_err("the idle process cannot be followed");
 
         assert!(
             matches!(error, AudioError::ProcessUnavailable { process_id: 0 }),
@@ -1244,5 +1394,44 @@ mod tests {
             describe(4_242),
             "the game's process tree, rooted at process 4242"
         );
+    }
+
+    #[test]
+    fn the_other_side_of_a_process_tree_can_be_captured_too() {
+        // Issue #27's whole point. A session needs *both* sides or neither: a
+        // recording with a `Game` track scoped to the tree and a system track
+        // that is the whole endpoint has the game's audio on two tracks, which
+        // is worse than one honest track (ADR 0003).
+        //
+        // What this proves is that Windows accepts the excluding activation on
+        // this machine and hands back a client that initialises — the thing
+        // that was not known, because nothing had ever asked for it. What is on
+        // the two tracks is a routing question and belongs with the session
+        // (#33).
+        let root = std::process::id();
+
+        let including = match ProcessLoopbackCapture::open(root) {
+            Ok(capture) => capture,
+            Err(error) => {
+                skipped(&format!("this machine will not scope a capture: {error}"));
+                return;
+            }
+        };
+        let excluding = ProcessLoopbackCapture::open_excluding(root)
+            .expect("a machine that can include a tree can exclude one: same activation");
+
+        // Both are real captures of the same shape. A machine that gave the
+        // excluding side a different format would give a session two tracks it
+        // could not mix, which is worth knowing here rather than in a muxer.
+        assert_eq!(
+            including.format().sample_rate(),
+            excluding.format().sample_rate(),
+            "the two sides of one tree are captured at one rate"
+        );
+
+        let mut excluding = excluding;
+        let mut including = including;
+        including.close();
+        excluding.close();
     }
 }

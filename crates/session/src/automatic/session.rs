@@ -34,6 +34,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use clipped_events::GameEvent;
+use clipped_library::virtual_clip::VirtualClip;
+
 use crate::config::ResolvedSettings;
 use crate::report::{EndReason, RecordingReport};
 
@@ -170,6 +173,18 @@ impl std::fmt::Display for SessionId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecording {
     pub(crate) index: u32,
+    /// Where this file starts on the **session's** timeline, in nanoseconds.
+    ///
+    /// The first recording of a session starts at zero by definition; a later
+    /// one starts wherever it began relative to the session's first kept frame.
+    /// With `duration_seconds` this is the span the file covers, which is what
+    /// turns a moment into a position in one file
+    /// (`clipped_library::events`, issue #71).
+    ///
+    /// [`None`] until something places it: a recording that produced no frame
+    /// has no start, and neither has one written by a build before this
+    /// existed.
+    pub(crate) starts_at_nanos: Option<i64>,
     pub(crate) output: PathBuf,
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: Option<SystemTime>,
@@ -182,6 +197,12 @@ impl SessionRecording {
     #[must_use]
     pub const fn index(&self) -> u32 {
         self.index
+    }
+
+    /// Where this file starts on the session's timeline, in nanoseconds.
+    #[must_use]
+    pub const fn starts_at_nanos(&self) -> Option<i64> {
+        self.starts_at_nanos
     }
 
     /// The file it was written to.
@@ -216,6 +237,79 @@ impl SessionRecording {
     #[must_use]
     pub const fn settings(&self) -> &ResolvedSettings {
         &self.settings
+    }
+}
+
+/// One clip the session produced, and where in the session it came from.
+///
+/// A clip is not a recording and is deliberately not filed as one: it is a
+/// shorter file somebody chose to keep out of a longer thing, it has its own
+/// table in the library (`clipped-storage`'s `clips`), and the sidecar has
+/// reserved the word since the schema shipped. What makes one today is a save
+/// from the replay buffer ([issue
+/// #38](https://github.com/wildware-uk/clipped/issues/38)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionClip {
+    pub(crate) path: PathBuf,
+    pub(crate) created_at: SystemTime,
+    pub(crate) source_index: u32,
+    pub(crate) source_start: Duration,
+    pub(crate) source_end: Duration,
+    pub(crate) requested: Duration,
+    pub(crate) complete: bool,
+}
+
+impl SessionClip {
+    /// The file that was written.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// When it was saved.
+    #[must_use]
+    pub const fn created_at(&self) -> SystemTime {
+        self.created_at
+    }
+
+    /// Which recording of the session it was cut from.
+    #[must_use]
+    pub const fn source_index(&self) -> u32 {
+        self.source_index
+    }
+
+    /// Where in that recording it begins.
+    #[must_use]
+    pub const fn source_start(&self) -> Duration {
+        self.source_start
+    }
+
+    /// Where in that recording it ends.
+    #[must_use]
+    pub const fn source_end(&self) -> Duration {
+        self.source_end
+    }
+
+    /// How long the clip is.
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.source_end.saturating_sub(self.source_start)
+    }
+
+    /// How much was asked for.
+    ///
+    /// Not always [`duration`](Self::duration): a clip has to begin on a
+    /// keyframe, so it is usually slightly longer at the front, and a buffer
+    /// that had not filled yet makes it shorter (`docs/replay-buffer.md`).
+    #[must_use]
+    pub const fn requested(&self) -> Duration {
+        self.requested
+    }
+
+    /// Whether the buffer held the whole of what was asked for.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
     }
 }
 
@@ -340,6 +434,20 @@ pub enum SessionEventKind {
         outcome: String,
     },
 
+    /// A clip was saved out of the replay buffer of a recording in this
+    /// session.
+    ///
+    /// The event as well as the entry in `clips`, because the two answer
+    /// different questions: the entry is what the library indexes, and the
+    /// event is what puts the save in the session's own history beside the
+    /// recording it came out of.
+    ReplaySaved {
+        /// Which recording of the session it was cut from.
+        index: u32,
+        /// The file that was written.
+        output: PathBuf,
+    },
+
     /// The game's process exited.
     GameExited {
         /// The process that exited.
@@ -437,7 +545,19 @@ pub struct Session {
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: Option<SystemTime>,
     pub(crate) recordings: Vec<SessionRecording>,
+    pub(crate) clips: Vec<SessionClip>,
+    /// The clips this session's events were worth, which have no file.
+    ///
+    /// A separate list from `clips` because they are separate things: a
+    /// [`SessionClip`] is a file that was written because somebody pressed a
+    /// key, and one of these is a *range* of a recording that costs nothing
+    /// until an export is asked for (`docs/highlights.md`). Flattening them
+    /// would give the first shape to the second and require a path that does
+    /// not exist.
+    pub(crate) generated: Vec<VirtualClip>,
     pub(crate) events: Vec<SessionEvent>,
+    /// What plugins reported, ordered by the moment each event describes.
+    pub(crate) game_events: Vec<GameEvent>,
 }
 
 impl Session {
@@ -449,7 +569,10 @@ impl Session {
             started_at: started,
             ended_at: None,
             recordings: Vec::new(),
+            clips: Vec::new(),
+            generated: Vec::new(),
             events: Vec::new(),
+            game_events: Vec::new(),
         }
     }
 
@@ -484,10 +607,45 @@ impl Session {
         &self.recordings
     }
 
+    /// The clips saved out of it, oldest first.
+    #[must_use]
+    pub fn clips(&self) -> &[SessionClip] {
+        &self.clips
+    }
+
     /// Its history.
     #[must_use]
     pub fn events(&self) -> &[SessionEvent] {
         &self.events
+    }
+
+    /// The clips generated from this session's events, which have no file yet.
+    #[must_use]
+    pub fn generated(&self) -> &[VirtualClip] {
+        &self.generated
+    }
+
+    /// Records what generation produced, replacing whatever it produced before.
+    ///
+    /// Replacing rather than appending, because generation is a pure function
+    /// of the events and the rules: running it twice over the same session must
+    /// answer the same clips, and appending would turn "the same answer" into a
+    /// second copy of it. The generator is what avoids re-cutting a range it has
+    /// already taken -- it is given the clips that exist and refuses to overlap
+    /// them (`crate::highlights::generate`).
+    pub fn record_generated(&mut self, clips: Vec<VirtualClip>) {
+        self.generated = clips;
+    }
+
+    /// What happened *in the game*, oldest first.
+    ///
+    /// A different list from [`events`](Self::events) and deliberately so: those
+    /// are the things the session manager did and this is what a plugin
+    /// reported. See [`SessionEventKind`] for why the two vocabularies are not
+    /// merged, and `docs/highlights.md` for why they are stored in two tables.
+    #[must_use]
+    pub fn game_events(&self) -> &[GameEvent] {
+        &self.game_events
     }
 
     /// Where the sidecar for this session goes, given the recordings directory.
@@ -511,9 +669,63 @@ impl Session {
         directory.join(name)
     }
 
+    /// Where the `ordinal`th clip saved out of this session goes.
+    ///
+    /// Named from the session for the reason a recording is — everything one
+    /// sitting produced sorts together in a directory listing — and numbered
+    /// from one, because a session can produce many. The word `replay` is what
+    /// keeps it out of the space recordings are named in: recording 2 of a
+    /// session is `clipped-<id>-2.mkv`, and no recording is ever
+    /// `clipped-<id>-replay-2.mkv`.
+    #[must_use]
+    pub fn clip_path(&self, directory: &Path, ordinal: u32) -> PathBuf {
+        directory.join(format!("clipped-{}-replay-{ordinal}.mkv", self.id))
+    }
+
+    /// How many clips have been saved out of this session.
+    ///
+    /// What [`clip_path`](Self::clip_path)'s ordinal counts from: the next clip
+    /// is this plus one.
+    #[must_use]
+    pub fn clips_saved(&self) -> u32 {
+        u32::try_from(self.clips.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Records a clip that has been written, and where it came from.
+    pub(crate) fn add_clip(&mut self, clip: SessionClip) {
+        self.record(
+            clip.created_at,
+            SessionEventKind::ReplaySaved {
+                index: clip.source_index,
+                output: clip.path.clone(),
+            },
+        );
+        self.clips.push(clip);
+    }
+
     /// Adds an event.
     pub(crate) fn record(&mut self, at: SystemTime, kind: SessionEventKind) {
         self.events.push(SessionEvent { at, kind });
+    }
+
+    /// Adds something a plugin reported.
+    ///
+    /// Kept in the order events happened rather than the order they arrived: a
+    /// plugin observes a game telling it something, so two events can be heard
+    /// out of order and the moment each *describes* is the one a timeline draws
+    /// at. `EventTiming` keeps those apart precisely so that this can sort by
+    /// the former.
+    ///
+    /// Nothing is dropped and nothing is deduplicated here. An event this build
+    /// does not recognise is still the session's, and deciding what is worth a
+    /// clip is the highlight rules' job rather than the session's
+    /// (`crates/session/src/highlights/`).
+    pub fn record_game_event(&mut self, event: GameEvent) {
+        let at = event.timing().at();
+        let position = self
+            .game_events
+            .partition_point(|existing| existing.timing().at() <= at);
+        self.game_events.insert(position, event);
     }
 
     /// Adds a recording that has just started, with the settings it was
@@ -527,6 +739,7 @@ impl Session {
     ) {
         self.recordings.push(SessionRecording {
             index,
+            starts_at_nanos: None,
             output: output.clone(),
             started_at: at,
             ended_at: None,
@@ -565,6 +778,24 @@ impl Session {
     pub(crate) fn end(&mut self, reason: SessionEndReason, at: SystemTime) {
         self.ended_at = Some(at);
         self.record(at, SessionEventKind::Ended { reason });
+
+        // After the session is closed, not during it. Generation reads the
+        // recordings' spans and the events, and both are only complete once
+        // nothing more can be added -- a clip cut from a session still running
+        // would be cut from half of it.
+        //
+        // It is arithmetic over events: no encoder, no filesystem, and nothing
+        // a capture thread waits for. A session that heard nothing generates
+        // nothing, which costs a walk of an empty list.
+        let generated = crate::highlights::generate_for(self);
+        if !generated.is_empty() {
+            tracing::info!(
+                session = %self.id(),
+                clips = generated.len(),
+                "this session's events were worth clips"
+            );
+        }
+        self.record_generated(generated);
     }
 }
 

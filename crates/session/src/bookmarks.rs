@@ -630,19 +630,7 @@ fn write(path: &Path, recording: &str, bookmarks: &[Bookmark]) -> io::Result<()>
     let json = serde_json::to_vec_pretty(&file)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
-    let temporary = temporary_path(path);
-    fs::write(&temporary, &json)?;
-    fs::rename(&temporary, path)
-}
-
-/// The name the file is written under before it is renamed into place.
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map_or_else(
-        || OsString::from("bookmarks.json"),
-        std::ffi::OsStr::to_os_string,
-    );
-    name.push(".tmp");
-    path.with_file_name(name)
+    clipped_logging::write_atomically(path, |temporary| io::Write::write_all(temporary, &json))
 }
 
 /// The file, as JSON.

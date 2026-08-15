@@ -12,10 +12,11 @@
 //! one media harness, rather than assertions written here (AGENTS.md sections 22
 //! and 55).
 //!
-//! What is deliberately absent is audio. A recording has no audio track yet
-//! ([issue #180](https://github.com/wildware-uk/clipped/issues/180)), so a clip
-//! is video only and `audio_stream_count(0)` says so; carrying audio into a
-//! replay is [issue #40](https://github.com/wildware-uk/clipped/issues/40).
+//! What is deliberately absent is audio. A recording carries audio tracks
+//! ([issue #180](https://github.com/wildware-uk/clipped/issues/180)), but the
+//! replay buffer holds video packets only, so a clip cut from one is video
+//! only and `audio_stream_count(0)` says so; carrying audio into a replay is
+//! [issue #40](https://github.com/wildware-uk/clipped/issues/40).
 
 mod support;
 
@@ -56,13 +57,6 @@ fn generous_rate() -> BitRate {
 /// minute of media takes a couple of seconds, fine enough to resolve a save
 /// that takes a few milliseconds.
 const PACE: Duration = Duration::from_micros(200);
-
-/// How many frames capture must produce while a save is still running.
-///
-/// Ten, which at the pace above is about five milliseconds — comfortably under
-/// how long writing a minute of video takes, and unreachable by a save that
-/// blocked capture or by one that wrote nothing.
-const CAPTURED_DURING_A_SAVE: u64 = 10;
 
 fn buffer() -> ReplayBuffer {
     ReplayBuffer::new(
@@ -112,7 +106,8 @@ fn requesting_the_previous_sixty_seconds_yields_a_clip_of_that_length_that_plays
 
     let directory = TemporaryDirectory::new("replay-save-sixty");
     let path = directory.file("clip.mkv");
-    let clip = save_clip(&lease, &path, &video.track()).expect("the clip is written");
+    let clip = save_clip(&lease, &path, &RecordingLayout::new(video.track()))
+        .expect("the clip is written");
 
     // The documented tolerance, and the whole of the keyframe-boundary
     // behaviour: never shorter than was asked for, never more than one segment
@@ -276,16 +271,24 @@ fn capture_carries_on_uninterrupted_while_a_clip_is_saved() {
     let before = pushed.load(Ordering::Acquire);
 
     // The claim, and how it is made without a stopwatch: the save runs on its own
-    // thread, and this waits for capture to advance **while that thread is still
-    // running**. A `save_clip` that held the buffer's lock would leave capture
-    // exactly where it was until the file was finished, and the loop would end on
-    // `is_finished` with nothing counted; a save that wrote nothing would end the
-    // same way. Waiting rather than sampling is what keeps this from depending on
-    // how fast the machine is — a slower one simply waits longer.
+    // thread, and this watches whether capture advances **at all** while that
+    // thread is still running. A `save_clip` holding the buffer's lock would
+    // leave capture exactly where it was until the file was finished, so one
+    // frame is the whole of the evidence — and it is evidence a busy machine
+    // cannot destroy.
+    //
+    // It used to require ten, and that is what made it flaky (issue #490). The
+    // loop has two exits, so a save that finished before a loaded runner had
+    // scheduled the capture thread ten times left `advanced` short and failed
+    // with "capture was waiting on the save" — accusing the code of the one
+    // defect this test exists to catch, when what had actually happened was that
+    // the machine was busy. A threshold scheduling luck can reach or miss is not
+    // measuring the property; "did it move" is.
     let (advanced, clip) = std::thread::scope(|scope| {
-        let saver = scope.spawn(|| save_clip(&lease, &clip_path, &video.track()));
+        let saver =
+            scope.spawn(|| save_clip(&lease, &clip_path, &RecordingLayout::new(video.track())));
         let mut advanced = 0;
-        while !saver.is_finished() && advanced < CAPTURED_DURING_A_SAVE {
+        while !saver.is_finished() && advanced == 0 {
             advanced = pushed.load(Ordering::Acquire) - before;
             std::thread::yield_now();
         }
@@ -297,9 +300,9 @@ fn capture_carries_on_uninterrupted_while_a_clip_is_saved() {
     let (frames, refused, recording) = capturing.join().expect("the capture thread finishes");
 
     assert!(
-        advanced >= CAPTURED_DURING_A_SAVE,
-        "only {advanced} frames were captured while the clip was being written, so capture was \
-         waiting on the save"
+        advanced > 0,
+        "capture did not advance by a single frame while the clip was being written, so the save \
+         held something the capture thread needed"
     );
     assert_eq!(refused, 0, "the buffer refused a packet during the save");
     assert_eq!(
@@ -421,29 +424,58 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     let second_path = directory.file("second.mkv");
     let track = video.track();
 
-    // "Still evicting" measured rather than claimed. This waits — with both
-    // saves still running — for the buffer to move its window past a segment one
-    // of them is reading: `segments_evicted_for_window` says the window moved,
-    // and `segments_retained_for_a_save` says what it moved past was still being
-    // read. The two together are the contention "without corrupting the buffer"
-    // is about; the eviction count alone would be satisfied by a window moving
-    // past segments no reader ever wanted.
-    let (during, first_clip, second_clip) = std::thread::scope(|scope| {
-        let one = scope.spawn(|| save_clip(&first, &first_path, &track));
-        let two = scope.spawn(|| save_clip(&second, &second_path, &track));
-
-        let mut during = buffer.stats();
-        while !one.is_finished()
-            && !two.is_finished()
-            && (during.segments_evicted_for_window() == before.segments_evicted_for_window()
-                || during.segments_retained_for_a_save() == 0)
+    // "Still evicting" made a precondition rather than hoped for, which is the
+    // whole of [issue #430](https://github.com/wildware-uk/clipped/issues/430).
+    //
+    // This used to wait *inside* the scope below, with the saves running, and
+    // its loop had two ways out: the contention appearing, or a save finishing.
+    // On a runner where both saves completed before the capture thread evicted
+    // anything it took the second and then asserted the first, so the test
+    // reported a symptom of its own setup not having happened.
+    //
+    // It waits here instead, before the saves start, and it is sound because a
+    // *lease* is what retains an evicted segment — `drop_front` moves a segment
+    // to `leased` when anything else holds an `Arc` to it, which the two leases
+    // above do for as long as they are alive. So neither counter needs a save to
+    // be in flight, and the capture thread pushing underneath is enough to make
+    // both move. `segments_evicted_for_window` says the window moved;
+    // `segments_retained_for_a_save` says what it moved past was still held. The
+    // eviction count alone would be satisfied by a window rolling past segments
+    // no reader ever wanted.
+    //
+    // Bounded by the capture thread's own ceiling, so a buffer that never
+    // reaches the state says so instead of spinning — and says it as a
+    // *give-up*, distinct from the assertions below failing.
+    loop {
+        let now = buffer.stats();
+        if now.segments_evicted_for_window() > before.segments_evicted_for_window()
+            && now.segments_retained_for_a_save() > 0
         {
-            std::thread::yield_now();
-            during = buffer.stats();
+            break;
         }
+        assert!(
+            pushed.load(Ordering::Acquire) < 12_000,
+            "gave up rather than failed: the capture thread pushed all 12,000 frames and the \
+             window never moved past a leased segment, so this test never reached the state it \
+             is about ({} evicted, {} retained, {} evicted before the leases were taken)",
+            now.segments_evicted_for_window(),
+            now.segments_retained_for_a_save(),
+            before.segments_evicted_for_window()
+        );
+        std::thread::yield_now();
+    }
+    // The state the assertions at the bottom are about, taken at the moment it
+    // was reached rather than after the saves — by then the saves have finished
+    // and what is being asserted would be a fact about a different moment.
+    let during = buffer.stats();
+
+    let (first_clip, second_clip) = std::thread::scope(|scope| {
+        let one =
+            scope.spawn(|| save_clip(&first, &first_path, &RecordingLayout::new(track.clone())));
+        let two =
+            scope.spawn(|| save_clip(&second, &second_path, &RecordingLayout::new(track.clone())));
 
         (
-            during,
             one.join().expect("the first save finishes"),
             two.join().expect("the second save finishes"),
         )
@@ -454,10 +486,16 @@ fn two_saves_in_quick_succession_both_produce_valid_clips() {
     stop.store(true, Ordering::Release);
     let frames = capturing.join().expect("the capture thread finishes");
 
+    // Both of these are now established by the wait above rather than raced
+    // for, so neither can fail as the test stands — and they are kept anyway,
+    // deliberately. They are what the wait is *for*, written where a reader
+    // meets the clips, and they are the guard on the loop's exit condition: a
+    // later change that weakens it back into "or a save finished" makes these
+    // reachable again and they fail exactly as they used to.
     assert!(
         during.segments_evicted_for_window() > before.segments_evicted_for_window(),
-        "the window did not move while the saves were running, so neither save read an evicting \
-         buffer: {} segments evicted before the saves and {} while they ran",
+        "the window did not move while a save held a lease, so neither save read an evicting \
+         buffer: {} segments evicted before the leases were taken and {} once the wait ended",
         before.segments_evicted_for_window(),
         during.segments_evicted_for_window()
     );
@@ -512,8 +550,9 @@ fn a_clip_never_overwrites_something_already_there() {
     let directory = TemporaryDirectory::new("replay-save-existing");
     let path = directory.file("clip.mkv");
 
-    save_clip(&lease, &path, &video.track()).expect("the first clip is written");
-    let refused = save_clip(&lease, &path, &video.track())
+    save_clip(&lease, &path, &RecordingLayout::new(video.track()))
+        .expect("the first clip is written");
+    let refused = save_clip(&lease, &path, &RecordingLayout::new(video.track()))
         .expect_err("a clip must not be written over a clip");
 
     // Choosing another name belongs to the caller, which is the layer that knows

@@ -162,11 +162,7 @@ fn run(wanted: &[(HotkeyAction, Hotkey)], dispatcher: Dispatcher, ready: &Sender
         if cause.is_none() {
             registered.push((action, hotkey));
         }
-        outcomes.push(RegistrationOutcome {
-            action,
-            hotkey,
-            cause,
-        });
+        outcomes.push(RegistrationOutcome { action, cause });
     }
 
     // SAFETY: `GetCurrentThreadId` takes nothing and cannot fail.

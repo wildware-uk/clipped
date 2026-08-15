@@ -16,6 +16,8 @@ events — have a producer. The rest still do not, and say so by name below.
 [#51]: https://github.com/wildware-uk/clipped/issues/51
 [#52]: https://github.com/wildware-uk/clipped/issues/52
 [#55]: https://github.com/wildware-uk/clipped/issues/55
+[#68]: https://github.com/wildware-uk/clipped/issues/68
+[#71]: https://github.com/wildware-uk/clipped/issues/71
 [#93]: https://github.com/wildware-uk/clipped/issues/93
 [#94]: https://github.com/wildware-uk/clipped/issues/94
 [#107]: https://github.com/wildware-uk/clipped/issues/107
@@ -209,10 +211,11 @@ games ──┬── sessions ──┬── recordings ──┬── bookma
 | `games` | one row per game actually played, keyed by the catalogue's `game_id` | the recorder's library indexer ([#402]) |
 | `sessions` | one sitting with one game, keyed by the recorder's own session identifier | the recorder's library indexer ([#402]) |
 | `session_game_candidates` | the games the catalogue could not choose between, for an unattributed session | the recorder's library indexer ([#402]) |
-| `recordings` | one media file: path, timings, dimensions, outcome, size, whether it is still there | the recorder's library indexer ([#402]) |
-| `clips` | a shorter file the user kept, and the window of the source it came from | nothing can create one |
+| `recordings` | one media file: path, timings, dimensions, outcome, size, whether it is still there, and where it starts on its session's timeline | the recorder's library indexer ([#402]) |
+| `clips` | a clip: the range of a recording it is, why it exists, and its file if it has one yet | a saved replay ([#38](https://github.com/wildware-uk/clipped/issues/38)); a clip with no file is stored by nothing yet ([#56](https://github.com/wildware-uk/clipped/issues/56)) |
 | `bookmarks` | a marked moment in a recording: offset, label, colour, duration | the recorder takes them ([#64](https://github.com/wildware-uk/clipped/issues/64)) and writes them to a sidecar beside each recording; nothing indexes them into this table yet (`docs/bookmarks.md`) |
 | `session_events` | what happened during a session, in the vocabulary the sidecar already writes | the recorder's library indexer ([#402]) |
+| `game_events` | what happened *in the game*: a plugin's event, the moment it happened on the media timeline, and which recording covers that moment | nothing yet — the table exists, and the sidecar write and ingest that fill it are the rest of [#71] |
 | `tags`, `recording_tags`, `clip_tags` | free-form labels, and what they are on | none |
 | `settings`, `game_settings` | global settings and per-game overrides, as JSON values under opaque keys | none |
 | `schema_migrations` | which migrations have run, and the checksum of each | the framework |
@@ -264,17 +267,14 @@ global row.
 
 A table that is wrong is worse than a table that is missing, so:
 
-- **Game events.** A kill, a round starting, a highlight. These are a different
-  vocabulary from session events entirely, they come from plugins, and that
-  vocabulary does not exist — `clipped-events` is module documentation with no
-  types in it and the plugin API is M9. A table whose `kind` column has no
-  defined values would be a guess. `session_events` covers what is produced
-  today; the migration that adds game events belongs to the milestone that
-  defines them.
 - **Screenshots.** SPEC.md section 26 designs them; nothing captures one.
-- **The clip edit model.** M11 represents cuts, audio levels and overlays as
-  metadata over a source recording. `clips` models the single window a saved
-  replay came from and nothing more.
+- **An interpreted clip edit model.** `clips.edit` holds the document's text
+  (migration `0004`), and nothing in this crate parses it: M11 represents cuts,
+  audio levels and overlays as metadata over a source recording, that model is
+  `clipped-edit`'s, and a second copy of it in SQL columns is what
+  AGENTS.md section 55 forbids. What is stored beside the document is only what
+  a query has to answer without opening one — which recording it depends on, its
+  window, its length and why it exists.
 - **Quota and retention policy.** SPEC.md section 27's maximum size, minimum free
   space and maximum age are settings, and they will live in `settings` under keys
   the storage manager defines. Where the *policy* lives is an M12 decision
@@ -283,6 +283,21 @@ A table that is wrong is worse than a table that is missing, so:
 
 Every one of those is a column or a table added by a later migration, which is
 exactly what the framework below is for.
+
+**Game events used to be on that list, and are not any more.** The reason given
+was that the vocabulary did not exist — `clipped-events` was module
+documentation with no types in it — and "a table whose `kind` column has no
+defined values would be a guess". `clipped-events` is a crate now ([#68]): it
+has `EventKind`, `GameEvent`, and a versioned `StoredEvent` envelope that keeps
+fields a newer build added. So the guess is gone and `game_events` exists
+(migration `0003`, [#71]), shaped the way `docs/highlights.md` argues it.
+
+What has *not* changed is why it is a second table rather than columns on
+`session_events`: that table's `at` is RFC 3339 text where an `EventTime` is
+signed nanoseconds on the media timeline, it has no `recording_id`, and
+`clipped_library::index::ingest` rewrites every one of a session's rows on each
+reconciliation — so an event written there would be regenerated rather than
+persisted.
 
 ## Migrations
 

@@ -344,9 +344,12 @@ would pass every other test in the repository.
 deck's tab strip and its selectable chips **at the point a screen needs them**,
 so that a component with no consumer is not designed against a guess. **The
 Library screen still does not need them**: since #301 it has one populated list
-— sessions — and two empty ones, because nothing creates a clip or a highlight
-yet, so a strip over them would still be the speculative component that issue
-exists to prevent. It belongs with the first screen that has three lists worth
+— sessions — and two the window does not draw. Clips exist on disk and in the
+database now, because a saved replay makes one
+([#38](https://github.com/wildware-uk/clipped/issues/38)), but they arrive
+*inside* a session rather than as a list of their own, and a strip over one
+populated list would still be the speculative component that issue exists to
+prevent. It belongs with the first screen that has three lists worth
 switching between, which is this one once #91 and #76 land.
 `LibraryScreen.test.tsx` asserts that no `tablist` and no `tab` is drawn, so
 adding one is a decision rather than a drift.
@@ -723,10 +726,10 @@ the screen says how:
 | Section | What can be changed today |
 | --- | --- |
 | Recording | `clipped-recorder watch --framerate 60 --codec auto …`, per run; #61 is what makes the settings file reach a recording |
-| Audio | The same options, with the recorder's own warning that a recording has no audio track yet (#180) |
+| Audio | The same options. A recording carries its audio tracks (#180); what the settings file cannot yet do is choose the devices per game |
 | Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
 | Hotkeys | The `hotkeys` section of `settings.json`, read when the recorder starts. The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232); binding one from here is #54 |
-| Notifications | **The one thing this window's own behaviour follows**: the three switches in `notifications.json`, named with their keys and their file |
+| Notifications | **The one thing this window's own behaviour follows**: the four switches in `notifications.json`, named with their keys and their file |
 | Startup | `clipped-recorder start-at-login enable`, which no protocol command can reach — [#308](https://github.com/wildware-uk/clipped/issues/308) |
 
 Two settings SPEC.md asks for have nowhere to be stored rather than nothing to
@@ -967,7 +970,7 @@ only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
 ```text
   Recording process `cs2.exe`          the status, not a control
   ─────────────────────────────
-  Save Replay — needs a recording with a replay buffer (#38)   disabled
+  Save Replay — this recording is not keeping a replay buffer   disabled
   Add Bookmark
   Stop Recording
   ─────────────────────────────
@@ -1052,11 +1055,13 @@ it is drawn on every mark, so no change to the bars or the badge can make this
 test fail. It fires only if the palette itself moves.
 
 **There is no "buffering" mark**, which SPEC.md section 33's own list implies.
-The recorder cannot report one: `RecorderStatus` is `idle` or `recording`, the
-replay buffer exists as a crate and nothing in `serve` runs it, and a tray that
-showed buffering would be showing something nobody measured (AGENTS.md section
-27). It arrives with the recording that runs a buffer, in
-[issue #38](https://github.com/wildware-uk/clipped/issues/38).
+`RecorderStatus` is `idle` or `recording` and nothing else: a recording that
+keeps a replay buffer is still a recording, and it says so by carrying
+`replay_seconds` on the recording rather than by being a third state
+([#38](https://github.com/wildware-uk/clipped/issues/38)). A separate mark would
+be for the mode that keeps a buffer and records nothing, which no build has
+([#423](https://github.com/wildware-uk/clipped/issues/423)), and a tray showing
+it today would be showing something nobody measured (AGENTS.md section 27).
 
 ### Nothing offered that would do nothing
 
@@ -1065,11 +1070,37 @@ reason in its own label**. A notification-area menu has no tooltip and no help
 text, so the label is the only place a reason can go, and "greyed out with no
 explanation" is the failure AGENTS.md section 27 names.
 
-- **Save Replay** is a command the protocol defines and the recorder refuses.
-  Its label is built from `UnbuiltCommand`'s own subsystem and tracking issue —
-  the same two facts the recorder puts in the `not_implemented` refusal — so the
-  day it is built, the menu stops claiming it has not.
-- **Add Bookmark** is what that looked like the day it happened. Issue #64 built
+- **Save Replay** was a command the protocol defined and the recorder refused,
+  labelled from `UnbuiltCommand`'s own subsystem and tracking issue so that the
+  day it was built the menu would stop claiming it had not. That day was
+  [#38](https://github.com/wildware-uk/clipped/issues/38). It is live exactly
+  when the running recording is keeping a replay buffer, and disabled with the
+  true reason otherwise: `— this recorder cannot save replays` when the recorder
+  never advertised `features::replay`, `— nothing is being recorded`, or `—
+  this recording is not keeping a replay buffer`.
+
+  **Clicking it saves a clip.** It sends `save_replay` naming nothing — not the
+  recording, not a length, not a destination — for the reason Add Bookmark names
+  nothing: the item is one click in a menu with nowhere to type, and each of
+  those three has an answer the recorder already holds. What comes back is
+  spelled out in full, unlike a bookmark's offset, because a replay is a **new
+  file** in a place the user did not choose, and a file nobody is told about is
+  a file nobody finds. A clip shorter than the buffer's window is reported as
+  short rather than as a failure: the buffer had not been filling long enough,
+  which is a fact about when the recording started and not about anything going
+  wrong.
+
+  A recording started **from this window** still keeps no buffer, so in practice
+  the reason is usually the third. The window cannot ask for one at a length
+  somebody chose: the duration lives in `replay_window_seconds`, and this window
+  has no way to read a setting — `apply_settings` is unbuilt (#108) and
+  `workspace_layering.rs` allows the Tauri host exactly one crate of the
+  workspace, `clipped-ipc`, so reading `settings.json` here would be a second
+  implementation of the settings file. `clipped-recorder replay --duration`
+  starts a recording that does have one, and against that recording the item is
+  live and works ([#427](https://github.com/wildware-uk/clipped/issues/427) for
+  the rest).
+- **Add Bookmark** is what that looked like the first time. Issue #64 built
   the bookmark store and the `add_bookmark` command, the refusal it quoted
   stopped existing, and the item became a control: live while something is being
   recorded, and disabled with `— nothing is being recorded` otherwise, because a
@@ -1284,20 +1315,22 @@ Everything, and there is no more:
 | `State(Unavailable)` | **yes** | The link has given up. Nothing is being recorded and nothing further will be tried unless asked. |
 | `RecordingInterrupted` | **yes** | A recorder died mid-recording. There is a playable file, and nothing else will ever say where. |
 | `RecordingFailed` | **yes** | A recording ended because something went wrong, and the state that follows it is only "idle". |
+| `HotkeysUnavailable` | **yes**, once per set | Windows refused a combination, so a control the user believes in does nothing at all. Only the first time a given set of refusals is seen — see below. |
 
-Those seven rows are the whole of `RecorderLinkEvent` and `RecorderLinkState`.
+Those eight rows are the whole of `RecorderLinkEvent` and `RecorderLinkState`.
 The rule they encode is that **only failures interrupt anybody**: a recorder runs
 for days, and a toast when a recording starts would train the user to dismiss
 them without reading, taking the three that matter with it.
 
 Issue #110's scope also lists "replay saved", "bookmark added" and "screenshot
-taken". **None of them is here.** Two of the three do not exist at all:
-`clipped_replay` can write a clip out of the retained segments (issue #37), but
-no build runs a recording with a buffer to save from (issue #38) and
-`save_replay` is a command this build refuses. Notifying about something no
-subsystem reports would be the invented state AGENTS.md section 27 forbids, and
-it would be the one thing worse than a missing notification: a user believing a
-clip was saved.
+taken". **None of them is here**, and the reason for the first has changed: a
+replay *can* be saved now — `clipped-recorder replay` does it on a hotkey and
+`save_replay` does it over the protocol (issue #38) — but `serve` publishes no
+event when one is, so a window has nothing to notify from. It is the reply to
+the command it sent, and a notification for a save the *user's own window* asked
+for would be telling them what they just did. The notification belongs with the
+hotkey reaching `serve` (issue #232), where a save can happen without the window
+asking for it.
 
 Bookmarks are the third, and they *do* exist now (issue #64). A "bookmark added"
 toast is still not here, and that is a decision rather than an omission: a
@@ -1338,6 +1371,7 @@ ever offers one this build can actually perform:
 | Recording failed | The recorder's own sentence, and where the file it wrote up to the failure is. | **Show the file** — File Explorer, with the recording selected. |
 | Recording interrupted | What was being recorded, that it was not resumed, and where the file is. | **Show the file** |
 | Recorder unavailable | Why the link gave up. | **Try again** — `RecorderLink::retry`, and the window is raised to watch it. |
+| *Action* is unavailable | Which combination Windows refused, for which action, in the recorder's own words. | **Change the hotkey** — the Settings screen, where that row already is. |
 
 `recording_failed` carries a recording identifier and no path, so the file is
 named from the last `Recording` status the window saw — and **only** when that
@@ -1353,6 +1387,32 @@ button that would do nothing is worse than no button (AGENTS.md section 27).
 
 Clicking the *body* of a toast raises the window rather than performing the
 action, which is the platform convention and means neither click does nothing.
+
+### A hotkey Windows would not give out, and why it is announced once
+
+The recorder has known which of its combinations Windows refused since issue
+#232, and `get_hotkeys` has been able to say so. Nothing *asked*: the list is
+drawn on Settings > Hotkeys, so somebody who never opens Settings found out that
+Ctrl+F10 belongs to another application by pressing it in a game and watching
+nothing happen (issue #417).
+
+`RecorderLink` now asks once it has attached, on a control connection of its own,
+and reports whatever came back in the `Conflict` state as
+`RecorderLinkEvent::HotkeysUnavailable`. A recorder that got every combination it
+asked for produces no event at all — an event meaning "all well" would have every
+consumer checking a length before deciding whether something was wrong.
+
+**The link reports on every attachment; the policy announces once.** The link
+cannot know what the user has already been told, and a recorder that drops its
+connection twice an hour would otherwise toast twice an hour about a combination
+the user has already decided to live with. So `NotificationPolicy` remembers the
+set it announced, compared by combination and action — which means a *different*
+hotkey being refused later, after somebody changed one, is news again.
+
+Nothing here fails an attachment. A recorder too old to know `get_hotkeys`, one
+that refuses it, or one that goes away between attaching and being asked, all
+mean the same thing: nothing to report. Losing the link over a question about
+hotkeys would trade a convenience for the thing the link exists to do.
 
 #### Keeping the button connected to its handler
 

@@ -73,7 +73,7 @@ What the document deliberately cannot hold is the second field, for two
 reasons:
 
 - **Layering.** Provenance is game-event vocabulary — a kill, reported by a
-  plugin, at a moment on the recording's timeline. `clipped-edit` and
+  plugin, at a moment on the session's timeline. `clipped-edit` and
   `clipped-events` are both at layer 0 of the table in README.md and cannot name
   each other. `clipped-library` is the lowest crate that can see both, so that
   is where the model lives.
@@ -116,7 +116,7 @@ caused it, which a label cannot do.
 | `highlight` | generation from game events ([#76]) | no |
 
 A `highlight` carries a `HighlightCause`: what happened, when it happened on the
-recording's timeline, and who reported it. Three fields, and deliberately not
+session's timeline, and who reported it. Three fields, and deliberately not
 the whole `GameEvent` — the payload can be kilobytes of a plugin's own detail
 and would be a second copy of a row that event persistence already owns, and the
 confidence is what the rules filtered on before deciding to generate at all.
@@ -512,19 +512,13 @@ The behaviour, which `SourceDeletion` states as a type rather than as prose:
 A clip that draws on more than one recording ([#88]) takes the worst answer of
 its sources, because a clip that needs two recordings and has one does not play.
 
-## Persistence, which does not exist yet
+## Persistence
 
-**A virtual clip cannot currently be stored, and this ticket did not add the
-ability.** The `clips` table from [#55] requires `path TEXT NOT NULL UNIQUE`,
-which is precisely the column a virtual clip does not have, and it holds no
-edit document and no origin. Storing one therefore needs a migration, and that
-migration is [#269] rather than part of this change: `docs/storage.md`'s rule is
-that a table that is wrong is worse than a table that is missing, and columns
-that nothing writes and nothing reads would be a guess at a shape two open
-issues are still deciding.
-
-The shape [#269] should add, recorded here so the model and the schema are
-argued in one place:
+The `clips` table from [#55] required `path TEXT NOT NULL UNIQUE` — precisely
+the column a virtual clip does not have — and held no edit document and no
+origin. Migration `0004_clips_without_a_file.sql` ([#269]) is what changed that,
+in the shape argued here so that the model and the schema stay argued in one
+place:
 
 - `path` becomes nullable — a clip with no file is the normal case, and a file
   is what an export adds.
@@ -539,9 +533,11 @@ argued in one place:
   "what depends on this recording" is asked before every deletion, and scanning
   every clip's document to answer it would not scale.
 
-Until that lands, a clip does not survive a restart and does not appear in the
-library or in search; the library index itself is [#56] and search is [#59],
-both M6 and both open.
+The table can hold one now; **nothing writes one yet.** Reading and writing
+these rows belongs with the library index ([#56]) and search is [#59], both M6
+and both open — so a virtual clip still does not survive a restart, and
+[#76]'s generated highlights still have nowhere to go. What has changed is that
+the obstacle is code rather than schema.
 
 ## Where the events themselves live
 
@@ -601,19 +597,19 @@ the keyframe the buffer began with, and the events inside it place in it,
 rebased onto the clip. Nothing about the model changes between the two cases;
 the list of segments does.
 
-### The table, which does not exist yet
+### The table
 
-**Nothing stores a game event.** `session_events` is not it and says so: the
-`0001` migration reserves that table for the session's own vocabulary and
-records the exclusion, `docs/storage.md` repeats it under "What is deliberately
-absent", and three things make writing game events there wrong rather than
-merely untidy — its `at` is RFC 3339 text where an `EventTime` is signed
-nanoseconds on the media timeline, it has no `recording_id`, and
-`clipped_library::index::ingest` rewrites every one of a session's rows on each
-reconciliation.
+**`session_events` is not it, and says so**: the `0001` migration reserves that
+table for the session's own vocabulary and records the exclusion, and three
+things make writing game events there wrong rather than merely untidy — its
+`at` is RFC 3339 text where an `EventTime` is signed nanoseconds on the media
+timeline, it has no `recording_id`, and `clipped_library::index::ingest`
+rewrites every one of a session's rows on each reconciliation, so an event
+written there would be regenerated rather than persisted.
 
-So M9 owes a migration, and the shape it should add is recorded here so that
-the model and the schema are argued in one place:
+So M9 owed a migration. It is `0003_game_events.sql` ([#71]), and the shape is
+argued here rather than only in the SQL so that the model and the schema stay
+argued in one place:
 
 ```sql
 CREATE TABLE game_events (
@@ -635,19 +631,29 @@ CREATE TABLE game_events (
   (AGENTS.md section 56). The other columns are indexes into that text rather
   than a second copy of the model; spreading the envelope across columns would
   lose everything that did not fit one.
-- **`kind` carries no `CHECK`.** The vocabulary is open by design, and a
-  constraint here would refuse exactly the events that must still be drawn.
+- **`kind` is checked for being *given*, never for *which*.** `CHECK (kind <>
+  '')` refuses a row that names no kind at all and nothing else: the vocabulary
+  is open by design, so a constraint listing permitted values would refuse
+  exactly the namespaced `Custom` and `Unrecognised` events that must still be
+  drawn.
 - **`recording_id` is nullable**, because an event a replay-buffer-only session
   heard belongs to the session and to no file, and `ON DELETE SET NULL` keeps
   it when the recording goes.
 
-Until that migration lands, nothing writes a game event and nothing reads one
-back: `crates/library/src/events.rs` places events it is *handed*. Drawing them
-is a second gap and a separate one — the desktop window can neither read the
-library nor ask the recorder for a row of it ([#329], [#301]) — so the editor's
-event lane says "nobody asked" rather than "there were none".
+The table is filled. A plugin's event reaches the open session, the session
+writes it to its sidecar, and `clipped_library::index::ingest` turns it into a
+row — **placed in the recording that covers it**, because each recording now
+writes where it starts on the session's timeline and `crates/library/src/
+events.rs` tests a moment against the span that gives ([#71]). An event no file
+covers keeps a null `recording_id`, which is one of the four answers above
+rather than a failure.
+
+Drawing them is a separate gap: the desktop window can neither read the library
+nor ask the recorder for a row of it ([#329], [#301]), so the editor's event lane
+says "nobody asked" rather than "there were none".
 
 [#68]: https://github.com/wildware-uk/clipped/issues/68
 [#71]: https://github.com/wildware-uk/clipped/issues/71
 [#301]: https://github.com/wildware-uk/clipped/issues/301
+[#338]: https://github.com/wildware-uk/clipped/issues/338
 [#329]: https://github.com/wildware-uk/clipped/issues/329

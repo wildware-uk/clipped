@@ -1416,3 +1416,64 @@ fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced(
         automatic.1
     );
 }
+
+/// A kill at `seconds` on the session's timeline.
+fn a_kill(seconds: i64) -> clipped_events::GameEvent {
+    use core::time::Duration;
+
+    use clipped_events::{Confidence, EventKind, EventSource, EventTime, EventTiming};
+
+    clipped_events::GameEvent::new(
+        EventKind::Kill,
+        EventTiming::new(
+            EventTime::from_media_nanos(seconds * 1_000_000_000),
+            Duration::ZERO,
+        ),
+        EventSource::plugin("cs2").expect("a legal source"),
+        Confidence::CERTAIN,
+    )
+}
+
+#[test]
+fn what_a_plugin_reports_goes_on_the_open_session() {
+    let mut harness = Harness::new("plugin-events-land");
+    let _ = started(&mut harness, 4242, t(10));
+
+    let kept = harness.manager.record_game_events([a_kill(3), a_kill(1)]);
+
+    assert_eq!(kept, 2, "the open session refused what a plugin reported");
+    let session = harness
+        .manager
+        .active_session()
+        .expect("the session is open");
+    let moments: Vec<i64> = session
+        .game_events()
+        .iter()
+        .map(|event| event.timing().at().as_media_nanos())
+        .collect();
+    assert_eq!(
+        moments,
+        [1_000_000_000, 3_000_000_000],
+        "the session kept them in the order they arrived rather than the order they happened"
+    );
+
+    // On the session, not in its own history: two vocabularies, two lists.
+    assert!(
+        !session.events().is_empty(),
+        "the session's own history was emptied"
+    );
+}
+
+#[test]
+fn events_reported_after_the_session_closed_are_refused_rather_than_swallowed() {
+    // The count is the whole point. A plugin can still be draining when its
+    // session ends, and an event silently discarded is indistinguishable from
+    // one that was never reported (AGENTS.md section 54) — so the caller is
+    // told how many were kept and can say so.
+    let mut harness = Harness::new("plugin-events-after-close");
+
+    let kept = harness.manager.record_game_events([a_kill(1)]);
+
+    assert_eq!(kept, 0, "an event was accepted with no session open");
+    assert!(harness.manager.active_session().is_none());
+}

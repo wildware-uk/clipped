@@ -186,6 +186,7 @@ fn main() {
             recorder_link_state,
             startup_notice,
             library_sessions,
+            library_events,
             library_games,
             record_target,
             recorder_status,
@@ -414,6 +415,31 @@ fn library_games(
     match link.call(&clipped_ipc::Command::LibraryGames)? {
         clipped_ipc::Reply::LibraryGames { games } => Ok(games),
         _ => Err(wrong_reply("library_games")),
+    }
+}
+
+/// The marks on one recording's timeline.
+///
+/// Placed in that recording's file by the recorder, because placing needs the
+/// recording's span on its session's timeline and this process has no way to
+/// know it — the window is given the number it draws at rather than one it
+/// would have to work out (`docs/ipc.md`, `library_events`).
+///
+/// `async` for the reason [`library_sessions`] is: the call opens a pipe and
+/// waits, and a window that froze while a lane was fetched is what ADR 0002's
+/// two processes exist to prevent.
+#[tauri::command(async)]
+fn library_events(
+    link: tauri::State<'_, RecorderLink>,
+    recording: String,
+) -> Result<clipped_ipc::LibraryEventLane, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::LibraryEvents(
+        clipped_ipc::LibraryEvents { recording },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::LibraryEvents { lane } => Ok(lane),
+        _ => Err(wrong_reply("library_events")),
     }
 }
 
@@ -900,6 +926,44 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
+
+        /// Waits until the link has asked its own start-up question.
+        ///
+        /// `RecorderLink` asks `get_hotkeys` once it has attached, on its
+        /// watching thread, so that a combination Windows refused reaches the
+        /// user as a notification rather than only as a line in a log
+        /// ([issue #417](https://github.com/wildware-uk/clipped/issues/417)).
+        ///
+        /// That question races every command a test sends afterwards: it can
+        /// arrive before one, after one, or between two. Waiting for it here and
+        /// then forgetting it is what keeps `asked()` a statement about *the
+        /// window* rather than about which thread got there first — the
+        /// alternative is nine assertions that pass or fail on timing.
+        fn wait_for_the_links_own_question(&self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if self
+                    .asked()
+                    .iter()
+                    .any(|command| matches!(command, clipped_ipc::Command::GetHotkeys))
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!(
+                "the link never asked this recorder which hotkeys it holds, so either it did not \
+                 attach or it stopped asking"
+            );
+        }
+
+        /// Forgets everything asked so far.
+        fn forget(&self) {
+            self.asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
     }
 
     impl clipped_ipc::CommandHandler for AskedRecorder {
@@ -975,6 +1039,9 @@ mod tests {
             output: r"D:\clips\clipped-cs2-2026-08-12T09-15-00.mkv".to_owned(),
             target: "process `cs2.exe`".to_owned(),
             elapsed_ms: 754_000,
+            // The window does not ask for a replay buffer, so a recording it
+            // started keeps none (#427).
+            replay_seconds: None,
         })
     }
 
@@ -1127,6 +1194,14 @@ mod tests {
                 )
             };
             let (link, _events) = RecorderLink::start(settings);
+
+            // Settled before the test looks at anything. See
+            // `wait_for_the_links_own_question`: the link asks the recorder
+            // which hotkeys it holds as soon as it attaches, and a test about
+            // what the window asked should not depend on whether that landed
+            // first.
+            self.handler.wait_for_the_links_own_question();
+            self.handler.forget();
 
             tauri::test::mock_builder()
                 .manage(link)

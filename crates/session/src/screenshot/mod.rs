@@ -490,23 +490,7 @@ fn free_path(
 
 /// Writes `bytes` to `path` through a temporary file in the same directory.
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut name = path
-        .file_name()
-        .map_or_else(|| std::ffi::OsString::from("screenshot"), ToOwned::to_owned);
-    name.push(".tmp");
-    let temporary = path.with_file_name(name);
-
-    fs::write(&temporary, bytes)?;
-    match fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            // The temporary file is removed on failure rather than left behind
-            // to be counted as a screenshot nobody can open. Its own failure is
-            // not reported over the one that actually matters.
-            let _ = fs::remove_file(&temporary);
-            Err(error)
-        }
-    }
+    clipped_logging::write_atomically(path, |temporary| io::Write::write_all(temporary, bytes))
 }
 
 /// Why a screenshot could not be taken or saved.

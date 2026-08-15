@@ -115,6 +115,7 @@ export const FEATURES = [
   'library',
   'export',
   'hotkeys',
+  'replay',
 ] as const;
 
 /** A capability this build knows how to make use of. */
@@ -130,7 +131,7 @@ export type KnownFeature = (typeof FEATURES)[number];
  */
 export type Feature = Extensible<KnownFeature>;
 
-/** Every command the protocol defines, including the two no build performs yet. */
+/** Every command the protocol defines, including the one no build performs yet. */
 export const COMMANDS = [
   'ping',
   'get_status',
@@ -138,12 +139,14 @@ export const COMMANDS = [
   'stop_recording',
   'add_bookmark',
   'take_screenshot',
+  'save_replay',
   'library_sessions',
   'library_games',
+  'library_events',
+  'plugins',
   'export_recording',
   'get_hotkeys',
   'shutdown',
-  'save_replay',
   'apply_settings',
 ] as const;
 
@@ -218,8 +221,11 @@ export const REPLIES = [
   'recording_stopped',
   'bookmark_added',
   'screenshot_taken',
+  'replay_saved',
   'library_sessions',
   'library_games',
+  'library_events',
+  'plugins',
   'recording_exported',
   'hotkeys',
   'shutting_down',
@@ -321,6 +327,15 @@ export type StartRecordingParams = {
   readonly microphone?: string;
   /** `default`, `none`, or part of a device name. */
   readonly system_audio?: string;
+  /**
+   * Keep the last this many seconds in memory, so that `save_replay` has
+   * something to save.
+   *
+   * Absent means no buffer, which is what an ordinary recording is. It belongs
+   * to the recording rather than to the save, because a buffer has to have been
+   * filling since before the thing somebody wants to keep happened.
+   */
+  readonly replay_seconds?: number;
 };
 
 /**
@@ -408,6 +423,35 @@ export type TakeScreenshotParams = {
   readonly pid?: number;
   /** `png`, `jpeg` or `webp`. Absent means the recorder's own default. */
   readonly format?: string;
+};
+
+/**
+ * How much of the replay buffer to keep, and where to put it. A type alias for
+ * the reason {@link StartRecordingParams} is one.
+ *
+ * Every field is optional, because the shape a hotkey sends is no fields at
+ * all: keep the recorder's configured duration out of whatever is being
+ * recorded, and put it where that recording's clips go.
+ */
+export type SaveReplayParams = {
+  /**
+   * Which recording to save out of. Absent means "whatever is being recorded",
+   * exactly as it does for a bookmark and a screenshot.
+   */
+  readonly recording_id?: string;
+  /**
+   * How many seconds to keep. Absent means the duration the recording's buffer
+   * was started with.
+   *
+   * More than the buffer's window is not refused: the clip is what there was,
+   * and {@link ReplaySummary.complete} says it was short.
+   */
+  readonly duration_seconds?: number;
+  /**
+   * Where to write the clip. Absent means beside the recording, named after the
+   * session it belongs to.
+   */
+  readonly output?: string;
 };
 
 /**
@@ -739,6 +783,14 @@ export interface ScreenshotTakenReply {
   readonly screenshot: ScreenshotSummary;
 }
 
+/** A replay was saved, and the clip is finished and playable. */
+export interface ReplaySavedReply {
+  /** The tag. */
+  readonly reply: 'replay_saved';
+  /** The clip, and how it compares with what was asked for. */
+  readonly clip: ReplaySummary;
+}
+
 /** One page of the recording library. */
 export interface LibrarySessionsReply {
   /** The tag. */
@@ -753,6 +805,111 @@ export interface LibraryGamesReply {
   readonly reply: 'library_games';
   /** One row per game, and one for the sittings nothing was attributed to. */
   readonly games: readonly LibraryGame[];
+}
+
+/** One mark on a recording's timeline. */
+export interface LibraryEventMark {
+  /** The recording this mark is on, as the library identifies it. */
+  readonly recording: string;
+  /** How far into that recording's file the event is, in nanoseconds. */
+  readonly at: number;
+  /**
+   * What happened.
+   *
+   * **Not a closed set.** A kind added after this build shipped, and a
+   * plugin's namespaced custom name, both arrive here and both must be drawn:
+   * validating against a list would delete exactly the marks that have to
+   * survive.
+   */
+  readonly kind: string;
+  /** Who reported it: a plugin's identifier, or `clipped`. */
+  readonly source: string;
+}
+
+/** The marks of one recording. */
+export interface LibraryEventLane {
+  /**
+   * The marks, earliest first.
+   *
+   * Always present. An empty array means the recording has no events, which is
+   * a different thing from the question not having been asked — and the two
+   * are drawn differently.
+   */
+  readonly marks: readonly LibraryEventMark[];
+}
+
+/** The marks on one recording's timeline. */
+export interface LibraryEventsReply {
+  /** The tag. */
+  readonly reply: 'library_events';
+  /** The events, placed in that recording's file. */
+  readonly lane: LibraryEventLane;
+}
+
+/**
+ * Whether a plugin will start, and why not when it will not.
+ *
+ * Four states rather than a boolean: a plugin nobody has enabled needs an
+ * invitation, one that was turned off needs nothing, and one whose consent has
+ * lapsed needs somebody to look at what changed.
+ */
+export type PluginState =
+  | { readonly state: 'enabled' }
+  | { readonly state: 'not-enabled' }
+  | { readonly state: 'turned-off' }
+  | {
+      readonly state: 'needs-consent-again';
+      /** What the user agreed to. */
+      readonly agreed_to: string;
+      /** What it declares now. */
+      readonly now_declares: string;
+    };
+
+/** One installed plugin, and what it asks for. */
+export interface PluginDeclaration {
+  /** The plugin's identifier, as its manifest gives it. */
+  readonly id: string;
+  /** What to call it on a screen. */
+  readonly name: string;
+  /** Its own version. Free text: nothing compares two of them. */
+  readonly version: string;
+  /** What it says it does. */
+  readonly description: string;
+  /**
+   * What it will do with the network, one plain sentence per grant.
+   *
+   * Empty means it declares none, which a screen must **say** rather than draw
+   * as a blank row.
+   */
+  readonly network: readonly string[];
+  /**
+   * What Clipped can and cannot promise about the sentences above.
+   *
+   * Sent with every declaration rather than kept here, because it is part of
+   * what somebody agrees to and a second copy could drift from what the
+   * recorder enforces.
+   */
+  readonly enforcement: string;
+  /** What this build will do about the plugin. */
+  readonly state: PluginState;
+}
+
+/** Something under the plugins directory that is not a usable plugin. */
+export interface RefusedPlugin {
+  /** Where it is. */
+  readonly directory: string;
+  /** Why it was refused, in the words the recorder used. */
+  readonly reason: string;
+}
+
+/** What plugins are installed, and what each of them asks for. */
+export interface PluginsReply {
+  /** The tag. */
+  readonly reply: 'plugins';
+  /** Every plugin discovery could read. */
+  readonly installed: readonly PluginDeclaration[];
+  /** Everything that is not one, and why. Always present. */
+  readonly refused: readonly RefusedPlugin[];
 }
 
 /** A recording was copied into MP4, and the file is finished. */
@@ -864,8 +1021,11 @@ export type Reply =
   | RecordingStoppedReply
   | BookmarkAddedReply
   | ScreenshotTakenReply
+  | ReplaySavedReply
   | LibrarySessionsReply
   | LibraryGamesReply
+  | LibraryEventsReply
+  | PluginsReply
   | RecordingExportedReply
   | HotkeysReply
   | ShuttingDownReply;
@@ -898,6 +1058,14 @@ export interface ActiveRecording {
   readonly target: string;
   /** Milliseconds the recording has been running, as the recorder measures it. */
   readonly elapsed_ms: number;
+  /**
+   * How much history this recording's replay buffer keeps, when it has one.
+   *
+   * Absent for a recording with no buffer. The `replay` feature says the build
+   * has the command; this says there is something for it to save from, and
+   * bounds what may be asked for.
+   */
+  readonly replay_seconds?: number;
 }
 
 /** A recording is in progress. */
@@ -1014,6 +1182,37 @@ export interface ScreenshotSummary {
    * a timeline can put a marker exactly where the picture came from.
    */
   readonly at_seconds?: number;
+}
+
+/**
+ * A clip saved out of a recording's replay buffer.
+ *
+ * It carries what the clip turned out to be rather than only that one was
+ * written, because what comes out is not exactly what was asked for: a clip can
+ * only begin on a keyframe, so it is slightly longer at the front, and a buffer
+ * that has not filled yet gives less than was asked for.
+ */
+export interface ReplaySummary {
+  /** The file that was written. */
+  readonly path: string;
+  /** The recording it was saved out of. */
+  readonly recording_id: string;
+  /** How much video was asked for. */
+  readonly requested_seconds: number;
+  /** How long the clip is. */
+  readonly duration_seconds: number;
+  /** Where in the recording the clip begins, on the recording's own timeline. */
+  readonly source_start_seconds: number;
+  /** Where in the recording the clip ends. */
+  readonly source_end_seconds: number;
+  /** Video kept before the requested start, because a clip begins on a keyframe. */
+  readonly leading_slack_seconds: number;
+  /** Whether the buffer held the whole of what was asked for. */
+  readonly complete: boolean;
+  /** How much of the request the buffer did not hold. Zero when `complete`. */
+  readonly shortfall_seconds: number;
+  /** How many bytes of coded video were written. */
+  readonly bytes: number;
 }
 
 /** Which versions this recorder actually speaks. */

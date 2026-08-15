@@ -33,6 +33,33 @@ use super::source::{EventSource, SourceMessage};
 /// and the fallback takes over.
 const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Holds back every test in this crate that opens a real WMI notification
+/// query, so that only one of them has one at a time.
+///
+/// WMI allows an account only a few notification queries at once — ten, on the
+/// machine this was measured on. A source takes *two* of them, and this crate
+/// has four tests that take a source or a whole watcher, so a run with enough
+/// threads asked for more than the machine had and the ones that lost were
+/// reported as `0x8004106C`: a failure of the suite's own concurrency, wearing
+/// the clothes of a broken machine
+/// ([issue #466](https://github.com/wildware-uk/clipped/issues/466)).
+///
+/// Serialising them costs a few seconds of a suite that already waits on real
+/// processes, and it is only half the fix: `cargo test --workspace` runs several
+/// binaries at once and this lock does not reach across them, which is why the
+/// tests that hold it also accept [`wmi::is_the_machines_quota`] and say so
+/// rather than failing.
+#[cfg(test)]
+pub(super) fn one_subscription_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // A test that panics while holding it poisons it, and the next test's
+    // failure would then be the first one's, one file away from where it
+    // happened.
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A running event source and the channel it delivers on.
 ///
 /// The channel belongs to the source rather than to the watcher, which is what
@@ -70,10 +97,24 @@ impl Source {
             Err(subscription) => subscription,
         };
 
-        tracing::warn!(
-            error = %subscription,
-            "WMI process notifications are unavailable; falling back to snapshot polling"
-        );
+        // Two different things to say. "Unavailable" is right for a service
+        // that is stopped, a repository that is corrupt or a policy that
+        // refuses — states somebody has to fix. A quota refusal is none of
+        // those: WMI is working and its queries are all in use, so the same
+        // start would succeed later, and telling a user their WMI is
+        // unavailable would send them to fix something that is not broken.
+        if wmi::is_the_machines_quota(&subscription) {
+            tracing::warn!(
+                error = %subscription,
+                "WMI has no notification query left for this account; falling back to snapshot \
+                 polling"
+            );
+        } else {
+            tracing::warn!(
+                error = %subscription,
+                "WMI process notifications are unavailable; falling back to snapshot polling"
+            );
+        }
 
         match Self::start_polling(config, known) {
             Ok(mut source) => {
@@ -211,15 +252,32 @@ mod tests {
 
     #[test]
     fn the_preferred_source_is_the_subscription_where_wmi_answers() {
+        let _held = one_subscription_at_a_time();
+
         let source = Source::start(WatchConfig::default(), &[])
             .expect("a source can be started on this machine");
 
+        // A machine with no notification query left to give falls back, and
+        // that is the fallback working rather than this failing: the
+        // subscription reached WMI and WMI answered with a resource limit. The
+        // lock above means it was not this suite that used them up, so accepting
+        // it here accepts only genuine outside contention — another test binary
+        // in a `--workspace` run, or a second copy of Clipped.
+        if let Some(declined) = &source.declined {
+            assert!(
+                wmi::is_the_machines_quota(declined),
+                "WMI was not used, and not because the machine was out of queries: {declined}"
+            );
+            assert_eq!(
+                source.kind,
+                EventSource::SnapshotPolling,
+                "a declined subscription has to leave the poller running"
+            );
+            println!("skipped: this machine had no WMI notification query to spare ({declined})");
+            return;
+        }
+
         assert_eq!(source.kind, EventSource::WmiNotification);
-        assert!(
-            source.declined.is_none(),
-            "nothing was declined: {:?}",
-            source.declined
-        );
     }
 
     #[test]

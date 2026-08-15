@@ -14,6 +14,14 @@
 //! questions in its own way, which meant a third way arrived with every ticket
 //! and none of them was ever tested against a file that was actually broken.
 //!
+//! **And the video to produce media *from*.** [`CodedVideo`] encodes a moving
+//! test pattern to real H.264 with the same FFmpeg programs, and hands back the
+//! coded pictures one at a time. Two crates need it — `clipped-replay` fills a
+//! buffer with it and `apps/recorder` fills a replay recording — and neither
+//! can encode without a GPU, so it lives here beside the checking rather than
+//! twice beside the callers (AGENTS.md section 55). See `src/fixture.rs` for
+//! why the programs rather than an encoder.
+//!
 //! An eighth answer arrived with the export command in
 //! [issue #399](https://github.com/wildware-uk/clipped/issues/399), and for the
 //! same reason: **were these the same coded bytes**. It is what tells a stream
@@ -84,12 +92,14 @@
 
 mod audio;
 mod expect;
+mod fixture;
 mod probe;
 mod temporary;
 mod tools;
 
 pub use audio::{AudioContent, Tone};
 pub use expect::{AudioStream, Validation, ValidationReport, VideoStream};
+pub use fixture::{AccessUnit, CodedVideo};
 pub use probe::{Media, MediaError, Packet, Stream};
 pub use temporary::TemporaryDirectory;
 pub use tools::{require_media_tools, MediaTools, ToolsUnavailable, REQUIRE_MEDIA};

@@ -623,8 +623,22 @@ mod tests {
         copier.begin(&frame).expect("the copy is issued");
         assert!(copier.is_pending());
 
+        // Bounded by the clock rather than by a count of attempts, and it is
+        // the clock that matters: a thousand `Map(… DO_NOT_WAIT)` calls take a
+        // fraction of a millisecond on an unloaded machine, so a loop bounded
+        // at a thousand tries gives the GPU a budget that shrinks as the CPU
+        // gets faster. A contended CI runner rendering through WARP outran it
+        // ([issue #428](https://github.com/wildware-uk/clipped/issues/428)).
+        //
+        // The sleep is not politeness either: without it this spins a core
+        // against the very device it is waiting for.
+        const GIVE_THE_COPY: std::time::Duration = std::time::Duration::from_secs(10);
+
+        let began = std::time::Instant::now();
         let mut polled = None;
-        for _ in 0..1_000 {
+        // The deadline is checked *after* an attempt, so the copy is always
+        // asked at least once however the budget is set.
+        loop {
             match copier.poll().expect("polling does not fail") {
                 Some(still) => {
                     polled = Some(still);
@@ -637,9 +651,19 @@ mod tests {
                     "a copy that is not ready is still pending"
                 ),
             }
+            if began.elapsed() >= GIVE_THE_COPY {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
-        let polled = polled.expect("the GPU finishes a 64x48 copy within a thousand attempts");
+        let polled = polled.unwrap_or_else(|| {
+            panic!(
+                "the GPU did not finish a 64x48 copy in {:?} (gave up after {:?})",
+                GIVE_THE_COPY,
+                began.elapsed()
+            )
+        });
         assert!(
             !copier.is_pending(),
             "a completed copy is no longer pending"

@@ -22,8 +22,8 @@
 //! ([issue #126](https://github.com/wildware-uk/clipped/issues/126)).
 //!
 //! The recording itself belongs to `clipped-session`; this package is the
-//! command line over it. There is no audio track yet — see [`record`] and
-//! `docs/recorder-cli.md`.
+//! command line over it, including which audio sources a recording captures —
+//! see [`record`] and `docs/recorder-cli.md`.
 //!
 //! # Modules
 //!
@@ -34,6 +34,7 @@
 //! | [`config`] | Validating arguments into a [`config::RecordingConfig`] |
 //! | [`export`] | The `export_recording` command: a recording copied into MP4 |
 //! | [`record`] | The `record` subcommand |
+//! | [`replay`] | The `replay` subcommand: a recording with a buffer, and the save |
 //! | [`list_windows`] | The `list-windows` subcommand |
 //! | [`capabilities`] | The `capabilities` subcommand |
 //! | [`serve`] | The `serve` subcommand, and the recorder behind the IPC protocol |
@@ -50,8 +51,10 @@ pub mod hotkeys;
 pub mod library;
 pub mod list_windows;
 pub mod options;
+pub mod plugins;
 pub mod record;
 pub mod recover;
+pub mod replay;
 pub mod serve;
 pub mod shutdown;
 pub mod start_at_login;
@@ -102,6 +105,10 @@ pub enum RunError {
     Watch(watch::WatchCommandError),
     /// `recover` failed.
     Recover(recover::RecoverError),
+    /// `replay` failed.
+    Replay(replay::ReplayCommandError),
+    /// `plugins` failed.
+    Plugins(plugins::PluginsError),
 }
 
 impl RunError {
@@ -109,36 +116,27 @@ impl RunError {
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::Record(record::RecordError::Configuration(_)) => EXIT_USAGE,
-            // A selector that named no window, or several, is the same class of
-            // mistake as a rejected argument: the command line is what has to
-            // change, and the message already lists the candidates.
-            Self::Record(record::RecordError::Resolution(_)) => EXIT_USAGE,
-            // A window that is minimised is *not* `EXIT_USAGE`: the command line
-            // named the right window and there is nothing in it to change. What
-            // has to change is the window, which the message says
-            // ([issue #383](https://github.com/wildware-uk/clipped/issues/383)),
-            // and a script that retries after restoring it should see the same
-            // code it would for any other refusal to record.
-            Self::Record(record::RecordError::TargetMinimised { .. }) => EXIT_FAILURE,
-            // And a `--microphone` that named no device, or several, is the
-            // same mistake again: the message says how many matched, and the
-            // command line is what has to change.
-            Self::Record(record::RecordError::Session(
-                clipped_session::SessionError::MicrophoneNotFound { .. },
-            )) => EXIT_USAGE,
-            // What this build genuinely cannot produce, as opposed to what went
-            // wrong while producing it.
-            Self::Record(record::RecordError::Session(
-                clipped_session::SessionError::ScalingNotSupported { .. }
-                | clipped_session::SessionError::UnsupportedPixelFormat { .. }
-                | clipped_session::SessionError::AudioDeviceNotSelectable,
-            )) => EXIT_NOT_IMPLEMENTED,
-            Self::Record(
-                record::RecordError::Shutdown(_)
-                | record::RecordError::Enumeration(_)
-                | record::RecordError::Session(_),
-            ) => EXIT_FAILURE,
+            Self::Record(error) => recording_exit_code(error),
+            // The recording half of `replay` is the same recording, judged by
+            // the same rules; what is added is the two numbers a buffer takes,
+            // and a number outside its range is a command line to fix.
+            Self::Replay(replay::ReplayCommandError::Recording(error)) => {
+                recording_exit_code(error)
+            }
+            // A settings file naming one combination for two actions is a file
+            // to fix, exactly as a bad argument is a command line to fix — the
+            // user's own text either way, and nothing about the machine
+            // (issue #444).
+            Self::Replay(
+                replay::ReplayCommandError::Configuration(_)
+                | replay::ReplayCommandError::Buffer(_)
+                | replay::ReplayCommandError::Hotkeybindings(_),
+            ) => EXIT_USAGE,
+            Self::Replay(replay::ReplayCommandError::Hotkeys(_)) => EXIT_FAILURE,
+            // Nothing this command does can lose a recording, so every failure
+            // is the same ordinary one: it did not do what was asked, and said
+            // why.
+            Self::Plugins(_) => EXIT_FAILURE,
             // A selector that named no window, or more than one, is a command
             // line to fix; a desktop that could not be enumerated is not.
             Self::ListWindows(list_windows::ListWindowsError::Resolution(_)) => EXIT_USAGE,
@@ -183,7 +181,14 @@ impl RunError {
     /// has nothing further to add about a real desktop.
     #[must_use]
     pub fn is_usage_error(&self) -> bool {
-        matches!(self, Self::Record(record::RecordError::Configuration(_)))
+        matches!(
+            self,
+            Self::Record(record::RecordError::Configuration(_))
+                | Self::Replay(
+                    replay::ReplayCommandError::Configuration(_)
+                        | replay::ReplayCommandError::Buffer(_)
+                )
+        )
     }
 }
 
@@ -197,6 +202,8 @@ impl fmt::Display for RunError {
             Self::StartAtLogin(error) => write!(formatter, "{error}"),
             Self::Watch(error) => write!(formatter, "{error}"),
             Self::Recover(error) => write!(formatter, "{error}"),
+            Self::Replay(error) => write!(formatter, "{error}"),
+            Self::Plugins(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -211,6 +218,8 @@ impl Error for RunError {
             Self::StartAtLogin(error) => Some(error),
             Self::Watch(error) => Some(error),
             Self::Recover(error) => Some(error),
+            Self::Replay(error) => Some(error),
+            Self::Plugins(error) => Some(error),
         }
     }
 }
@@ -257,6 +266,50 @@ impl From<recover::RecoverError> for RunError {
     }
 }
 
+impl From<replay::ReplayCommandError> for RunError {
+    fn from(error: replay::ReplayCommandError) -> Self {
+        Self::Replay(error)
+    }
+}
+
+/// The exit code a recording failure produces.
+///
+/// Extracted so that `record` and `replay` cannot drift: the second is the
+/// first with a buffer beside it, and a scaler that does not exist means the
+/// same thing whichever subcommand ran into it (AGENTS.md section 55).
+fn recording_exit_code(error: &record::RecordError) -> u8 {
+    match error {
+        record::RecordError::Configuration(_) => EXIT_USAGE,
+        // A selector that named no window, or several, is the same class of
+        // mistake as a rejected argument: the command line is what has to
+        // change, and the message already lists the candidates.
+        record::RecordError::Resolution(_) => EXIT_USAGE,
+        // A window that is minimised is *not* `EXIT_USAGE`: the command line
+        // named the right window and there is nothing in it to change. What
+        // has to change is the window, which the message says
+        // ([issue #383](https://github.com/wildware-uk/clipped/issues/383)),
+        // and a script that retries after restoring it should see the same
+        // code it would for any other refusal to record.
+        record::RecordError::TargetMinimised { .. } => EXIT_FAILURE,
+        // And a `--microphone` that named no device, or several, is the
+        // same mistake again: the message says how many matched, and the
+        // command line is what has to change.
+        record::RecordError::Session(clipped_session::SessionError::MicrophoneNotFound {
+            ..
+        }) => EXIT_USAGE,
+        // What this build genuinely cannot produce, as opposed to what went
+        // wrong while producing it.
+        record::RecordError::Session(
+            clipped_session::SessionError::ScalingNotSupported { .. }
+            | clipped_session::SessionError::UnsupportedPixelFormat { .. }
+            | clipped_session::SessionError::AudioDeviceNotSelectable,
+        ) => EXIT_NOT_IMPLEMENTED,
+        record::RecordError::Shutdown(_)
+        | record::RecordError::Enumeration(_)
+        | record::RecordError::Session(_) => EXIT_FAILURE,
+    }
+}
+
 /// Runs the subcommand the command line selected.
 ///
 /// A new subcommand is a variant on [`Command`] and an arm here.
@@ -266,6 +319,8 @@ impl From<recover::RecoverError> for RunError {
 /// Whatever the subcommand failed with. See [`RunError::exit_code`] for how
 /// each becomes a process exit code.
 pub fn run(cli: &Cli) -> Result<(), RunError> {
+    sweep_abandoned_replay_spill();
+
     match &cli.command {
         Command::Record(args) => record::run(args).map_err(RunError::from),
         Command::ListWindows(args) => list_windows::run(args).map_err(RunError::from),
@@ -274,6 +329,35 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::StartAtLogin(args) => start_at_login::run(args).map_err(RunError::from),
         Command::Watch(args) => watch::run(args).map_err(RunError::from),
         Command::Recover(args) => recover::run(args).map_err(RunError::from),
+        Command::Replay(args) => replay::run(args).map_err(RunError::from),
+        Command::Plugins(args) => plugins::run(args).map_err(RunError::Plugins),
+    }
+}
+
+/// Removes replay spill directories left behind by a Clipped that crashed.
+///
+/// A replay buffer keeps its window on disk
+/// ([issue #36](https://github.com/wildware-uk/clipped/issues/36)) and removes
+/// its own directory when the recording ends. A process that was killed, or
+/// that stopped at a power cut, does not — so the files are swept here, once,
+/// before anything else runs.
+///
+/// It cannot take a *running* Clipped's directory: each one holds a lock file
+/// open for as long as its buffer lives, and the sweep only removes a directory
+/// whose lock it can open (`clipped_replay::sweep`). That matters because
+/// `serve` and a `replay` run are both ordinary things to have going at once.
+///
+/// Nothing is reported when there is nothing to do, which is the ordinary case.
+fn sweep_abandoned_replay_spill() {
+    let Some(root) = clipped_replay::SpillArea::default_root() else {
+        return;
+    };
+    let removed = clipped_replay::sweep(&root);
+    if removed > 0 {
+        tracing::info!(
+            directories = removed,
+            "removed replay buffer files left behind by a Clipped that did not shut down"
+        );
     }
 }
 
@@ -340,6 +424,30 @@ mod tests {
         ));
         assert_eq!(error.exit_code(), EXIT_FAILURE);
         assert!(!error.is_usage_error());
+    }
+
+    #[test]
+    fn a_minimised_window_is_a_failure_and_not_a_command_line_to_fix() {
+        // The one mapping in `recording_exit_code` that was argued in a comment
+        // and asserted nowhere: a verifier changed it to `EXIT_USAGE` and the
+        // whole suite stayed green
+        // ([issue #383](https://github.com/wildware-uk/clipped/issues/383)).
+        //
+        // The distinction is the whole of the decision. `EXIT_USAGE` says the
+        // command line has to change, and it does not: it named the right
+        // window, and there is nothing in it to fix. What has to change is the
+        // window — which the message says — so a script that restores it and
+        // retries should see the same code it would for any other refusal to
+        // record.
+        let error = RunError::from(RecordError::TargetMinimised {
+            window: "Counter-Strike 2".to_owned(),
+        });
+
+        assert_eq!(error.exit_code(), EXIT_FAILURE);
+        assert!(
+            !error.is_usage_error(),
+            "a minimised window is not a usage error, so nothing may offer `--help` for it"
+        );
     }
 
     #[test]

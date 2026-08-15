@@ -16,19 +16,21 @@
 //!
 //! # Commands whose subsystem does not exist yet
 //!
-//! Two of the commands the protocol defines belong to subsystems that are not
-//! built: a recording with a replay buffer and the configuration API.
-//! They are [`UnbuiltCommand`], they are refused with
-//! [`ErrorCode::NotImplemented`] and the milestone and issue that build them,
-//! and there is deliberately nowhere for them to be handled — a command that
-//! could be wired to a handler which quietly did nothing is exactly what
-//! AGENTS.md sections 27 and 54 forbid.
+//! One of the commands the protocol defines belongs to a subsystem that is not
+//! built: the configuration API. It is an [`UnbuiltCommand`], it is refused with
+//! [`ErrorCode::NotImplemented`] and the milestone and issue that build it, and
+//! there is deliberately nowhere for it to be handled — a command that could be
+//! wired to a handler which quietly did nothing is exactly what AGENTS.md
+//! sections 27 and 54 forbid.
 //!
-//! Their *parameters* are left as an open object rather than given a schema.
-//! Nobody knows yet what `save_replay` takes, because the thing it would ask
-//! for does not exist; inventing a shape now would be a public API designed
-//! against a guess, and one the milestone that builds it would have to break
-//! (AGENTS.md section 43).
+//! Its *parameters* are left as an open object rather than given a schema:
+//! inventing a shape for a subsystem that does not exist would be a public API
+//! designed against a guess, and one the milestone that builds it would have to
+//! break (AGENTS.md section 43).
+//!
+//! `save_replay` was the other one until
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38), and what it
+//! takes is now decided rather than open — see [`SaveReplay`].
 //!
 //! # The command with no handler behind it
 //!
@@ -41,10 +43,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
-use crate::library::{LibraryGame, LibrarySessionPage, LibrarySessions};
+use crate::library::{
+    LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage, LibrarySessions,
+};
 use crate::message::Request;
+use crate::plugins::{PluginDeclaration, RefusedPlugin};
 use crate::status::{
-    BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ScreenshotSummary,
+    BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
+    ScreenshotSummary,
 };
 
 /// A command, parsed and known to be one this build understands.
@@ -62,11 +68,19 @@ pub enum Command {
     AddBookmark(AddBookmark),
     /// Save a still image of what is being captured.
     TakeScreenshot(TakeScreenshot),
+    /// Keep the last few seconds of what is being recorded, as a clip.
+    SaveReplay(SaveReplay),
     /// Read a page of the recording library: the sittings and what they
     /// produced.
     LibrarySessions(LibrarySessions),
     /// Read what the library holds per game (SPEC.md section 17).
     LibraryGames,
+
+    /// The game events of one recording, placed in its file.
+    LibraryEvents(LibraryEvents),
+
+    /// What plugins are installed, what each declares, and what will start.
+    Plugins,
     /// Copy a finished recording into MP4, without re-encoding it.
     ExportRecording(ExportRecording),
     /// What every global hotkey is bound to, and whether it works.
@@ -102,8 +116,11 @@ impl Command {
             Self::StopRecording(_) => "stop_recording",
             Self::AddBookmark(_) => "add_bookmark",
             Self::TakeScreenshot(_) => "take_screenshot",
+            Self::SaveReplay(_) => "save_replay",
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
+            Self::LibraryEvents(_) => "library_events",
+            Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
             Self::GetHotkeys => "get_hotkeys",
             Self::Shutdown(_) => "shutdown",
@@ -127,8 +144,11 @@ impl Command {
             "stop_recording" => Ok(Self::StopRecording(parse_params(request)?)),
             "add_bookmark" => Ok(Self::AddBookmark(parse_params(request)?)),
             "take_screenshot" => Ok(Self::TakeScreenshot(parse_params(request)?)),
+            "save_replay" => Ok(Self::SaveReplay(parse_params(request)?)),
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
+            "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
+            "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
@@ -153,14 +173,18 @@ impl Command {
     /// these from user input.
     pub fn to_request(&self, id: u64) -> Result<Request, ProtocolError> {
         let params = match self {
-            Self::Ping | Self::GetStatus | Self::LibraryGames | Self::GetHotkeys => {
-                Ok(serde_json::Value::Null)
-            }
+            Self::Ping
+            | Self::GetStatus
+            | Self::LibraryGames
+            | Self::Plugins
+            | Self::GetHotkeys => Ok(serde_json::Value::Null),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
+            Self::LibraryEvents(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
             Self::TakeScreenshot(screenshot) => serde_json::to_value(screenshot),
+            Self::SaveReplay(replay) => serde_json::to_value(replay),
             Self::ExportRecording(export) => serde_json::to_value(export),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
             Self::Unbuilt(_) => Ok(serde_json::Value::Null),
@@ -209,16 +233,6 @@ fn parse_params<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, 
 /// act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnbuiltCommand {
-    /// `save_replay` — needs a recording that is running a replay buffer.
-    ///
-    /// Not the buffer itself, which exists: [issue
-    /// #37](https://github.com/wildware-uk/clipped/issues/37) wrote
-    /// `clipped_replay::save_clip` and `clipped_session::record_with_replay`
-    /// fills a buffer while it records. What no build does is *start* such a
-    /// recording or route a save request to one, and that is [issue
-    /// #38](https://github.com/wildware-uk/clipped/issues/38) — so that is the
-    /// issue this refusal names.
-    SaveReplay,
     /// `apply_settings` — needs the configuration API.
     ApplySettings,
 }
@@ -227,15 +241,13 @@ pub enum UnbuiltCommand {
 ///
 /// A test walks this, so a command added to [`UnbuiltCommand`] and forgotten
 /// here is a failure rather than a command that quietly stops being refused.
-pub const UNBUILT_COMMANDS: &[UnbuiltCommand] =
-    &[UnbuiltCommand::SaveReplay, UnbuiltCommand::ApplySettings];
+pub const UNBUILT_COMMANDS: &[UnbuiltCommand] = &[UnbuiltCommand::ApplySettings];
 
 impl UnbuiltCommand {
     /// The command's name on the wire.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::SaveReplay => "save_replay",
             Self::ApplySettings => "apply_settings",
         }
     }
@@ -253,7 +265,6 @@ impl UnbuiltCommand {
     #[must_use]
     pub const fn subsystem(self) -> &'static str {
         match self {
-            Self::SaveReplay => "a recording with a replay buffer",
             Self::ApplySettings => "the settings API",
         }
     }
@@ -262,7 +273,6 @@ impl UnbuiltCommand {
     #[must_use]
     pub const fn milestone(self) -> &'static str {
         match self {
-            Self::SaveReplay => "M3",
             Self::ApplySettings => "M7",
         }
     }
@@ -271,7 +281,6 @@ impl UnbuiltCommand {
     #[must_use]
     pub const fn tracking_issue(self) -> u32 {
         match self {
-            Self::SaveReplay => 38,
             Self::ApplySettings => 108,
         }
     }
@@ -326,6 +335,22 @@ pub struct StartRecording {
     /// `default`, `none`, or part of a device name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_audio: Option<String>,
+    /// Keep the last this many seconds of the recording in memory, so that
+    /// `save_replay` has something to save.
+    ///
+    /// Absent means no buffer, which is what an ordinary recording is: a buffer
+    /// costs memory in proportion to its duration — about 140 MiB a minute at
+    /// 1080p60 (`docs/replay-buffer.md`) — so it is kept only when somebody
+    /// asked for one. The supported range is `clipped-replay`'s, 30 to 1800
+    /// seconds, and a value outside it is refused with that crate's own message
+    /// rather than a second opinion about it.
+    ///
+    /// It is on `start_recording` rather than on `save_replay` because it is
+    /// a property of the *recording*: a buffer has to have been filling since
+    /// before the thing somebody wants to keep happened, and no request made
+    /// afterwards can conjure the history it did not keep.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_seconds: Option<u32>,
 }
 
 /// Which recording to stop.
@@ -433,6 +458,62 @@ pub struct TakeScreenshot {
     pub format: Option<String>,
 }
 
+/// How much of the replay buffer to keep, and where to put it.
+///
+/// **Every field is optional, and that is the whole design.** The shape a hotkey
+/// sends is no fields at all: keep the recorder's configured duration out of
+/// whatever is being recorded, and put it where that recording's clips go. A
+/// person pressing Ctrl+F10 mid-fight has said everything they are going to say
+/// (SPEC.md sections 25 and 34).
+///
+/// Each field exists because a *different* caller needs it, and each was weighed
+/// against leaving it out:
+///
+/// - **`recording_id`** — the same field [`AddBookmark`] and [`TakeScreenshot`]
+///   carry, meaning the same thing: absent is "whatever is being recorded",
+///   which is what a hotkey and a tray item want; naming one is what a window
+///   that had a particular recording on screen does, so that a save meant for a
+///   recording which ended in the meantime is refused rather than taken out of
+///   its successor.
+/// - **`duration_seconds`** — SPEC.md section 15 asks for user-selectable
+///   periods (15 s, 30 s, 1 min, 2 min, 5 min and a custom one), so this cannot
+///   be fixed by the recorder; and it cannot be *required* either, because the
+///   hotkey has nowhere to carry it. Absent means the duration the recording was
+///   started with. It is a number of seconds rather than a name because
+///   "custom" is one of the choices, and an enumeration of five values plus an
+///   escape hatch is an enumeration with a hole in it.
+/// - **`output`** — absent means beside the recording, named after the session,
+///   which is what makes a hotkey press a complete interaction. A caller that
+///   names one is doing what `export_recording` does: choosing where a file it
+///   asked for goes. A destination that already exists is refused rather than
+///   replaced, exactly as an export's is (AGENTS.md section 56).
+///
+/// What is deliberately **not** here is a range: no start, no end, no "from
+/// this moment". A replay buffer holds the last N seconds of *now*, and a
+/// request for an arbitrary window of a recording is a different feature over a
+/// different source — the clip editor's, in M11 — that would need the file
+/// rather than the buffer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SaveReplay {
+    /// Which recording to save out of, as
+    /// [`ActiveRecording::recording_id`](crate::ActiveRecording) reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<String>,
+    /// How many seconds to keep. Absent means the duration the recording's
+    /// buffer was started with.
+    ///
+    /// A save longer than the buffer's window is not refused: the buffer cannot
+    /// hold more than its window, so the clip is what there was and
+    /// [`ReplaySummary::complete`](crate::ReplaySummary) says it was short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    /// Where to write the clip. Absent means beside the recording, named after
+    /// the session it belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
 /// Which recording to copy into MP4, and where to put the copy.
 ///
 /// Both fields are required, and neither has a default. That is deliberate on
@@ -531,6 +612,15 @@ pub enum Reply {
         /// The file, and what is in it.
         screenshot: ScreenshotSummary,
     },
+    /// A replay was saved, and the clip is finished and playable.
+    ///
+    /// Sent **after** the container's trailer has been written, for the reason
+    /// [`Self::RecordingStopped`] is: a window that said "saved" before that
+    /// would be pointing at a file that is not yet playable.
+    ReplaySaved {
+        /// The clip, and how it compares with what was asked for.
+        clip: ReplaySummary,
+    },
     /// One page of the recording library.
     LibrarySessions {
         /// The sittings, newest first, and where the next page starts.
@@ -540,6 +630,24 @@ pub enum Reply {
         /// [`ErrorCode::LibraryUnavailable`](crate::ErrorCode::LibraryUnavailable)
         /// and says why.
         page: LibrarySessionPage,
+    },
+    /// What plugins are installed, and what each of them asks for.
+    Plugins {
+        /// Every plugin discovery could read, in the order it found them.
+        installed: Vec<PluginDeclaration>,
+        /// Everything under the plugins directory that is not one, and why.
+        ///
+        /// Always sent, so that "nothing was refused" and "the question was not
+        /// asked" are told apart by whether the reply arrived.
+        refused: Vec<RefusedPlugin>,
+    },
+    /// The marks of one recording's timeline.
+    LibraryEvents {
+        /// The events, placed in that recording's file, earliest first.
+        ///
+        /// Always sent, so that "none" and "not asked" are told apart by
+        /// whether the reply arrived rather than by guessing at an empty field.
+        lane: LibraryEventLane,
     },
     /// What the library holds per game.
     LibraryGames {

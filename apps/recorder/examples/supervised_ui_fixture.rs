@@ -152,6 +152,19 @@ fn main() -> ExitCode {
                 recording_id,
                 error,
             } => say(&format!("failed={recording_id} {error}")),
+            // Reported once the link attaches, when Windows would not give the
+            // recorder a combination it asked for (issue #417). Said here as the
+            // actions rather than the whole rows: this fixture's output is read
+            // line by line by a test, and what a test would assert on is which
+            // hotkeys were refused.
+            RecorderLinkEvent::HotkeysUnavailable { conflicts } => say(&format!(
+                "hotkeys_unavailable={}",
+                conflicts
+                    .iter()
+                    .map(|binding| binding.action.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(",")
+            )),
         }
     }
 
@@ -179,7 +192,8 @@ fn start_recording(
             pid: Some(pid),
             output: Some(output.to_string_lossy().into_owned()),
             overwrite: true,
-            // The session cannot record audio yet and would warn on every run.
+            // Asked for explicitly: a fixture should produce the same file
+            // on a machine with audio devices and one without.
             microphone: Some("none".to_owned()),
             system_audio: Some("none".to_owned()),
             ..StartRecording::default()

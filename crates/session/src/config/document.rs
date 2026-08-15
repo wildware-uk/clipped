@@ -169,12 +169,22 @@ pub(crate) fn parse(
         take_object(path, &mut document, "hotkeys", Section::Document)?,
     )?;
 
+    // Never refused, only kept: an entry this build cannot read is a record of
+    // what somebody consented to, and deleting one to tidy the file would be
+    // the worst possible way to lose it (`super::plugins`).
+    let plugins = super::plugins::read(take_object(
+        path,
+        &mut document,
+        "plugins",
+        Section::Document,
+    )?);
+
     // Whatever is left is a key from a newer build, or the version, which is
     // rewritten rather than kept.
     document.remove("version");
     let unknown = document.into_iter().collect();
 
-    let configuration = Configuration::from_parts(global, games, hotkeys, unknown);
+    let configuration = Configuration::from_parts(global, games, hotkeys, plugins, unknown);
     let loaded = if version == SCHEMA_VERSION {
         Loaded::AsWritten
     } else {
@@ -204,6 +214,10 @@ pub(crate) fn render(configuration: &Configuration) -> String {
     document.insert(
         "hotkeys".to_owned(),
         Value::Object(write_hotkeys(configuration.hotkeys())),
+    );
+    document.insert(
+        "plugins".to_owned(),
+        Value::Object(super::plugins::write(configuration.plugins())),
     );
 
     for (key, value) in configuration.unrecognised() {

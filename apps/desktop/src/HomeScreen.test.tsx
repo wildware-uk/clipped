@@ -78,6 +78,7 @@ const TARGET: RecordTarget = { process_id: 4_242, process_name: 'cs2.exe' };
 const ATTACHED: RecorderLinkState = {
   link: 'attached',
   recorder_process_id: 7,
+  features: [],
   status: { state: 'idle' },
 };
 
@@ -85,6 +86,7 @@ const ATTACHED: RecorderLinkState = {
 const LINK_CLAIMS_RECORDING: RecorderLinkState = {
   link: 'attached',
   recorder_process_id: 7,
+  features: [],
   status: {
     state: 'recording',
     recording_id: 'rec-1',

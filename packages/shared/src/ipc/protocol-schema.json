@@ -39,12 +39,14 @@
         "stop_recording",
         "add_bookmark",
         "take_screenshot",
+        "save_replay",
         "library_sessions",
         "library_games",
+        "library_events",
+        "plugins",
         "export_recording",
         "get_hotkeys",
         "shutdown",
-        "save_replay",
         "apply_settings"
       ],
       "tolerates_unrecognised": true
@@ -117,7 +119,8 @@
         "shutdown",
         "library",
         "export",
-        "hotkeys"
+        "hotkeys",
+        "replay"
       ],
       "tolerates_unrecognised": true
     },
@@ -151,11 +154,14 @@
         "recording_stopped",
         "bookmark_added",
         "screenshot_taken",
+        "replay_saved",
         "library_sessions",
         "library_games",
         "recording_exported",
         "hotkeys",
-        "shutting_down"
+        "shutting_down",
+        "library_events",
+        "plugins"
       ],
       "tolerates_unrecognised": false
     },
@@ -177,7 +183,9 @@
         "recording_id",
         "target"
       ],
-      "optional": []
+      "optional": [
+        "replay_seconds"
+      ]
     },
     "add_bookmark": {
       "required": [],
@@ -423,7 +431,9 @@
         "state",
         "target"
       ],
-      "optional": []
+      "optional": [
+        "replay_seconds"
+      ]
     },
     "recording_summary": {
       "required": [
@@ -442,6 +452,21 @@
         "sustained_framerate"
       ]
     },
+    "replay_summary": {
+      "required": [
+        "bytes",
+        "complete",
+        "duration_seconds",
+        "leading_slack_seconds",
+        "path",
+        "recording_id",
+        "requested_seconds",
+        "shortfall_seconds",
+        "source_end_seconds",
+        "source_start_seconds"
+      ],
+      "optional": []
+    },
     "reply.bookmark_added": {
       "required": [
         "bookmark",
@@ -456,6 +481,13 @@
       ],
       "optional": []
     },
+    "reply.library_events": {
+      "required": [
+        "lane",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.library_games": {
       "required": [
         "games",
@@ -466,6 +498,14 @@
     "reply.library_sessions": {
       "required": [
         "page",
+        "reply"
+      ],
+      "optional": []
+    },
+    "reply.plugins": {
+      "required": [
+        "installed",
+        "refused",
         "reply"
       ],
       "optional": []
@@ -495,6 +535,13 @@
       "required": [
         "reply",
         "summary"
+      ],
+      "optional": []
+    },
+    "reply.replay_saved": {
+      "required": [
+        "clip",
+        "reply"
       ],
       "optional": []
     },
@@ -536,6 +583,14 @@
       ],
       "optional": []
     },
+    "save_replay": {
+      "required": [],
+      "optional": [
+        "duration_seconds",
+        "output",
+        "recording_id"
+      ]
+    },
     "screenshot_summary": {
       "required": [
         "bytes",
@@ -566,6 +621,7 @@
         "overwrite",
         "pid",
         "process",
+        "replay_seconds",
         "resolution",
         "system_audio",
         "window"
@@ -637,6 +693,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "save_replay",
+      "params": "save_replay",
+      "reply": "reply.replay_saved",
+      "available_in_this_build": true
+    },
+    {
       "name": "library_sessions",
       "params": "library_sessions",
       "reply": "reply.library_sessions",
@@ -646,6 +708,18 @@
       "name": "library_games",
       "params": null,
       "reply": "reply.library_games",
+      "available_in_this_build": true
+    },
+    {
+      "name": "library_events",
+      "params": "library_events",
+      "reply": "reply.library_events",
+      "available_in_this_build": true
+    },
+    {
+      "name": "plugins",
+      "params": null,
+      "reply": "reply.plugins",
       "available_in_this_build": true
     },
     {
@@ -665,12 +739,6 @@
       "params": "shutdown",
       "reply": "reply.shutting_down",
       "available_in_this_build": true
-    },
-    {
-      "name": "save_replay",
-      "params": null,
-      "reply": null,
-      "available_in_this_build": false
     },
     {
       "name": "apply_settings",
@@ -743,6 +811,7 @@
           "overwrite": false,
           "pid": 4242,
           "process": "cs2.exe",
+          "replay_seconds": 60,
           "resolution": "source",
           "system_audio": "none",
           "window": "Counter-Strike"
@@ -834,7 +903,8 @@
           "shutdown",
           "library",
           "export",
-          "hotkeys"
+          "hotkeys",
+          "replay"
         ],
         "protocol_version": 1,
         "recorder": {
@@ -914,6 +984,7 @@
               "elapsed_ms": 4200,
               "output": "D:\\clips\\session.mkv",
               "recording_id": "r-1",
+              "replay_seconds": 60,
               "state": "recording",
               "target": "process `cs2.exe`"
             }
@@ -1047,6 +1118,33 @@
       "discriminant": "response.ok.screenshot_taken"
     },
     {
+      "name": "a replay clip saved out of the buffer",
+      "direction": "server",
+      "frame": {
+        "id": 12,
+        "outcome": {
+          "ok": {
+            "clip": {
+              "bytes": 51204112,
+              "complete": false,
+              "duration_seconds": 21.983,
+              "leading_slack_seconds": 1.983,
+              "path": "D:\\clips\\clipped-cs2-20260813-201400-replay-1.mkv",
+              "recording_id": "r-1",
+              "requested_seconds": 30.0,
+              "shortfall_seconds": 10.0,
+              "source_end_seconds": 30.0,
+              "source_start_seconds": 8.017
+            },
+            "reply": "replay_saved"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.replay_saved"
+    },
+    {
       "name": "a page of the library, with more after it",
       "direction": "server",
       "frame": {
@@ -1176,6 +1274,83 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_sessions"
+    },
+    {
+      "name": "the marks on one recording's timeline",
+      "direction": "server",
+      "frame": {
+        "id": 11,
+        "outcome": {
+          "ok": {
+            "lane": {
+              "marks": [
+                {
+                  "at": 4000000000,
+                  "kind": "kill",
+                  "recording": "1",
+                  "source": "counter-strike-2"
+                },
+                {
+                  "at": 9500000000,
+                  "kind": "acme-cs2.flashbang_blinded_five",
+                  "recording": "1",
+                  "source": "acme-cs2"
+                }
+              ]
+            },
+            "reply": "library_events"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_events"
+    },
+    {
+      "name": "what is installed, and what each plugin asks for",
+      "direction": "server",
+      "frame": {
+        "id": 12,
+        "outcome": {
+          "ok": {
+            "installed": [
+              {
+                "description": "Reports kills, deaths and rounds from Game State Integration.",
+                "enforcement": "Clipped shows what a plugin declares and refuses to start one whose declaration has \n             changed since you allowed it. It cannot yet stop a plugin from using the \n             network in ways it did not declare.",
+                "id": "acme-cs2",
+                "name": "Counter-Strike 2 highlights",
+                "network": [
+                  "Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state"
+                ],
+                "state": {
+                  "state": "not-enabled"
+                },
+                "version": "0.1.0"
+              },
+              {
+                "description": "Reports kills and objectives.",
+                "enforcement": "Clipped shows what a plugin declares and refuses to start one whose declaration has \n             changed since you allowed it. It cannot yet stop a plugin from using the \n             network in ways it did not declare.",
+                "id": "acme-dota2",
+                "name": "Dota 2 highlights",
+                "network": [
+                  "Listens on 127.0.0.1:3213 (this machine only) — receives Dota 2                                  game state"
+                ],
+                "state": {
+                  "agreed_to": "loopback listen 127.0.0.1:3213",
+                  "now_declares": "loopback listen 127.0.0.1:3213; outbound connect                                                telemetry.example:443",
+                  "state": "needs-consent-again"
+                },
+                "version": "0.2.0"
+              }
+            ],
+            "refused": [],
+            "reply": "plugins"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.plugins"
     },
     {
       "name": "what the library holds per game",
@@ -1339,14 +1514,13 @@
             "hotkeys": [
               {
                 "action": "save_replay",
-                "handled": false,
+                "handled": true,
                 "hotkey": "Ctrl+F10",
                 "label": "Save replay",
                 "state": {
                   "reason": "Ctrl+F10 could not be Clipped's shortcut for Save                                          replay: another application already uses it. Choose a                                          different combination, or close the application that                                          has this one and try again",
                   "state": "conflict"
-                },
-                "unavailable": "Save replay is not in this build: a recording with a replay buffer arrives in M3              (issue #38)"
+                }
               },
               {
                 "action": "add_bookmark",
@@ -1364,6 +1538,16 @@
                 "state": {
                   "state": "unbound"
                 }
+              },
+              {
+                "action": "open_overlay",
+                "handled": false,
+                "hotkey": "Ctrl+F12",
+                "label": "Open overlay",
+                "state": {
+                  "state": "registered"
+                },
+                "unavailable": "Open overlay is not in this build: the overlay arrives in M5 (issue #53)"
               }
             ],
             "reply": "hotkeys"
@@ -1400,6 +1584,7 @@
               "elapsed_ms": 4200,
               "output": "D:\\clips\\session.mkv",
               "recording_id": "r-1",
+              "replay_seconds": 60,
               "target": "process `cs2.exe`"
             },
             "reply": "shutting_down"
@@ -1436,11 +1621,11 @@
             "code": "not_implemented",
             "detail": {
               "detail": "not_implemented",
-              "milestone": "M3",
-              "subsystem": "a recording with a replay buffer",
-              "tracking_issue": 38
+              "milestone": "M7",
+              "subsystem": "the settings API",
+              "tracking_issue": 108
             },
-            "message": "a recording with a replay buffer is not in this build"
+            "message": "the settings API is not in this build"
           }
         },
         "type": "response"
@@ -1486,6 +1671,7 @@
           "elapsed_ms": 4200,
           "output": "D:\\clips\\session.mkv",
           "recording_id": "r-1",
+          "replay_seconds": 60,
           "state": "recording",
           "target": "process `cs2.exe`"
         },

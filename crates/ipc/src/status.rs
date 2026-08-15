@@ -60,6 +60,16 @@ pub struct ActiveRecording {
     /// duration does not have to agree with the recorder about the time of day
     /// or the time zone.
     pub elapsed_ms: u64,
+    /// How much history this recording's replay buffer keeps, when it has one.
+    ///
+    /// Absent — and absent from the wire — for a recording with no buffer,
+    /// which is every recording started without one asked for. A UI reads it
+    /// before offering "Save Replay" *for this recording*: the `replay` feature
+    /// says the build has the command, and this says there is something for it
+    /// to save from. It also bounds what may be asked for, since a save cannot
+    /// reach back further than the window (`docs/replay-buffer.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_seconds: Option<u32>,
 }
 
 /// What a finished recording turned out to be.
@@ -172,6 +182,48 @@ pub struct ScreenshotSummary {
     /// came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_seconds: Option<f64>,
+}
+
+/// A clip saved out of a recording's replay buffer.
+///
+/// The reply to `save_replay`. It carries what the clip turned out to be rather
+/// than only that one was written, because **what comes out is not exactly what
+/// was asked for and a window has to be able to say so**
+/// (`docs/replay-buffer.md`):
+///
+/// - A clip can only begin on a keyframe, so it is up to one keyframe interval
+///   *longer* at the front than the request ([`Self::leading_slack_seconds`]).
+/// - A buffer that has not filled yet gives less than was asked for — a hotkey
+///   pressed ten seconds into a recording asking for the last thirty produces
+///   the ten seconds there are ([`Self::complete`],
+///   [`Self::shortfall_seconds`]). That is a clip worth having and worth
+///   labelling, not a failure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplaySummary {
+    /// The file that was written.
+    pub path: String,
+    /// The recording it was saved out of, as
+    /// [`ActiveRecording::recording_id`] reported it.
+    pub recording_id: String,
+    /// How much video was asked for.
+    pub requested_seconds: f64,
+    /// How long the clip is.
+    pub duration_seconds: f64,
+    /// Where in the recording the clip begins, on the recording's own timeline.
+    pub source_start_seconds: f64,
+    /// Where in the recording the clip ends.
+    pub source_end_seconds: f64,
+    /// Video kept before the requested start, because a clip has to begin on a
+    /// keyframe.
+    pub leading_slack_seconds: f64,
+    /// Whether the buffer held the whole of what was asked for.
+    pub complete: bool,
+    /// How much of the request the buffer did not hold. Zero when
+    /// [`Self::complete`].
+    pub shortfall_seconds: f64,
+    /// How many bytes of coded video were written, before the container's own
+    /// overhead.
+    pub bytes: u64,
 }
 
 /// A recording copied into another container, and what the copy turned out to
@@ -288,6 +340,7 @@ mod tests {
             output: r"D:\clips\session.mkv".to_owned(),
             target: "process cs2.exe".to_owned(),
             elapsed_ms: 4_200,
+            replay_seconds: None,
         });
 
         let json = serde_json::to_string(&status).expect("it serialises");

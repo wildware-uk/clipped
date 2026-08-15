@@ -50,17 +50,29 @@
 //! What crosses back is what the plugins reported and what went wrong with them,
 //! taken here once round the loop and put in front of the user.
 //!
-//! # Plugins, and why none of them runs yet
+//! # Plugins, and which of them runs
 //!
 //! `run` reads the plugins directory at start-up and says what is installed and
-//! what was refused. None of it is *enabled*: starting a plugin needs the
-//! consent the user gave to what it declares, nothing records that yet
-//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), and
-//! enabling one uninvited would make `docs/privacy.md`'s register false — all
-//! three bundled plugins open a loopback socket. So each recording names the
-//! installed plugins that claim the game it is of and says they are not enabled,
-//! which is the honest state rather than a silence
-//! (`clipped_session::plugins::installed_but_not_enabled`).
+//! what was refused. Which of those *start* comes from the settings file's
+//! `plugins` section — the plugins the user enabled, and the consent token each
+//! was enabled with (`clipped_session::config::plugins`,
+//! [issue #282](https://github.com/wildware-uk/clipped/issues/282)). It is read
+//! once, beside the plugins themselves.
+//!
+//! A plugin the file does not mention is off, and enabling one uninvited is not
+//! an option: it would make `docs/privacy.md`'s register false, and all three
+//! bundled plugins open a loopback socket. A plugin whose declaration no longer
+//! matches the token beside it is refused and *reported* — the user agreed to
+//! something else, and is the only one who can agree to the new thing.
+//!
+//! So each recording names the installed plugins that claim the game it is of
+//! and did not start, with which of the three reasons it was, rather than
+//! leaving a silence (`report_plugin_not_started`).
+//!
+//! Nothing writes that section yet
+//! ([issue #281](https://github.com/wildware-uk/clipped/issues/281) is the
+//! screen that would), so a build whose settings nobody has hand-edited starts
+//! no plugin.
 //!
 //! # Stopping
 //!
@@ -88,7 +100,9 @@ use clipped_session::automatic::{
     AutomaticSettings, RecordingId, RecordingOutcome, RecordingOutcomeSummary, RecordingRequest,
     Session, SessionAction, SessionManager,
 };
-use clipped_session::config::{Configuration, ConfigurationError, ConfigurationStore};
+use clipped_session::config::{
+    Configuration, ConfigurationError, ConfigurationStore, NotStarted, PluginConsents,
+};
 use clipped_session::plugins::{installed_but_not_enabled, PluginOutcome, SessionPlugins};
 use clipped_session::{
     RecordingOutputs, RecordingProgress, RecordingReport, RecordingSettings, SessionError,
@@ -536,6 +550,21 @@ struct Driver {
     /// else is writing to, and doing it again every second would be the
     /// filesystem polling AGENTS.md section 18 rules out.
     installed_plugins: Vec<InstalledPlugin>,
+    /// Which of those the user enabled, and what they agreed to.
+    ///
+    /// Read once at start-up, beside the plugins themselves and for the same
+    /// reason.
+    plugin_consents: PluginConsents,
+    /// The zero every event of the open session is stamped against.
+    ///
+    /// Taken from the first recording that produces a frame and held until the
+    /// session ends. A session that writes several files stamps all their
+    /// events against this one origin, which is the only thing
+    /// `clipped_library::events` can place against — it sorts a session's
+    /// recordings on one axis and asks which contains a moment, and both
+    /// operations are nonsense if every file has its own zero
+    /// ([issue #488](https://github.com/wildware-uk/clipped/issues/488)).
+    session_epoch: Option<Instant>,
     running: Option<Running>,
 }
 
@@ -550,6 +579,12 @@ struct Running {
     /// Dropped when the recording is collected, which stops every one of them
     /// whether or not this loop asked politely first.
     plugins: SessionPlugins,
+    /// This recording's account of its own timeline.
+    ///
+    /// Kept so that the driver can read the epoch back once the first frame has
+    /// fixed it, and hold it as the *session's* zero for every later recording
+    /// of the same session.
+    progress: RecordingProgress,
 }
 
 impl Driver {
@@ -577,12 +612,19 @@ impl Driver {
         // Per-game settings reach a recording through the manager: it resolves
         // them when it asks for one, and `attempt` lays the answer over what
         // the command line asked for (issue #61).
-        let manager = SessionManager::new(catalogue, settings)
-            .with_configuration(load_configuration(settings_file));
+        let configuration = load_configuration(settings_file);
+        // Taken before the configuration moves into the manager. Which plugins
+        // the user enabled is not a per-game setting the manager resolves, and
+        // `attach_plugins` runs on a path that must not go looking for a
+        // settings file.
+        let plugin_consents = configuration.plugins().clone();
+        let manager = SessionManager::new(catalogue, settings).with_configuration(configuration);
         Self {
             manager,
             plan,
             installed_plugins,
+            plugin_consents,
+            session_epoch: None,
             running: None,
         }
     }
@@ -673,8 +715,78 @@ impl Driver {
         Some((running.id, outcome))
     }
 
-    /// Puts what this recording's plugins have said in front of the user.
+    /// Takes the session's zero from the first recording that produces a frame,
+    /// and lets it go when the session does.
+    ///
+    /// Reading it is one atomic load from a `OnceLock` the capture thread has
+    /// already written; nothing waits, and nothing is asked of the recording.
+    ///
+    /// The clearing half is the one that matters. A zero held past the end of a
+    /// session would stamp the next session's events against a previous
+    /// session's first frame -- every event minutes or hours out, and every
+    /// number still a plausible one, which is the failure mode
+    /// [issue #488](https://github.com/wildware-uk/clipped/issues/488) is about.
+    fn hold_the_sessions_epoch(&mut self) {
+        if self.manager.active_session().is_none() {
+            self.session_epoch = None;
+            return;
+        }
+
+        if self.session_epoch.is_some() {
+            return;
+        }
+
+        if let Some(running) = self.running.as_ref() {
+            self.session_epoch = running.progress.timeline_epoch();
+        }
+    }
+
+    /// Tells the session where the running recording starts on its timeline.
+    ///
+    /// The difference between the session's zero and this recording's, which is
+    /// a number only the driver holds -- the session manager never sees an
+    /// `Instant` and the recording never sees the session's. Nanoseconds,
+    /// because that is what an `EventTime` is.
+    ///
+    /// Done once per recording, as soon as both epochs exist, rather than when
+    /// the recording ends: a recording that fails still occupied a span, and a
+    /// span nobody wrote down is one every event of that file is placed against
+    /// nothing by (`clipped_library::events`).
+    fn place_the_running_recording(&mut self) {
+        let (Some(session_epoch), Some(running)) = (self.session_epoch, self.running.as_ref())
+        else {
+            return;
+        };
+        let Some(recording_epoch) = running.progress.timeline_epoch() else {
+            return;
+        };
+        let id = running.id.clone();
+
+        // Saturating, and signed for the same reason `EventTime` is: a
+        // recording cannot start before its session, but a clock that is not
+        // guaranteed monotonic across a suspend could say so, and a value
+        // pinned at the end of the range is at least visibly wrong.
+        let starts_at = recording_epoch
+            .saturating_duration_since(session_epoch)
+            .as_nanos();
+        let starts_at = i64::try_from(starts_at).unwrap_or(i64::MAX);
+
+        if self.manager.place_recording(&id, starts_at) {
+            tracing::debug!(
+                session = id.session.as_str(),
+                index = id.index,
+                starts_at_nanos = starts_at,
+                "this recording's place on the session's timeline was recorded"
+            );
+        }
+    }
+
+    /// Puts what this recording's plugins have said in front of the user, and
+    /// what they reported on the session.
     fn report_plugin_activity(&mut self) {
+        self.hold_the_sessions_epoch();
+        self.place_the_running_recording();
+
         let Some(running) = self.running.as_ref() else {
             return;
         };
@@ -682,19 +794,40 @@ impl Driver {
             report_plugin_event(&report);
         }
 
-        // Taken and counted rather than left to accumulate. Writing them
-        // against the recording is issue #71; until that exists, an event
-        // reaching this point has nowhere to go, and pretending otherwise
-        // would be a feature that looks finished (AGENTS.md section 54).
+        let session = running.id.session.clone();
+        let index = running.id.index;
         let events = running.plugins.take_events();
-        if !events.is_empty() {
-            tracing::info!(
-                session = running.id.session.as_str(),
-                index = running.id.index,
-                events = events.len(),
-                "this recording's plugins reported events; nothing stores them yet (issue #71)"
-            );
+        if events.is_empty() {
+            return;
         }
+
+        // Onto the session, which writes them to its sidecar, which the library
+        // indexer turns into rows (issue #71). Drained on this thread and handed
+        // over here rather than delivered by the plugin thread, because the
+        // session manager is not shared: one owner, one place it is mutated.
+        let offered = events.len();
+        let kept = self.manager.record_game_events(events);
+        if kept == offered {
+            tracing::debug!(
+                session = session.as_str(),
+                index,
+                events = kept,
+                "this recording's plugins reported events"
+            );
+            return;
+        }
+
+        // Said rather than swallowed. The only way to get here is a plugin
+        // still draining after its session closed, and an event that is
+        // silently discarded is indistinguishable from one that was never
+        // reported (AGENTS.md section 54).
+        tracing::warn!(
+            session = session.as_str(),
+            index,
+            offered,
+            kept,
+            "a plugin reported events after the session closed, so they were dropped"
+        );
     }
 
     /// Carries out what the session manager decided.
@@ -774,14 +907,16 @@ impl Driver {
             stop,
             thread,
             plugins,
+            progress,
         });
     }
 
     /// Starts the plugins for the game this recording is of.
     ///
-    /// None of them, today, and it says which ones those would have been: see
-    /// the module documentation for why a plugin nobody enabled is named rather
-    /// than started.
+    /// Only the ones the user enabled, and only while what they agreed to still
+    /// matches what the plugin declares. Everything not started is said, with
+    /// which of the three reasons it was: a plugin that quietly does not run is
+    /// worse than one that says why (AGENTS.md section 27).
     fn attach_plugins(
         &self,
         request: &RecordingRequest,
@@ -792,31 +927,67 @@ impl Driver {
             process: ObservedProcess::new(&request.image_name, request.process_id),
         };
 
-        for plugin in installed_but_not_enabled(&self.installed_plugins, &session.process) {
-            tracing::info!(
-                plugin = %plugin.id(),
-                game = request.game.slug(),
-                "a plugin supports this game and has not been enabled, so it was not started; \
-                 nothing records which plugins are enabled yet (issue #282)"
-            );
-            eprintln!(
-                "{} supports {} and is installed, but nothing in this build can record that you \
-                 enabled it, so it is not running.",
-                plugin.manifest().name(),
-                request.game.display_name()
-            );
+        // Narrowed to this game first, so that nothing is said about a plugin
+        // for a game nobody is playing.
+        let supporting: Vec<InstalledPlugin> =
+            installed_but_not_enabled(&self.installed_plugins, &session.process)
+                .into_iter()
+                .cloned()
+                .collect();
+        let (enabled, refused) = self.plugin_consents.enable_all(supporting);
+
+        for problem in &refused {
+            report_plugin_not_started(problem, request);
         }
 
         SessionPlugins::start(
-            // Empty until issue #282: an `EnabledPlugin` is what consent
-            // produces, and nothing stores consent yet. The wiring below is
-            // real and is exercised by `clipped_session::plugins`' tests
-            // against real plugin processes.
-            Vec::new(),
+            enabled,
             session,
             progress,
+            self.session_epoch,
             SupervisionPolicy::default(),
         )
+    }
+}
+
+/// Says why an installed plugin for this game did not start.
+///
+/// Three different things to tell somebody, so they are told apart. Only the
+/// lapse interrupts: a plugin nobody has enabled, or one that is turned off, is
+/// doing what the user asked, and a console line every time they launch a game
+/// would be nagging. A lapse is the one they have to act on, because a plugin
+/// they *did* enable has stopped running and will not start again until they
+/// look at what changed.
+fn report_plugin_not_started(problem: &NotStarted, request: &RecordingRequest) {
+    match problem {
+        NotStarted::NeverEnabled { plugin } => tracing::info!(
+            plugin,
+            game = request.game.slug(),
+            "a plugin supports this game and has not been enabled, so it was not started"
+        ),
+        NotStarted::TurnedOff { plugin } => tracing::info!(
+            plugin,
+            game = request.game.slug(),
+            "a plugin supports this game and is turned off, so it was not started"
+        ),
+        NotStarted::ConsentLapsed {
+            plugin,
+            agreed_to,
+            now_declares,
+        } => {
+            tracing::warn!(
+                plugin,
+                game = request.game.slug(),
+                agreed_to,
+                now_declares,
+                "a plugin asks for network access other than what was agreed to, so it was not                  started"
+            );
+            eprintln!(
+                "{plugin} is enabled but now asks for different network access, so it is not                  running.
+  you agreed to: {agreed_to}
+  it now asks for: {now_declares}"
+            );
+        }
     }
 }
 

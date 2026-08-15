@@ -911,3 +911,49 @@ fn a_deleted_recording_stops_counting_towards_what_the_library_holds() {
     assert_eq!(game.recordings, 1, "a deleted recording is still counted");
     assert_eq!(game.bytes, 4_096, "deleted footage is still counted");
 }
+
+#[test]
+fn deleting_a_recording_clips_were_cut_from_says_how_many_depend_on_it() {
+    // Issue #74's second acceptance criterion, and the answer this takes:
+    // **warned about, not blocked.** Deleting a recording is the user's
+    // decision and the trash makes it recoverable, so refusing would be
+    // choosing for them. Saying nothing would leave clips pointing at a file
+    // that is no longer where they think it is, and nothing else would tell
+    // anybody.
+    //
+    // Automatic cleanup takes the other answer entirely and will not touch such
+    // a recording at all, because nobody chose that deletion
+    // (`accounting::cleanup::Protection::SourceOfClips`).
+    let library = Library::new("dependents").with_recordings("cs2-20260811-143205", &["a.mkv"]);
+    let mut database = library.open();
+    let item = library.recording(&database, "a.mkv");
+
+    database
+        .connection()
+        .execute(
+            "INSERT INTO clips (clip_id, source_recording_id, path, created_at) \
+             VALUES (1, ?1, 'first.mkv', '2026-08-12T09:00:00+01:00'), \
+                    (2, ?1, 'second.mkv', '2026-08-12T09:05:00+01:00')",
+            [item.id],
+        )
+        .expect("two clips can be cut from it");
+
+    let entry = library
+        .trash
+        .send(&mut database, item, deleted_at())
+        .expect("a recording with clips is still the user's to delete");
+
+    assert_eq!(
+        entry.dependent_clips, 2,
+        "the caller has to be able to say what depends on it"
+    );
+
+    // And the count is about being a *source*, not about being deleted: a clip
+    // is not a source of anything.
+    let clip = TrashItem::clip(1);
+    let clip_entry = library
+        .trash
+        .send(&mut database, clip, deleted_at())
+        .expect("a clip can be deleted too");
+    assert_eq!(clip_entry.dependent_clips, 0);
+}

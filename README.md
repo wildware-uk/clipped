@@ -10,7 +10,10 @@ Clipped is local-first: no account, no cloud service and no telemetry.
 ## Status
 
 Early development. **There is no release to download** — no published build and
-nothing signed — and a build from source is how you run Clipped today. What
+nothing signed — and a build from source is how you run Clipped today. There
+will not be one until every milestone is finished, and the first will be
+`v1.0.0`; [docs/releasing.md](docs/releasing.md) is that rule, and the release
+build refuses to produce anything until it holds. What
 follows is what that build does. See [SPEC.md](SPEC.md) for the product this is
 being built towards, and the
 [issue tracker](https://github.com/wildware-uk/clipped/issues) for what is being
@@ -302,6 +305,7 @@ is not responsible for, and where it sits in this stack.
 | [docs/architecture.md](docs/architecture.md) | Subsystems, boundaries and ADRs |
 | [docs/privacy.md](docs/privacy.md) | What leaves the machine, and what never does |
 | [docs/licensing.md](docs/licensing.md) | What a release has to carry, and the LGPL obligations FFmpeg brings |
+| [docs/releasing.md](docs/releasing.md) | When a release may happen, what a version means, and the gates a tag has to pass |
 | [docs/packaging.md](docs/packaging.md) | What the installer carries beside the window, and how it gets there |
 | [docs/testing.md](docs/testing.md) | The controlled test applications, and the capture tests that drive them |
 | [docs/logging.md](docs/logging.md) | Log levels, log location and diagnostics |

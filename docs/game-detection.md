@@ -422,14 +422,30 @@ A launcher knows something no amount of looking at a process can tell you: which
 of *its* games this is. That is the catalogue's strongest matching rung
 (`LauncherIdentity`), and until [#43] nothing produced it. Launcher detection is
 provider-based — one module per shop, so support for a new one is an addition
-rather than a change to shared logic (SPEC.md section 6). Steam is the first;
-Epic, Xbox, Battle.net, EA, Ubisoft, Riot and GOG are [#44] and are deliberately
-not stubbed, because a provider that always answers "no" is a control that
-silently does nothing.
+rather than a change to shared logic (SPEC.md section 6). Steam is the first
+([#43]), Epic the second, Ubisoft Connect the third, Xbox the fourth,
+Battle.net the fifth and Riot the sixth ([#44], which asks for one pull request
+per launcher). EA and GOG are the rest of [#44] and are deliberately not
+stubbed, because a provider that always answers "no" is a control that silently
+does nothing.
 
-There is no `trait LauncherProvider` yet either. One implementation is not
-enough to know the shape of the abstraction, and [#44]'s launchers keep their
-metadata in three different kinds of place.
+There is still no `trait LauncherProvider`. Xbox was expected to settle it and
+settled it the other way: it reads a *two-level* registry key whose entries are
+not all installations, and its identifier has to be derived from a package full
+name rather than read out of a field. Steam follows a registry key to a library
+index to a manifest per application across several drives, Epic reads one
+directory of JSON, and Ubisoft enumerates a registry key and reads the game's
+name out of somebody else's. What they demonstrably share is shared rather than
+repeated:
+
+| Module | Shared by | Extracted when |
+| --- | --- | --- |
+| `launcher/registry.rs` | Steam, Ubisoft, Xbox | Ubisoft needed the same two-call `RegGetValueW` sizing; Xbox needed the subkey enumeration twice over |
+| `launcher/claim.rs` | Epic, Ubisoft, Xbox, Battle.net, Riot | Ubisoft needed the same deepest-directory rule; every provider since uses it unchanged |
+
+Both were extracted when a second caller appeared and named exactly what the two
+had in common — which is the argument for waiting on the trait rather than
+against it.
 
 ### Steam
 
@@ -676,6 +692,173 @@ cargo run -p clipped-game-detection --example steam_probe -- cs2.exe "B:\SteamLi
 - **Nothing watches for changes.** An installation is read once; a caller that
   wants to notice a game installed since start-up reads it again, which is a few
   dozen small files.
+
+### Ubisoft Connect
+
+Ubisoft records nothing in a file. It keeps one registry subkey per installed
+game, named after the application identifier, so **enumerating the subkeys is the
+list of installed games** — which is why this provider needed
+`registry::subkeys` where Steam's only ever needed a value.
+
+```text
+HKLM\SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs\<id>        InstallDir
+HKLM\SOFTWARE\WOW6432Node\...\Uninstall\Uplay Install <id>      DisplayName
+```
+
+Read from a machine with two Ubisoft games on it:
+
+```text
+15657  C:/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/XDefiant/    XDefiant
+5595   C:/Program Files (x86)/Ubisoft/Ubisoft Game Launcher/games/Trackmania/  Trackmania
+```
+
+Note the spelling of `InstallDir`: forward slashes, and a trailing one, where a
+running process reports the same directory with backslashes. Nothing in the
+provider cares because `normalise_path` does not — but a fixture written from
+memory gets both wrong, and would agree with a provider that never worked on a
+real machine.
+
+**The name is optional and the identifier is not.** `DisplayName` lives under
+the uninstall key, which is somebody else's namespace and can be missing. A game
+with no readable name is still detected and named after its identifier, because
+the identifier is what the catalogue matches on.
+
+**A tie is refused rather than guessed between.** Epic can break a tie between
+two applications sharing a directory on the executable its manifest names.
+Ubisoft's registry records no executable at all, so when two identifiers claim
+one directory the answer is "no launcher identity" — leaving the catalogue's own
+path and name rungs, which are a better answer than a confident wrong one
+([#459] is what the alternative costs).
+
+**Verified against a real installation, not only fixtures.**
+`examples/ubisoft_probe.rs` asks the registry itself and then asks the provider
+to claim every executable actually sitting in each install directory: 2 games,
+0 problems, 10 executables, none claimed by the wrong game. The equivalent Epic
+probe is what found [#459].
+
+### Xbox
+
+Xbox keeps its metadata furthest from a file. `Get-AppxPackage` and the
+`PackageManager` API list every MSIX package on the machine — Sticky Notes, the
+Ubuntu subsystem, the Xbox overlay — and say nothing about which are games. The
+gaming services repository lists **only** what the Xbox app installed:
+
+```text
+HKLM\SOFTWARE\Microsoft\GamingServices\PackageRepository\Root
+  \<container>\<mangled path>
+      Package = 38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g
+      Root    = \?\B:\WindowsApps\38985CA0.COREBase_1.0.203.0_x64_ww_5bkah9njm3e9g\
+```
+
+**The identifier is the package family name, and deriving it has a trap.** A
+package *full* name carries the version, so it changes with every update; the
+*family* name is what stays put. The obvious derivation is "split on `__`", and
+it is wrong — the `COREBase` package above carries a resource qualifier and has
+a **single** underscore before the publisher where every other package on the
+same machine has two. A `__` split drops it silently, which was one game in six.
+
+Taking the name before the first underscore and the publisher after the last is
+right for both shapes, and the result is checkable rather than assumed: the same
+repository has a `GameSave` entry keyed by `38985CA0.COREBase_5bkah9njm3e9g`,
+which is exactly what the derivation produces.
+
+Two other things a scan would get wrong. `Root` is an extended-length path, so
+the `\?\` prefix has to come off before it can meet a path a process reports.
+And games are **not all on one drive**: the machine this was written against had
+four on `B:` and one under `C:\Program Files\WindowsApps`, so anything assuming
+`C:\XboxGames` would find a fraction of them.
+
+**Verified against a real registry**, not only fixtures:
+`examples/xbox_probe.rs` reports 6 packages, 0 problems, and none claimed by the
+wrong package — including the `_ww_` one and the one on the other drive.
+`WindowsApps` is not readable by an ordinary process, so the probe checks the two
+things that would silently produce nothing rather than walking executables the
+way `ubisoft_probe` does.
+
+### Battle.net
+
+Battle.net keeps its product list in two places and **neither joins a product to
+a directory**, which is the join a provider needs. `Battle.net.config` has a
+`Games` section keyed by product — `battle_net`, `prometheus` — and records no
+install path for any of them, only a `DefaultInstallPath` for the next one;
+`product.db` is protocol buffers, which would mean carrying a parser and a schema
+for somebody else's private format.
+
+The uninstall entry has both halves:
+
+```text
+UninstallString = "…\Blizzard Uninstaller.exe" --lang=enUS
+                  --uid=prometheus --displayname="Overwatch"
+InstallLocation = B:\BattleNet\Overwatch
+```
+
+**The identifier is in the command line.** `--uid=prometheus` is Overwatch's
+product code, and it is the same identifier `Battle.net.config` uses, so the two
+agree without this having to make them. The alternative was the `Product` column
+of `.build.info` in the game's own directory — which says `pro` for the same
+game, a *different* identifier, and would mean opening a file on a drive that may
+have gone.
+
+**The launcher is not a game.** Battle.net's own uninstall entry is written by
+the same uninstaller and is identical down to the flags —
+`--uid=battle.net --displayname="Battle.net"`. Left in, every process under the
+client's directory would be reported as a game called Battle.net. The product
+identifier is the one thing that distinguishes it, and it is what excludes it.
+
+**Verified against a real installation**: `examples/battlenet_probe.rs` reports
+1 game, 0 problems, 5 executables checked and none claimed by the wrong game —
+with the client correctly absent.
+
+### Riot
+
+Riot keeps one directory per product *and patchline* under
+`%ProgramData%\Riot Games\Metadata`, and each installed product's
+`<name>.product_settings.yaml` says where it is:
+
+```text
+product_install_full_path: "C:/Riot Games/League of Legends"
+product_install_root: "C:/Riot Games"
+```
+
+**A directory here is not an installation.** The machine this was read from had
+eight of them and three settings files:
+
+```text
+bacon.live                       league_of_legends.live.game_patch
+league_of_legends.live           lion.live
+teamfighttactics.live            teamfighttactics.pbe
+valorant.live                    Riot Client
+```
+
+`valorant.live`, `bacon.live` and `lion.live` held a lockfile and a preview
+manifest — games the client offers, on a machine that has none of them. A
+provider that read the listing and stopped would report three games that are not
+installed, and every one of those is a wrong answer about what somebody is
+playing rather than a missing one.
+
+**The identity is the part before the first dot.** `live` and `pbe` are the same
+game to anybody watching a recording, so both patchlines answer
+`league_of_legends` and a catalogue entry naming the product matches a player on
+either. They install to different directories, so nothing is ambiguous about
+which is running. The split is on the *first* dot because
+`league_of_legends.live.game_patch` is a component of League rather than a
+product called `league_of_legends.live`.
+
+**A product with no install path is skipped, not reported.** Teamfight Tactics
+has settings and no `product_install_full_path`, on both patchlines, because it
+is played from League's client in League's directory. That is the healthy state
+of the machine, so calling it a fault would put two warnings on every machine
+with League on it. The root is not used as a fallback either: `C:/Riot Games/`
+holds every Riot game, so a product claiming it would answer `teamfighttactics`
+for a League process, and a wrong game is worse than no game.
+
+The consequence is a limitation worth naming: **Teamfight Tactics is detected as
+League of Legends**, because there is nothing in a path or a process name to
+tell them apart.
+
+**Verified against a real installation**: `examples/riot_probe.rs` reports 1
+product, 0 problems, 6 executables checked and none claimed by the wrong product
+— with the five uninstalled products and the client itself correctly absent.
 
 ## The process watcher
 
@@ -979,6 +1162,36 @@ standard input piped and nothing else attached: it is on every Windows machine,
 it starts immediately, and it exits when its input closes — so the test knows
 the exact moment the process began and the exact moment it ended.
 
+#### Ten notification queries, shared with everything else on the machine
+
+WMI gives an account only a few notification queries at once — **ten**, measured
+by opening them until it refused, and confirmed from a second client that got
+the same number. A source takes two of them, one for creations and one for
+deletions, and they are released as soon as the enumerator is dropped: there is
+no leak, only a limit.
+
+That limit is what [#466] was. Four tests in this crate take a source or a whole
+watcher, so a run with enough threads asked for more than the machine had, and
+the ones that lost were reported as `0x8004106C` — which reads as "your WMI is
+misconfigured" and means nothing of the sort. It passed when a crate was run on
+its own and failed under `cargo test --workspace`, which is the shape of failure
+that costs the most trust.
+
+Both halves are addressed, because either alone would leave it:
+
+- `one_subscription_at_a_time` holds those four tests to one at a time, so the
+  suite stops competing with itself.
+- The two tests that assert WMI *answers* accept a quota refusal and say so,
+  because `cargo test --workspace` runs several binaries at once and no lock
+  inside one of them reaches the others. They accept **only** that code: a
+  subscription pointed at a namespace that does not exist still fails both, which
+  is what keeps them from being tests that pass whatever happens.
+- `explain` turns the code into a sentence saying the machine is working and
+  something on it is holding the queries. The code stays in the message, because
+  it is what a search engine answers to.
+
+[#466]: https://github.com/wildware-uk/clipped/issues/466
+
 ### Assumptions and limits
 
 - **A process that starts in the gap between the baseline snapshot and the
@@ -1005,3 +1218,4 @@ the exact moment the process began and the exact moment it ended.
   that held only for the subscription would leave the poller enumerating every
   process on the machine twenty times a second — the thing this design exists to
   avoid.
+[#459]: https://github.com/wildware-uk/clipped/issues/459

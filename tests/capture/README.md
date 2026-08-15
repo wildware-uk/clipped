@@ -10,6 +10,8 @@ reproducible on any machine (AGENTS.md sections 25 and 26).
 | `wgc_fullscreen_dx11.rs` | Captures `test-apps/fullscreen-dx11`, which takes a whole display exclusively, and checks the display is given back |
 | `av_sync.rs` | Captures `test-apps/video-pattern` and the system audio endpoint at the same time: how far the two clocks drift apart, and — against a subject playing a tone at the moment it presents a named frame — the absolute A/V offset ([docs/av-sync.md](../../docs/av-sync.md)) |
 | `screenshot.rs` | Photographs `test-apps/video-pattern` through the real capture backend, saves the file, and reads the pattern back out of the picture that was saved ([docs/screenshots.md](../../docs/screenshots.md)) |
+| `screenshot_fullscreen.rs` | The same, of `test-apps/fullscreen-dx11` holding a whole display — the third of the presentations issue #67 names, which `screenshot.rs` cannot reach from the other package |
+| `screenshot_during_recording.rs` | Records `test-apps/video-pattern` and takes screenshots out of the running recording, measuring that it went on capturing and encoding across every one of them |
 | `readback.rs` | Shared helper: copies a captured GPU texture into system memory so a test can read the pattern out of it |
 
 The tests belong to the packages that own the applications they start — Cargo
@@ -26,6 +28,8 @@ cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --
 cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1 av_offset_stays
 cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1 the_absolute
 cargo test -p clipped-video-pattern --test screenshot -- --ignored --nocapture --test-threads=1
+cargo test -p clipped-fullscreen-dx11 --test screenshot_fullscreen -- --ignored --nocapture
+cargo test -p clipped-video-pattern --test screenshot_during_recording -- --ignored --nocapture
 ```
 
 is how they are run.

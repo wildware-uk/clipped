@@ -215,6 +215,30 @@ cargo deny --all-features check
 Adding a licence to the allow-list is a licensing decision about the project,
 not a way to get a build green. Raise it on the issue.
 
+## Releases and versioning
+
+**Nothing is released until every milestone is finished**, and the first release
+will be `v1.0.0`. A milestone number is not a version number: `M9` complete does
+not mean `0.9.0`, and no milestone implies a version at all. The `0.1.0` in the
+manifests is a placeholder for "unreleased".
+
+[docs/releasing.md](docs/releasing.md) is the rule in full — what a version is,
+who may decide a milestone is finished (a maintainer, by closing it on GitHub),
+what an agent may and may not do, and the five gates a tag has to pass before
+[`.github/workflows/release.yml`](.github/workflows/release.yml) will build
+anything. Read it before tagging.
+
+Two things worth knowing even if you never make a release:
+
+- **The tag is the source of truth for the version.** Twenty-nine declarations
+  across seven files have to agree with it, and the release build refuses while
+  naming every one that does not, rather than editing them to match.
+- **The workflow cannot publish while the licence obligations in
+  [docs/licensing.md](docs/licensing.md) are unmet.** The installer carries a
+  pinned LGPL v3 FFmpeg, and until it also carries the notices and licence texts
+  that conveying it owes ([#123](https://github.com/wildware-uk/clipped/issues/123)),
+  a release built from this tree may not be distributed.
+
 ## Licensing and dependencies
 
 Clipped is licensed under the [Mozilla Public License 2.0](LICENSE). It was

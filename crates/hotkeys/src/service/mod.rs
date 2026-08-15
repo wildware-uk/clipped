@@ -12,7 +12,7 @@
 mod platform;
 
 use core::fmt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
 use crate::action::{HotkeyAction, ACTIONS};
@@ -62,27 +62,15 @@ impl HotkeyService {
 
         let (running, outcomes) = platform::HotkeyLoop::start(bindings, dispatcher)?;
 
-        let statuses = ACTIONS
+        // Every binding is attempted and reported, so the outcomes that carry a
+        // cause are exactly the combinations Windows would not give this
+        // process; the rest of the report is a function of what was asked for.
+        let refused: BTreeMap<HotkeyAction, ConflictCause> = outcomes
             .iter()
-            .map(|&action| ActionStatus {
-                action,
-                binding: bindings.binding(action),
-                state: match outcomes.iter().find(|outcome| outcome.action == action) {
-                    None => BindingState::Unbound,
-                    Some(outcome) => match outcome.cause {
-                        None => BindingState::Bound,
-                        Some(cause) => BindingState::Conflict(Conflict {
-                            action,
-                            hotkey: outcome.hotkey,
-                            cause,
-                        }),
-                    },
-                },
-                handled: handled.contains(&action),
-            })
+            .filter_map(|outcome| outcome.cause.map(|cause| (outcome.action, cause)))
             .collect();
 
-        let registration = Registration { statuses };
+        let registration = Registration::of(bindings, &handled, &refused);
         for conflict in registration.conflicts() {
             tracing::warn!(
                 action = conflict.action.name(),
@@ -270,6 +258,52 @@ pub struct Registration {
 }
 
 impl Registration {
+    /// The report for `bindings`, given which actions have handlers and which
+    /// combinations the system refused.
+    ///
+    /// This is the construction [`HotkeyService::start`] performs, and there is
+    /// only this one. It is public because **a conflict is the case that
+    /// matters and the one no test could otherwise reach**: whether Windows
+    /// refuses `Ctrl`+`F10` depends on what else is installed on the machine, so
+    /// a test that arranged a real one would be a test that passed or failed by
+    /// accident. Everything built *from* a registration — the lines
+    /// `clipped-recorder replay` prints before it starts recording, the rows the
+    /// settings screen draws — has a conflict path, and this is how each of them
+    /// is exercised without one (`docs/testing.md`).
+    ///
+    /// An action with no binding is [`BindingState::Unbound`] whatever `refused`
+    /// says about it: nothing was registered for it, so nothing can have been
+    /// refused.
+    #[must_use]
+    pub fn of(
+        bindings: &Bindings,
+        handled: &BTreeSet<HotkeyAction>,
+        refused: &BTreeMap<HotkeyAction, ConflictCause>,
+    ) -> Self {
+        Self {
+            statuses: ACTIONS
+                .iter()
+                .map(|&action| {
+                    let binding = bindings.binding(action);
+                    ActionStatus {
+                        action,
+                        binding,
+                        state: match (binding, refused.get(&action)) {
+                            (None, _) => BindingState::Unbound,
+                            (Some(hotkey), Some(&cause)) => BindingState::Conflict(Conflict {
+                                action,
+                                hotkey,
+                                cause,
+                            }),
+                            (Some(_), None) => BindingState::Bound,
+                        },
+                        handled: handled.contains(&action),
+                    }
+                })
+                .collect(),
+        }
+    }
+
     /// Every action, bound or not.
     #[must_use]
     pub fn statuses(&self) -> &[ActionStatus] {
@@ -345,21 +379,25 @@ impl core::error::Error for HotkeyError {
 
 /// What happened to one binding when it was registered.
 ///
-/// The platform module's answer, before it becomes an [`ActionStatus`].
+/// The platform module's answer, before it becomes an [`ActionStatus`]. It does
+/// not carry the combination: the action names it in the [`Bindings`] the
+/// registration was asked for, and a second copy here would be a second thing
+/// that could disagree with what was actually registered.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RegistrationOutcome {
     /// The action whose combination this is.
     pub(crate) action: HotkeyAction,
-    /// The combination.
-    pub(crate) hotkey: Hotkey,
     /// [`None`] if Windows accepted it.
     pub(crate) cause: Option<ConflictCause>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BindingState, Conflict, ConflictCause};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{BindingState, Conflict, ConflictCause, Registration};
     use crate::action::HotkeyAction;
+    use crate::bindings::Bindings;
 
     fn conflict(cause: ConflictCause) -> Conflict {
         Conflict {
@@ -412,6 +450,67 @@ mod tests {
         assert!(
             message.contains("Choose a different combination"),
             "{message}"
+        );
+    }
+
+    /// The three states one report can hold at once, from the one construction
+    /// `HotkeyService::start` uses.
+    #[test]
+    fn a_report_says_bound_refused_or_never_asked_for_each_action() {
+        let registration = Registration::of(
+            &Bindings::defaults(),
+            &BTreeSet::from([HotkeyAction::SaveReplay]),
+            &BTreeMap::from([(HotkeyAction::SaveReplay, ConflictCause::AlreadyRegistered)]),
+        );
+
+        let refused = registration
+            .status(HotkeyAction::SaveReplay)
+            .expect("every action has a row");
+        assert!(matches!(refused.state(), BindingState::Conflict(_)));
+        assert_eq!(refused.binding().expect("Ctrl+F10").to_string(), "Ctrl+F10");
+        assert!(refused.is_handled());
+
+        let accepted = registration
+            .status(HotkeyAction::AddBookmark)
+            .expect("every action has a row");
+        assert_eq!(accepted.state(), &BindingState::Bound);
+        assert!(
+            !accepted.is_handled(),
+            "only `save_replay` was given a handler here",
+        );
+
+        let never_asked = registration
+            .status(HotkeyAction::TakeScreenshot)
+            .expect("every action has a row");
+        assert_eq!(never_asked.state(), &BindingState::Unbound);
+
+        let conflicts: Vec<&Conflict> = registration.conflicts().collect();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].action(), HotkeyAction::SaveReplay);
+        assert_eq!(conflicts[0].hotkey().to_string(), "Ctrl+F10");
+        assert_eq!(
+            registration.bound().count(),
+            1,
+            "a refused combination is not a bound one",
+        );
+    }
+
+    /// Nothing was registered for it, so nothing can have been refused.
+    #[test]
+    fn an_unbound_action_is_never_reported_as_a_conflict() {
+        let registration = Registration::of(
+            &Bindings::empty(),
+            &BTreeSet::new(),
+            &BTreeMap::from([(HotkeyAction::SaveReplay, ConflictCause::AlreadyRegistered)]),
+        );
+
+        assert_eq!(registration.conflicts().count(), 0);
+        assert_eq!(
+            registration
+                .status(HotkeyAction::SaveReplay)
+                .expect("every action has a row")
+                .state(),
+            &BindingState::Unbound,
         );
     }
 

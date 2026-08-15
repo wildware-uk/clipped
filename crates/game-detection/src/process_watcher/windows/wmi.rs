@@ -46,7 +46,7 @@ use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
 use windows::Win32::System::Variant::{VariantClear, VARENUM, VARIANT, VT_BSTR, VT_I4, VT_UNKNOWN};
 use windows::Win32::System::Wmi::{
     IEnumWbemClassObject, IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator,
-    WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_S_TIMEDOUT,
+    WBEM_E_QUOTA_VIOLATION, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_S_TIMEDOUT,
 };
 
 use super::super::config::WatchConfig;
@@ -214,7 +214,7 @@ fn subscribe(change: Change, config: WatchConfig) -> Result<Subscription, Source
                 Change::Started => "ExecNotificationQuery(__InstanceCreationEvent)",
                 Change::Exited => "ExecNotificationQuery(__InstanceDeletionEvent)",
             },
-            error,
+            explain(&error),
         )
     })?;
 
@@ -228,6 +228,59 @@ fn subscribe(change: Change, config: WatchConfig) -> Result<Subscription, Source
         _services: services,
         enumerator,
     })
+}
+
+/// What a failed subscription should say, for the one code that means
+/// something other than "WMI is broken".
+///
+/// `WBEM_E_QUOTA_VIOLATION` is WMI refusing to open *another* notification
+/// query, not refusing this user or this query. The service allows a small
+/// number of them per account at once — ten, measured on the machine this was
+/// written on, by opening them until it said no — and releases each one as soon
+/// as its enumerator is dropped.
+///
+/// Left as a bare `0x8004106C` it is the most misleading failure this module
+/// can produce: everything about it looks like a machine whose WMI is
+/// misconfigured, and the only way to find out otherwise is to run the same
+/// code again with less running beside it. That is twenty minutes of somebody's
+/// evening, and it has already been spent once
+/// ([issue #466](https://github.com/wildware-uk/clipped/issues/466)). The code
+/// stays in the message, because it is what a search engine answers to.
+///
+/// Every other code is passed through: a message that explained one failure and
+/// paraphrased the rest would be worse than one that explained none, because
+/// there would be no way to tell which kind you were reading (AGENTS.md
+/// section 15).
+fn explain(error: &windows::core::Error) -> String {
+    if error.code() == HRESULT(WBEM_E_QUOTA_VIOLATION.0) {
+        return format!(
+            "WMI would not open another notification query for this account: it allows only a \
+             few at once and they are all in use ({}). This machine's WMI is working — something \
+             on it, quite possibly another copy of this program, is holding them, and they are \
+             released as soon as it stops.",
+            error.code()
+        );
+    }
+
+    error.to_string()
+}
+
+/// Whether a subscription failed because the machine had no query left to give.
+///
+/// The one failure that says nothing about this code and nothing about the
+/// machine being broken: everything up to and including submitting the query
+/// worked, and the service answered with a resource limit.
+///
+/// Two callers, for the same reason. [`Source::start`](super::Source::start)
+/// asks it to choose between "WMI is unavailable" and "WMI has none left",
+/// which are different sentences to a user with a log in front of them; the
+/// tests ask it to tell a machine that is busy from a mistake of their own.
+/// Both go through here rather than matching on a string, so there is one
+/// answer to the question.
+pub(super) fn is_the_machines_quota(error: &SourceError) -> bool {
+    error
+        .detail
+        .contains(&HRESULT(WBEM_E_QUOTA_VIOLATION.0).to_string())
 }
 
 /// Blocks on the enumerator, forwarding events, until told to stop.
@@ -498,9 +551,63 @@ mod tests {
         // COM plumbing above — apartment, connection, proxy blanket, query — is
         // correct, and it fails on a machine where the primary source is
         // unavailable, which is exactly what it should report.
-        let subscription = subscribe(Change::Started, WatchConfig::default())
-            .expect("WMI process notifications are available to an ordinary user");
+        let _held = super::super::one_subscription_at_a_time();
 
-        drop(subscription);
+        match subscribe(Change::Started, WatchConfig::default()) {
+            Ok(subscription) => drop(subscription),
+            // The one failure that is not this code's. Everything above the
+            // query worked and the service answered with a resource limit, so
+            // there is nothing here to have got wrong — and with the lock held
+            // it was not this suite that used the queries up. Anything else is
+            // still a failure, which is what keeps this from being a test that
+            // passes whatever happens.
+            Err(error) if is_the_machines_quota(&error) => {
+                println!("skipped: this machine had no WMI notification query to spare ({error})");
+            }
+            Err(error) => {
+                panic!("WMI process notifications are available to an ordinary user: {error}")
+            }
+        }
+    }
+
+    #[test]
+    fn the_quota_failure_says_it_is_the_machine_rather_than_the_machine_being_broken() {
+        // The message the issue was written about. `0x8004106C` alone reads as
+        // "your WMI is misconfigured", which is the one thing it does not mean,
+        // and the twenty minutes that costs is the reason this function exists.
+        let quota = windows::core::Error::from_hresult(HRESULT(WBEM_E_QUOTA_VIOLATION.0));
+
+        let said = explain(&quota);
+
+        assert!(
+            said.contains("0x8004106C"),
+            "the code has to survive: it is what a search engine answers to. {said}"
+        );
+        assert!(
+            said.contains("working"),
+            "the message has to say the machine is not the problem: {said}"
+        );
+        assert!(
+            is_the_machines_quota(&SourceError::new("ExecNotificationQuery", said.clone())),
+            "the source above tells this case apart by asking, so the two have to agree: {said}"
+        );
+    }
+
+    #[test]
+    fn every_other_failure_is_passed_through_rather_than_paraphrased() {
+        // A message that explained one code and rewrote the rest would be worse
+        // than one that explained none: there would be no way to tell which
+        // kind you were reading.
+        let denied = windows::core::Error::from_hresult(HRESULT(
+            windows::Win32::System::Wmi::WBEM_E_ACCESS_DENIED.0,
+        ));
+
+        let said = explain(&denied);
+
+        assert_eq!(said, denied.to_string());
+        assert!(!is_the_machines_quota(&SourceError::new(
+            "ExecNotificationQuery",
+            said
+        )));
     }
 }

@@ -240,12 +240,32 @@ impl Trash {
             file_moved = moved_to.is_some(),
             "a library item was moved to the trash"
         );
+
+        // Said after the move rather than instead of it. Deleting a recording
+        // that clips were cut from is the user's decision and is not refused --
+        // it is recoverable, which is what the trash is for -- but it must not
+        // be silent: those clips are ranges of a file that is no longer where
+        // they point, and nothing else would tell anybody
+        // ([issue #74](https://github.com/wildware-uk/clipped/issues/74)).
+        //
+        // Automatic cleanup takes the other answer and will not touch such a
+        // recording at all (`crate::accounting::cleanup`), because nobody chose
+        // that deletion.
+        let dependent_clips = dependent_clips(database, item);
+        if dependent_clips > 0 {
+            tracing::warn!(
+                item = %item,
+                clips = dependent_clips,
+                "this recording is the source of clips, and they now point at a file in the                  trash; restoring it puts them back"
+            );
+        }
         Ok(TrashEntry {
             item,
             path,
             original_path: row.path,
             deleted_at,
             size_bytes: row.size_bytes,
+            dependent_clips,
         })
     }
 
@@ -344,11 +364,13 @@ impl Trash {
                 let original_path = row
                     .get::<_, Option<String>>(3)?
                     .map_or_else(|| path.clone(), PathBuf::from);
+                let item = TrashItem {
+                    kind,
+                    id: row.get(0)?,
+                };
                 entries.push(TrashEntry {
-                    item: TrashItem {
-                        kind,
-                        id: row.get(0)?,
-                    },
+                    item,
+                    dependent_clips: dependent_clips(database, item),
                     path,
                     original_path,
                     deleted_at: row.get(2)?,
@@ -380,12 +402,14 @@ impl Trash {
         item: TrashItem,
     ) -> Result<Option<TrashEntry>, TrashError> {
         let row = self.read(database, item)?;
+        let dependent_clips = dependent_clips(database, item);
         Ok(row.deleted_at.map(|deleted_at| TrashEntry {
             item,
             original_path: row.deleted_from.unwrap_or_else(|| row.path.clone()),
             path: row.path,
             deleted_at,
             size_bytes: row.size_bytes,
+            dependent_clips,
         }))
     }
 
@@ -592,4 +616,25 @@ struct ItemRow {
     deleted_at: Option<String>,
     deleted_from: Option<PathBuf>,
     size_bytes: Option<i64>,
+}
+
+/// How many clips name `item` as the recording they were cut from.
+///
+/// Zero for a clip, which is not a source of anything. A failure to ask is
+/// reported as zero rather than as an error: this exists to add a sentence to a
+/// log, and a deletion that worked must not become a failure because a count
+/// could not be read (AGENTS.md section 17).
+fn dependent_clips(database: &Database, item: TrashItem) -> u32 {
+    if item.kind != ItemKind::Recording {
+        return 0;
+    }
+    database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM clips WHERE source_recording_id = ?1",
+            params![item.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
+        .unwrap_or(0)
 }

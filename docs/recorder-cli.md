@@ -47,6 +47,15 @@ track's dimensions in its header and the encoder is configured for one size. The
 file is finished at that point and says so; what a session should do instead is
 [#184](https://github.com/wildware-uk/clipped/issues/184).
 
+**`replay` keeps the last few minutes and saves them on a key.** It is `record`
+with a rolling buffer beside it: the recording runs as usual, every encoded
+packet is copied into `clipped-replay`'s buffer as well, and `Ctrl`+`F10` turns
+the last N seconds of that buffer into a clip of the thing that just happened
+([#38](https://github.com/wildware-uk/clipped/issues/38), SPEC.md sections 15
+and 16). The clip is written beside the recording, named after the session, and
+entered in the session's own record — so it reaches the library exactly as the
+recording does ([sessions.md](sessions.md), [replay-buffer.md](replay-buffer.md)).
+
 **`watch` records games automatically.** It is the mode the product exists for
 (SPEC.md section 2): a game launching starts a session recording and quitting it
 finalises one, with nothing to press
@@ -65,19 +74,23 @@ rather than only a fixture.
 
 ```text
 clipped-recorder record --window <TITLE>
+clipped-recorder replay --window <TITLE> [--duration <SECONDS>]
 clipped-recorder watch [--output-directory <PATH>]
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
 clipped-recorder serve [--endpoint <NAME>]
 clipped-recorder start-at-login <enable|disable|status>
+clipped-recorder plugins <list|enable <ID>|disable <ID>>
 ```
 
 Nothing is currently specified without being declared: `record`,
+`replay` ([#38](https://github.com/wildware-uk/clipped/issues/38)),
 `watch` ([#46](https://github.com/wildware-uk/clipped/issues/46)),
 `list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)),
 `capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)),
-`serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)) and
-`start-at-login` ([#106](https://github.com/wildware-uk/clipped/issues/106)) are
+`serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)),
+`start-at-login` ([#106](https://github.com/wildware-uk/clipped/issues/106)) and
+`plugins` ([#492](https://github.com/wildware-uk/clipped/issues/492)) are
 all implemented below (AGENTS.md section 27).
 
 Adding one is a variant on `Command` in `apps/recorder/src/cli.rs` and an arm in
@@ -258,6 +271,84 @@ in the output directory, created and immediately deleted, because Windows has no
 permission bit that can be read and believed. Failing here beats failing twenty
 minutes into a session.
 
+## `replay`
+
+Records, and keeps the last few minutes to save from.
+
+```text
+clipped-recorder replay --window "Counter-Strike 2"
+```
+
+That is a complete invocation. It records exactly as `record` does — the same
+target rules, the same options, the same file in the same place — and adds two
+things:
+
+- **A rolling buffer** of the last `--duration` seconds of encoded video, held
+  in memory. There is one encoder and two consumers of its packets, so the
+  buffer costs one `memcpy` per packet and the memory its window needs, not a
+  second encode ([replay-buffer.md](replay-buffer.md)).
+- **A hotkey.** `Ctrl`+`F10` writes the last `--save-duration` seconds out as a
+  clip, beside the recording and named after the session
+  (`clipped-<session>-replay-1.mkv`, then `-2`, and so on). A combination
+  another application already owns is reported when the command starts rather
+  than discovered when a press does nothing ([hotkeys.md](hotkeys.md)).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--duration <SECONDS>` | the configured replay window, 300 unless changed | How much video the buffer keeps, from 30 to 1800 |
+| `--save-duration <SECONDS>` | the whole of `--duration` | How much one save keeps, from 1 second up |
+
+Every `record` option — `--window`, `--process`, `--pid`, `--output`,
+`--resolution`, `--framerate`, `--codec`, `--encoder`, `--microphone`,
+`--system-audio` — means exactly what it means there, because they are the same
+arguments validated by the same code.
+
+**It writes the ordinary recording as well as the clips.** SPEC.md section 4's
+Manual/Replay capture mode keeps the buffer and writes no continuous file; this
+build has no recording without one, so `replay` costs the disk what `record`
+costs it. Buffer-only capture is
+[#423](https://github.com/wildware-uk/clipped/issues/423).
+
+What comes out is not exactly what was asked for, and the command says so on
+every save:
+
+```text
+Keeping the last 5 minutes. Press Ctrl+F10 to save 5 minutes; Ctrl+C to stop.
+Replay saved: D:\clips\clipped-unattributed-20260813-201400-replay-1.mkv (5 minutes 2 seconds)
+```
+
+`Ctrl`+`F10` there is the shipped default. The combination named is the one
+`replay` actually registered, which is whatever the `hotkeys` section of
+`settings.json` says (`docs/configuration.md`) — so on a machine where another
+application already owns the default, rebinding it in that file works and the
+line says so. It did not until
+[#444](https://github.com/wildware-uk/clipped/issues/444): the subcommand
+registered the defaults and ignored the file, which made the conflict report's
+advice to "choose a different combination" impossible to act on.
+
+A clip can only begin on a keyframe, so it is up to one keyframe interval longer
+at the front than the request; and a buffer that has not filled yet gives less
+than was asked for, which is said in as many words rather than left to be
+noticed:
+
+```text
+Replay saved: …-replay-1.mkv (12 seconds)
+  18 seconds of what was asked for was not in the buffer yet.
+```
+
+A duration no buffer can hold, or a save longer than the buffer it comes from,
+is a usage error with the acceptable range in it — before a capture session
+exists, not after a game has launched:
+
+```text
+error: invalid value '4000' for '--duration <SECONDS>': a replay buffer of 4000
+seconds is outside the supported range 30-1800 seconds
+```
+
+The session is indexed by the next `serve` that starts, exactly as a `watch`
+session is: what makes a sitting findable is its sidecar, and the library run at
+start-up catches everything no run has seen ([library.md](library.md)).
+
 ## `watch`
 
 Records games as they start and stops when they exit, without being asked.
@@ -343,11 +434,14 @@ rather than passed over:
 A plugin could not be read: plugin.json names an executable that is not there: …
 ```
 
-**Nothing there is started.** Starting a plugin needs the consent the user
-recorded against what it declares, and nothing records that yet
-([#282](https://github.com/wildware-uk/clipped/issues/282)) — so when a game
-launches, any installed plugin that claims it is named as one that is not
-running, instead of being ignored:
+**Only what you enabled is started.** The settings file's `plugins` section
+records which plugins you turned on and what you agreed to when you did
+([#282](https://github.com/wildware-uk/clipped/issues/282)); a plugin it does
+not mention is off. There is no screen that writes that section yet
+([#281](https://github.com/wildware-uk/clipped/issues/281)), so unless one has
+been hand-edited in, nothing is started — and when a game launches, any
+installed plugin that claims it is named as one that is not running, with which
+of the three reasons it was, instead of being ignored:
 
 ```text
 Counter-Strike 2 highlight plugin supports Counter-Strike 2 and is installed, but
@@ -381,6 +475,61 @@ The desktop application cannot drive this yet, and cannot see a session even
 when the recorder is running one: the control protocol describes a recording by
 its capture target and has no vocabulary for a game or a session. That is
 [#241](https://github.com/wildware-uk/clipped/issues/241).
+
+## `plugins`
+
+Shows what a plugin declares, and allows or stops one.
+
+```text
+clipped-recorder plugins list
+clipped-recorder plugins enable <ID>
+clipped-recorder plugins disable <ID>
+```
+
+A plugin is a program somebody else wrote, and every bundled one opens a
+loopback socket. **Enabling one *is* the consent to the network access it
+declares**, so the declaration is printed before consent is taken — every time,
+including when you have enabled that plugin before, because consent to something
+you were not shown is not consent ([docs/privacy.md](privacy.md)).
+
+```text
+acme.counter-strike-2  Counter-Strike 2 highlight plugin  0.1.0
+  Reports kills, deaths and rounds from Game State Integration.
+  Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state
+  Clipped shows what a plugin declares and refuses to start one whose declaration
+  has changed since you allowed it. It cannot yet stop a plugin from using the
+  network in ways it did not declare.
+  status: not enabled — run `plugins enable` to allow what it declares above
+```
+
+That last sentence is not decoration. A declaration shown without it reads as a
+guarantee, and the guarantee Clipped can actually make is narrower than the one
+a reader would assume.
+
+`list` also prints anything under the plugins directory that could not be read
+and why, because something you put there expecting it to work, which does not,
+is exactly what you need told.
+
+### The four states
+
+| Status | What it means |
+| --- | --- |
+| `enabled` | It will start with the next game it supports. |
+| `not enabled` | Nothing has ever allowed it. This is what a plugin you have just installed says. |
+| `turned off` | You allowed it and then stopped it. What you agreed to is kept, so turning it back on will not ask again unless the plugin has changed. |
+| `needs consent again` | It asks for something other than what you agreed to. Both texts are printed. It does not run until `enable` agrees to the new one. |
+
+The state comes from the same resolution a recording uses, rather than being
+worked out separately here: two answers to "will this start?" that could
+disagree is the defect this command exists to prevent.
+
+### What it does not do
+
+It does not talk to a running recorder, so it reports no health — whether a
+plugin is running, restarting, or was stopped for flooding is a live session's
+business and belongs with the screen
+([#281](https://github.com/wildware-uk/clipped/issues/281)), along with showing
+all of this in a window rather than a terminal.
 
 ## `list-windows`
 

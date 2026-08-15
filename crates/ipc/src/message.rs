@@ -180,6 +180,22 @@ pub mod features {
         /// register hotkeys" and "every hotkey registered cleanly" are opposite
         /// answers, and an empty list would be drawn as the second.
         HOTKEYS = "hotkeys";
+        /// The recorder can save the last few seconds out of a recording's
+        /// replay buffer: `save_replay`.
+        ///
+        /// A UI asks for this before offering a "Save Replay" control, for the
+        /// reason the six above give: a recorder built before
+        /// [issue #38](https://github.com/wildware-uk/clipped/issues/38)
+        /// *parses* `save_replay` and always refuses it with
+        /// [`ErrorCode::NotImplemented`](crate::ErrorCode::NotImplemented), so
+        /// the check is what tells a window with an unusable button from one
+        /// with a working one before somebody presses it.
+        ///
+        /// The feature says the command exists, not that a buffer is running.
+        /// Whether *this* recording has one to save from is
+        /// [`ActiveRecording::replay_seconds`](crate::ActiveRecording), because
+        /// it is a property of the recording rather than of the build.
+        REPLAY = "replay";
     }
 }
 

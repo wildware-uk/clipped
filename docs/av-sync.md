@@ -85,6 +85,37 @@ of lag, silently.
 The epoch does not have to be the earliest moment in the recording, and nothing
 in the model assumes it is.
 
+### One epoch per recording, one timeline per session
+
+`MediaTime` is per **recording**: a `CaptureClock` is started for each one, so a
+session that writes three files has three epochs, and each file's timestamps
+count from its own.
+
+Events are not on that axis. `clipped_events::EventTime` is a moment on the
+**session's** timeline — one zero for the whole sitting — because placing an
+event means asking which of a session's files covers it, and a set of segments
+each measured from its own zero cannot be sorted or searched
+(`clipped_library::events`, `docs/highlights.md`). A session's second recording
+therefore occupies a span starting at a positive `EventTime` rather than at
+zero.
+
+The two coincide only for the first recording. **A later recording's
+`MediaTime` readings are not `EventTime`s**, and converting one means adding
+where that recording starts on the session's timeline;
+`EventTime::from_media_nanos` takes a reading already on that timeline and
+cannot rebase, because it is handed a bare `i64`. Getting this wrong is silent:
+every event of the second file lands in the first, and no assertion anywhere
+fails.
+
+The recorder keeps this rule by holding one epoch per session
+([issue #488](https://github.com/wildware-uk/clipped/issues/488)). A
+`SessionPlugins` is still created per recording — a plugin does not outlive the
+recording that started it — but the second one is handed the session's zero
+rather than taking its own, and the driver lets that zero go when the session
+ends. Holding it past the end would stamp the *next* session's events against
+the previous session's first frame, which is the same failure an hour further
+out.
+
 ### Start-time alignment: what happens to audio before the epoch
 
 This needs a stated rule rather than whatever falls out of the component that
@@ -110,8 +141,9 @@ The two alternatives, and why not:
 **Not implemented here.** `clipped-capture` gives a session the signed
 `MediaTime` the rule needs, and `crates/capture/src/time.rs` is where the epoch
 is fixed, but applying the rule belongs to whoever owns the recording's sources —
-`clipped-session`, which exists and records video but has no audio source to
-align against yet ([issue #180](https://github.com/wildware-uk/clipped/issues/180)).
+`clipped-session`, which records video and audio together
+([issue #180](https://github.com/wildware-uk/clipped/issues/180)) and aligns
+them on one capture clock.
 [Issue #174](https://github.com/wildware-uk/clipped/issues/174) tracks doing it.
 Until then a recording assembled from these parts inherits the muxer's clamp,
 which is a known error at the head of the file rather than a hidden one.
@@ -474,12 +506,11 @@ reports for a packet, or the endpoint's own buffering is
 - **No file is written.** As with the drift measurement, these are the timestamps
   the pipeline produces, not what a writer wrote. It is the half of
   [issue #173](https://github.com/wildware-uk/clipped/issues/173) that is not
-  done, and it is not done because it cannot be yet: a recording with an audio
-  track in it needs
-  [#126](https://github.com/wildware-uk/clipped/issues/126) to wire capture,
-  encode and mux together and
-  [#180](https://github.com/wildware-uk/clipped/issues/180) to route audio into
-  the same file. Measuring this offset from a produced recording, with the media
+  done. It was blocked on a recording having an audio track at all, which
+  [#126](https://github.com/wildware-uk/clipped/issues/126) and
+  [#180](https://github.com/wildware-uk/clipped/issues/180) have since given it,
+  so what remains is the measurement rather than something to measure.
+  Taking this offset from a produced recording, with the media
   harness reading the pattern's counter out of the video track and the tone out
   of the audio track, is
   [#151](https://github.com/wildware-uk/clipped/issues/151). The stages that
