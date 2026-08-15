@@ -418,14 +418,30 @@ mod tests {
     /// How many pixels of a mark have to print differently before the two marks
     /// count as tellable apart.
     ///
-    /// Eight, of 1,024. A one- or two-pixel difference is an antialiasing
-    /// accident rather than a shape anybody can see, and demanding only that the
-    /// two bitmaps are not identical would accept one: the alpha silhouettes
-    /// this test used to compare separated Idle from the other three by exactly
-    /// two pixels, which is the margin this number exists to reject. The closest
-    /// real pair is Recording against Connecting, which differ by the light
-    /// middle of the ring — 27 pixels, on either taskbar.
-    const TELLABLE_APART: usize = 8;
+    /// Sixteen, of 1,024, and the number is measured rather than picked.
+    ///
+    /// Demanding only that the two bitmaps are not identical would accept an
+    /// antialiasing accident: the alpha silhouettes this test used to compare
+    /// separated Idle from the other three by exactly two pixels, which is the
+    /// margin this number exists to reject.
+    ///
+    /// Both ends of it are measured, by drawing the marks and counting:
+    ///
+    /// | Pair | Pixels differing |
+    /// | --- | ---: |
+    /// | Recording vs Connecting — the closest **real** pair | 31 |
+    /// | Recording vs Unavailable | 50 |
+    /// | Connecting vs Unavailable | 73 |
+    /// | Idle vs any badged mark | 85 to 108 |
+    /// | **Connecting drawn as a filled disc**, differing from Recording only in hue | **8** |
+    ///
+    /// That last row is the failure this test exists to catch, and it is why
+    /// eight was too low: an accent disc and a near-black disc are the same
+    /// shape and both print as ink, so the only pixels that differ are where the
+    /// two colours antialias against the badge's light face. Sixteen is twice
+    /// that and half the closest real pair, so it rejects the artefact and
+    /// clears every shape difference by a factor of two.
+    const TELLABLE_APART: usize = 16;
 
     #[test]
     fn every_mark_is_a_different_shape_and_not_only_a_different_colour() {
@@ -445,6 +461,12 @@ mod tests {
                         .filter(|(ink_in_first, ink_in_second)| ink_in_first != ink_in_second)
                         .count();
 
+                    // Printed as well as asserted, so that a change which
+                    // halves a margin without crossing the threshold is visible
+                    // in a test run rather than silent (AGENTS.md section 18).
+                    println!(
+                        "{first:?} vs {second:?} on a {name} taskbar: {differing} pixels differ"
+                    );
                     assert!(
                         differing >= TELLABLE_APART,
                         "{first:?} and {second:?} print alike on a {name} taskbar — {differing} \
@@ -515,6 +537,11 @@ mod tests {
                     .iter()
                     .map(|pixel| contrast(*pixel, *ground))
                     .fold(0.0_f64, f64::max);
+                // Printed, not only asserted. The threshold is what makes this
+                // a test; the figure is what makes it evidence, and a change
+                // that halved the margin while staying above 3:1 would
+                // otherwise pass in silence (AGENTS.md section 18).
+                println!("{mark:?} on a {name} taskbar: {best:.2}:1 at best");
                 assert!(
                     best >= 3.0,
                     "{mark:?} measures {best:.2}:1 at best against a {name} taskbar, so it is not \
