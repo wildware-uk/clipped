@@ -45,9 +45,15 @@ use serde_json::{Map, Value};
 /// `clipped_session::automatic::sidecar::SCHEMA_VERSION` is the writer's copy of
 /// the same number. It is duplicated rather than shared for the reason the
 /// module documentation gives, and
-/// `crates/library/tests/sidecars.rs::the_documented_sidecar_is_the_one_this_build_reads`
-/// is what stops the two drifting quietly.
-pub(crate) const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+/// `clipped_session::automatic::sidecar`'s
+/// `the_reader_this_build_ships_understands_what_this_build_writes` is what
+/// stops the two drifting quietly. That test is why this is `pub`: the writer's
+/// crate is the one that can see both numbers.
+///
+/// Version 2 added `game_events` ([issue
+/// #71](https://github.com/wildware-uk/clipped/issues/71)). A version 1 file is
+/// still read, and simply has none.
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 /// One session, as its sidecar describes it.
 #[derive(Debug, Deserialize)]
@@ -73,6 +79,17 @@ pub(crate) struct SessionSidecar {
     pub(crate) clips: Vec<SidecarClip>,
     #[serde(default)]
     pub(crate) events: Vec<SidecarEvent>,
+    /// What plugins reported, each as the whole document the recorder wrote.
+    ///
+    /// Held as raw JSON rather than parsed into this struct's own shape,
+    /// because `clipped_events::schema::read_value` is what interprets one and
+    /// it keeps the fields this build has no name for. Parsing them into
+    /// borrowed fields here would drop exactly those.
+    ///
+    /// Defaulted: a version 1 sidecar has no such key, and every sidecar
+    /// written before something produces game events has an empty one.
+    #[serde(default)]
+    pub(crate) game_events: Vec<Value>,
 }
 
 /// Which game the session was of, and how sure the catalogue was.
@@ -304,10 +321,17 @@ mod tests {
 
     #[test]
     fn a_sidecar_from_a_newer_build_is_refused_rather_than_half_read() {
-        let text = MINIMAL.replace("\"schema_version\": 1", "\"schema_version\": 2");
+        // One past whatever this build supports, so that the test keeps
+        // testing a refusal rather than becoming a test of the current version
+        // the next time the schema grows a field.
+        let newer = SUPPORTED_SCHEMA_VERSION + 1;
+        let text = MINIMAL.replace(
+            "\"schema_version\": 1",
+            &format!("\"schema_version\": {newer}"),
+        );
 
         match parse(&text) {
-            Err(SidecarError::UnsupportedSchema { found }) => assert_eq!(found, 2),
+            Err(SidecarError::UnsupportedSchema { found }) => assert_eq!(found, newer),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }

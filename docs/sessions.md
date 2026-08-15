@@ -351,7 +351,7 @@ one sitting, one file — produces a file named after the session and nothing el
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "session_id": "counter-strike-2-20260811-143205",
   "game": {
     "kind": "known",
@@ -402,6 +402,18 @@ one sitting, one file — produces a file named after the session and nothing el
     { "at": "2026-08-11T14:32:09+01:00", "event": "recording-started", "index": 1, "output": "…" },
     { "at": "2026-08-11T14:50:13+01:00", "event": "recording-ended", "index": 1, "outcome": "recorded" },
     { "at": "2026-08-11T15:31:21+01:00", "event": "session-ended", "reason": "game-exited" }
+  ],
+  "game_events": [
+    {
+      "schema": 1,
+      "kind": "kill",
+      "at": 137000000000,
+      "precision": 0,
+      "latency": 250000000,
+      "source": "cs2",
+      "confidence": 1.0,
+      "data": { "weapon": "ak47", "headshot": true }
+    }
   ]
 }
 ```
