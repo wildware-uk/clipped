@@ -85,6 +85,28 @@ of lag, silently.
 The epoch does not have to be the earliest moment in the recording, and nothing
 in the model assumes it is.
 
+### One epoch per recording, one timeline per session
+
+`MediaTime` is per **recording**: a `CaptureClock` is started for each one, so a
+session that writes three files has three epochs, and each file's timestamps
+count from its own.
+
+Events are not on that axis. `clipped_events::EventTime` is a moment on the
+**session's** timeline — one zero for the whole sitting — because placing an
+event means asking which of a session's files covers it, and a set of segments
+each measured from its own zero cannot be sorted or searched
+(`clipped_library::events`, `docs/highlights.md`). A session's second recording
+therefore occupies a span starting at a positive `EventTime` rather than at
+zero.
+
+The two coincide only for the first recording. **A later recording's
+`MediaTime` readings are not `EventTime`s**, and converting one means adding
+where that recording starts on the session's timeline;
+`EventTime::from_media_nanos` takes a reading already on that timeline and
+cannot rebase, because it is handed a bare `i64`. Getting this wrong is silent:
+every event of the second file lands in the first, and no assertion anywhere
+fails.
+
 ### Start-time alignment: what happens to audio before the epoch
 
 This needs a stated rule rather than whatever falls out of the component that

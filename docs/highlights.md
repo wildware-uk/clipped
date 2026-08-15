@@ -73,7 +73,7 @@ What the document deliberately cannot hold is the second field, for two
 reasons:
 
 - **Layering.** Provenance is game-event vocabulary — a kill, reported by a
-  plugin, at a moment on the recording's timeline. `clipped-edit` and
+  plugin, at a moment on the session's timeline. `clipped-edit` and
   `clipped-events` are both at layer 0 of the table in README.md and cannot name
   each other. `clipped-library` is the lowest crate that can see both, so that
   is where the model lives.
@@ -116,7 +116,7 @@ caused it, which a label cannot do.
 | `highlight` | generation from game events ([#76]) | no |
 
 A `highlight` carries a `HighlightCause`: what happened, when it happened on the
-recording's timeline, and who reported it. Three fields, and deliberately not
+session's timeline, and who reported it. Three fields, and deliberately not
 the whole `GameEvent` — the payload can be kilobytes of a plugin's own detail
 and would be a second copy of a row that event persistence already owns, and the
 confidence is what the rules filtered on before deciding to generate at all.
