@@ -140,6 +140,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use clipped_events::GameEvent;
 use clipped_game_detection::catalogue::{Catalogue, Match, ProcessCandidate};
 use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEvent};
 
@@ -427,6 +428,31 @@ impl SessionManager {
     #[must_use]
     pub fn active_session(&self) -> Option<&Session> {
         self.active.as_ref().map(|active| &active.session)
+    }
+
+    /// Puts what a plugin reported on the open session.
+    ///
+    /// Returns how many were kept. **Zero means they were dropped**, which
+    /// happens when no session is open -- a plugin whose process outlived the
+    /// game by a moment, or one still draining after the session ended -- and
+    /// the caller is expected to say so rather than let them vanish quietly
+    /// (AGENTS.md section 54).
+    ///
+    /// The events go on the *session* rather than on a recording, because a
+    /// session is what they belong to: one heard before the first file started,
+    /// or during a replay-buffer-only session, is still the session's. Which
+    /// file covers each moment is decided when the events are placed, not here
+    /// ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+    pub fn record_game_events(&mut self, events: impl IntoIterator<Item = GameEvent>) -> usize {
+        let Some(active) = self.active.as_mut() else {
+            return 0;
+        };
+        let mut kept = 0;
+        for event in events {
+            active.session.record_game_event(event);
+            kept += 1;
+        }
+        kept
     }
 
     /// Whether a recording is running.

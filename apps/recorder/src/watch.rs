@@ -673,7 +673,8 @@ impl Driver {
         Some((running.id, outcome))
     }
 
-    /// Puts what this recording's plugins have said in front of the user.
+    /// Puts what this recording's plugins have said in front of the user, and
+    /// what they reported on the session.
     fn report_plugin_activity(&mut self) {
         let Some(running) = self.running.as_ref() else {
             return;
@@ -682,19 +683,40 @@ impl Driver {
             report_plugin_event(&report);
         }
 
-        // Taken and counted rather than left to accumulate. Writing them
-        // against the recording is issue #71; until that exists, an event
-        // reaching this point has nowhere to go, and pretending otherwise
-        // would be a feature that looks finished (AGENTS.md section 54).
+        let session = running.id.session.clone();
+        let index = running.id.index;
         let events = running.plugins.take_events();
-        if !events.is_empty() {
-            tracing::info!(
-                session = running.id.session.as_str(),
-                index = running.id.index,
-                events = events.len(),
-                "this recording's plugins reported events; nothing stores them yet (issue #71)"
-            );
+        if events.is_empty() {
+            return;
         }
+
+        // Onto the session, which writes them to its sidecar, which the library
+        // indexer turns into rows (issue #71). Drained on this thread and handed
+        // over here rather than delivered by the plugin thread, because the
+        // session manager is not shared: one owner, one place it is mutated.
+        let offered = events.len();
+        let kept = self.manager.record_game_events(events);
+        if kept == offered {
+            tracing::debug!(
+                session = session.as_str(),
+                index,
+                events = kept,
+                "this recording's plugins reported events"
+            );
+            return;
+        }
+
+        // Said rather than swallowed. The only way to get here is a plugin
+        // still draining after its session closed, and an event that is
+        // silently discarded is indistinguishable from one that was never
+        // reported (AGENTS.md section 54).
+        tracing::warn!(
+            session = session.as_str(),
+            index,
+            offered,
+            kept,
+            "a plugin reported events after the session closed, so they were dropped"
+        );
     }
 
     /// Carries out what the session manager decided.
