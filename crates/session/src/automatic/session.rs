@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use clipped_events::GameEvent;
+use clipped_library::virtual_clip::VirtualClip;
 
 use crate::config::ResolvedSettings;
 use crate::report::{EndReason, RecordingReport};
@@ -545,6 +546,15 @@ pub struct Session {
     pub(crate) ended_at: Option<SystemTime>,
     pub(crate) recordings: Vec<SessionRecording>,
     pub(crate) clips: Vec<SessionClip>,
+    /// The clips this session's events were worth, which have no file.
+    ///
+    /// A separate list from `clips` because they are separate things: a
+    /// [`SessionClip`] is a file that was written because somebody pressed a
+    /// key, and one of these is a *range* of a recording that costs nothing
+    /// until an export is asked for (`docs/highlights.md`). Flattening them
+    /// would give the first shape to the second and require a path that does
+    /// not exist.
+    pub(crate) generated: Vec<VirtualClip>,
     pub(crate) events: Vec<SessionEvent>,
     /// What plugins reported, ordered by the moment each event describes.
     pub(crate) game_events: Vec<GameEvent>,
@@ -560,6 +570,7 @@ impl Session {
             ended_at: None,
             recordings: Vec::new(),
             clips: Vec::new(),
+            generated: Vec::new(),
             events: Vec::new(),
             game_events: Vec::new(),
         }
@@ -606,6 +617,24 @@ impl Session {
     #[must_use]
     pub fn events(&self) -> &[SessionEvent] {
         &self.events
+    }
+
+    /// The clips generated from this session's events, which have no file yet.
+    #[must_use]
+    pub fn generated(&self) -> &[VirtualClip] {
+        &self.generated
+    }
+
+    /// Records what generation produced, replacing whatever it produced before.
+    ///
+    /// Replacing rather than appending, because generation is a pure function
+    /// of the events and the rules: running it twice over the same session must
+    /// answer the same clips, and appending would turn "the same answer" into a
+    /// second copy of it. The generator is what avoids re-cutting a range it has
+    /// already taken -- it is given the clips that exist and refuses to overlap
+    /// them (`crate::highlights::generate`).
+    pub fn record_generated(&mut self, clips: Vec<VirtualClip>) {
+        self.generated = clips;
     }
 
     /// What happened *in the game*, oldest first.
