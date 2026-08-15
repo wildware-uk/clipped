@@ -562,6 +562,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::Ping
                 | Command::GetStatus
                 | Command::LibraryGames
+                | Command::Plugins
                 | Command::GetHotkeys
                 | Command::Unbuilt(_) => None,
             },
@@ -576,6 +577,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
                 Command::LibraryEvents(_) => Some("reply.library_events".to_owned()),
+                Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
@@ -858,6 +860,38 @@ fn samples() -> Vec<Sample> {
                             },
                         ],
                     },
+                }),
+            }),
+        ),
+        (
+            "what is installed, and what each plugin asks for",
+            ServerMessage::Response(Response {
+                id: 12,
+                outcome: Outcome::Ok(Reply::Plugins {
+                    installed: vec![
+                        exemplar_plugin(),
+                        // One whose declaration has changed since it was
+                        // allowed. Both texts travel, because "here is what
+                        // changed" cannot be asked with one of them.
+                        crate::plugins::PluginDeclaration {
+                            id: "acme-dota2".to_owned(),
+                            name: "Dota 2 highlights".to_owned(),
+                            version: "0.2.0".to_owned(),
+                            description: "Reports kills and objectives.".to_owned(),
+                            network: vec![
+                                "Listens on 127.0.0.1:3213 (this machine only) — receives Dota 2                                  game state"
+                                    .to_owned(),
+                            ],
+                            enforcement: "Clipped shows what a plugin declares and refuses to start one whose declaration has \n             changed since you allowed it. It cannot yet stop a plugin from using the \n             network in ways it did not declare."
+                .to_owned(),
+                            state: crate::plugins::PluginState::NeedsConsentAgain {
+                                agreed_to: "loopback listen 127.0.0.1:3213".to_owned(),
+                                now_declares: "loopback listen 127.0.0.1:3213; outbound connect                                                telemetry.example:443"
+                                    .to_owned(),
+                            },
+                        },
+                    ],
+                    refused: Vec::new(),
                 }),
             }),
         ),
@@ -1250,6 +1284,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         // tells "none" from "not asked" is that `marks` is always present, and
         // that is a property of the type rather than of the path.
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
+        Reply::Plugins { .. } => "plugins".to_owned(),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
         // would otherwise reach the same discriminant for a page that continues
@@ -1789,6 +1824,7 @@ fn every_built_command() -> Vec<Command> {
         Command::LibraryEvents(crate::library::LibraryEvents {
             recording: "1".to_owned(),
         }),
+        Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
         Command::GetHotkeys,
         Command::Shutdown(Shutdown::default()),
@@ -1805,6 +1841,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibrarySessions(_)
             | Command::LibraryGames
             | Command::LibraryEvents(_)
+            | Command::Plugins
             | Command::ExportRecording(_)
             | Command::GetHotkeys
             | Command::Shutdown(_)
@@ -1993,6 +2030,13 @@ fn every_reply() -> Vec<Reply> {
                 }],
             },
         },
+        Reply::Plugins {
+            installed: vec![exemplar_plugin()],
+            refused: vec![crate::plugins::RefusedPlugin {
+                directory: r"C:\ProgramData\Clipped\plugins\half-installed".to_owned(),
+                reason: "its manifest is not readable JSON".to_owned(),
+            }],
+        },
     ];
     for reply in &replies {
         match reply {
@@ -2006,12 +2050,30 @@ fn every_reply() -> Vec<Reply> {
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
             | Reply::LibraryEvents { .. }
+            | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::RecordingExported { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }
     replies
+}
+
+/// One installed plugin, for the schema and the samples.
+fn exemplar_plugin() -> crate::plugins::PluginDeclaration {
+    crate::plugins::PluginDeclaration {
+        id: "acme-cs2".to_owned(),
+        name: "Counter-Strike 2 highlights".to_owned(),
+        version: "0.1.0".to_owned(),
+        description: "Reports kills, deaths and rounds from Game State Integration.".to_owned(),
+        network: vec![
+            "Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state"
+                .to_owned(),
+        ],
+        enforcement: "Clipped shows what a plugin declares and refuses to start one whose declaration has \n             changed since you allowed it. It cannot yet stop a plugin from using the \n             network in ways it did not declare."
+                .to_owned(),
+        state: crate::plugins::PluginState::NotEnabled,
+    }
 }
 
 /// Every state a binding can be in.

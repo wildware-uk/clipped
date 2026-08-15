@@ -47,6 +47,7 @@ use crate::library::{
     LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage, LibrarySessions,
 };
 use crate::message::Request;
+use crate::plugins::{PluginDeclaration, RefusedPlugin};
 use crate::status::{
     BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
     ScreenshotSummary,
@@ -77,6 +78,9 @@ pub enum Command {
 
     /// The game events of one recording, placed in its file.
     LibraryEvents(LibraryEvents),
+
+    /// What plugins are installed, what each declares, and what will start.
+    Plugins,
     /// Copy a finished recording into MP4, without re-encoding it.
     ExportRecording(ExportRecording),
     /// What every global hotkey is bound to, and whether it works.
@@ -116,6 +120,7 @@ impl Command {
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
             Self::LibraryEvents(_) => "library_events",
+            Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
             Self::GetHotkeys => "get_hotkeys",
             Self::Shutdown(_) => "shutdown",
@@ -143,6 +148,7 @@ impl Command {
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
             "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
+            "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
@@ -167,9 +173,11 @@ impl Command {
     /// these from user input.
     pub fn to_request(&self, id: u64) -> Result<Request, ProtocolError> {
         let params = match self {
-            Self::Ping | Self::GetStatus | Self::LibraryGames | Self::GetHotkeys => {
-                Ok(serde_json::Value::Null)
-            }
+            Self::Ping
+            | Self::GetStatus
+            | Self::LibraryGames
+            | Self::Plugins
+            | Self::GetHotkeys => Ok(serde_json::Value::Null),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
@@ -622,6 +630,16 @@ pub enum Reply {
         /// [`ErrorCode::LibraryUnavailable`](crate::ErrorCode::LibraryUnavailable)
         /// and says why.
         page: LibrarySessionPage,
+    },
+    /// What plugins are installed, and what each of them asks for.
+    Plugins {
+        /// Every plugin discovery could read, in the order it found them.
+        installed: Vec<PluginDeclaration>,
+        /// Everything under the plugins directory that is not one, and why.
+        ///
+        /// Always sent, so that "nothing was refused" and "the question was not
+        /// asked" are told apart by whether the reply arrived.
+        refused: Vec<RefusedPlugin>,
     },
     /// The marks of one recording's timeline.
     LibraryEvents {

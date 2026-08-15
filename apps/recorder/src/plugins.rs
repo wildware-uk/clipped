@@ -37,7 +37,8 @@ use core::fmt;
 use std::error::Error;
 use std::path::PathBuf;
 
-use clipped_plugins::{discover, InstalledPlugin, NetworkAccess, RejectedPlugin};
+use clipped_ipc::{PluginDeclaration, PluginState, RefusedPlugin};
+use clipped_plugins::{discover, InstalledPlugin, NetworkAccess};
 use clipped_session::config::{
     ConfigurationError, ConfigurationStore, NotStarted, PluginConsent, PluginConsents,
 };
@@ -109,16 +110,15 @@ pub fn run(args: &PluginsArgs) -> Result<(), PluginsError> {
 
     match &args.action {
         PluginsAction::List => {
-            list(
-                &discovery.installed,
-                &discovery.rejected,
-                configuration.plugins(),
-            );
+            // Through the same function the protocol answers with, so a screen
+            // and a terminal cannot describe one machine differently.
+            let (installed, refused) = declarations()?;
+            list(&installed, &refused);
             Ok(())
         }
         PluginsAction::Enable { plugin } => {
             let installed = find(&discovery.installed, plugin)?;
-            show(installed);
+            show(&declaration_of(installed, configuration.plugins()));
 
             // The token is taken from what the plugin declares *now*, at the
             // moment it is shown. That is what makes the printout above and the
@@ -146,6 +146,60 @@ pub fn run(args: &PluginsArgs) -> Result<(), PluginsError> {
             println!("{plugin} is turned off. What you agreed to is kept, so turning it back on will not ask again unless it has changed.");
             Ok(())
         }
+    }
+}
+
+/// Everything installed, what each declares, and what will start.
+///
+/// The one answer to "what is on this machine and what will run": the terminal
+/// renders it and the control protocol sends it, rather than each working it
+/// out. Two answers to that question that could disagree is the defect this
+/// whole module exists to avoid, and it would be a worse one across a process
+/// boundary than within one.
+///
+/// # Errors
+///
+/// [`PluginsError::NoDirectory`] when there is nowhere to look, and
+/// [`PluginsError::Settings`] when the settings file could not be read.
+pub fn declarations() -> Result<(Vec<PluginDeclaration>, Vec<RefusedPlugin>), PluginsError> {
+    let directory = crate::config::plugins_directory().ok_or(PluginsError::NoDirectory)?;
+    let discovery = discover(&directory);
+
+    let mut store = ConfigurationStore::at(settings_path());
+    store.load()?;
+    let consents = store.current().plugins().clone();
+
+    let installed = discovery
+        .installed
+        .iter()
+        .map(|plugin| declaration_of(plugin, &consents))
+        .collect();
+    let refused = discovery
+        .rejected
+        .iter()
+        .map(|refused| RefusedPlugin {
+            directory: refused.directory.display().to_string(),
+            reason: refused.reason.to_string(),
+        })
+        .collect();
+
+    Ok((installed, refused))
+}
+
+/// One plugin, as the protocol describes it.
+fn declaration_of(plugin: &InstalledPlugin, consents: &PluginConsents) -> PluginDeclaration {
+    let manifest = plugin.manifest();
+    PluginDeclaration {
+        id: plugin.id().as_str().to_owned(),
+        name: manifest.name().to_owned(),
+        version: manifest.version().to_owned(),
+        description: manifest.description().to_owned(),
+        network: manifest.network().summary(),
+        // Sent with every declaration rather than left to the reader. It is
+        // part of what somebody agrees to, and a second copy on the other side
+        // of the boundary is one that can drift from what is enforced.
+        enforcement: NetworkAccess::ENFORCEMENT.to_owned(),
+        state: state_of(plugin, consents),
     }
 }
 
@@ -183,85 +237,100 @@ fn find<'a>(
 /// wants, then what Clipped can actually promise about that -- a declaration
 /// shown without [`NetworkAccess::ENFORCEMENT`] overstates what enabling a
 /// plugin buys, so the statement is last and is not optional.
-fn declaration_of(plugin: &InstalledPlugin) -> Vec<String> {
-    let manifest = plugin.manifest();
+fn lines_of(declared: &PluginDeclaration) -> Vec<String> {
     let mut lines = vec![
-        format!(
-            "{}  {}  {}",
-            plugin.id(),
-            manifest.name(),
-            manifest.version()
-        ),
-        format!("  {}", manifest.description()),
+        format!("{}  {}  {}", declared.id, declared.name, declared.version),
+        format!("  {}", declared.description),
     ];
 
-    if manifest.network().is_empty() {
+    if declared.network.is_empty() {
         lines.push("  It declares no network access.".to_owned());
     } else {
         lines.extend(
-            manifest
-                .network()
-                .summary()
-                .into_iter()
+            declared
+                .network
+                .iter()
                 .map(|sentence| format!("  {sentence}")),
         );
     }
 
-    lines.push(format!("  {}", NetworkAccess::ENFORCEMENT));
+    lines.push(format!("  {}", declared.enforcement));
     lines
 }
 
 /// Prints what one plugin is and what it asks for.
-fn show(plugin: &InstalledPlugin) {
-    for line in declaration_of(plugin) {
+fn show(declared: &PluginDeclaration) {
+    for line in lines_of(declared) {
         println!("{line}");
     }
 }
 
 /// Prints everything installed, everything refused, and what is agreed to.
-fn list(installed: &[InstalledPlugin], rejected: &[RejectedPlugin], consents: &PluginConsents) {
-    if installed.is_empty() && rejected.is_empty() {
+fn list(installed: &[PluginDeclaration], refused: &[RefusedPlugin]) {
+    if installed.is_empty() && refused.is_empty() {
         println!("No plugins are installed.");
         return;
     }
 
-    for plugin in installed {
-        show(plugin);
-        println!("  status: {}", state_of(plugin, consents));
+    for declared in installed {
+        show(declared);
+        println!("  status: {}", said(&declared.state));
         println!();
     }
 
     // Said rather than skipped: something the user put on disk expecting it to
     // work, which does not, is exactly what they need told (AGENTS.md section
     // 45).
-    for refused in rejected {
-        println!("Could not be read: {refused}");
+    for refused in refused {
+        println!(
+            "Could not be read: {} ({})",
+            refused.directory, refused.reason
+        );
     }
 }
 
 /// What this build will do about `plugin`, in the words a person needs.
-fn state_of(plugin: &InstalledPlugin, consents: &PluginConsents) -> String {
+fn state_of(plugin: &InstalledPlugin, consents: &PluginConsents) -> PluginState {
     // Asked through the same resolution a recording uses, rather than
     // reimplemented here — two answers to "will this start?" that could
-    // disagree is the defect this whole command exists to avoid.
+    // disagree is the defect this whole module exists to avoid.
     let (enabled, refused) = consents.enable_all([plugin.clone()]);
     if !enabled.is_empty() {
-        return "enabled".to_owned();
+        return PluginState::Enabled;
     }
     match refused.first() {
-        Some(NotStarted::NeverEnabled { .. }) => {
-            "not enabled — run `plugins enable` to allow what it declares above".to_owned()
-        }
-        Some(NotStarted::TurnedOff { .. }) => "turned off".to_owned(),
+        Some(NotStarted::TurnedOff { .. }) => PluginState::TurnedOff,
         Some(NotStarted::ConsentLapsed {
             agreed_to,
             now_declares,
             ..
-        }) => format!(
-            "needs consent again — it asks for something other than what you agreed to\n    \
-             you agreed to: {agreed_to}\n    it now asks for: {now_declares}"
+        }) => PluginState::NeedsConsentAgain {
+            agreed_to: agreed_to.clone(),
+            now_declares: now_declares.clone(),
+        },
+        // `NeverEnabled`, and the unreachable empty case: a plugin that is
+        // neither started nor refused has not been allowed, which is what a
+        // newly installed one is.
+        _ => PluginState::NotEnabled,
+    }
+}
+
+/// What a terminal prints for a state.
+fn said(state: &PluginState) -> String {
+    match state {
+        PluginState::Enabled => "enabled".to_owned(),
+        PluginState::NotEnabled => {
+            "not enabled — run `plugins enable` to allow what it declares above".to_owned()
+        }
+        PluginState::TurnedOff => "turned off".to_owned(),
+        PluginState::NeedsConsentAgain {
+            agreed_to,
+            now_declares,
+        } => format!(
+            "needs consent again — it asks for something other than what you agreed to
+                 you agreed to: {agreed_to}
+    it now asks for: {now_declares}"
         ),
-        None => "unknown".to_owned(),
     }
 }
 
@@ -314,7 +383,10 @@ mod tests {
         // the enforcement statement it reads as a guarantee Clipped cannot
         // make.
         let root = TemporaryDirectory::new("plugins-declaration");
-        let lines = declaration_of(&installed(&root, "acme.cs2", LISTENS));
+        let lines = lines_of(&declaration_of(
+            &installed(&root, "acme.cs2", LISTENS),
+            &PluginConsents::none(),
+        ));
 
         let endpoint = lines
             .iter()
@@ -341,7 +413,10 @@ mod tests {
         // An empty list and "no declaration" look identical if nothing is
         // printed, and they are different things to be told.
         let root = TemporaryDirectory::new("plugins-no-network");
-        let lines = declaration_of(&installed(&root, "acme.quiet", "[]"));
+        let lines = lines_of(&declaration_of(
+            &installed(&root, "acme.quiet", "[]"),
+            &PluginConsents::none(),
+        ));
 
         assert!(
             lines.iter().any(|line| line.contains("no network access")),
@@ -356,18 +431,18 @@ mod tests {
         let declared = plugin.consent_token();
 
         let never = PluginConsents::none();
-        assert!(state_of(&plugin, &never).starts_with("not enabled"));
+        assert_eq!(state_of(&plugin, &never), PluginState::NotEnabled);
 
         let mut off = PluginConsents::none();
         off.set(
             "acme.cs2".to_owned(),
             PluginConsent::disabled(declared.clone()),
         );
-        assert_eq!(state_of(&plugin, &off), "turned off");
+        assert_eq!(state_of(&plugin, &off), PluginState::TurnedOff);
 
         let mut on = PluginConsents::none();
         on.set("acme.cs2".to_owned(), PluginConsent::enabled(declared));
-        assert_eq!(state_of(&plugin, &on), "enabled");
+        assert_eq!(state_of(&plugin, &on), PluginState::Enabled);
 
         // The third acceptance criterion: what changed is shown, both halves,
         // so somebody can see what they are being asked to agree to.
@@ -376,13 +451,22 @@ mod tests {
             "acme.cs2".to_owned(),
             PluginConsent::enabled(ConsentToken::from_stored("loopback listen 127.0.0.1:9999")),
         );
-        let said = state_of(&plugin, &lapsed);
-        assert!(said.starts_with("needs consent again"), "{said}");
-        assert!(
-            said.contains("127.0.0.1:9999"),
-            "what was agreed to: {said}"
-        );
-        assert!(said.contains("127.0.0.1:3212"), "what it asks now: {said}");
+        let PluginState::NeedsConsentAgain {
+            agreed_to,
+            now_declares,
+        } = state_of(&plugin, &lapsed)
+        else {
+            panic!("a plugin asking for something else was not marked as needing consent");
+        };
+        assert_eq!(agreed_to, "loopback listen 127.0.0.1:9999");
+        assert_eq!(now_declares, "loopback listen 127.0.0.1:3212");
+
+        // And both halves reach a terminal, which is the second place they have
+        // to arrive: the protocol carries them for a screen, and `said` is what
+        // a person without one is shown.
+        let printed = said(&state_of(&plugin, &lapsed));
+        assert!(printed.contains("127.0.0.1:9999"), "{printed}");
+        assert!(printed.contains("127.0.0.1:3212"), "{printed}");
     }
 
     #[test]

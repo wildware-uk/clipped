@@ -491,6 +491,7 @@ when a command's parameters are all optional.
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
 | `library_events` | `recording` | `library_events` | yes |
+| `plugins` | none | `plugins` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
@@ -831,6 +832,59 @@ in the wrong place.
 Refused with `invalid_parameters` if `recording` is not an identifier this
 library uses, and with `library_unavailable` on the same terms as
 `library_sessions`.
+
+### `plugins`
+
+What is installed, what each plugin declares, and what will start.
+
+```json
+{"type":"response","id":12,"outcome":{"ok":{
+  "reply":"plugins",
+  "installed":[
+    {"id":"acme-cs2","name":"Counter-Strike 2 highlights","version":"0.1.0",
+     "description":"Reports kills, deaths and rounds from Game State Integration.",
+     "network":["Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state"],
+     "enforcement":"Clipped shows what a plugin declares and refuses to start one whose declaration has changed since you allowed it. It cannot yet stop a plugin from using the network in ways it did not declare.",
+     "state":{"state":"not-enabled"}}],
+  "refused":[]}}}
+```
+
+**A declaration is shown before consent is taken, never after.** Enabling a
+plugin *is* the consent to the network access it declares, and every bundled
+plugin opens a loopback socket, so [privacy.md](privacy.md)'s register is only
+true if a deliberate, informed action is what starts one.
+
+That is why the sentences and `enforcement` travel rather than being composed by
+the reader: the words somebody agrees to are the recorder's, and a second
+rendering of one declaration is a second thing to keep in step with what is
+actually enforced.
+
+`network` is empty when a plugin declares none. A screen must **say** that
+rather than draw a blank row — "it asks for nothing" and "we did not ask" are
+different things.
+
+### The four states
+
+| `state` | What it means |
+| --- | --- |
+| `enabled` | It will start with the next game it supports. |
+| `not-enabled` | Nothing has ever allowed it. What a newly installed plugin says. |
+| `turned-off` | Allowed, then turned off. What was agreed to is kept. |
+| `needs-consent-again` | It asks for something other than what was agreed to. Carries `agreed_to` and `now_declares`, because "here is what changed" cannot be asked with one of them. |
+
+`refused` is everything under the plugins directory that is not a usable plugin,
+with the reason. Reported rather than omitted: somebody put it there expecting
+it to work.
+
+Both arrays are always present, so "nothing installed" and "the question was not
+asked" are told apart by whether the reply arrived.
+
+**Enabling is not here.** Writing the consent record is a settings write the
+protocol does not have; `clipped-recorder plugins enable` is what writes one
+today, and the screen is
+[#281](https://github.com/wildware-uk/clipped/issues/281). Neither is a plugin's
+*health* — whether it is running, restarting or was stopped for flooding belongs
+to a live session rather than to the list of what is installed.
 
 ### `export_recording`
 

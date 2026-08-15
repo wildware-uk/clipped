@@ -53,6 +53,9 @@ import type {
   LibraryClip,
   LibraryEventLane,
   LibraryEventMark,
+  PluginDeclaration,
+  PluginState,
+  RefusedPlugin,
   LibraryGame,
   LibraryRecording,
   LibrarySession,
@@ -353,6 +356,12 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'library_events':
       return { reply: 'library_events', lane: readEventLane(reply['lane']) };
+    case 'plugins':
+      return {
+        reply: 'plugins',
+        installed: arrayField(reply['installed'], 'a plugin list', readPluginDeclaration),
+        refused: arrayField(reply['refused'], 'a refused plugin list', readRefusedPlugin),
+      };
     case 'recording_exported':
       return { reply: 'recording_exported', export: readExport(reply['export']) };
     case 'hotkeys':
@@ -618,6 +627,57 @@ function readLibraryClip(value: JsonValue | undefined): LibraryClip {
     ...(missing === undefined ? {} : { missing_since: missing }),
     favourite: booleanField(clip, 'favourite', what),
     tags: stringArrayField(clip, 'tags', what),
+  };
+}
+
+/**
+ * One installed plugin.
+ *
+ * `network` is required rather than defaulted: an absent list and an empty one
+ * would otherwise be indistinguishable, and they are "the recorder did not say"
+ * and "it declares none" — the second of which a screen must state rather than
+ * leave blank.
+ */
+function readPluginDeclaration(value: JsonValue | undefined): PluginDeclaration {
+  const plugin = object(value, 'a plugin');
+  const what = 'a plugin';
+  return {
+    id: stringField(plugin, 'id', what),
+    name: stringField(plugin, 'name', what),
+    version: stringField(plugin, 'version', what),
+    description: stringField(plugin, 'description', what),
+    network: stringArrayField(plugin, 'network', what),
+    enforcement: stringField(plugin, 'enforcement', what),
+    state: readPluginState(plugin['state']),
+  };
+}
+
+/** What a plugin's state is, and what changed when consent has lapsed. */
+function readPluginState(value: JsonValue | undefined): PluginState {
+  const state = object(value, 'a plugin state');
+  const tag = stringField(state, 'state', 'a plugin state');
+  switch (tag) {
+    case 'enabled':
+    case 'not-enabled':
+    case 'turned-off':
+      return { state: tag };
+    case 'needs-consent-again':
+      return {
+        state: tag,
+        agreed_to: stringField(state, 'agreed_to', 'a lapsed consent'),
+        now_declares: stringField(state, 'now_declares', 'a lapsed consent'),
+      };
+    default:
+      unreadable(`\`${tag}\` is not a plugin state this build knows`);
+  }
+}
+
+/** Something that is not a usable plugin, and why. */
+function readRefusedPlugin(value: JsonValue | undefined): RefusedPlugin {
+  const refused = object(value, 'a refused plugin');
+  return {
+    directory: stringField(refused, 'directory', 'a refused plugin'),
+    reason: stringField(refused, 'reason', 'a refused plugin'),
   };
 }
 

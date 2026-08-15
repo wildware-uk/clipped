@@ -43,6 +43,7 @@
         "library_sessions",
         "library_games",
         "library_events",
+        "plugins",
         "export_recording",
         "get_hotkeys",
         "shutdown",
@@ -159,7 +160,8 @@
         "recording_exported",
         "hotkeys",
         "shutting_down",
-        "library_events"
+        "library_events",
+        "plugins"
       ],
       "tolerates_unrecognised": false
     },
@@ -500,6 +502,14 @@
       ],
       "optional": []
     },
+    "reply.plugins": {
+      "required": [
+        "installed",
+        "refused",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.pong": {
       "required": [
         "reply"
@@ -704,6 +714,12 @@
       "name": "library_events",
       "params": "library_events",
       "reply": "reply.library_events",
+      "available_in_this_build": true
+    },
+    {
+      "name": "plugins",
+      "params": null,
+      "reply": "reply.plugins",
       "available_in_this_build": true
     },
     {
@@ -1289,6 +1305,52 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_events"
+    },
+    {
+      "name": "what is installed, and what each plugin asks for",
+      "direction": "server",
+      "frame": {
+        "id": 12,
+        "outcome": {
+          "ok": {
+            "installed": [
+              {
+                "description": "Reports kills, deaths and rounds from Game State Integration.",
+                "enforcement": "Clipped shows what a plugin declares and refuses to start one whose declaration has \n             changed since you allowed it. It cannot yet stop a plugin from using the \n             network in ways it did not declare.",
+                "id": "acme-cs2",
+                "name": "Counter-Strike 2 highlights",
+                "network": [
+                  "Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state"
+                ],
+                "state": {
+                  "state": "not-enabled"
+                },
+                "version": "0.1.0"
+              },
+              {
+                "description": "Reports kills and objectives.",
+                "enforcement": "Clipped shows what a plugin declares and refuses to start one whose declaration has \n             changed since you allowed it. It cannot yet stop a plugin from using the \n             network in ways it did not declare.",
+                "id": "acme-dota2",
+                "name": "Dota 2 highlights",
+                "network": [
+                  "Listens on 127.0.0.1:3213 (this machine only) — receives Dota 2                                  game state"
+                ],
+                "state": {
+                  "agreed_to": "loopback listen 127.0.0.1:3213",
+                  "now_declares": "loopback listen 127.0.0.1:3213; outbound connect                                                telemetry.example:443",
+                  "state": "needs-consent-again"
+                },
+                "version": "0.2.0"
+              }
+            ],
+            "refused": [],
+            "reply": "plugins"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.plugins"
     },
     {
       "name": "what the library holds per game",
