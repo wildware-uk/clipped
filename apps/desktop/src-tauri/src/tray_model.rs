@@ -23,10 +23,18 @@
 //! gains one, this stops claiming it has not. Add Bookmark is what that looked
 //! like the day it happened ([issue
 //! #64](https://github.com/wildware-uk/clipped/issues/64)): the refusal it
-//! quoted no longer exists, so the item is a control, disabled only while there
-//! is no recording to put a bookmark in.
+//! quoted no longer exists, so the item is a control, disabled while there is
+//! no recording to put a bookmark in — or while the attached recorder never
+//! said it could make one ([issue
+//! #447](https://github.com/wildware-uk/clipped/issues/447)).
+//!
+//! That second condition is about the *recorder*, not the build. An installed
+//! Clipped can find an older recorder still running from a previous version,
+//! and every item here maps to a command that recorder may not have. It says so
+//! in its welcome, and asking is the difference between a control that refuses
+//! before it is pressed and one that refuses after.
 
-use clipped_ipc::{ActiveRecording, RecorderLinkState, RecorderStatus};
+use clipped_ipc::{features, ActiveRecording, RecorderLinkState, RecorderStatus};
 
 use crate::foreground::ForegroundWindow;
 use crate::tray_icon::TrayMark;
@@ -136,8 +144,8 @@ pub(crate) fn tray_model(
         // Not a control. It is the sentence SPEC.md section 33 puts at the top
         // of the menu, and there is nothing to click.
         status: MenuEntry::refused(status),
-        save_replay: replay_entry(recording),
-        add_bookmark: bookmark_entry(recording.is_some()),
+        save_replay: replay_entry(link, recording),
+        add_bookmark: bookmark_entry(link, recording.is_some()),
         record,
         record_action,
         // Both of these open the window at a screen. Neither screen is written
@@ -256,7 +264,17 @@ pub(crate) fn could_not_reach_the_recorder(link: &RecorderLinkState, error: &str
 /// has one ([issue #427](https://github.com/wildware-uk/clipped/issues/427)).
 /// Saying *that* is the difference between a stale claim about the build and a
 /// true one about this recording.
-fn replay_entry(recording: Option<&ActiveRecording>) -> MenuEntry {
+///
+/// The capability is asked first, and is a different question again: a recorder
+/// that never advertised `replay` has no `save_replay` command, so no recording
+/// it makes can ever be savable. Asked before the two conditions above because
+/// it outlives them — the others change with the next recording, and this one
+/// does not change until the recorder is replaced.
+fn replay_entry(link: &RecorderLinkState, recording: Option<&ActiveRecording>) -> MenuEntry {
+    if attached_without(link, features::REPLAY) {
+        return MenuEntry::refused("Save Replay — this recorder cannot save replays");
+    }
+
     match recording {
         Some(active) if active.replay_seconds.is_some() => MenuEntry::live("Save Replay"),
         Some(_) => {
@@ -276,12 +294,43 @@ fn replay_entry(recording: Option<&ActiveRecording>) -> MenuEntry {
 ///
 /// It was a `not in this build` refusal until
 /// [issue #64](https://github.com/wildware-uk/clipped/issues/64), which is the
-/// ticket that built the bookmark store and the command.
-fn bookmark_entry(recording: bool) -> MenuEntry {
+/// ticket that built the bookmark store and the command. A recorder from before
+/// that issue is still a recorder this window can attach to, and it says so by
+/// not advertising `bookmarks` — which is asked first, because "this recorder
+/// has no bookmarks at all" and "there is nothing to bookmark right now" send a
+/// user to two different places.
+fn bookmark_entry(link: &RecorderLinkState, recording: bool) -> MenuEntry {
+    if attached_without(link, features::BOOKMARKS) {
+        return MenuEntry::refused("Add Bookmark — this recorder cannot mark a moment");
+    }
+
     if recording {
         MenuEntry::live("Add Bookmark")
     } else {
         MenuEntry::refused("Add Bookmark — nothing is being recorded")
+    }
+}
+
+/// Whether there is a recorder attached and it did **not** advertise `feature`.
+///
+/// The question `features::BOOKMARKS` and `features::SCREENSHOTS` are
+/// documented as existing for: a UI asks it *before* drawing the control,
+/// because a recorder built before the command existed refuses it with
+/// [`ErrorCode::UnknownCommand`](clipped_ipc::ErrorCode::UnknownCommand) — a
+/// refusal that arrives after the only part of the interaction that cost the
+/// user anything ([issue #447](https://github.com/wildware-uk/clipped/issues/447)).
+///
+/// Deliberately not "does this recorder do X", which would also be false while
+/// there is no recorder at all. The items asking this already have a better
+/// sentence for that case — "nothing is being recorded" — and replacing it with
+/// a claim about a recorder that is not there would be worse than the one it
+/// replaced.
+fn attached_without(link: &RecorderLinkState, feature: &str) -> bool {
+    match link {
+        RecorderLinkState::Attached { features, .. } => {
+            !features.iter().any(|advertised| advertised == feature)
+        }
+        _ => false,
     }
 }
 
@@ -329,12 +378,38 @@ mod tests {
     use super::*;
     use clipped_ipc::ActiveRecording;
 
+    /// A recorder of this build: one that advertises everything this build's
+    /// own `serve` does.
+    ///
+    /// `features::ALL` rather than a list typed here, so a capability added to
+    /// the protocol does not quietly leave these cases testing an older
+    /// recorder than the one they are about.
     fn attached(status: RecorderStatus) -> RecorderLinkState {
+        attached_with(
+            features::ALL
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            status,
+        )
+    }
+
+    /// A recorder advertising exactly `features` and nothing else.
+    fn attached_with(features: Vec<String>, status: RecorderStatus) -> RecorderLinkState {
         RecorderLinkState::Attached {
             recorder_process_id: 4_242,
-            features: Vec::new(),
+            features,
             status,
         }
+    }
+
+    /// Everything this build's recorder can do, except one thing.
+    fn everything_but(missing: &str) -> Vec<String> {
+        features::ALL
+            .iter()
+            .filter(|name| **name != missing)
+            .map(|name| (*name).to_owned())
+            .collect()
     }
 
     fn recording() -> RecorderLinkState {
@@ -364,11 +439,17 @@ mod tests {
     }
 
     /// Every state the link can be in, for the tests that walk all of them.
+    ///
+    /// Two of them are attached *and recording* and differ only in what the
+    /// recorder said it could do, because that is the difference the properties
+    /// below have to hold across: an older recorder mid-recording is the case
+    /// where a control looks most clearly clickable and is most clearly not.
     fn every_link_state() -> Vec<RecorderLinkState> {
         vec![
             RecorderLinkState::Connecting,
             attached(RecorderStatus::Idle),
             recording(),
+            attached_with(Vec::new(), RecorderStatus::Recording(active(Some(30)))),
             RecorderLinkState::Reconnecting {
                 attempt: 2,
                 attempts_allowed: 4,
@@ -397,8 +478,10 @@ mod tests {
                         &link,
                         RecorderLinkState::Attached {
                             status: RecorderStatus::Recording(active),
+                            features,
                             ..
                         } if active.replay_seconds.is_some()
+                            && features.iter().any(|name| name == features::REPLAY)
                     ),
                     "{link:?}: a replay comes out of a buffer, so the item may only be clickable \
                      while a recording is keeping one"
@@ -406,11 +489,12 @@ mod tests {
                 assert_eq!(
                     model.add_bookmark.enabled,
                     matches!(
-                        link,
+                        &link,
                         RecorderLinkState::Attached {
                             status: RecorderStatus::Recording(_),
+                            features,
                             ..
-                        }
+                        } if features.iter().any(|name| name == features::BOOKMARKS)
                     ),
                     "{link:?}: a bookmark is an offset into a recording, so the item may only be \
                      clickable while there is one"
@@ -508,6 +592,75 @@ mod tests {
         let recording = tray_model(&recording(), Some(&game()));
         assert_eq!(recording.add_bookmark.label, "Add Bookmark");
         assert!(recording.add_bookmark.enabled);
+    }
+
+    #[test]
+    fn a_recorder_that_never_said_it_could_bookmark_is_not_offered_a_bookmark_control() {
+        // The version-skew case, and the one the protocol's own documentation
+        // says `features::BOOKMARKS` exists for. An installed Clipped can find
+        // a recorder from before issue #64 still running, and everything about
+        // it looks right: attached, recording, a game in front. Drawing the
+        // control on the strength of that means the user presses it and *then*
+        // gets `unknown_command`, having marked a moment that was never marked.
+        let older = attached_with(
+            everything_but(features::BOOKMARKS),
+            RecorderStatus::Recording(active(None)),
+        );
+
+        let model = tray_model(&older, Some(&game()));
+
+        assert!(!model.add_bookmark.enabled);
+        assert_eq!(
+            model.add_bookmark.label, "Add Bookmark — this recorder cannot mark a moment",
+            "the reason has to name the recorder rather than the recording: it is what a restart \
+             fixes, and 'nothing is being recorded' would be a lie about a recording that is \
+             running"
+        );
+    }
+
+    #[test]
+    fn a_recorder_that_never_said_it_could_save_replays_is_not_offered_the_control() {
+        // The same skew, on the item where it is easiest to hide: a recording
+        // *with* a buffer, on a recorder with no `save_replay` command. Both
+        // conditions the label already knew about are satisfied, so without the
+        // capability check this is a live, clickable Save Replay that refuses.
+        let older = attached_with(
+            everything_but(features::REPLAY),
+            RecorderStatus::Recording(active(Some(300))),
+        );
+
+        let model = tray_model(&older, Some(&game()));
+
+        assert!(!model.save_replay.enabled);
+        assert_eq!(
+            model.save_replay.label,
+            "Save Replay — this recorder cannot save replays"
+        );
+    }
+
+    #[test]
+    fn a_recorder_that_is_not_there_is_not_described_as_one_that_lacks_a_capability() {
+        // The ordering the two items above depend on. "This recorder cannot
+        // mark a moment" said while there is no recorder at all is a claim
+        // about something that does not exist, and it would replace two
+        // sentences that are true and useful.
+        for link in [
+            RecorderLinkState::Connecting,
+            RecorderLinkState::Unavailable {
+                reason: "the recorder was not found".to_owned(),
+            },
+        ] {
+            let model = tray_model(&link, Some(&game()));
+
+            assert_eq!(
+                model.add_bookmark.label, "Add Bookmark — nothing is being recorded",
+                "{link:?}"
+            );
+            assert_eq!(
+                model.save_replay.label, "Save Replay — nothing is being recorded",
+                "{link:?}"
+            );
+        }
     }
 
     #[test]
