@@ -79,16 +79,6 @@ const BETWEEN: Duration = Duration::from_millis(1_200);
 /// frame count below is not entirely made of the gaps between them.
 const TAIL: Duration = Duration::from_secs(1);
 
-/// The shortest the recording can honestly have run.
-///
-/// The span from the **first** screenshot to the end, not the sum of this
-/// test's sleeps. A recording measures itself from its own first frame, which
-/// is after the encoder has opened, so its duration is legitimately shorter
-/// than the wall clock this thread slept for — 5.71s against 5.8s on the
-/// machine this was written on. Everything from the first screenshot onwards is
-/// inside the recording by construction, so this is a bound that holds however
-/// long the encoder took to open.
-
 /// The share of the frames a perfect run would encode that this one has to.
 ///
 /// Not one, and deliberately: the subject presents on a real machine and the
@@ -98,7 +88,15 @@ const TAIL: Duration = Duration::from_secs(1);
 /// have to cost less than a fiftieth of the run to stay above it.
 const FRAME_FLOOR: f64 = 2.0 / 3.0;
 
-/// See [`RECORD_FOR`]'s documentation.
+/// The shortest the recording can honestly have run.
+///
+/// The span from the **first** screenshot to the end, not the sum of this
+/// test's sleeps. A recording measures itself from its own first frame, which
+/// is after the encoder has opened, so its duration is legitimately shorter
+/// than the wall clock this thread slept for — 5.71s against 5.8s on the
+/// machine this was written on. Everything from the first screenshot onwards is
+/// inside the recording by construction, so this is a bound that holds however
+/// long the encoder took to open.
 const RECORD_FOR: Duration = Duration::from_millis(1_200 * (SCREENSHOTS as u64 - 1) + 1_000);
 
 /// How long the application is given to appear.
