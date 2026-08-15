@@ -1166,12 +1166,29 @@ Installing Game State Integration means **writing a file into the user's game
 directory**, and that is the part of this plugin with the least code and the
 most judgement in it. `docs/privacy.md` governs it, and three rules fall out.
 
-**It is never a side effect.** Nothing is installed when the plugin is attached
-to a session, or when the game launches, or when the plugin is enabled. It is a
-command the user runs — `clipped-cs2-plugin install <game folder>` — and until
-they do, an attached plugin reports a problem naming that command and stops.
-A plugin that wrote into a game directory because a game started would be doing
-something nobody asked for.
+**It is never a side effect — in `plugins/cs2`.** Nothing is installed when the
+plugin is attached to a session, or when the game launches, or when the plugin is
+enabled. It is a command the user runs —
+`clipped-cs2-plugin install <game folder>` — and until they do, an attached
+plugin reports a problem naming that command and stops. A plugin that wrote into
+a game directory because a game started would be doing something nobody asked
+for.
+
+> **`plugins/dota2` does not do this, and the difference is unresolved.** It
+> writes its configuration when the host attaches it, and then reports that the
+> game has to be restarted before anything will arrive. The two plugins landed
+> from branches open at the same time
+> ([#70](https://github.com/wildware-uk/clipped/issues/70) and
+> [#73](https://github.com/wildware-uk/clipped/issues/73)), and both behaviours
+> are defensible: one asks first, and the other cannot report anything at all
+> until the file exists, so a user who never runs a command never learns that
+> there was one to run.
+>
+> This paragraph used to state CS2's answer as a rule for every plugin, which was
+> not true of the code beside it. Which answer becomes the rule is recorded as a
+> decision on #73 and is not settled here — but a document that describes one
+> plugin's choice as the project's policy would have the next plugin author
+> follow it and be wrong either way.
 
 **Exactly what is written is documented, and it is one file.**
 `gamestate_integration_clipped.cfg`, in `game\csgo\cfg`, holding a loopback URI,
