@@ -741,10 +741,51 @@ impl Driver {
         }
     }
 
+    /// Tells the session where the running recording starts on its timeline.
+    ///
+    /// The difference between the session's zero and this recording's, which is
+    /// a number only the driver holds -- the session manager never sees an
+    /// `Instant` and the recording never sees the session's. Nanoseconds,
+    /// because that is what an `EventTime` is.
+    ///
+    /// Done once per recording, as soon as both epochs exist, rather than when
+    /// the recording ends: a recording that fails still occupied a span, and a
+    /// span nobody wrote down is one every event of that file is placed against
+    /// nothing by (`clipped_library::events`).
+    fn place_the_running_recording(&mut self) {
+        let (Some(session_epoch), Some(running)) = (self.session_epoch, self.running.as_ref())
+        else {
+            return;
+        };
+        let Some(recording_epoch) = running.progress.timeline_epoch() else {
+            return;
+        };
+        let id = running.id.clone();
+
+        // Saturating, and signed for the same reason `EventTime` is: a
+        // recording cannot start before its session, but a clock that is not
+        // guaranteed monotonic across a suspend could say so, and a value
+        // pinned at the end of the range is at least visibly wrong.
+        let starts_at = recording_epoch
+            .saturating_duration_since(session_epoch)
+            .as_nanos();
+        let starts_at = i64::try_from(starts_at).unwrap_or(i64::MAX);
+
+        if self.manager.place_recording(&id, starts_at) {
+            tracing::debug!(
+                session = id.session.as_str(),
+                index = id.index,
+                starts_at_nanos = starts_at,
+                "this recording's place on the session's timeline was recorded"
+            );
+        }
+    }
+
     /// Puts what this recording's plugins have said in front of the user, and
     /// what they reported on the session.
     fn report_plugin_activity(&mut self) {
         self.hold_the_sessions_epoch();
+        self.place_the_running_recording();
 
         let Some(running) = self.running.as_ref() else {
             return;

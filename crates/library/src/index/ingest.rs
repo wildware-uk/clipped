@@ -37,8 +37,11 @@
 //! waits on a disk it does not have to, because the write lock is held while it
 //! runs (AGENTS.md section 20).
 
+use core::time::Duration;
 use std::path::{Path, PathBuf};
 
+use clipped_edit::RecordingId;
+use clipped_events::{EventTime, RecordedSpan};
 use clipped_storage::rusqlite::{params, OptionalExtension, Savepoint};
 use tracing::debug;
 
@@ -46,6 +49,7 @@ use super::error::IndexProblem;
 use super::moment;
 use super::presence::{self, FileFacts};
 use super::sidecar::{self, SessionSidecar, SidecarError, SidecarGame};
+use crate::events::{Placement, RecordedSegment, SessionRecordings};
 
 /// The words `recordings.outcome` may hold.
 const RECORDING_OUTCOMES: &[&str] = &["recorded", "no-window", "failed"];
@@ -100,6 +104,13 @@ pub(crate) struct SessionWrite {
     pub(crate) newly_missing: usize,
     /// Recordings whose file has come back.
     pub(crate) returned: usize,
+    /// Where each recording written sits on the session's timeline: its row
+    /// identifier, its start in nanoseconds, and how long it runs.
+    ///
+    /// Only the recordings that have both numbers, because a span needs both. A
+    /// recording that produced no frame has no start and covers no moment, so
+    /// leaving it out is the truth rather than an omission.
+    pub(crate) segments: Vec<(i64, i64, f64)>,
 }
 
 /// Reads the sidecar at `path` and looks at every file it names.
@@ -176,8 +187,11 @@ pub(crate) fn write(
 
     write_candidates(savepoint, session)?;
     write_events(savepoint, session)?;
-    write_game_events(savepoint, session)?;
     let written = write_recordings(savepoint, prepared, observed_at, problems)?;
+    // After the recordings, for the same reason the clips below are: a game
+    // event names the recording that covers it, and the row it names has to
+    // exist. It also needs the spans that writing them produced.
+    write_game_events(savepoint, session, &written.segments)?;
     // After the recordings, because a clip points at the one it was cut from
     // and the row it points at has to exist.
     write_clips(savepoint, prepared, problems)?;
@@ -328,20 +342,18 @@ fn write_events(
 /// from the sidecar, and nothing a user can have changed lives in one of these
 /// rows.
 ///
-/// # What this does not do
+/// # Which recording each event landed in
 ///
-/// **It does not place an event in a recording.** `recording_id` is left null
-/// and `crates/library/src/events.rs` -- which is written, and does exactly
-/// this -- is not called, because placing a moment needs each recording's span
-/// on the session's *media* timeline and the sidecar records no such thing: a
-/// `SidecarRecording` has a wall-clock `started_at` and a duration, and an
-/// `EventTime` is nanoseconds from the first video frame. Deriving one from the
-/// other across a machine that slept would be a guess, and a kill drawn on the
-/// wrong second is worse than one not drawn yet (AGENTS.md section 27).
+/// `segments` is where each of the session's files sits on its timeline, and
+/// `crate::events` is what turns a moment into a file and an offset into it. An
+/// event no file covers keeps a null `recording_id`, which is an ordinary
+/// answer rather than a failure: heard before the first recording started, in
+/// the gap after a window was destroyed and recreated, after the last one
+/// ended, or during a session that wrote nothing at all.
 ///
-/// So this persists what was heard, in full and in order, and the placement is
-/// the next piece of
-/// [issue #71](https://github.com/wildware-uk/clipped/issues/71).
+/// The offset itself is not stored. It is `at_nanos` minus the recording's
+/// start, and a stored copy would be a second truth to keep in step with the
+/// span it came from.
 ///
 /// # What it refuses to lose
 ///
@@ -353,13 +365,22 @@ fn write_events(
 fn write_game_events(
     savepoint: &Savepoint<'_>,
     session: &SessionSidecar,
+    segments: &[(i64, i64, f64)],
 ) -> Result<(), clipped_storage::rusqlite::Error> {
+    let recordings = SessionRecordings::of(segments.iter().filter_map(
+        |&(recording_id, starts_at, duration)| {
+            let start = EventTime::from_media_nanos(starts_at);
+            let end = start.saturating_add(Duration::from_secs_f64(duration.max(0.0)));
+            RecordedSpan::new(start, end)
+                .map(|span| RecordedSegment::new(RecordingId::new(recording_id.to_string()), span))
+        },
+    ));
     savepoint
         .prepare("DELETE FROM game_events WHERE session_id = ?1")?
         .execute(params![session.session_id])?;
 
     let mut insert = savepoint.prepare(
-        "INSERT INTO game_events (session_id, recording_id, at_nanos, kind, source, document)          VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+        "INSERT INTO game_events (session_id, recording_id, at_nanos, kind, source, document)          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
     for document in &session.game_events {
         let read = match clipped_events::schema::read_value(document.clone()) {
@@ -380,8 +401,17 @@ fn write_game_events(
             );
             continue;
         };
+        // The identifier goes back through the same string it went out as,
+        // because `clipped_edit::RecordingId` wraps a library identifier and
+        // this is the library that wrote it.
+        let placed_in = match recordings.place(read.event.timing().at()) {
+            Placement::In { recording, .. } => recording.as_str().parse::<i64>().ok(),
+            Placement::NotRecorded(_) => None,
+        };
+
         insert.execute(params![
             session.session_id,
+            placed_in,
             read.event.timing().at().as_media_nanos(),
             read.event.kind().to_string(),
             read.event.source().as_str(),
@@ -419,6 +449,13 @@ fn write_recordings(
             Ok(outcome) => {
                 inner.commit()?;
                 written.recording_ids.push(outcome.recording_id);
+                if let (Some(starts_at), Some(duration)) =
+                    (recording.starts_at_nanos, recording.duration_seconds)
+                {
+                    written
+                        .segments
+                        .push((outcome.recording_id, starts_at, duration));
+                }
                 written.recordings += 1;
                 written.newly_missing += usize::from(outcome.newly_missing);
                 written.returned += usize::from(outcome.returned);
@@ -784,6 +821,72 @@ mod tests {
             }}"#
         );
         sidecar::parse(&text).expect("the sidecar parses")
+    }
+
+    /// A session with one file, covering 0 s to 10 s of its timeline.
+    fn ten_seconds_recorded() -> Vec<(i64, i64, f64)> {
+        vec![(7, 0, 10.0)]
+    }
+
+    /// Where `at_nanos` would be placed among `segments`.
+    fn placed(segments: &[(i64, i64, f64)], at_nanos: i64) -> Option<i64> {
+        let recordings = SessionRecordings::of(segments.iter().filter_map(
+            |&(recording_id, starts_at, duration)| {
+                let start = EventTime::from_media_nanos(starts_at);
+                let end = start.saturating_add(Duration::from_secs_f64(duration.max(0.0)));
+                RecordedSpan::new(start, end).map(|span| {
+                    RecordedSegment::new(RecordingId::new(recording_id.to_string()), span)
+                })
+            },
+        ));
+        match recordings.place(EventTime::from_media_nanos(at_nanos)) {
+            Placement::In { recording, .. } => recording.as_str().parse::<i64>().ok(),
+            Placement::NotRecorded(_) => None,
+        }
+    }
+
+    #[test]
+    fn an_event_no_file_covers_keeps_no_recording_rather_than_the_nearest_one() {
+        // The four ways that happens are ordinary answers, not failures, and
+        // all four must resolve to null rather than to the closest file: a kill
+        // pinned to the nearest frame is a kill drawn in a place it did not
+        // happen (AGENTS.md section 27).
+        let session = ten_seconds_recorded();
+
+        assert_eq!(placed(&session, 5_000_000_000), Some(7), "inside the file");
+        assert_eq!(
+            placed(&session, -1),
+            None,
+            "a moment before the first recording was pinned to it"
+        );
+        assert_eq!(
+            placed(&session, 10_000_000_001),
+            None,
+            "a moment after the last recording was pinned to it"
+        );
+        assert_eq!(
+            placed(&[], 5_000_000_000),
+            None,
+            "a session that recorded nothing placed an event in something"
+        );
+    }
+
+    #[test]
+    fn a_recording_with_no_span_takes_no_events_rather_than_taking_all_of_them() {
+        // A recording that produced no frame has no start, so it is left out of
+        // the segments entirely. The danger is the opposite of dropping it: a
+        // zero-length or zero-start default would make it a file covering the
+        // beginning of the session, and every early event would land in a file
+        // with no frames in it.
+        let with_a_gap = vec![(7, 0, 10.0), (9, 30_000_000_000, 10.0)];
+
+        assert_eq!(placed(&with_a_gap, 5_000_000_000), Some(7));
+        assert_eq!(placed(&with_a_gap, 35_000_000_000), Some(9));
+        assert_eq!(
+            placed(&with_a_gap, 20_000_000_000),
+            None,
+            "a moment in the gap between two recordings was placed in one of them"
+        );
     }
 
     #[test]

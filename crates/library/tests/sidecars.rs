@@ -163,10 +163,20 @@ fn the_documented_game_event_reaches_a_row() {
     assert_eq!(at_nanos, 137_000_000_000);
     assert_eq!(kind, "kill");
     assert_eq!(source, "cs2");
+    // The whole of issue #71 in one assertion: the event carries a moment on
+    // the session's timeline, the recording says where it sits on that same
+    // timeline, and the two together put the kill in one file. Without
+    // `starts_at_nanos` no span can be built and this is null — an ordinary
+    // answer for an event no file covers, and the wrong one here.
+    let indexed: i64 = database
+        .connection()
+        .query_row("SELECT recording_id FROM recordings", [], |row| row.get(0))
+        .expect("the recording it names was indexed");
     assert_eq!(
-        recording, None,
-        "an event was placed in a recording, which nothing can do yet: the sidecar \
-         records no media-timeline span per recording (see `write_game_events`)"
+        recording,
+        Some(indexed),
+        "the documented kill is 137 s into a recording that starts at 0 and runs for 1084 s, \
+         and was not placed in it"
     );
 
     // The payload survives being stored, which is the whole argument for

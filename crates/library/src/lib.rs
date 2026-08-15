@@ -54,14 +54,13 @@
 //! position in one file, for a session that wrote several of them, one that
 //! started after the game did, or none at all
 //! ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
-//! The `game_events` table exists now (migration `0003`) and
-//! [`index::ingest`] fills it from the sidecar, so a game event a session heard
-//! survives the process that heard it. **What is still missing is the
-//! placement**: every row's `recording_id` is null, because deciding which file
-//! covers a moment needs each recording's span on the session's *media*
-//! timeline and the sidecar records only a wall-clock start and a duration.
-//! So this module still places events it is *handed* rather than events it
-//! reads back. `docs/highlights.md` argues both the table and the model.
+//! The `game_events` table exists (migration `0003`) and [`index::ingest`]
+//! fills it from the sidecar, **placing each event in the recording that covers
+//! it**: a sidecar now carries where each file starts on the session's
+//! timeline, and this module turns that plus the file's duration into the span
+//! a moment is tested against. An event no file covers keeps a null
+//! `recording_id`, which is one of four ordinary answers rather than a failure.
+//! `docs/highlights.md` argues both the table and the model.
 //!
 //! [`thumbnail`]: the picture every screen that lists a recording shows for it
 //! (SPEC.md section 22, `docs/thumbnails.md`). It decodes a frame through

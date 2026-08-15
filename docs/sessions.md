@@ -371,6 +371,7 @@ one sitting, one file — produces a file named after the session and nothing el
       "outcome": "recorded",
       "frames_encoded": 65040,
       "duration_seconds": 1084.0,
+      "starts_at_nanos": 0,
       "width": 2560,
       "height": 1440,
       "end_reason": "target-lost",
@@ -428,7 +429,22 @@ and change. It is per recording rather than per session because that is where
 the answer can differ — a session that spans a settings change holds one
 recording made at the old settings and one at the new.
 
-The key was added after the schema shipped and the `schema_version` is
+`starts_at_nanos` is where that recording begins on the **session's** timeline,
+whose zero is the first video frame the session kept. The first recording starts
+at zero by definition; a second one — a window destroyed and recreated, a game
+relaunched inside its restart grace — starts wherever it began relative to that
+same origin, never back at zero. With `duration_seconds` it is the span the file
+covers, and a span is what turns a moment on the session's timeline into a
+position in *this* file, which is how a kill ends up drawn on the right second
+of the right recording ([#71](https://github.com/wildware-uk/clipped/issues/71),
+[docs/av-sync.md](av-sync.md)).
+
+It is absent for a recording that produced no frame: there is no timeline for it
+to start on, and no moment it can cover. An event that falls in such a gap
+belongs to the session and to no file, which the library stores as a null
+`recording_id` rather than as the nearest guess.
+
+Both keys were added after the schema shipped and the `schema_version` is
 deliberately unchanged: every other field means exactly what it did, and a
 reader that does not know the key ignores it. A sidecar written by an older
 build has no `settings` on its recordings, which is not the same as a recording

@@ -246,6 +246,20 @@ struct SidecarRecording<'a> {
     frames_encoded: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_seconds: Option<f64>,
+    /// Where this file starts on the session's timeline, in nanoseconds.
+    ///
+    /// With `duration_seconds` this is the span the file covers, and a span is
+    /// what turns a moment on that timeline into a position in *this* file --
+    /// which is how an event ends up drawn on the right second of the right
+    /// recording when a session wrote several
+    /// ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+    ///
+    /// Omitted when there is none, and the schema version is deliberately
+    /// unchanged: a reader that does not know the key ignores it and every
+    /// other field means exactly what it did, which is the same argument the
+    /// `settings` key was added under (`docs/sessions.md`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    starts_at_nanos: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -324,6 +338,7 @@ impl<'a> SidecarRecording<'a> {
             outcome: recording.outcome().map(RecordingOutcomeSummary::token),
             frames_encoded: None,
             duration_seconds: None,
+            starts_at_nanos: recording.starts_at_nanos(),
             width: None,
             height: None,
             end_reason: None,

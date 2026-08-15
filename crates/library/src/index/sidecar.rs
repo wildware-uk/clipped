@@ -136,6 +136,15 @@ pub(crate) struct SidecarRecording {
     pub(crate) end_reason: Option<String>,
     #[serde(default)]
     pub(crate) duration_seconds: Option<f64>,
+    /// Where this file starts on the session's timeline, in nanoseconds.
+    ///
+    /// With `duration_seconds` it is the span the file covers, which is what
+    /// places a game event in one recording rather than merely on a session
+    /// ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+    /// Defaulted: a sidecar written before the key existed has none, and a
+    /// recording that produced no frame never had one.
+    #[serde(default)]
+    pub(crate) starts_at_nanos: Option<i64>,
     #[serde(default)]
     pub(crate) frames_encoded: Option<u64>,
     #[serde(default)]
