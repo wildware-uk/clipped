@@ -564,6 +564,9 @@ impl CommandHandler for RecorderService {
             Command::LibraryGames => Ok(Reply::LibraryGames {
                 games: self.library.games()?,
             }),
+            Command::LibraryEvents(request) => Ok(Reply::LibraryEvents {
+                lane: self.library.events(&request)?,
+            }),
             // Also on the connection thread, and for the same reason a library
             // read is: it touches no recording, takes no lock a recording takes
             // and opens a file of its own (`crate::export`). It is the slower
@@ -2492,6 +2495,97 @@ mod tests {
         };
         assert_eq!(games.len(), 1);
         assert_eq!(games[0].missing, 1);
+    }
+
+    #[test]
+    fn the_marks_of_a_recording_reach_the_window_placed_in_its_file() {
+        // Issue #329. The window cannot work out where a mark goes: that needs
+        // the recording's span, which it has no way to know. So the recorder
+        // answers with the offset into the file, and this is the wiring that
+        // proves the command reaches the index rather than merely compiling.
+        let directory = scratch("library-events");
+        let path = directory.join("library.db");
+        let recording = {
+            let database = clipped_storage::Database::open(&path).expect("a database opens");
+            let connection = database.connection();
+            connection
+                .execute_batch(
+                    "INSERT INTO games (game_id, name, first_seen_at)                      VALUES ('cs2', 'Counter-Strike 2', '2026-08-11T20:14:00+01:00');                      INSERT INTO sessions (session_id, game_id, started_at)                      VALUES ('cs2-20260811-201400', 'cs2', '2026-08-11T20:14:00+01:00');                      INSERT INTO recordings (session_id, session_index, path, started_at,                          duration_seconds, starts_at_nanos)                      VALUES ('cs2-20260811-201400', 1, 'one.mkv',                              '2026-08-11T20:14:00+01:00', 600.0, 60000000000);",
+                )
+                .expect("a session with one recording inserts");
+            let recording = connection.last_insert_rowid();
+
+            // The recording starts a minute into the session, so a kill at 64 s
+            // on the session's timeline is 4 s into *this file*. Getting that
+            // subtraction backwards is the whole failure this answers.
+            connection
+                .execute(
+                    "INSERT INTO game_events                         (session_id, recording_id, at_nanos, kind, source, document)                      VALUES ('cs2-20260811-201400', ?1, 64000000000,                              'acme-cs2.flashbang_blinded_five', 'acme-cs2', '{}')",
+                    clipped_storage::rusqlite::params![recording],
+                )
+                .expect("an event inserts");
+            recording
+        };
+
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(path)),
+            indexer_over(&directory),
+            Catalogue::default(),
+        );
+
+        let Reply::LibraryEvents { lane } = service
+            .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
+                recording: recording.to_string(),
+            }))
+            .expect("the events read")
+        else {
+            panic!("`library_events` was answered with something else");
+        };
+
+        assert_eq!(lane.marks.len(), 1);
+        assert_eq!(
+            lane.marks[0].at, 4_000_000_000,
+            "the mark is 4 s into the file and was placed at {}ns, which is what a mark drawn              against the session's timeline rather than the file's would look like",
+            lane.marks[0].at
+        );
+        assert_eq!(
+            lane.marks[0].kind, "acme-cs2.flashbang_blinded_five",
+            "a kind this build has never met has to arrive and be drawn"
+        );
+        assert_eq!(lane.marks[0].source, "acme-cs2");
+    }
+
+    #[test]
+    fn a_recording_with_no_events_is_answered_as_none_rather_than_refused() {
+        // "None" and "nobody asked" are different things to draw, and the
+        // Editor screen says them differently. An empty lane is the first; a
+        // refusal would make the window guess at the second.
+        let service = service_over_a_library("library-events-none");
+
+        let Reply::LibraryEvents { lane } = service
+            .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
+                recording: "1".to_owned(),
+            }))
+            .expect("a recording with no events is not a failure")
+        else {
+            panic!("`library_events` was answered with something else");
+        };
+
+        assert!(lane.marks.is_empty());
+    }
+
+    #[test]
+    fn an_identifier_that_is_not_a_recording_is_the_callers_mistake() {
+        let service = service_over_a_library("library-events-bad-id");
+
+        let refusal = service
+            .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
+                recording: "the third one".to_owned(),
+            }))
+            .expect_err("that is not an identifier this library uses");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
     }
 
     #[test]

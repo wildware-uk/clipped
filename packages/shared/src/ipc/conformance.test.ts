@@ -62,6 +62,7 @@ import type {
   KnownEventName,
   LibraryClip,
   LibraryGame,
+  LibraryEventsReply,
   LibraryGamesReply,
   LibraryRecording,
   LibrarySession,
@@ -452,6 +453,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     games: 'required',
   }),
+  'reply.library_events': fields<LibraryEventsReply>({
+    reply: 'required',
+    lane: 'required',
+  }),
   'reply.recording_exported': fields<RecordingExportedReply>({
     reply: 'required',
     export: 'required',
@@ -566,6 +571,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'library_events',
+    params: 'library_events',
+    reply: 'reply.library_events',
+    available_in_this_build: true,
+  },
+  {
     name: 'export_recording',
     params: 'export_recording',
     reply: 'reply.recording_exported',
@@ -624,6 +635,11 @@ function replyDiscriminant(reply: Reply): string {
       return reply.page.next_cursor === undefined ? 'library_sessions' : 'library_sessions.more';
     case 'library_games':
       return 'library_games';
+    case 'library_events':
+      // One discriminant, unlike `library_sessions`: an empty lane is not a
+      // different shape, it is the same shape carrying nothing. What tells
+      // "none" from "not asked" is that `marks` is always present.
+      return 'library_events';
     case 'hotkeys':
       return 'hotkeys';
     case 'recording_exported':

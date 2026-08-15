@@ -142,6 +142,7 @@ export const COMMANDS = [
   'save_replay',
   'library_sessions',
   'library_games',
+  'library_events',
   'export_recording',
   'get_hotkeys',
   'shutdown',
@@ -222,6 +223,7 @@ export const REPLIES = [
   'replay_saved',
   'library_sessions',
   'library_games',
+  'library_events',
   'recording_exported',
   'hotkeys',
   'shutting_down',
@@ -803,6 +805,45 @@ export interface LibraryGamesReply {
   readonly games: readonly LibraryGame[];
 }
 
+/** One mark on a recording's timeline. */
+export interface LibraryEventMark {
+  /** The recording this mark is on, as the library identifies it. */
+  readonly recording: string;
+  /** How far into that recording's file the event is, in nanoseconds. */
+  readonly at: number;
+  /**
+   * What happened.
+   *
+   * **Not a closed set.** A kind added after this build shipped, and a
+   * plugin's namespaced custom name, both arrive here and both must be drawn:
+   * validating against a list would delete exactly the marks that have to
+   * survive.
+   */
+  readonly kind: string;
+  /** Who reported it: a plugin's identifier, or `clipped`. */
+  readonly source: string;
+}
+
+/** The marks of one recording. */
+export interface LibraryEventLane {
+  /**
+   * The marks, earliest first.
+   *
+   * Always present. An empty array means the recording has no events, which is
+   * a different thing from the question not having been asked — and the two
+   * are drawn differently.
+   */
+  readonly marks: readonly LibraryEventMark[];
+}
+
+/** The marks on one recording's timeline. */
+export interface LibraryEventsReply {
+  /** The tag. */
+  readonly reply: 'library_events';
+  /** The events, placed in that recording's file. */
+  readonly lane: LibraryEventLane;
+}
+
 /** A recording was copied into MP4, and the file is finished. */
 export interface RecordingExportedReply {
   /** The tag. */
@@ -915,6 +956,7 @@ export type Reply =
   | ReplaySavedReply
   | LibrarySessionsReply
   | LibraryGamesReply
+  | LibraryEventsReply
   | RecordingExportedReply
   | HotkeysReply
   | ShuttingDownReply;

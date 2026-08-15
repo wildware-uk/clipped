@@ -556,6 +556,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::TakeScreenshot(_) => Some("take_screenshot".to_owned()),
                 Command::SaveReplay(_) => Some("save_replay".to_owned()),
                 Command::LibrarySessions(_) => Some("library_sessions".to_owned()),
+                Command::LibraryEvents(_) => Some("library_events".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
@@ -574,6 +575,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::SaveReplay(_) => Some("reply.replay_saved".to_owned()),
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
+                Command::LibraryEvents(_) => Some("reply.library_events".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
@@ -826,6 +828,35 @@ fn samples() -> Vec<Sample> {
                             ..exemplar_library_session()
                         }],
                         next_cursor: None,
+                    },
+                }),
+            }),
+        ),
+        (
+            "the marks on one recording's timeline",
+            ServerMessage::Response(Response {
+                id: 11,
+                outcome: Outcome::Ok(Reply::LibraryEvents {
+                    lane: crate::library::LibraryEventLane {
+                        marks: vec![
+                            crate::library::LibraryEventMark {
+                                recording: "1".to_owned(),
+                                at: 4_000_000_000,
+                                kind: "kill".to_owned(),
+                                source: "counter-strike-2".to_owned(),
+                            },
+                            // A kind this build has never met, carried through
+                            // and drawn like any other. A mirror that validated
+                            // `kind` against a list would delete exactly the
+                            // marks that have to survive
+                            // (`crate::library::LibraryEventMark`).
+                            crate::library::LibraryEventMark {
+                                recording: "1".to_owned(),
+                                at: 9_500_000_000,
+                                kind: "acme-cs2.flashbang_blinded_five".to_owned(),
+                                source: "acme-cs2".to_owned(),
+                            },
+                        ],
                     },
                 }),
             }),
@@ -1214,6 +1245,11 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::BookmarkAdded { .. } => "bookmark_added".to_owned(),
         Reply::ScreenshotTaken { .. } => "screenshot_taken".to_owned(),
         Reply::ReplaySaved { .. } => "replay_saved".to_owned(),
+        // One discriminant, unlike `library_sessions` below: an empty lane is
+        // not a different *shape*, it is the same shape carrying nothing. What
+        // tells "none" from "not asked" is that `marks` is always present, and
+        // that is a property of the type rather than of the path.
+        Reply::LibraryEvents { .. } => "library_events".to_owned(),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
         // would otherwise reach the same discriminant for a page that continues
@@ -1750,6 +1786,9 @@ fn every_built_command() -> Vec<Command> {
         Command::SaveReplay(exemplar_save_replay()),
         Command::LibrarySessions(exemplar_library_sessions()),
         Command::LibraryGames,
+        Command::LibraryEvents(crate::library::LibraryEvents {
+            recording: "1".to_owned(),
+        }),
         Command::ExportRecording(exemplar_export_recording()),
         Command::GetHotkeys,
         Command::Shutdown(Shutdown::default()),
@@ -1765,6 +1804,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::SaveReplay(_)
             | Command::LibrarySessions(_)
             | Command::LibraryGames
+            | Command::LibraryEvents(_)
             | Command::ExportRecording(_)
             | Command::GetHotkeys
             | Command::Shutdown(_)
@@ -1943,6 +1983,16 @@ fn every_reply() -> Vec<Reply> {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
         },
+        Reply::LibraryEvents {
+            lane: crate::library::LibraryEventLane {
+                marks: vec![crate::library::LibraryEventMark {
+                    recording: "1".to_owned(),
+                    at: 4_000_000_000,
+                    kind: "kill".to_owned(),
+                    source: "counter-strike-2".to_owned(),
+                }],
+            },
+        },
     ];
     for reply in &replies {
         match reply {
@@ -1955,6 +2005,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::ReplaySaved { .. }
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
+            | Reply::LibraryEvents { .. }
             | Reply::Hotkeys { .. }
             | Reply::RecordingExported { .. }
             | Reply::ShuttingDown { .. } => {}

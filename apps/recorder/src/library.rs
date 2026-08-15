@@ -54,8 +54,9 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use clipped_ipc::{
-    ErrorCode, LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage,
-    LibrarySessions, ProtocolError, MAX_FRAME_BYTES,
+    ErrorCode, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
+    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, ProtocolError,
+    MAX_FRAME_BYTES,
 };
 use clipped_library::index::{
     cursor_of, game_summaries, list_sessions, reconcile, GameSummary, IndexControl, IndexReport,
@@ -153,6 +154,62 @@ impl LibraryReader {
         })
     }
 
+    /// The game events of one recording, placed in that recording's file.
+    ///
+    /// The offset is a subtraction the index can do because both halves are
+    /// columns: an event's moment on the session's timeline, and where that
+    /// recording starts on the same timeline (`starts_at_nanos`, migration
+    /// `0005`). Nothing opens a file, and nothing re-reads a sidecar.
+    ///
+    /// A recording with no events answers with an empty lane rather than an
+    /// error. "None" and "the question was never asked" are different things to
+    /// draw, and the reply arriving at all is what tells them apart
+    /// (AGENTS.md section 27).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] if the recording is not named by an
+    /// identifier the library uses, and [`ErrorCode::LibraryUnavailable`] if
+    /// the index could not be read.
+    pub fn events(&self, request: &LibraryEvents) -> Result<LibraryEventLane, ProtocolError> {
+        // Before the database is opened, for the reason `sessions` parses its
+        // query first: a malformed identifier is the caller's mistake and is
+        // worth saying so even on a machine whose library cannot be read.
+        let recording: i64 = request.recording.parse().map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidParameters,
+                format!(
+                    "`library_events` was given `{}`, which is not a recording identifier this                      library uses",
+                    request.recording
+                ),
+            )
+        })?;
+
+        self.with_database(|database| {
+            let mut statement = database
+                .connection()
+                .prepare(
+                    "SELECT game_events.at_nanos - recordings.starts_at_nanos, \n                            game_events.kind, game_events.source \n                     FROM game_events \n                     JOIN recordings \n                         ON recordings.recording_id = game_events.recording_id \n                     WHERE game_events.recording_id = ?1 \n                       AND recordings.starts_at_nanos IS NOT NULL \n                     ORDER BY game_events.at_nanos",
+                )
+                .map_err(unreadable)?;
+
+            let marks = statement
+                .query_map([recording], |row| {
+                    Ok(LibraryEventMark {
+                        recording: request.recording.clone(),
+                        at: row.get(0)?,
+                        kind: row.get(1)?,
+                        source: row.get(2)?,
+                    })
+                })
+                .map_err(unreadable)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(unreadable)?;
+
+            Ok(LibraryEventLane { marks })
+        })
+    }
+
     /// Runs a read against the open database, opening it if this is the first
     /// question or if the last attempt failed.
     ///
@@ -209,6 +266,16 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> ProtocolError {
 }
 
 /// A read the index refused.
+fn unreadable(error: clipped_storage::rusqlite::Error) -> ProtocolError {
+    // The same code a failed index read answers with, because it is the same
+    // thing from the caller's side: the library is there and could not be
+    // asked. A window shows one message for both and retries the same way.
+    ProtocolError::new(
+        ErrorCode::LibraryUnavailable,
+        format!("the recording library could not be read: {error}"),
+    )
+}
+
 fn unavailable(error: clipped_library::index::IndexError) -> ProtocolError {
     ProtocolError::new(
         ErrorCode::LibraryUnavailable,
