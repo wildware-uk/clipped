@@ -1050,14 +1050,33 @@ explanation" is the failure AGENTS.md section 27 names.
 - **Save Replay** was a command the protocol defined and the recorder refused,
   labelled from `UnbuiltCommand`'s own subsystem and tracking issue so that the
   day it was built the menu would stop claiming it had not. That day was
-  [#38](https://github.com/wildware-uk/clipped/issues/38). It is now live
-  exactly when the running recording is keeping a replay buffer, and disabled
-  with the true reason otherwise: `— nothing is being recorded`, or `— this
-  recording is not keeping a replay buffer`. **In practice it is still always
-  the second**, because nothing in this window asks `start_recording` for a
-  buffer ([#427](https://github.com/wildware-uk/clipped/issues/427)) — which is
-  a fact about this recording rather than a stale claim about the build, and
-  that is the whole difference.
+  [#38](https://github.com/wildware-uk/clipped/issues/38). It is live exactly
+  when the running recording is keeping a replay buffer, and disabled with the
+  true reason otherwise: `— this recorder cannot save replays` when the recorder
+  never advertised `features::replay`, `— nothing is being recorded`, or `—
+  this recording is not keeping a replay buffer`.
+
+  **Clicking it saves a clip.** It sends `save_replay` naming nothing — not the
+  recording, not a length, not a destination — for the reason Add Bookmark names
+  nothing: the item is one click in a menu with nowhere to type, and each of
+  those three has an answer the recorder already holds. What comes back is
+  spelled out in full, unlike a bookmark's offset, because a replay is a **new
+  file** in a place the user did not choose, and a file nobody is told about is
+  a file nobody finds. A clip shorter than the buffer's window is reported as
+  short rather than as a failure: the buffer had not been filling long enough,
+  which is a fact about when the recording started and not about anything going
+  wrong.
+
+  A recording started **from this window** still keeps no buffer, so in practice
+  the reason is usually the third. The window cannot ask for one at a length
+  somebody chose: the duration lives in `replay_window_seconds`, and this window
+  has no way to read a setting — `apply_settings` is unbuilt (#108) and
+  `workspace_layering.rs` allows the Tauri host exactly one crate of the
+  workspace, `clipped-ipc`, so reading `settings.json` here would be a second
+  implementation of the settings file. `clipped-recorder replay --duration`
+  starts a recording that does have one, and against that recording the item is
+  live and works ([#427](https://github.com/wildware-uk/clipped/issues/427) for
+  the rest).
 - **Add Bookmark** is what that looked like the first time. Issue #64 built
   the bookmark store and the `add_bookmark` command, the refusal it quoted
   stopped existing, and the item became a control: live while something is being
