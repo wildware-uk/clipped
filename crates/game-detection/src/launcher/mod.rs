@@ -12,11 +12,12 @@
 //! "provider-based so that support for a new launcher is an addition rather than
 //! a change to shared logic". [`steam`] is the first
 //! ([#43](https://github.com/wildware-uk/clipped/issues/43)), [`epic`] the
-//! second, [`ubisoft`] the third, [`xbox`] the fourth and [`battlenet`] the
-//! fifth ([#44](https://github.com/wildware-uk/clipped/issues/44), which asks
-//! for one pull request per launcher and is still open for the rest).
+//! second, [`ubisoft`] the third, [`xbox`] the fourth, [`battlenet`] the fifth
+//! and [`riot`] the sixth
+//! ([#44](https://github.com/wildware-uk/clipped/issues/44), which asks for one
+//! pull request per launcher and is still open for EA).
 //!
-//! EA, Riot and GOG are deliberately **not** stubbed
+//! EA and GOG are deliberately **not** stubbed
 //! here — an empty provider that always answers "no" is a control that silently
 //! does nothing (AGENTS.md section 27), and
 //! [`LauncherKind`](crate::catalogue::LauncherKind) already carries the
@@ -75,6 +76,7 @@ mod claim;
 pub mod epic;
 mod keyvalues;
 mod registry;
+pub mod riot;
 pub mod steam;
 pub mod ubisoft;
 pub mod xbox;
