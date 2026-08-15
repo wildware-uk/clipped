@@ -467,6 +467,35 @@ that file is and which part of which recording it came from:
   pressed the key for thirty seconds and got twelve" has an answer here
   (`docs/replay-buffer.md`).
 
+### A clip with no file
+
+`path` is **absent** for a clip nothing has exported yet — a generated
+highlight is a range of a recording and costs no disk until somebody asks for a
+file (SPEC.md sections 19, 20 and 44). A saved replay has one from the moment it
+is written, because the packets it is made of were about to be evicted from
+memory. Absent and empty are not the same thing: a `path` that is present and
+blank is a malformed record and is still refused.
+
+Such a clip carries three keys instead:
+
+- `edit` is what the clip *is*, as `clipped_edit::EditDocument::write` wrote it.
+  The library stores the text without interpreting it.
+- `origin` is `manual`, `replay-buffer` or `highlight`. **Absent means
+  `replay-buffer`**, because until a clip with no file could be stored that was
+  the only kind there was.
+- `origin_detail` is the rest of the serialised origin: for a highlight,
+  `{"kind":…,"at":…,"source":…}` — what happened, when, and which plugin said
+  so.
+
+`origin_detail` is not only description. **It is what identifies the clip.** A
+clip with a file is identified by that file, which is why `clips.path` is
+unique; a clip with none has nothing else unique about it, so the library
+matches one on its session and its cause. Two highlights of one session cannot
+share both, because the generator refuses to cut a second clip over a window it
+has already taken. Getting that wrong duplicates every generated clip on every
+reconciliation — which is why `crates/library/tests/reconciliation.rs` indexes
+the same session twice and counts.
+
 The key was reserved from the first version of this schema and is filled now, so
 the `schema_version` is unchanged: a reader that ignores it loses the clips and
 still indexes the sitting. A session that saved none writes an empty list, as
