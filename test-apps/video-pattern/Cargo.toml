@@ -49,6 +49,13 @@ path = "../../tests/capture/av_sync.rs"
 name = "screenshot"
 path = "../../tests/capture/screenshot.rs"
 
+# The screenshot-during-a-recording measurement: issue #67's third acceptance
+# criterion, which the rendezvous' own unit tests cannot reach because they do
+# not run a capture loop or an encoder (issue #452's sibling case).
+[[test]]
+name = "screenshot_during_recording"
+path = "../../tests/capture/screenshot_during_recording.rs"
+
 [dependencies]
 # The command-line parser every executable in this workspace uses, so that
 # `--help` looks the same wherever a contributor meets it (see the root
