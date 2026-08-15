@@ -102,14 +102,14 @@
 //! event a plugin reports during a recording now outlives the process that
 //! heard it.
 //!
-//! # What is not here
+//! # Which file an event landed in
 //!
-//! **Deciding which file an event landed in.** The row's `recording_id` is null
-//! until something writes each recording's span on the session's timeline into
-//! the sidecar; `clipped_library::events` does the placing and has nothing to
-//! place against. See `docs/av-sync.md`, "One epoch per recording, one timeline
-//! per session", for why that number is not derivable from the wall-clock start
-//! a sidecar already carries.
+//! Decided by `clipped_library::events` when the session is indexed, from the
+//! span each recording writes into the sidecar -- `starts_at_nanos`, which the
+//! driver works out from this timeline and the recording's own epoch. An event
+//! no file covers keeps a null `recording_id`, which is an ordinary answer:
+//! heard before the first recording started, in a gap between two, after the
+//! last, or during a session that wrote nothing.
 
 use core::time::Duration;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};

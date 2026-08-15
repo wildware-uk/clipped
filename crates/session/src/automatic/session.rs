@@ -172,6 +172,18 @@ impl std::fmt::Display for SessionId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecording {
     pub(crate) index: u32,
+    /// Where this file starts on the **session's** timeline, in nanoseconds.
+    ///
+    /// The first recording of a session starts at zero by definition; a later
+    /// one starts wherever it began relative to the session's first kept frame.
+    /// With `duration_seconds` this is the span the file covers, which is what
+    /// turns a moment into a position in one file
+    /// (`clipped_library::events`, issue #71).
+    ///
+    /// [`None`] until something places it: a recording that produced no frame
+    /// has no start, and neither has one written by a build before this
+    /// existed.
+    pub(crate) starts_at_nanos: Option<i64>,
     pub(crate) output: PathBuf,
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: Option<SystemTime>,
@@ -184,6 +196,12 @@ impl SessionRecording {
     #[must_use]
     pub const fn index(&self) -> u32 {
         self.index
+    }
+
+    /// Where this file starts on the session's timeline, in nanoseconds.
+    #[must_use]
+    pub const fn starts_at_nanos(&self) -> Option<i64> {
+        self.starts_at_nanos
     }
 
     /// The file it was written to.
@@ -692,6 +710,7 @@ impl Session {
     ) {
         self.recordings.push(SessionRecording {
             index,
+            starts_at_nanos: None,
             output: output.clone(),
             started_at: at,
             ended_at: None,

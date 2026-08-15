@@ -640,13 +640,17 @@ CREATE TABLE game_events (
   heard belongs to the session and to no file, and `ON DELETE SET NULL` keeps
   it when the recording goes.
 
-The migration has landed; the table is still empty. Nothing writes a game event
-and nothing reads one back yet — `crates/library/src/events.rs` places events it
-is *handed* — because the sidecar write and the ingest that fill this table are
-the remainder of [#71], and [#338] is what produces the events in the first
-place. Drawing them is a second gap and a separate one: the desktop window can
-neither read the library nor ask the recorder for a row of it ([#329], [#301]),
-so the editor's event lane says "nobody asked" rather than "there were none".
+The table is filled. A plugin's event reaches the open session, the session
+writes it to its sidecar, and `clipped_library::index::ingest` turns it into a
+row — **placed in the recording that covers it**, because each recording now
+writes where it starts on the session's timeline and `crates/library/src/
+events.rs` tests a moment against the span that gives ([#71]). An event no file
+covers keeps a null `recording_id`, which is one of the four answers above
+rather than a failure.
+
+Drawing them is a separate gap: the desktop window can neither read the library
+nor ask the recorder for a row of it ([#329], [#301]), so the editor's event lane
+says "nobody asked" rather than "there were none".
 
 [#68]: https://github.com/wildware-uk/clipped/issues/68
 [#71]: https://github.com/wildware-uk/clipped/issues/71
