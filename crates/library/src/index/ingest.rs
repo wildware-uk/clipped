@@ -51,6 +51,8 @@ use super::presence::{self, FileFacts};
 use super::sidecar::{self, SessionSidecar, SidecarError, SidecarGame};
 use crate::events::{Placement, RecordedSegment, SessionRecordings};
 
+/// The words `clips.origin` may hold.
+const CLIP_ORIGINS: &[&str] = &["manual", "replay-buffer", "highlight"];
 /// The words `recordings.outcome` may hold.
 const RECORDING_OUTCOMES: &[&str] = &["recorded", "no-window", "failed"];
 /// The words `recordings.end_reason` may hold.
@@ -137,7 +139,19 @@ pub(crate) fn prepare(path: &Path) -> Result<PreparedSession, SidecarError> {
         .clips
         .iter()
         .map(|clip| {
-            let path = sidecar::recording_path(directory, &clip.path);
+            // A clip with no file has nothing to look at, and asking the
+            // filesystem about the empty path would answer "missing" for a clip
+            // that was never supposed to have one.
+            let Some(named) = clip.path.as_deref() else {
+                return PreparedFile {
+                    path: PathBuf::new(),
+                    facts: FileFacts {
+                        present: false,
+                        size_bytes: None,
+                    },
+                };
+            };
+            let path = sidecar::recording_path(directory, named);
             let facts = presence::look_at(&path);
             PreparedFile { path, facts }
         })
@@ -665,7 +679,15 @@ fn write_clips(
     let session = &prepared.sidecar;
 
     for (clip, file) in session.clips.iter().zip(&prepared.clip_files) {
-        if clip.path.trim().is_empty() {
+        // Absent and empty are different. A clip with no `path` key is one
+        // nothing has exported yet; a `path` that is present and blank is a
+        // malformed record, and reading it as "no file" would turn a broken
+        // sidecar into a clip nobody can find.
+        if clip
+            .path
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
             problems.push(IndexProblem::UnknownToken {
                 session_id: session.session_id.clone(),
                 field: "clip path",
@@ -674,7 +696,17 @@ fn write_clips(
             continue;
         }
 
-        let path = file.path.display().to_string();
+        let origin = clip.origin.as_deref().unwrap_or("replay-buffer");
+        if !CLIP_ORIGINS.contains(&origin) {
+            problems.push(IndexProblem::UnknownToken {
+                session_id: session.session_id.clone(),
+                field: "clip origin",
+                value: origin.to_owned(),
+            });
+            continue;
+        }
+
+        let path = clip.path.as_ref().map(|_| file.path.display().to_string());
         let source_recording_id = match clip.source_recording {
             None => None,
             Some(index) => savepoint
@@ -688,15 +720,43 @@ fn write_clips(
                 .optional()?,
         };
 
-        let existing: Option<(i64, String, bool)> = savepoint
-            .prepare(
-                "SELECT clip_id, path, deleted_at IS NOT NULL FROM clips \
-                 WHERE path = ?1 OR deleted_from = ?1",
-            )?
-            .query_row(params![path], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()?;
+        // Two natural keys, because a clip has two kinds of identity.
+        //
+        // A clip with a **file** is identified by it: that is what `0001` says
+        // and why `clips.path` is UNIQUE. A clip with **no file** has nothing
+        // unique among its columns except why it exists — so a highlight is
+        // identified by its session and its cause, which `origin_detail` holds
+        // as the moment, the kind and the plugin that reported it. Two
+        // highlights of one session cannot share all three: the generator
+        // refuses to cut a second clip over a window it has already taken
+        // (`clipped_session::highlights::generate`).
+        //
+        // Matched rather than rewritten wholesale, and both failures are why: a
+        // key that never matches duplicates every generated clip on every
+        // reconciliation, and rewriting instead would throw away the favourite,
+        // the tags and the title somebody put on one (AGENTS.md section 56).
+        let existing: Option<(i64, Option<String>, bool)> = match &path {
+            Some(path) => savepoint
+                .prepare(
+                    "SELECT clip_id, path, deleted_at IS NOT NULL FROM clips \
+                     WHERE path = ?1 OR deleted_from = ?1",
+                )?
+                .query_row(params![path], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()?,
+            None => savepoint
+                .prepare(
+                    "SELECT clip_id, path, deleted_at IS NOT NULL FROM clips \
+                     WHERE session_id = ?1 AND origin = ?2 \
+                       AND origin_detail IS ?3 AND path IS NULL",
+                )?
+                .query_row(
+                    params![session.session_id, origin, clip.origin_detail],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?,
+        };
 
         // The size of the file as it is now, or nothing when it is not there —
         // the row keeps whatever it had, for the reason a recording's does.
@@ -714,7 +774,8 @@ fn write_clips(
                         "UPDATE clips SET session_id = ?2, source_recording_id = ?3, path = ?4, \
                              title = COALESCE(?5, title), created_at = COALESCE(?6, created_at), \
                              source_start_seconds = ?7, source_end_seconds = ?8, \
-                             duration_seconds = ?9, size_bytes = COALESCE(?10, size_bytes) \
+                             duration_seconds = ?9, size_bytes = COALESCE(?10, size_bytes), \
+                             edit = ?11, origin = ?12, origin_detail = ?13 \
                          WHERE clip_id = ?1",
                     )?
                     .execute(params![
@@ -728,6 +789,9 @@ fn write_clips(
                         clip.source_end_seconds,
                         clip.duration_seconds,
                         size_bytes,
+                        clip.edit,
+                        origin,
+                        clip.origin_detail,
                     ])?;
             }
             None => {
@@ -735,8 +799,8 @@ fn write_clips(
                     .prepare(
                         "INSERT INTO clips (session_id, source_recording_id, path, title, \
                              created_at, source_start_seconds, source_end_seconds, \
-                             duration_seconds, size_bytes) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                             duration_seconds, size_bytes, edit, origin, origin_detail) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     )?
                     .execute(params![
                         session.session_id,
@@ -753,6 +817,9 @@ fn write_clips(
                         clip.source_end_seconds,
                         clip.duration_seconds,
                         size_bytes,
+                        clip.edit,
+                        origin,
+                        clip.origin_detail,
                     ])?;
             }
         }

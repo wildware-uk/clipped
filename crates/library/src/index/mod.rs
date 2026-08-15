@@ -527,8 +527,13 @@ impl Table {
                  WHERE recording_id > ?1 ORDER BY recording_id LIMIT ?2"
             }
             Self::Clips => {
+                // `path IS NOT NULL` because a clip that has never been
+                // exported has no file to have gone: `missing_since` means "the
+                // file this row names is not where it says", and marking a
+                // virtual clip missing would report the absence of something
+                // that was never supposed to exist (AGENTS.md section 27).
                 "SELECT clip_id, path, missing_since, deleted_at FROM clips \
-                 WHERE clip_id > ?1 ORDER BY clip_id LIMIT ?2"
+                 WHERE clip_id > ?1 AND path IS NOT NULL ORDER BY clip_id LIMIT ?2"
             }
         }
     }
@@ -602,7 +607,10 @@ fn report_unindexed_media(
 
     for query in [
         "SELECT path FROM recordings",
-        "SELECT path FROM clips",
+        // Only the clips that have one. A clip nothing has exported claims no
+        // file, and asking it to would answer NULL for every generated
+        // highlight.
+        "SELECT path FROM clips WHERE path IS NOT NULL",
         // A user who moves a file and lets Clipped find it again still has the
         // old path in `deleted_from`; a file sitting there is accounted for.
         "SELECT deleted_from FROM recordings WHERE deleted_from IS NOT NULL",

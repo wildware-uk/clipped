@@ -167,8 +167,18 @@ pub(crate) struct SidecarRecording {
 /// that exists (AGENTS.md section 16).
 #[derive(Debug, Deserialize)]
 pub(crate) struct SidecarClip {
-    /// The file, as the recorder named it.
-    pub(crate) path: String,
+    /// The file, as the recorder named it, when there is one.
+    ///
+    /// Absent for a clip nothing has exported yet: a generated highlight is a
+    /// range of a recording and costs no disk until somebody asks for a file
+    /// (SPEC.md sections 19, 20 and 44). A saved replay has one from the moment
+    /// it is written, because the packets it is made of were about to be
+    /// evicted from memory.
+    ///
+    /// Absent and empty are **not** the same thing. A clip whose `path` is
+    /// present and blank is a malformed record and is still refused.
+    #[serde(default)]
+    pub(crate) path: Option<String>,
     #[serde(default)]
     pub(crate) created_at: Option<String>,
     /// Which recording of the session it was cut from.
@@ -184,6 +194,27 @@ pub(crate) struct SidecarClip {
     /// today; the column exists for the clips M11 creates.
     #[serde(default)]
     pub(crate) title: Option<String>,
+    /// What the clip *is*, as `clipped_edit::EditDocument::write` wrote it.
+    ///
+    /// Carried as text and not interpreted here, exactly as it is stored
+    /// (`clips.edit`, migration `0004`). Absent for a saved replay, whose
+    /// window is `source_start_seconds` and `source_end_seconds`.
+    #[serde(default)]
+    pub(crate) edit: Option<String>,
+    /// Why the clip exists: `manual`, `replay-buffer` or `highlight`.
+    ///
+    /// Absent means `replay-buffer`, because that is the only kind a sidecar
+    /// written before this key existed could have described: a clip with no
+    /// file could not be recorded at all.
+    #[serde(default)]
+    pub(crate) origin: Option<String>,
+    /// The rest of the serialised origin.
+    ///
+    /// For a highlight, `{"kind":…,"at":…,"source":…}` -- what happened, when,
+    /// and which plugin said so. **This is what identifies a clip that has no
+    /// file**: see `ingest::write_clips`.
+    #[serde(default)]
+    pub(crate) origin_detail: Option<String>,
 }
 
 /// One thing that happened during the session.
