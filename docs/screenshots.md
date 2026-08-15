@@ -253,10 +253,37 @@ will collect.
 | The rendezvous answers every waiter exactly once | same | nothing |
 | A screenshot during a real capture of a real window, windowed and borderless | `tests/capture/screenshot.rs` | `CLIPPED_REQUIRE_CAPTURE`, a desktop |
 | A screenshot of a subject holding a whole display, exclusively where Windows allows it | `tests/capture/screenshot_fullscreen.rs` | as above, and a display it can take |
+| Screenshots taken out of a running recording do not interrupt it | `tests/capture/screenshot_during_recording.rs` | as above, and an encoder |
 
-The last two rows are the only ones that open a window, and they are behind
+The last three rows are the only ones that open a window, and they are behind
 `CLIPPED_REQUIRE_CAPTURE` and `#[ignore]` for the reason
 [testing.md](testing.md) gives.
+
+**A screenshot does not interrupt a recording, measured rather than argued.**
+The design says it cannot — a screenshot during a recording asks that recording
+for a frame it already has, instead of opening a second capture — and the
+rendezvous is unit-tested. That is not the same claim: a Direct3D copy issued on
+the recording's own device, a texture not released, or a readback that stalled
+the GPU would all leave the rendezvous working perfectly and the recording full
+of holes. So one recording is made, four screenshots are taken out of it, and
+the run is measured. On the machine this was written on:
+
+```text
+picture            : 1280x720 at 60 fps
+ran for            : 5.71s
+ended because      : Stopped
+frames captured    : 344
+frames encoded     : 342
+dropped, writer    : 0
+missed by source   : 0
+source frames      : [72, 145, 218, 291]
+```
+
+342 of the 343 frames the run could hold, nothing dropped, nothing missed, and
+the subject's own frame numbers advancing by 73 — 1.2 seconds at 60 fps —
+between one screenshot and the next. Making the capture loop sleep for a second
+while it serves a screenshot turns that into 341 frames of a 9.66-second run,
+which the test refuses.
 
 Together they are the whole of issue #67's first acceptance criterion —
 "screenshots are correct for windowed, borderless and fullscreen games" — and
