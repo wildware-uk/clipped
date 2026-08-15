@@ -317,6 +317,8 @@ fn claim(connection: &Connection, path: &Path, writable: bool) -> Result<(), Sto
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::params;
+
     use super::*;
     use crate::test_support::{scratch_directory, table_names};
 
@@ -597,6 +599,151 @@ mod tests {
             mistyped.is_err(),
             "a STRICT table accepted text in an INTEGER column"
         );
+    }
+
+    /// A session with one recording, for the game-event tests below.
+    ///
+    /// Returns the recording's id.
+    fn a_session_with_a_recording(database: &Database) -> i64 {
+        let connection = database.connection();
+        connection
+            .execute_batch(
+                "INSERT INTO games (game_id, name, first_seen_at) \
+                 VALUES ('counter-strike-2', 'Counter-Strike 2', '2026-08-11T14:32:05+01:00'); \
+                 INSERT INTO sessions (session_id, game_id, started_at) \
+                 VALUES ('counter-strike-2-20260811-143205', 'counter-strike-2', \
+                         '2026-08-11T14:32:05+01:00'); \
+                 INSERT INTO recordings (session_id, session_index, path, started_at) \
+                 VALUES ('counter-strike-2-20260811-143205', 1, 'D:\\clips\\a.mkv', \
+                         '2026-08-11T14:32:09+01:00');",
+            )
+            .expect("the session and its recording can be written");
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn a_game_event_belongs_to_a_recording_or_to_the_session_alone() {
+        // Both shapes, because issue #71's second acceptance criterion is the
+        // one with no file: an event heard before the recorder started, in the
+        // gap between two segments, or during a replay-buffer-only session that
+        // never wrote anything. A schema that forced a recording could not say
+        // it happened at all.
+        let directory = scratch_directory("game-events-shapes");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events \
+                     (session_id, recording_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', ?1, 4200000000, 'kill', 'cs2', \
+                         '{\"schema\":1,\"kind\":\"kill\"}')",
+                params![recording],
+            )
+            .expect("an event in a recording can be written");
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events \
+                     (session_id, recording_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', NULL, -1500000000, 'match-started', \
+                         'cs2', '{\"schema\":1,\"kind\":\"match-started\"}')",
+                [],
+            )
+            .expect("an event belonging to no file can be written");
+
+        // Negative nanoseconds survive as negative: an `EventTime` is signed
+        // because a moment can precede the timeline's origin, and a column that
+        // silently made that positive would move the event.
+        let earliest: i64 = database
+            .connection()
+            .query_row("SELECT MIN(at_nanos) FROM game_events", [], |row| {
+                row.get(0)
+            })
+            .expect("the events can be read");
+        assert_eq!(earliest, -1_500_000_000, "a moment before the origin moved");
+    }
+
+    #[test]
+    fn deleting_a_recording_keeps_what_happened_during_it() {
+        // AGENTS.md section 56. The events are the session's, not the file's:
+        // deleting a recording must not silently take the record of the match
+        // that was played. They stop claiming a position in a file that has
+        // gone, and that is all.
+        let directory = scratch_directory("game-events-recording-deleted");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events \
+                     (session_id, recording_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', ?1, 4200000000, 'kill', 'cs2', '{}')",
+                params![recording],
+            )
+            .expect("the event can be written");
+
+        database
+            .connection()
+            .execute(
+                "DELETE FROM recordings WHERE recording_id = ?1",
+                params![recording],
+            )
+            .expect("the recording can be deleted");
+
+        let (kept, orphaned): (i64, i64) = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*), COUNT(recording_id) FROM game_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the events can be counted");
+        assert_eq!(kept, 1, "deleting a recording took the event with it");
+        assert_eq!(orphaned, 0, "the event still points at a deleted recording");
+    }
+
+    #[test]
+    fn deleting_a_session_takes_its_events_but_an_open_vocabulary_is_accepted() {
+        let directory = scratch_directory("game-events-session-deleted");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        a_session_with_a_recording(&database);
+
+        // A kind this build has never met is stored, not refused. The whole
+        // argument for `document` being the authority is that an event survives
+        // a build that does not understand it, and a vocabulary CHECK here
+        // would refuse exactly those events.
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events (session_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', 1, 'acme.tournament/ace', \
+                         'acme-plugin', '{\"schema\":9}')",
+                [],
+            )
+            .expect("a kind this build does not know is still stored");
+
+        let empty = database.connection().execute(
+            "INSERT INTO game_events (session_id, at_nanos, kind, source, document) \
+             VALUES ('counter-strike-2-20260811-143205', 1, '', 'cs2', '{}')",
+            [],
+        );
+        assert!(empty.is_err(), "an event with no kind at all was accepted");
+
+        database
+            .connection()
+            .execute(
+                "DELETE FROM sessions WHERE session_id = 'counter-strike-2-20260811-143205'",
+                [],
+            )
+            .expect("the session can be deleted");
+
+        let left: i64 = database
+            .connection()
+            .query_row("SELECT COUNT(*) FROM game_events", [], |row| row.get(0))
+            .expect("the events can be counted");
+        assert_eq!(left, 0, "a deleted session left its events behind");
     }
 
     #[test]
