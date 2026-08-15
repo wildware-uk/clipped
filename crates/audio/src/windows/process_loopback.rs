@@ -938,24 +938,60 @@ mod tests {
         let mut from_the_client = 0u64;
         let started = Instant::now();
         let until = started + duration;
-        while Instant::now() < until {
+
+        // Reading stops on the clock; **collecting does not**.
+        //
+        // A read hands over at most one silence instalment -- 100 ms, so that
+        // the memory this crate uses stays fixed however long a consumer stalls
+        // (`crate::timeline`'s `SILENCE_CHUNK`). A reader that is descheduled
+        // therefore does not lose the audio for the period it was away: it is
+        // *owed*, and arrives on the reads that follow.
+        //
+        // Stopping on the clock alone measured how often this thread was
+        // scheduled rather than what the capture produced. CI failed with
+        // 0.100 s of track against 1.200 s of reading -- exactly one instalment,
+        // which is a loop that went round once
+        // ([issue #425](https://github.com/wildware-uk/clipped/issues/425)).
+        // Draining what is still owed is what makes the assertions below
+        // statements about the capture rather than about the machine.
+        let collect = |capture: &mut ProcessLoopbackCapture,
+                       timeline: &mut Contiguity,
+                       from_the_client: &mut u64| {
             match capture
                 .read(Duration::from_millis(100))
                 .expect("a healthy capture does not fail")
             {
                 Capture::Samples(samples) => {
                     if samples.origin() == SampleOrigin::Endpoint {
-                        from_the_client += samples.frames() as u64;
+                        *from_the_client += samples.frames() as u64;
                     }
                     timeline.accept(&samples);
                 }
                 Capture::Idle | Capture::FormatChanged(_) => {}
             }
+        };
+
+        while Instant::now() < until {
+            collect(capture, &mut timeline, &mut from_the_client);
         }
+        let elapsed = started.elapsed();
+
+        // Bounded, so that a capture which genuinely stopped producing fails
+        // the assertion rather than hanging here. Covering the window needs
+        // about one read per instalment, and ten times that leaves room for
+        // every one of them to have been a wasted trip.
+        let attempts = (elapsed.as_millis() / 100 + 1) * 10;
+        for _ in 0..attempts {
+            if timeline.seconds() >= elapsed.as_secs_f64() {
+                break;
+            }
+            collect(capture, &mut timeline, &mut from_the_client);
+        }
+
         Reading {
             timeline,
             from_the_client,
-            elapsed: started.elapsed(),
+            elapsed,
         }
     }
 
