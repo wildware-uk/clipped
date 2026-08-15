@@ -1358,8 +1358,11 @@ by the change that found it, because settling it changes a plugin's behaviour.
 Stated plainly, because the gap between this document and the running
 application is the thing most likely to be misread (AGENTS.md section 7):
 
-- **Nothing enables a plugin, so a recording still starts none**
-  ([issue #282](https://github.com/wildware-uk/clipped/issues/282)). The
+- **A recording starts the plugins the settings file enables**
+  ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), and no
+  others. Nothing *writes* that file for you yet
+  ([issue #281](https://github.com/wildware-uk/clipped/issues/281)), so a build
+  whose settings nobody has hand-edited starts none. The
   *wiring* exists as of
   [issue #338](https://github.com/wildware-uk/clipped/issues/338):
   `clipped_session::plugins` creates the supervisor, attaches the plugins it is
@@ -1398,10 +1401,13 @@ application is the thing most likely to be misread (AGENTS.md section 7):
   does and does not prove, and `plugins/dota2/fixtures/README.md` says how to
   take a real capture). A plugin can be shown to parse, diff, bound and report
   correctly without the game; it cannot be shown to be reading the right fields.
-- **Nothing stores which plugins are enabled**, or the consent each was enabled
-  with ([issue #282](https://github.com/wildware-uk/clipped/issues/282)). That
-  lives in the configuration API, not here: a plugin crate with its own settings
-  file would be the second configuration store AGENTS.md section 30 warns about.
+- **Which plugins are enabled, and the consent each was enabled with, are
+  stored** ([issue #282](https://github.com/wildware-uk/clipped/issues/282)) --
+  in the configuration API rather than here, because a plugin crate with its own
+  settings file would be the second configuration store AGENTS.md section 30
+  warns about. The token is kept as legible text, so a person reading their own
+  settings can see what they agreed to; a plugin whose declaration no longer
+  matches is refused and reported rather than started.
 - **Nothing shows any of it**
   ([issue #281](https://github.com/wildware-uk/clipped/issues/281)). The
   sentences a user reads before enabling a plugin exist and are tested; the

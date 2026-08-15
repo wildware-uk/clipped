@@ -292,6 +292,24 @@ impl ConsentToken {
         Self(lines.join("; "))
     }
 
+    /// A token read back from somewhere it was stored.
+    ///
+    /// Named rather than `From<String>` so that the claim is visible: the
+    /// caller is saying "this text is a consent somebody gave", and the only
+    /// legitimate source is a token this type produced earlier -- a settings
+    /// file (`clipped_session::config::plugins`), not a manifest and not
+    /// anything a plugin sent.
+    ///
+    /// Nothing is validated, because there is nothing to validate against: the
+    /// whole purpose of the token is to be *compared* with what a plugin
+    /// declares now, and text that matches no declaration simply lapses. A
+    /// constructor that rejected unfamiliar text would refuse exactly the
+    /// tokens written by a build that knew about a grant this one does not.
+    #[must_use]
+    pub fn from_stored(text: &str) -> Self {
+        Self(text.to_owned())
+    }
+
     /// The canonical text.
     #[must_use]
     pub fn as_str(&self) -> &str {

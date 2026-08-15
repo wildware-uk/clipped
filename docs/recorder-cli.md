@@ -432,11 +432,14 @@ rather than passed over:
 A plugin could not be read: plugin.json names an executable that is not there: …
 ```
 
-**Nothing there is started.** Starting a plugin needs the consent the user
-recorded against what it declares, and nothing records that yet
-([#282](https://github.com/wildware-uk/clipped/issues/282)) — so when a game
-launches, any installed plugin that claims it is named as one that is not
-running, instead of being ignored:
+**Only what you enabled is started.** The settings file's `plugins` section
+records which plugins you turned on and what you agreed to when you did
+([#282](https://github.com/wildware-uk/clipped/issues/282)); a plugin it does
+not mention is off. There is no screen that writes that section yet
+([#281](https://github.com/wildware-uk/clipped/issues/281)), so unless one has
+been hand-edited in, nothing is started — and when a game launches, any
+installed plugin that claims it is named as one that is not running, with which
+of the three reasons it was, instead of being ignored:
 
 ```text
 Counter-Strike 2 highlight plugin supports Counter-Strike 2 and is installed, but
