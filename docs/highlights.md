@@ -601,19 +601,19 @@ the keyframe the buffer began with, and the events inside it place in it,
 rebased onto the clip. Nothing about the model changes between the two cases;
 the list of segments does.
 
-### The table, which does not exist yet
+### The table
 
-**Nothing stores a game event.** `session_events` is not it and says so: the
-`0001` migration reserves that table for the session's own vocabulary and
-records the exclusion, `docs/storage.md` repeats it under "What is deliberately
-absent", and three things make writing game events there wrong rather than
-merely untidy — its `at` is RFC 3339 text where an `EventTime` is signed
-nanoseconds on the media timeline, it has no `recording_id`, and
-`clipped_library::index::ingest` rewrites every one of a session's rows on each
-reconciliation.
+**`session_events` is not it, and says so**: the `0001` migration reserves that
+table for the session's own vocabulary and records the exclusion, and three
+things make writing game events there wrong rather than merely untidy — its
+`at` is RFC 3339 text where an `EventTime` is signed nanoseconds on the media
+timeline, it has no `recording_id`, and `clipped_library::index::ingest`
+rewrites every one of a session's rows on each reconciliation, so an event
+written there would be regenerated rather than persisted.
 
-So M9 owes a migration, and the shape it should add is recorded here so that
-the model and the schema are argued in one place:
+So M9 owed a migration. It is `0003_game_events.sql` ([#71]), and the shape is
+argued here rather than only in the SQL so that the model and the schema stay
+argued in one place:
 
 ```sql
 CREATE TABLE game_events (
@@ -635,19 +635,25 @@ CREATE TABLE game_events (
   (AGENTS.md section 56). The other columns are indexes into that text rather
   than a second copy of the model; spreading the envelope across columns would
   lose everything that did not fit one.
-- **`kind` carries no `CHECK`.** The vocabulary is open by design, and a
-  constraint here would refuse exactly the events that must still be drawn.
+- **`kind` is checked for being *given*, never for *which*.** `CHECK (kind <>
+  '')` refuses a row that names no kind at all and nothing else: the vocabulary
+  is open by design, so a constraint listing permitted values would refuse
+  exactly the namespaced `Custom` and `Unrecognised` events that must still be
+  drawn.
 - **`recording_id` is nullable**, because an event a replay-buffer-only session
   heard belongs to the session and to no file, and `ON DELETE SET NULL` keeps
   it when the recording goes.
 
-Until that migration lands, nothing writes a game event and nothing reads one
-back: `crates/library/src/events.rs` places events it is *handed*. Drawing them
-is a second gap and a separate one — the desktop window can neither read the
-library nor ask the recorder for a row of it ([#329], [#301]) — so the editor's
-event lane says "nobody asked" rather than "there were none".
+The migration has landed; the table is still empty. Nothing writes a game event
+and nothing reads one back yet — `crates/library/src/events.rs` places events it
+is *handed* — because the sidecar write and the ingest that fill this table are
+the remainder of [#71], and [#338] is what produces the events in the first
+place. Drawing them is a second gap and a separate one: the desktop window can
+neither read the library nor ask the recorder for a row of it ([#329], [#301]),
+so the editor's event lane says "nobody asked" rather than "there were none".
 
 [#68]: https://github.com/wildware-uk/clipped/issues/68
 [#71]: https://github.com/wildware-uk/clipped/issues/71
 [#301]: https://github.com/wildware-uk/clipped/issues/301
+[#338]: https://github.com/wildware-uk/clipped/issues/338
 [#329]: https://github.com/wildware-uk/clipped/issues/329
