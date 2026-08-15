@@ -261,6 +261,13 @@ pub struct Attachment {
     /// Read from the pipe itself rather than from anything this process
     /// remembers, so it names the recorder that is actually being talked to.
     pub recorder_process_id: u32,
+    /// What that recorder said it can do, from its `Welcome`.
+    ///
+    /// Carried rather than looked up later, because it describes **this**
+    /// recorder: a window that asked again after a restart could be told about
+    /// a different build from the one it is attached to. See
+    /// [`crate::features`] for the names.
+    pub features: Vec<String>,
     /// How this process came to be talking to it.
     pub origin: AttachmentOrigin,
 }
@@ -482,7 +489,7 @@ fn loader_status_name(status: u32) -> &'static str {
 /// and [`SupervisorError::Connect`] for any other failure to reach the endpoint
 /// — including one belonging to another account.
 pub fn ensure_recorder(settings: &SupervisorSettings) -> Result<Attachment, SupervisorError> {
-    if let Some(recorder_process_id) = probe(settings)? {
+    if let Some((recorder_process_id, features)) = probe(settings)? {
         tracing::debug!(
             endpoint = %settings.endpoint,
             recorder = recorder_process_id,
@@ -490,6 +497,7 @@ pub fn ensure_recorder(settings: &SupervisorSettings) -> Result<Attachment, Supe
         );
         return Ok(Attachment {
             recorder_process_id,
+            features,
             origin: AttachmentOrigin::Existing,
         });
     }
@@ -497,15 +505,21 @@ pub fn ensure_recorder(settings: &SupervisorSettings) -> Result<Attachment, Supe
     start_and_wait(settings)
 }
 
-/// The process identifier of the recorder serving the endpoint, or [`None`] if
-/// nothing is.
+/// The recorder serving the endpoint -- its process identifier and what it can
+/// do -- or [`None`] if nothing is.
+///
+/// The features come from the same handshake as the identifier, because that is
+/// the only place they are said: a recorder describes itself once, in its
+/// `Welcome`. Reading them here rather than asking again later is what makes
+/// them describe *this* recorder rather than whatever is listening by the time
+/// somebody looks ([issue #447](https://github.com/wildware-uk/clipped/issues/447)).
 ///
 /// A refused handshake still means a recorder is there, and is reported as
 /// [`SupervisorError::Incompatible`] rather than as an absence: starting a
 /// second recorder because the first one is too old would produce two recorders
 /// racing for one endpoint, and the one that lost would be the one that is
 /// recording.
-fn probe(settings: &SupervisorSettings) -> Result<Option<u32>, SupervisorError> {
+fn probe(settings: &SupervisorSettings) -> Result<Option<(u32, Vec<String>)>, SupervisorError> {
     match Client::connect(
         &settings.endpoint,
         &settings.client.name,
@@ -513,7 +527,7 @@ fn probe(settings: &SupervisorSettings) -> Result<Option<u32>, SupervisorError> 
         PROBE,
     ) {
         Ok(client) => match client.recorder_process_id() {
-            Ok(process_id) => Ok(Some(process_id)),
+            Ok(process_id) => Ok(Some((process_id, client.welcome().features.clone()))),
             Err(error) => Err(SupervisorError::Connect {
                 endpoint: settings.endpoint.path(),
                 source: Box::new(ClientError::Transport(TransportError::Platform(error))),
@@ -589,7 +603,7 @@ fn start_and_wait(settings: &SupervisorSettings) -> Result<Attachment, Superviso
 
     let deadline = Instant::now() + settings.startup_timeout;
     loop {
-        if let Some(recorder_process_id) = probe(settings)? {
+        if let Some((recorder_process_id, features)) = probe(settings)? {
             // The recorder answering may not be the one started here: two
             // supervisors deciding at the same instant that nothing is running
             // is a real race, and the endpoint is what resolves it rather than
@@ -608,6 +622,7 @@ fn start_and_wait(settings: &SupervisorSettings) -> Result<Attachment, Superviso
 
             return Ok(Attachment {
                 recorder_process_id,
+                features,
                 origin,
             });
         }

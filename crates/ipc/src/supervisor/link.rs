@@ -91,6 +91,20 @@ pub enum RecorderLinkState {
         /// was replaced" is not something a UI may keep to itself
         /// (AGENTS.md section 27).
         recorder_process_id: u32,
+        /// What that recorder can do, from its handshake.
+        ///
+        /// A control that maps to a feature-gated command asks this before it
+        /// draws itself. Without it the control is drawn against an older
+        /// recorder, the user chooses a file name, and *then* the command is
+        /// refused with `unknown_command` — a refusal that arrives after the
+        /// only part of the interaction that cost them anything, which is what
+        /// AGENTS.md section 27 forbids
+        /// ([issue #447](https://github.com/wildware-uk/clipped/issues/447)).
+        ///
+        /// It describes the recorder named above, not whatever is listening
+        /// now: both travel together so a replacement cannot be read with the
+        /// previous build's capabilities.
+        features: Vec<String>,
         /// What the recorder is doing.
         status: RecorderStatus,
     },
@@ -747,6 +761,7 @@ fn follow(
                     sender,
                     RecorderLinkState::Attached {
                         recorder_process_id: attachment.recorder_process_id,
+                        features: attachment.features.clone(),
                         status,
                     },
                 );
@@ -1212,6 +1227,14 @@ mod tests {
             RecorderLinkState::Connecting,
             RecorderLinkState::Attached {
                 recorder_process_id: 4_242,
+                // Two of them, and not the whole list: a window is told what
+                // *this* recorder can do, which is a subset for anything but
+                // the newest build, and the round trip has to keep the subset
+                // rather than a flag saying "some".
+                features: vec![
+                    crate::features::RECORDING.to_owned(),
+                    crate::features::LIBRARY.to_owned(),
+                ],
                 status: RecorderStatus::Idle,
             },
             RecorderLinkState::Reconnecting {

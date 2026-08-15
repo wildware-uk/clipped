@@ -595,6 +595,7 @@ mod tests {
     fn idle() -> RecorderLinkState {
         RecorderLinkState::Attached {
             recorder_process_id: 4_242,
+            features: Vec::new(),
             status: RecorderStatus::Idle,
         }
     }
@@ -612,6 +613,7 @@ mod tests {
     fn recording(recording_id: &str) -> RecorderLinkState {
         RecorderLinkState::Attached {
             recorder_process_id: 4_242,
+            features: Vec::new(),
             status: RecorderStatus::Recording(active(recording_id)),
         }
     }

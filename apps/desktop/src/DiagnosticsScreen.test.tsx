@@ -79,6 +79,7 @@ function recording(output: string): RecorderLinkView {
     link: {
       link: 'attached',
       recorder_process_id: 4242,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-7',
@@ -128,7 +129,7 @@ const STATES: readonly (readonly [string, RecorderLinkView, string, RegExp])[] =
   ],
   [
     'when a recorder is attached and idle',
-    view({ link: { link: 'attached', recorder_process_id: 7, status: { state: 'idle' } } }),
+    view({ link: { link: 'attached', recorder_process_id: 7, features: [], status: { state: 'idle' } } }),
     'Ready',
     /nothing is being recorded/i,
   ],
@@ -168,7 +169,7 @@ describe('what the Diagnostics screen says about capture health', () => {
 
     expect(
       describeCaptureHealth(
-        view({ link: { link: 'attached', recorder_process_id: 7, status: { state: 'idle' } } }),
+        view({ link: { link: 'attached', recorder_process_id: 7, features: [], status: { state: 'idle' } } }),
       ).detail,
     ).toMatch(/nothing is being recorded/i);
   });
@@ -264,6 +265,7 @@ const LEAKY: DiagnosticsReportInput = {
     link: {
       link: 'attached',
       recorder_process_id: 4242,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-7',
@@ -475,6 +477,7 @@ describe('the Diagnostics screen', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-7',
@@ -516,6 +519,7 @@ describe('the Diagnostics screen', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-7',
@@ -533,6 +537,7 @@ describe('the Diagnostics screen', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 91,
+      features: [],
       status: { state: 'idle' },
     });
 
@@ -567,6 +572,7 @@ describe('the Diagnostics screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-7',
@@ -621,6 +627,7 @@ describe('the Diagnostics screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
@@ -655,6 +662,7 @@ describe('the Diagnostics screen', () => {
     const runtime = stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
@@ -674,6 +682,7 @@ describe('the Diagnostics screen', () => {
       event: 'state',
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: {
         state: 'recording',
         recording_id: 'r-7',
@@ -709,6 +718,7 @@ describe('the Diagnostics screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
@@ -744,6 +754,7 @@ describe('the Diagnostics screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
@@ -769,6 +780,7 @@ describe('the Diagnostics screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
@@ -794,6 +806,7 @@ describe('the Diagnostics screen', () => {
     stubRecorderLinkRuntime({
       link: 'attached',
       recorder_process_id: 7,
+      features: [],
       status: { state: 'idle' },
     });
     renderApp();
