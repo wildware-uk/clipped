@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
     PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -186,7 +186,16 @@ impl ProcessHandle {
 /// Compared and never converted. What the values *are* does not matter here —
 /// only that a process created after another has a larger one — and the two
 /// sources this crate reads them from, `GetProcessTimes` and
-/// `GetSystemTimeAsFileTime`, are the same clock in the same units.
+/// `GetSystemTimePreciseAsFileTime`, are the same clock in the same units.
+///
+/// **`GetSystemTimeAsFileTime` is not.** It does not read the clock: it answers
+/// with the value written at the machine's last timer tick, 15.625 ms apart by
+/// default and shorter only while some process is holding the timer resolution
+/// down. `GetProcessTimes` stamps a creation time when the process is created,
+/// in between ticks — so comparing one against the other compares a precise
+/// moment against a copy of it that can be a whole tick stale, and a process
+/// created *before* a reading can compare as created *after* it
+/// ([issue #432](https://github.com/wildware-uk/clipped/issues/432)).
 ///
 /// That clock is the system clock rather than a monotonic one, so an
 /// adjustment — a time server correcting a drifting machine, a user changing
@@ -211,10 +220,18 @@ impl FileTime {
 
 /// The current moment, on the same scale [`ProcessHandle::creation_time`]
 /// answers in.
+///
+/// **Precise**, and that is the whole of this function's content: the ordinary
+/// `GetSystemTimeAsFileTime` answers with the last timer tick rather than the
+/// clock, so a process created microseconds ago compares as created in the
+/// future. Measured on a developer machine over 400 real child processes, with
+/// the machine's own timer at 0.5 ms: 27 were refused by that comparison, and
+/// **373 of 400** were when the tick was modelled at its 15.625 ms default.
+/// With this call, none (see [`FileTime`] and issue #432).
 pub(crate) fn file_time_now() -> FileTime {
     // SAFETY: the call takes no arguments in this binding — it fills a
     // `FILETIME` the binding owns and returns it by value — and cannot fail.
-    FileTime::from(unsafe { GetSystemTimeAsFileTime() })
+    FileTime::from(unsafe { GetSystemTimePreciseAsFileTime() })
 }
 
 impl Drop for ProcessHandle {
