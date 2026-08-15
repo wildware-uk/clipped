@@ -132,14 +132,19 @@
 //! plugin is [`RecordingProgress::timeline_began`], one `OnceLock` store on the
 //! first frame.
 //!
-//! Two things it deliberately does not do. Nothing yet produces a
+//! One thing it deliberately does not do: nothing yet produces a
 //! `clipped_plugins::EnabledPlugin` in a shipped build, because nothing records
 //! which plugins the user enabled
 //! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), so a
 //! session names the plugins it cannot start rather than starting them
-//! uninvited; and the events it drains are handed over rather than stored,
-//! because writing them against the recording is
-//! [issue #71](https://github.com/wildware-uk/clipped/issues/71).
+//! uninvited.
+//!
+//! What it drains now reaches the open session
+//! ([`SessionManager::record_game_events`](automatic::SessionManager)), which
+//! writes it to the sidecar the library indexes
+//! ([issue #71](https://github.com/wildware-uk/clipped/issues/71)). Which file
+//! each moment landed in is still undecided -- see
+//! [`plugins`] for the one number that is missing.
 //!
 //! # Threading
 //!

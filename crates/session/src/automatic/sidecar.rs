@@ -703,6 +703,75 @@ mod tests {
     }
 
     #[test]
+    fn what_a_plugin_reported_reaches_the_file_in_the_order_it_happened() {
+        use core::time::Duration;
+
+        use clipped_events::{Confidence, EventKind, EventSource, EventTime, EventTiming};
+
+        let kill = |seconds: i64| {
+            clipped_events::GameEvent::new(
+                EventKind::Kill,
+                EventTiming::new(
+                    EventTime::from_media_nanos(seconds * 1_000_000_000),
+                    Duration::ZERO,
+                ),
+                EventSource::plugin("cs2").expect("a legal source"),
+                Confidence::CERTAIN,
+            )
+        };
+
+        let mut session = session();
+        // Out of order on purpose: a plugin observes a game telling it
+        // something, so two reports can arrive the wrong way round. The file
+        // must carry the order things *happened*.
+        session.record_game_event(kill(9));
+        session.record_game_event(kill(4));
+
+        let json = serde_json::to_string(&SidecarFile::of(&session)).expect("the shape encodes");
+        let file: Value = serde_json::from_str(&json).expect("what serde wrote is JSON");
+
+        let events = file["game_events"]
+            .as_array()
+            .expect("the game events are a list");
+        let moments: Vec<i64> = events
+            .iter()
+            .map(|event| event["at"].as_i64().expect("each carries its moment"))
+            .collect();
+        assert_eq!(
+            moments,
+            [4_000_000_000, 9_000_000_000],
+            "the file kept the order the reports arrived rather than the order things happened"
+        );
+
+        // A separate array from the session's own history, which is the whole
+        // reason `SessionEventKind` has no game-event variant.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["kind"], Value::from("kill"));
+        assert_eq!(events[0]["source"], Value::from("cs2"));
+        assert!(
+            file["events"]
+                .as_array()
+                .expect("the session's own events are a list")
+                .iter()
+                .all(|event| event["event"] != "kill"),
+            "a game event was written into the session's own history"
+        );
+    }
+
+    #[test]
+    fn a_session_that_heard_nothing_writes_an_empty_list_rather_than_no_key() {
+        // A reader that defaults a missing key and one that reads an empty list
+        // agree; a reader that treats the key's absence as "unknown" does not.
+        // The session's own `clips` and `bookmarks` are written the same way.
+        let file = written();
+        assert_eq!(
+            file["game_events"],
+            Value::Array(Vec::new()),
+            "a session with no game events must still say so"
+        );
+    }
+
+    #[test]
     fn writing_a_sidecar_replaces_the_previous_one_rather_than_appending_to_it() {
         let directory = std::env::temp_dir().join(format!(
             "clipped-sidecar-{}-{:?}",

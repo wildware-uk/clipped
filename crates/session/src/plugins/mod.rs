@@ -81,16 +81,24 @@
 //! game and say it is not enabled, so that a user who installed one is told why
 //! it is not running rather than left to guess (AGENTS.md section 27).
 //!
+//! # Where a drained event goes
+//!
+//! [`SessionPlugins::take_events`] and [`PluginOutcome::events`] hand it over,
+//! and the driver puts it on the open session
+//! (`SessionManager::record_game_events`), which writes it to the session's
+//! sidecar, which `clipped_library::index::ingest` turns into a `game_events`
+//! row ([issue #71](https://github.com/wildware-uk/clipped/issues/71)). An
+//! event a plugin reports during a recording now outlives the process that
+//! heard it.
+//!
 //! # What is not here
 //!
-//! **Persisting the events.** [`SessionPlugins::take_events`] and
-//! [`PluginOutcome::events`] are where a drained event is handed over, and
-//! nothing in this workspace takes it yet:
-//! [issue #71](https://github.com/wildware-uk/clipped/issues/71) is the ticket
-//! that writes them to `clipped-storage` against the recording they belong to.
-//! Until it lands, an event reported during a recording reaches the log and the
-//! recording's outcome, and no further — which the driver says out loud rather
-//! than implying a feature that works.
+//! **Deciding which file an event landed in.** The row's `recording_id` is null
+//! until something writes each recording's span on the session's timeline into
+//! the sidecar; `clipped_library::events` does the placing and has nothing to
+//! place against. See `docs/av-sync.md`, "One epoch per recording, one timeline
+//! per session", for why that number is not derivable from the wall-clock start
+//! a sidecar already carries.
 
 use core::time::Duration;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
