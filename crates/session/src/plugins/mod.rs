@@ -67,11 +67,12 @@
 //!
 //! [`SessionPlugins::start`] takes [`EnabledPlugin`]s, and the only way to
 //! obtain one is [`InstalledPlugin::enable`] with the consent token the user's
-//! consent was recorded against. Nothing records that yet
-//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282) is the
-//! configuration API's job, and a settings store here would be the second one
-//! AGENTS.md section 30 warns about), so today no shipped path produces an
-//! `EnabledPlugin` and a session attaches none.
+//! consent was recorded against. That record is the settings file's
+//! `plugins` section (`clipped_session::config::plugins`, issue #282) -- in the
+//! configuration API rather than here, because a settings store in this module
+//! would be the second one AGENTS.md section 30 warns about. A plugin the file
+//! does not mention is disabled, so a session with no settings file attaches
+//! nothing.
 //!
 //! Enabling one on the user's behalf was the alternative, and it is refused:
 //! `docs/privacy.md` requires that network access is opted into by a deliberate

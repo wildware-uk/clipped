@@ -50,17 +50,29 @@
 //! What crosses back is what the plugins reported and what went wrong with them,
 //! taken here once round the loop and put in front of the user.
 //!
-//! # Plugins, and why none of them runs yet
+//! # Plugins, and which of them runs
 //!
 //! `run` reads the plugins directory at start-up and says what is installed and
-//! what was refused. None of it is *enabled*: starting a plugin needs the
-//! consent the user gave to what it declares, nothing records that yet
-//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), and
-//! enabling one uninvited would make `docs/privacy.md`'s register false — all
-//! three bundled plugins open a loopback socket. So each recording names the
-//! installed plugins that claim the game it is of and says they are not enabled,
-//! which is the honest state rather than a silence
-//! (`clipped_session::plugins::installed_but_not_enabled`).
+//! what was refused. Which of those *start* comes from the settings file's
+//! `plugins` section — the plugins the user enabled, and the consent token each
+//! was enabled with (`clipped_session::config::plugins`,
+//! [issue #282](https://github.com/wildware-uk/clipped/issues/282)). It is read
+//! once, beside the plugins themselves.
+//!
+//! A plugin the file does not mention is off, and enabling one uninvited is not
+//! an option: it would make `docs/privacy.md`'s register false, and all three
+//! bundled plugins open a loopback socket. A plugin whose declaration no longer
+//! matches the token beside it is refused and *reported* — the user agreed to
+//! something else, and is the only one who can agree to the new thing.
+//!
+//! So each recording names the installed plugins that claim the game it is of
+//! and did not start, with which of the three reasons it was, rather than
+//! leaving a silence (`report_plugin_not_started`).
+//!
+//! Nothing writes that section yet
+//! ([issue #281](https://github.com/wildware-uk/clipped/issues/281) is the
+//! screen that would), so a build whose settings nobody has hand-edited starts
+//! no plugin.
 //!
 //! # Stopping
 //!
@@ -88,7 +100,9 @@ use clipped_session::automatic::{
     AutomaticSettings, RecordingId, RecordingOutcome, RecordingOutcomeSummary, RecordingRequest,
     Session, SessionAction, SessionManager,
 };
-use clipped_session::config::{Configuration, ConfigurationError, ConfigurationStore};
+use clipped_session::config::{
+    Configuration, ConfigurationError, ConfigurationStore, NotStarted, PluginConsents,
+};
 use clipped_session::plugins::{installed_but_not_enabled, PluginOutcome, SessionPlugins};
 use clipped_session::{
     RecordingOutputs, RecordingProgress, RecordingReport, RecordingSettings, SessionError,
@@ -536,6 +550,11 @@ struct Driver {
     /// else is writing to, and doing it again every second would be the
     /// filesystem polling AGENTS.md section 18 rules out.
     installed_plugins: Vec<InstalledPlugin>,
+    /// Which of those the user enabled, and what they agreed to.
+    ///
+    /// Read once at start-up, beside the plugins themselves and for the same
+    /// reason.
+    plugin_consents: PluginConsents,
     running: Option<Running>,
 }
 
@@ -577,12 +596,18 @@ impl Driver {
         // Per-game settings reach a recording through the manager: it resolves
         // them when it asks for one, and `attempt` lays the answer over what
         // the command line asked for (issue #61).
-        let manager = SessionManager::new(catalogue, settings)
-            .with_configuration(load_configuration(settings_file));
+        let configuration = load_configuration(settings_file);
+        // Taken before the configuration moves into the manager. Which plugins
+        // the user enabled is not a per-game setting the manager resolves, and
+        // `attach_plugins` runs on a path that must not go looking for a
+        // settings file.
+        let plugin_consents = configuration.plugins().clone();
+        let manager = SessionManager::new(catalogue, settings).with_configuration(configuration);
         Self {
             manager,
             plan,
             installed_plugins,
+            plugin_consents,
             running: None,
         }
     }
@@ -801,9 +826,10 @@ impl Driver {
 
     /// Starts the plugins for the game this recording is of.
     ///
-    /// None of them, today, and it says which ones those would have been: see
-    /// the module documentation for why a plugin nobody enabled is named rather
-    /// than started.
+    /// Only the ones the user enabled, and only while what they agreed to still
+    /// matches what the plugin declares. Everything not started is said, with
+    /// which of the three reasons it was: a plugin that quietly does not run is
+    /// worse than one that says why (AGENTS.md section 27).
     fn attach_plugins(
         &self,
         request: &RecordingRequest,
@@ -814,31 +840,61 @@ impl Driver {
             process: ObservedProcess::new(&request.image_name, request.process_id),
         };
 
-        for plugin in installed_but_not_enabled(&self.installed_plugins, &session.process) {
-            tracing::info!(
-                plugin = %plugin.id(),
-                game = request.game.slug(),
-                "a plugin supports this game and has not been enabled, so it was not started; \
-                 nothing records which plugins are enabled yet (issue #282)"
-            );
-            eprintln!(
-                "{} supports {} and is installed, but nothing in this build can record that you \
-                 enabled it, so it is not running.",
-                plugin.manifest().name(),
-                request.game.display_name()
-            );
+        // Narrowed to this game first, so that nothing is said about a plugin
+        // for a game nobody is playing.
+        let supporting: Vec<InstalledPlugin> =
+            installed_but_not_enabled(&self.installed_plugins, &session.process)
+                .into_iter()
+                .cloned()
+                .collect();
+        let (enabled, refused) = self.plugin_consents.enable_all(supporting);
+
+        for problem in &refused {
+            report_plugin_not_started(problem, request);
         }
 
-        SessionPlugins::start(
-            // Empty until issue #282: an `EnabledPlugin` is what consent
-            // produces, and nothing stores consent yet. The wiring below is
-            // real and is exercised by `clipped_session::plugins`' tests
-            // against real plugin processes.
-            Vec::new(),
-            session,
-            progress,
-            SupervisionPolicy::default(),
-        )
+        SessionPlugins::start(enabled, session, progress, SupervisionPolicy::default())
+    }
+}
+
+/// Says why an installed plugin for this game did not start.
+///
+/// Three different things to tell somebody, so they are told apart. Only the
+/// lapse interrupts: a plugin nobody has enabled, or one that is turned off, is
+/// doing what the user asked, and a console line every time they launch a game
+/// would be nagging. A lapse is the one they have to act on, because a plugin
+/// they *did* enable has stopped running and will not start again until they
+/// look at what changed.
+fn report_plugin_not_started(problem: &NotStarted, request: &RecordingRequest) {
+    match problem {
+        NotStarted::NeverEnabled { plugin } => tracing::info!(
+            plugin,
+            game = request.game.slug(),
+            "a plugin supports this game and has not been enabled, so it was not started"
+        ),
+        NotStarted::TurnedOff { plugin } => tracing::info!(
+            plugin,
+            game = request.game.slug(),
+            "a plugin supports this game and is turned off, so it was not started"
+        ),
+        NotStarted::ConsentLapsed {
+            plugin,
+            agreed_to,
+            now_declares,
+        } => {
+            tracing::warn!(
+                plugin,
+                game = request.game.slug(),
+                agreed_to,
+                now_declares,
+                "a plugin asks for network access other than what was agreed to, so it was not                  started"
+            );
+            eprintln!(
+                "{plugin} is enabled but now asks for different network access, so it is not                  running.
+  you agreed to: {agreed_to}
+  it now asks for: {now_declares}"
+            );
+        }
     }
 }
 

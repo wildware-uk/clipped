@@ -133,12 +133,14 @@ Three facts about it are worth having in one place:
   it is placed on, so there has to be a timeline first. A recording that never
   captured a frame — no window appeared — starts no plugin, and a session with
   two recordings in it runs its plugins twice, once per file.
-- **Nothing is enabled, so nothing starts.** Starting a plugin needs the consent
-  the user recorded against what it declares, and nothing records that yet
-  ([#282](https://github.com/wildware-uk/clipped/issues/282)). `watch` reads the
-  plugins directory, says what is installed and what was refused, and names any
+- **Only what the settings file enables starts.** The `plugins` section records
+  which plugins the user turned on and the consent token each was enabled with
+  ([#282](https://github.com/wildware-uk/clipped/issues/282)); a plugin it does
+  not mention is off, and one whose declaration no longer matches its token is
+  refused and reported rather than started. `watch` reads the plugins
+  directory, says what is installed and what was refused, and names any
   installed plugin that claims the game it is about to record as one it is not
-  starting. [docs/privacy.md](privacy.md) is why enabling one uninvited is not
+  starting, with the reason. [docs/privacy.md](privacy.md) is why enabling one uninvited is not
   an option. What a plugin reports is likewise handed over rather than kept:
   storing events against the recording is
   [#71](https://github.com/wildware-uk/clipped/issues/71).

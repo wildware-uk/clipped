@@ -132,12 +132,13 @@
 //! plugin is [`RecordingProgress::timeline_began`], one `OnceLock` store on the
 //! first frame.
 //!
-//! One thing it deliberately does not do: nothing yet produces a
-//! `clipped_plugins::EnabledPlugin` in a shipped build, because nothing records
-//! which plugins the user enabled
-//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), so a
-//! session names the plugins it cannot start rather than starting them
-//! uninvited.
+//! It starts only what the user enabled. `config::plugins` records that, and
+//! what they agreed to when they did
+//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)); a plugin
+//! the settings file does not mention is disabled, and one whose network
+//! declaration no longer matches the token beside it is refused and reported
+//! rather than started. What a session cannot start it names, rather than
+//! leaving somebody to wonder.
 //!
 //! What it drains now reaches the open session
 //! ([`SessionManager::record_game_events`](automatic::SessionManager)), which
