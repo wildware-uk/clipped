@@ -1198,4 +1198,50 @@ mod tests {
         tracker.observe(&live(10, 0, 0, 0), at(0));
         assert!(tracker.observe(&paused, at(1)).events.is_empty());
     }
+
+    #[test]
+    fn returning_to_the_menu_and_loading_the_same_map_starts_a_new_match() {
+        // The branch that clears the baseline when the whole `map` block is
+        // absent — going back to the main menu — had no test of its own: it
+        // could be deleted and every other test in this crate stayed green.
+        //
+        // It is not cosmetic. Without it the baseline still holds `de_dust2`,
+        // so loading `de_dust2` again looks like the *same* map and reports no
+        // `match_started` at all. The next match's kills are then compared
+        // against the previous one's and the first one produces a decrease,
+        // which is reported as a reset rather than as a new match.
+        //
+        // A menu payload is the whole block missing rather than a field of it,
+        // which is the distinction the arm above turns on: "says nothing" and
+        // "says nothing is there" are different payloads.
+        let mut tracker = MatchTracker::new();
+        tracker.observe(&live(10, 8, 6, 3), at(0));
+
+        let menu = payload(serde_json::json!({
+            "provider": {"steamid": LOCAL, "timestamp": 20},
+            "player": {"steamid": LOCAL,
+                       "match_stats": {"kills": 8, "deaths": 6, "assists": 3}}
+        }));
+        tracker.observe(&menu, at(1));
+
+        // The same map again, from a fresh scoreboard.
+        let again = payload(serde_json::json!({
+            "provider": {"steamid": LOCAL, "timestamp": 30},
+            "map": {"name": "de_dust2", "mode": "competitive", "phase": "warmup", "round": 0},
+            "player": {"steamid": LOCAL, "team": "T",
+                       "match_stats": {"kills": 0, "deaths": 0, "assists": 0}}
+        }));
+        let step = tracker.observe(&again, at(2));
+
+        assert_eq!(
+            step.kinds(),
+            vec![&EventKind::MatchStarted],
+            "the same map after the menu is a new match, not a continuation"
+        );
+        assert!(
+            step.notes.is_empty(),
+            "a new match's counters starting from zero is not a reset to report: {:?}",
+            step.notes
+        );
+    }
 }
