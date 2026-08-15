@@ -603,17 +603,26 @@ the run green.
 
 ## What is not built yet
 
-AGENTS.md section 26 names four test applications. Two exist. The other two are
-audio, and they were left out on purpose rather than stubbed:
+AGENTS.md section 26 names four test applications. **Three exist.**
+`test-apps/process-tree-audio` arrived with process-scoped capture in
+[issue #26](https://github.com/wildware-uk/clipped/issues/26): a parent that
+plays nothing and a child that plays a tone, so that scoping can be proved
+against a known shape rather than against Discord. Its
+`tests/process_loopback_isolation.rs` starts it, records it and analyses the
+result, with nobody watching.
 
-- `test-apps/audio-generator` and `test-apps/process-tree-audio` need
-  `clipped-audio` to exist to be worth anything — an audio generator with no
-  audio capture to test would be written against a guess at what M2 needs and
-  rewritten by the first test that used it, and a directory of empty programs is
-  worse than two good ones. They are
+The one still missing is `test-apps/audio-generator`, which was left out on
+purpose rather than stubbed:
+
+- An audio generator with no audio capture to test would have been written
+  against a guess at what M2 needs and rewritten by the first test that used it,
+  and a directory of empty programs is worse than three good ones. It is
   [issue #136](https://github.com/wildware-uk/clipped/issues/136), in M2, with
   the tone plan from AGENTS.md section 26 (440 Hz, 880 Hz, 1320 Hz) written into
-  its acceptance criteria.
+  its acceptance criteria. Much of what it was for is now covered from the other
+  end: `crates/session/src/audio/tests.rs` scripts sources through the real
+  muxing path and asserts tone isolation by frequency analysis, and
+  `crates/muxer/tests/multi_track_audio.rs` does the same over five tracks.
 
 Anything else this document describes is built. Where it describes something
 that is not, it says so — a document that quietly describes intentions as facts

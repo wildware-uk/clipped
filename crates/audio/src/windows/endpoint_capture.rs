@@ -1788,12 +1788,32 @@ pub(super) mod testing {
 
         pub(in crate::windows) fn accept(&mut self, samples: &CapturedAudio<'_>) {
             let anchor = *self.anchor.get_or_insert(samples.timestamp());
-            assert_eq!(
-                samples.timestamp(),
-                AudioTimestamp::from_nanos(
-                    anchor.as_nanos() + self.format.frames_to_nanos(self.frames)
-                ),
-                "buffers must be exactly contiguous"
+            let expected = anchor.as_nanos() + self.format.frames_to_nanos(self.frames);
+            let actual = samples.timestamp().as_nanos();
+
+            // One nanosecond of slack, and exactly one: it is the truncation
+            // this arithmetic cannot avoid, not a tolerance for drift.
+            //
+            // The capture stamps every buffer `timeline_anchor +
+            // frames_to_nanos(frames_since_the_timeline_started)`. This counts
+            // from the first buffer *it* saw, which is not always the first the
+            // timeline emitted -- so where the capture computes
+            // `f2n(before + since)`, this computes `f2n(before) + f2n(since)`,
+            // and integer division does not distribute over addition. At
+            // 48 kHz, `f2n(1) + f2n(2)` is 62,499 where `f2n(3)` is 62,500.
+            //
+            // Each truncation loses less than a nanosecond and there are two of
+            // them against one, so the difference is at most one -- which is why
+            // this is `<= 1` rather than a figure somebody chose. A capture that
+            // really lost or repeated audio is out by a frame, 20,833 ns at this
+            // rate, and still fails
+            // ([issue #424](https://github.com/wildware-uk/clipped/issues/424)).
+            let out_by = expected.abs_diff(actual);
+            assert!(
+                out_by <= 1,
+                "buffers must be contiguous: expected {expected} ns, got {actual} ns, which is \
+                 {out_by} ns out — more than the one nanosecond this arithmetic truncates by, \
+                 so audio was lost or repeated"
             );
             self.frames += samples.frames() as u64;
         }

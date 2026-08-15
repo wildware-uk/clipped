@@ -278,7 +278,12 @@ describe('the Settings screen', () => {
     await openSection(user, 'Notifications');
 
     expect(pane()).toHaveTextContent(/%APPDATA%\\uk\.wildware\.clipped\\notifications\.json/);
-    for (const key of ['recording_failed', 'recording_interrupted', 'recorder_unavailable']) {
+    for (const key of [
+      'recording_failed',
+      'recording_interrupted',
+      'recorder_unavailable',
+      'hotkey_unavailable',
+    ]) {
       expect(pane()).toHaveTextContent(new RegExp(key));
     }
     expect(pane()).toHaveTextContent(/Every category is on until that file says otherwise/);

@@ -28,10 +28,11 @@ owns the thread that wires capture to encoding
 interrupted part way through. Packets go through `clipped-muxer` into that file,
 rather than into a `Vec` in a test.
 
-What is still missing from a *recording* is its sound: the session writes no
-audio track yet ([#180](https://github.com/wildware-uk/clipped/issues/180)),
-which is why `docs/audio-routing.md` describes two captures rather than a track
-model.
+A recording has its sound: the session writes the audio tracks alongside the
+video ([#180](https://github.com/wildware-uk/clipped/issues/180)), and
+`crates/session`'s own tests decode a produced file and assert the streams'
+codec, sample rate and channel count as well as that they are synchronised with
+the picture. `docs/audio-routing.md` is the track model.
 
 This document describes the interface, the rules a backend has to obey, and the
 four backends that obey them. Where it describes something that does not exist

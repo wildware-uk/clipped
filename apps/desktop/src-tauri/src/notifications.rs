@@ -189,6 +189,10 @@ fn perform(app: &AppHandle, action: &NotificationAction) {
             }
         }
         NotificationAction::OpenClipped { notice } => crate::tray::report(app, notice),
+        // The Settings screen is where the hotkey list lives, with the row for
+        // the refused combination and the recorder's own sentence beside it
+        // (issue #232).
+        NotificationAction::OpenHotkeySettings => crate::tray::open_screen(app, "/settings"),
     }
 }
 

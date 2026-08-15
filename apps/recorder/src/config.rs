@@ -22,7 +22,10 @@ use time::macros::format_description;
 use time::OffsetDateTime;
 
 use crate::cli::RecordArgs;
-use crate::options::{AudioDeviceSelection, EncoderSelection, Framerate, Resolution, VideoCodec};
+use crate::options::{
+    AudioDeviceSelection, EncoderSelection, Framerate, ReplayLength, ReplayWindow, Resolution,
+    VideoCodec,
+};
 
 /// The container extension the recorder writes.
 ///
@@ -167,6 +170,13 @@ pub enum ConfigError {
         /// Why the current directory could not be read.
         source: io::Error,
     },
+    /// A replay save was asked to keep more than the buffer holds.
+    SaveLongerThanBuffer {
+        /// The save duration that was asked for, in seconds.
+        save: u32,
+        /// The buffer's own duration, in seconds.
+        window: u32,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -239,6 +249,12 @@ impl fmt::Display for ConfigError {
                 formatter,
                 "the output path is relative and the current directory could not be read: {source}"
             ),
+            Self::SaveLongerThanBuffer { save, window } => write!(
+                formatter,
+                "a save of {save} seconds cannot be taken from a replay buffer that keeps \
+                 {window}: ask for at most {window} seconds, or give the buffer a longer \
+                 duration"
+            ),
         }
     }
 }
@@ -281,6 +297,78 @@ impl RecordingConfig {
             system_audio: args.system_audio.clone(),
         })
     }
+}
+
+/// A validated `replay` invocation: a recording, and the buffer beside it.
+///
+/// The recording half is [`RecordingConfig`] and is resolved by exactly the same
+/// rules, so `replay --window X` points at the window `record --window X` would
+/// and writes the same kind of file to the same place. What is added is the two
+/// numbers the buffer needs, and the one rule that relates them.
+#[derive(Debug)]
+pub struct ReplayConfig {
+    /// The recording the buffer is filled from.
+    pub recording: RecordingConfig,
+    /// How much history the buffer keeps.
+    pub window: std::time::Duration,
+    /// How much of it one save keeps.
+    pub save: std::time::Duration,
+}
+
+impl ReplayConfig {
+    /// Validates parsed arguments into a configuration.
+    ///
+    /// Reads the filesystem exactly as [`RecordingConfig::resolve`] does, and
+    /// adds the one check neither value's own parser can make: a save cannot be
+    /// longer than the buffer it is taken from. That is refused here rather than
+    /// silently shortened, because "I asked for the last five minutes and got
+    /// thirty seconds" is the kind of quiet disappointment AGENTS.md section 54
+    /// is about — and unlike a buffer that has not filled yet, this one is
+    /// knowable before anything is recorded.
+    ///
+    /// `configured` is the window the settings file resolved to, which is what
+    /// `--duration` overrides for one run. It is read from the same fold every
+    /// other setting comes through, so "how much does Clipped keep" has one
+    /// answer whether it is asked here or in the settings screen (AGENTS.md
+    /// section 30, `docs/configuration.md`).
+    ///
+    /// # Errors
+    ///
+    /// [`RecordingConfig::resolve`]'s, and
+    /// [`ConfigError::SaveLongerThanBuffer`].
+    pub fn resolve(
+        args: &crate::cli::ReplayArgs,
+        configured: std::time::Duration,
+    ) -> Result<Self, ConfigError> {
+        let recording = RecordingConfig::resolve(&args.record)?;
+        let window = args.duration.map_or(configured, ReplayWindow::duration);
+        // Nothing said means the whole window: SPEC.md section 42's example is
+        // `replay --duration 60` and a hotkey that saves the previous sixty
+        // seconds, so the two are one number until somebody says otherwise.
+        let save = args.save_duration.map_or(window, ReplayLength::duration);
+
+        if save > window {
+            return Err(ConfigError::SaveLongerThanBuffer {
+                save: seconds_of(save),
+                window: seconds_of(window),
+            });
+        }
+
+        Ok(Self {
+            recording,
+            window,
+            save,
+        })
+    }
+}
+
+/// A whole number of seconds, for a message somebody reads.
+///
+/// Saturating rather than wrapping: both durations are already inside a replay
+/// buffer's bounds, so this is unreachable, and a silent wrap would put an
+/// absurd number in a refusal.
+fn seconds_of(duration: std::time::Duration) -> u32 {
+    u32::try_from(duration.as_secs()).unwrap_or(u32::MAX)
 }
 
 /// Picks the single target out of the three mutually exclusive selectors.
@@ -596,6 +684,106 @@ mod tests {
             window: Some(window.to_owned()),
             ..RecordArgs::default()
         }
+    }
+
+    /// A `replay` invocation of `window`, writing into `directory`.
+    fn replay_args_in(directory: &Path, window: &str) -> crate::cli::ReplayArgs {
+        crate::cli::ReplayArgs {
+            record: RecordArgs {
+                output: Some(directory.join("replay.mkv")),
+                ..args_for(window)
+            },
+            duration: None,
+            save_duration: None,
+        }
+    }
+
+    /// The window the settings file resolves to when nobody has changed it.
+    fn configured_window() -> std::time::Duration {
+        clipped_session::config::DEFAULT_REPLAY_WINDOW
+    }
+
+    #[test]
+    fn a_replay_keeps_the_configured_window_and_saves_the_whole_of_it() {
+        // Nothing typed means the setting decides, and a save with no duration
+        // of its own means the whole buffer — which is SPEC.md section 42's
+        // "hotkey saves the previous N seconds" with N being the one number.
+        let directory = TestDirectory::new("replay-defaults");
+        let config = ReplayConfig::resolve(
+            &replay_args_in(directory.path(), "Counter-Strike 2"),
+            configured_window(),
+        )
+        .expect("a window and an output are enough");
+
+        assert_eq!(config.window, configured_window());
+        assert_eq!(config.save, configured_window());
+    }
+
+    #[test]
+    fn a_duration_on_the_command_line_overrides_the_configured_one() {
+        let directory = TestDirectory::new("replay-duration");
+        let mut args = replay_args_in(directory.path(), "Counter-Strike 2");
+        args.duration = Some("90".parse().expect("ninety seconds is in range"));
+
+        let config = ReplayConfig::resolve(&args, configured_window()).expect("a valid replay");
+
+        assert_eq!(config.window, std::time::Duration::from_secs(90));
+        assert_eq!(
+            config.save,
+            std::time::Duration::from_secs(90),
+            "a save with nothing said still means the whole buffer, and the buffer moved"
+        );
+    }
+
+    #[test]
+    fn a_save_longer_than_the_buffer_is_refused_with_both_numbers() {
+        // The one rule neither value's own parser can enforce, because neither
+        // can see the other. It is refused rather than silently shortened: "I
+        // asked for five minutes and got thirty seconds" is the quiet
+        // disappointment AGENTS.md section 54 is about, and unlike a buffer
+        // that has not filled yet this is knowable before anything is recorded.
+        let directory = TestDirectory::new("replay-too-long");
+        let mut args = replay_args_in(directory.path(), "Counter-Strike 2");
+        args.duration = Some("60".parse().expect("in range"));
+        args.save_duration = Some("120".parse().expect("in range"));
+
+        let error = ReplayConfig::resolve(&args, configured_window())
+            .expect_err("a minute of buffer cannot yield two minutes of clip");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("120") && message.contains("60"),
+            "the refusal has to name both numbers, or there is nothing to change: {message}"
+        );
+
+        // And the same save against a buffer long enough for it is accepted,
+        // so the refusal is a rule rather than a refusal of everything.
+        args.duration = Some("300".parse().expect("in range"));
+        assert!(ReplayConfig::resolve(&args, configured_window()).is_ok());
+    }
+
+    #[test]
+    fn a_replay_resolves_its_recording_by_exactly_the_rules_record_uses() {
+        // `replay` is `record` with a buffer beside it, so a target it cannot
+        // resolve or an output it cannot write has to fail identically — the
+        // same error type, from the same function (AGENTS.md section 55).
+        let directory = TestDirectory::new("replay-recording");
+        let args = replay_args_in(directory.path(), "Counter-Strike 2");
+
+        let config = ReplayConfig::resolve(&args, configured_window())
+            .expect("a valid replay")
+            .recording;
+        assert_eq!(
+            config.target,
+            CaptureTarget::WindowTitle("Counter-Strike 2".to_owned())
+        );
+        assert_eq!(config.output, directory.path().join("replay.mkv"));
+
+        let mut broken = replay_args_in(directory.path(), "Counter-Strike 2");
+        broken.record.output = Some(directory.path().join("replay.mp4"));
+        let error = ReplayConfig::resolve(&broken, configured_window())
+            .expect_err("the recorder writes Matroska");
+        assert!(matches!(error, ConfigError::OutputIsNotMatroska { .. }));
     }
 
     #[test]

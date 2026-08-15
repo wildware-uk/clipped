@@ -67,6 +67,7 @@ async function openLibrary(user: ReturnType<typeof userEvent.setup>): Promise<vo
 const ATTACHED = {
   link: 'attached',
   recorder_process_id: 7,
+  features: [],
   status: { state: 'idle' },
 } as const;
 

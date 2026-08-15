@@ -107,11 +107,13 @@ mod lease;
 mod range;
 mod save;
 mod segment;
+pub mod spill;
 
-pub use buffer::{PushOutcome, ReplayBuffer, ReplayStats};
+pub use buffer::{AudioPushOutcome, PushOutcome, ReplayBuffer, ReplayStats};
 pub use config::{ReplayConfig, DEFAULT_SEGMENT, MAXIMUM_WINDOW, MINIMUM_WINDOW};
 pub use error::{ConfigError, LeaseError};
 pub use lease::SegmentLease;
 pub use range::TimeRange;
 pub use save::{save_clip, SaveError, SavedClip};
-pub use segment::{Segment, SegmentId, SegmentPacket};
+pub use segment::{Segment, SegmentAudio, SegmentId, SegmentPacket};
+pub use spill::{sweep, SpillArea};

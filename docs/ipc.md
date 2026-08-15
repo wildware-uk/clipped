@@ -331,7 +331,7 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`, `hotkeys`.
+`shutdown`, `library`, `export`, `hotkeys`, `replay`.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
@@ -356,6 +356,15 @@ one of the user's keys does nothing; a recorder that answers with no conflicts
 has registered them all cleanly. Both would be drawn as an untroubled list by a
 window that did not check, which is the worst available reading of the same
 empty screen.
+
+`replay` is the check in front of a "Save Replay" control, and it is the one
+with a second half. The feature says the *build* has
+[`save_replay`](#save_replay) — a recorder built before it parses the command
+and always refuses it with `not_implemented`, which reads plausibly enough that
+nobody would question it. Whether the recording that is running has a buffer to
+save from is `active_recording.replay_seconds`, because that is a property of
+the recording rather than of the build: a window offering the control needs both
+to be true.
 
 ## Compatibility policy
 
@@ -478,13 +487,81 @@ when a command's parameters are all optional.
 | `stop_recording` | `recording_id` (optional) | `recording_stopped` | yes |
 | `add_bookmark` | all optional, below | `bookmark_added` | yes |
 | `take_screenshot` | all optional, below | `screenshot_taken` | yes |
+| `save_replay` | all optional, below | `replay_saved` | yes |
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
+| `library_events` | `recording` | `library_events` | yes |
+| `plugins` | none | `plugins` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
-| `save_replay` | not yet defined | — | no — M3, [#38](https://github.com/wildware-uk/clipped/issues/38) |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
+
+### `save_replay`
+
+Keeps the last few seconds of what is being recorded, as a clip
+([#38](https://github.com/wildware-uk/clipped/issues/38)).
+
+```json
+{"type":"request","id":1,"command":"save_replay","params":{}}
+```
+
+**Every parameter is optional, and that is the design.** The shape a hotkey
+sends is no parameters at all: keep the duration the recording was started with,
+out of whatever is being recorded, and put the clip where that recording's clips
+go. Somebody pressing `Ctrl`+`F10` mid-fight has said everything they are going
+to say.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `recording_id` | whatever is being recorded | Which recording to save out of, as `active_recording.recording_id` reported it |
+| `duration_seconds` | the window the recording's buffer was started with | How much to keep |
+| `output` | beside the recording, named after the session | Where to write the clip |
+
+`duration_seconds` is a number rather than one of a fixed set, because SPEC.md
+section 15's periods (15 s, 30 s, 1 min, 2 min, 5 min) come with "and custom",
+and an enumeration with an escape hatch is an enumeration with a hole in it. A
+duration longer than the buffer's window is **not** refused: the buffer cannot
+hold more than its window, so the clip is what there was and `complete` says it
+was short.
+
+There is deliberately no range in the request — no start, no end, no "from this
+moment". A replay buffer holds the last N seconds of *now*; an arbitrary window
+of a recording is a different feature over a different source, and it is the
+clip editor's (M11).
+
+The reply says what the clip turned out to be, because what comes out is not
+exactly what was asked for:
+
+```json
+{"type":"response","id":1,"outcome":{"ok":{"reply":"replay_saved","clip":{
+  "path":"D:\\clips\\clipped-cs2-20260813-201400-replay-1.mkv",
+  "recording_id":"r-1","requested_seconds":30.0,"duration_seconds":31.983,
+  "source_start_seconds":553.017,"source_end_seconds":585.0,
+  "leading_slack_seconds":1.983,"complete":true,"shortfall_seconds":0.0,
+  "bytes":51204112}}}}
+```
+
+- A clip can only begin on a keyframe, so it is up to one keyframe interval
+  longer at the front than the request. `leading_slack_seconds` is how much.
+- A buffer that has not filled yet gives less than was asked for —
+  `complete: false` and `shortfall_seconds` — which is a clip worth having and
+  worth labelling, not a failure.
+
+**Which recordings can be saved from.** A buffer costs memory in proportion to
+its duration, so one is kept only when `start_recording` asked for it with
+`replay_seconds`. `active_recording.replay_seconds` says whether the recording
+that is running has one and how much it keeps, which is what a window reads
+before offering the control; the `replay` feature says only that the build has
+the command.
+
+Refusals: `not_recording` when nothing is being recorded, when a named recording
+is not the one running, or when the recording that is running keeps no buffer —
+which is a different sentence, because the answer to it is to start one that
+does. `invalid_parameters` for a `duration_seconds` that is not a number of
+seconds or a blank `output`. `internal` when the clip could not be written,
+naming the file: a destination that already exists is refused rather than
+replaced.
 
 ### `start_recording`
 
@@ -707,6 +784,108 @@ nothing — the space it is not occupying is not being used — and is counted i
 
 Refused with `library_unavailable` on the same terms as `library_sessions`.
 
+### `library_events`
+
+The marks on one recording's timeline: what a plugin reported while it was being
+recorded, **placed in that recording's file**.
+
+```json
+{"type":"request","id":11,"command":"library_events","params":{"recording":"1"}}
+```
+
+```json
+{"type":"response","id":11,"outcome":{"ok":{
+  "reply":"library_events",
+  "lane":{"marks":[
+    {"recording":"1","at":4000000000,"kind":"kill","source":"counter-strike-2"},
+    {"recording":"1","at":9500000000,
+     "kind":"acme-cs2.flashbang_blinded_five","source":"acme-cs2"}]}}}}
+```
+
+`at` is nanoseconds **into that recording's file**, which is what a timeline
+draws at and a player seeks to — not a moment on the session's timeline, which
+is how the events are stored. A session can write several files and a recording
+can begin after the game did, so the two are different numbers; the recorder
+does the subtraction because it needs the recording's span, which the window has
+no way to know ([av-sync.md](av-sync.md), "One epoch per recording, one timeline
+per session").
+
+Three properties of this reply are deliberate:
+
+- **`kind` is not a closed vocabulary.** The second mark above is a plugin's own
+  namespaced name, and a kind added after the window shipped arrives the same
+  way. A client that validated `kind` against a list would delete exactly the
+  marks that have to survive, which is the compatibility rule at the top of this
+  document applied to an open set.
+- **The payload does not travel.** A plugin's own detail can be kilobytes and
+  nothing above the plugin interprets it, so it is not sent for a mark two
+  pixels wide. It stays in the library.
+- **`marks` is always present.** An empty array means the recording has no
+  events; it does not mean the question was not asked. Those are different
+  things to draw, and a client that could not tell them apart would have to
+  guess whether to show an empty lane or say nothing is known.
+
+A recording whose span the library does not know — one that produced no frame,
+or a row indexed before the span was recorded — has no marks rather than marks
+in the wrong place.
+
+Refused with `invalid_parameters` if `recording` is not an identifier this
+library uses, and with `library_unavailable` on the same terms as
+`library_sessions`.
+
+### `plugins`
+
+What is installed, what each plugin declares, and what will start.
+
+```json
+{"type":"response","id":12,"outcome":{"ok":{
+  "reply":"plugins",
+  "installed":[
+    {"id":"acme-cs2","name":"Counter-Strike 2 highlights","version":"0.1.0",
+     "description":"Reports kills, deaths and rounds from Game State Integration.",
+     "network":["Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state"],
+     "enforcement":"Clipped shows what a plugin declares and refuses to start one whose declaration has changed since you allowed it. It cannot yet stop a plugin from using the network in ways it did not declare.",
+     "state":{"state":"not-enabled"}}],
+  "refused":[]}}}
+```
+
+**A declaration is shown before consent is taken, never after.** Enabling a
+plugin *is* the consent to the network access it declares, and every bundled
+plugin opens a loopback socket, so [privacy.md](privacy.md)'s register is only
+true if a deliberate, informed action is what starts one.
+
+That is why the sentences and `enforcement` travel rather than being composed by
+the reader: the words somebody agrees to are the recorder's, and a second
+rendering of one declaration is a second thing to keep in step with what is
+actually enforced.
+
+`network` is empty when a plugin declares none. A screen must **say** that
+rather than draw a blank row — "it asks for nothing" and "we did not ask" are
+different things.
+
+### The four states
+
+| `state` | What it means |
+| --- | --- |
+| `enabled` | It will start with the next game it supports. |
+| `not-enabled` | Nothing has ever allowed it. What a newly installed plugin says. |
+| `turned-off` | Allowed, then turned off. What was agreed to is kept. |
+| `needs-consent-again` | It asks for something other than what was agreed to. Carries `agreed_to` and `now_declares`, because "here is what changed" cannot be asked with one of them. |
+
+`refused` is everything under the plugins directory that is not a usable plugin,
+with the reason. Reported rather than omitted: somebody put it there expecting
+it to work.
+
+Both arrays are always present, so "nothing installed" and "the question was not
+asked" are told apart by whether the reply arrived.
+
+**Enabling is not here.** Writing the consent record is a settings write the
+protocol does not have; `clipped-recorder plugins enable` is what writes one
+today, and the screen is
+[#281](https://github.com/wildware-uk/clipped/issues/281). Neither is a plugin's
+*health* — whether it is running, restarting or was stopped for flooding belongs
+to a live session rather than to the list of what is installed.
+
 ### `export_recording`
 
 Copies a finished recording into MP4 without decoding it. Clipped records
@@ -765,10 +944,12 @@ did.
     {"action":"save_replay","label":"Save replay","hotkey":"Ctrl+F10",
      "state":{"state":"conflict",
               "reason":"Ctrl+F10 could not be Clipped's shortcut for Save replay: another application already uses it. Choose a different combination, or close the application that has this one and try again"},
-     "handled":false,
-     "unavailable":"Save replay is not in this build: a recording with a replay buffer arrives in M3 (issue #38)"},
+     "handled":true},
     {"action":"add_bookmark","label":"Add bookmark","hotkey":"Ctrl+F9",
-     "state":{"state":"registered"},"handled":true}]}}}
+     "state":{"state":"registered"},"handled":true},
+    {"action":"open_overlay","label":"Open overlay",
+     "state":{"state":"unbound"},"handled":false,
+     "unavailable":"Open overlay is not in this build: the overlay arrives in M5 (issue #53)"}]}}}
 ```
 
 Always every action, including the ones bound to nothing: a screen sent a subset
@@ -779,10 +960,12 @@ indistinguishable from one the recorder has never heard of.
 them will be wrong half the time.** `state` is what Windows said —
 `unbound`, `registered`, or `conflict` carrying the sentence to show. `handled`
 is whether anything in the recorder performs the action, and `unavailable` is
-the recorder's own words for why not. `Ctrl`+`F10` registers cleanly on most
-machines and no build saves a replay, so a row drawn from `state` alone would
-report a working hotkey for a key that reports itself as unbuilt when pressed
-(AGENTS.md section 27).
+the recorder's own words for why not. The two come apart in both directions:
+`Ctrl`+`F10` is the combination another application is most likely to have
+taken, and the recorder performs `save_replay` whether or not Windows granted
+it; `open_overlay` would register cleanly on any machine and nothing behind it
+would happen. A row drawn from `state` alone reports a working hotkey for a key
+that reports itself as unbuilt when pressed (AGENTS.md section 27).
 
 `state` is a **closed** enumeration and tolerates no stranger, unlike an event
 or an error code and for the same reason [`recorder_status`](#get_status) does
@@ -924,30 +1107,36 @@ checks `shutdown` in [`welcome.features`](#the-handshake) first.
 
 ## Commands this build cannot perform
 
-Four commands are defined by the protocol and refused by this build, with
-`not_implemented` and a detail naming the subsystem, the milestone and the
-issue:
+**One** command is defined by the protocol and refused by this build —
+`apply_settings` — with `not_implemented` and a detail naming the subsystem, the
+milestone and the issue:
 
 ```json
 {"type":"response","id":3,"outcome":{"error":{
   "code":"not_implemented",
-  "message":"a recording with a replay buffer is not in this build",
+  "message":"the settings API is not in this build",
   "detail":{"detail":"not_implemented",
-            "subsystem":"a recording with a replay buffer",
-            "milestone":"M3","tracking_issue":38}}}}
+            "subsystem":"the settings API",
+            "milestone":"M7","tracking_issue":108}}}}
 ```
 
-They are refused **before dispatch**, so there is no handler for one to be wired
+`save_replay` was in this list until issue #38 built it, and is now an ordinary
+command with a schema of its own — see [`save_replay`](#save_replay) above.
+`UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` is the list this section
+describes, and it is the one to check rather than this prose.
+
+It is refused **before dispatch**, so there is no handler for it to be wired
 to. That is the point: a command that could be handled is a command that could
-be answered "saved" by something that saved nothing (AGENTS.md sections 27 and
-54). The UI is expected to render the refusal as what it is — "Save replay is
+be answered "applied" by something that applied nothing (AGENTS.md sections 27 and
+54). The UI is expected to render the refusal as what it is — "the settings API is
 not in this build" — rather than showing a dead control.
 
-Their *parameters* are deliberately left as an open object rather than given a
-schema. Nobody knows yet what `save_replay` takes, because the thing it would
-ask for does not exist; inventing a shape now would be a public API designed
-against a guess, and one the milestone that builds it would have to break
-(AGENTS.md section 43).
+Its *parameters* are deliberately left as an open object rather than given a
+schema, because nobody yet knows what the settings API takes; inventing a shape
+now would be a public API designed against a guess, and
+one the milestone that builds it would have to break (AGENTS.md section 43).
+That is what happened to `save_replay`, which got its shape from the work that
+built it rather than from a guess made in advance.
 
 ## Events
 

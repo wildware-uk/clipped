@@ -92,11 +92,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
 
 use clipped_game_detection::catalogue::Catalogue;
+use clipped_game_detection::launcher::Launchers;
 use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
     Endpoint, EventPublisher, HotkeyBinding, ProtocolError, RecorderStatus, RecordingSummary,
-    Reply, ScreenshotSummary, Server, ServerError, StartRecording, StopRecording, TakeScreenshot,
-    TransportError,
+    ReplaySummary, Reply, SaveReplay, ScreenshotSummary, Server, ServerError, StartRecording,
+    StopRecording, TakeScreenshot, TransportError,
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
@@ -108,7 +109,8 @@ use clipped_session::screenshot::{
     StillFrame,
 };
 use clipped_session::{
-    CaptureTargetSettings, RecordingProgress, RecordingReport, RecordingSettings,
+    CaptureTargetSettings, RecordingProgress, RecordingReport, RecordingSettings, ReplayRecording,
+    ReplaySaveError,
 };
 use clipped_windows::WindowInfo;
 
@@ -141,6 +143,12 @@ fn features_of_this_build() -> Vec<String> {
         // from a machine on which every combination registered cleanly. The two
         // are opposite answers and the second is what an empty list looks like.
         features::HOTKEYS.to_owned(),
+        // And for this before it offers "Save Replay": a recorder built before
+        // issue #38 parses `save_replay` and always refuses it, so the feature
+        // is what tells an unusable button from a working one. Whether *this*
+        // recording has a buffer to save from is
+        // `ActiveRecording::replay_seconds`.
+        features::REPLAY.to_owned(),
     ]
 }
 
@@ -294,6 +302,9 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
 /// The same loader `watch` uses, so a game the user registered, renamed or
 /// excluded means the same thing to a recording they started from the window as
 /// it does to one detection started (AGENTS.md section 55, issue #45).
+/// `crate::replay` reads it through here too, for the same reason and with the
+/// same fallback: a sitting is filed under the game it is of whichever
+/// subcommand made it.
 ///
 /// **A catalogue that cannot be read does not stop a recording**, which is the
 /// difference between this and `watch`. `watch` has nothing to do without a
@@ -308,7 +319,7 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
 /// recordings under games they told Clipped to leave alone. Every sitting made
 /// while their file is unreadable is `unattributed`, which is honest, and the
 /// error names the file so they can fix it.
-fn catalogue_for_recordings() -> Catalogue {
+pub(crate) fn catalogue_for_recordings() -> Catalogue {
     match crate::watch::load_catalogue() {
         Ok(catalogue) => catalogue,
         Err(error) => {
@@ -384,6 +395,10 @@ impl RecorderService {
             // And the same catalogue `watch` matches processes against, read
             // once for the same reason (issue #403).
             catalogue_for_recordings(),
+            // And the launchers, so that a recording started from the window is
+            // filed under the game whichever shop installed it, rather than
+            // only when the catalogue knows the executable's name (issue #522).
+            Launchers::discover(),
         )
     }
 
@@ -407,6 +422,10 @@ impl RecorderService {
             indexer,
             Configuration::defaults(),
             catalogue,
+            // A handler built for a test is told nothing about this machine's
+            // launchers, for the reason its catalogue is a fixture (AGENTS.md
+            // section 25).
+            Launchers::none(),
         )
     }
 
@@ -416,6 +435,7 @@ impl RecorderService {
         indexer: LibraryIndexer,
         configuration: Configuration,
         catalogue: Catalogue,
+        launchers: Launchers,
     ) -> Self {
         let indexer = Arc::new(indexer);
         Self {
@@ -424,6 +444,7 @@ impl RecorderService {
                 Arc::clone(&indexer),
                 configuration,
                 catalogue,
+                launchers,
             )),
             library,
             indexer,
@@ -536,6 +557,14 @@ impl CommandHandler for RecorderService {
             Command::TakeScreenshot(request) => Ok(Reply::ScreenshotTaken {
                 screenshot: self.recordings.screenshot(&request, SystemTime::now())?,
             }),
+            // On the connection thread it arrived on, like a bookmark and a
+            // screenshot, and for the same reason: what it takes from the
+            // recording state is a handle and a session, both of which it
+            // copies out under the lock and lets go of before it writes
+            // anything (`RecordingState::save_replay`).
+            Command::SaveReplay(request) => Ok(Reply::ReplaySaved {
+                clip: self.recordings.save_replay(&request, SystemTime::now())?,
+            }),
             // Answered from the index rather than from anything this process is
             // doing, and deliberately on the connection thread: a library read
             // is a bounded query over local data and shares nothing with a
@@ -546,6 +575,22 @@ impl CommandHandler for RecorderService {
             Command::LibraryGames => Ok(Reply::LibraryGames {
                 games: self.library.games()?,
             }),
+            Command::LibraryEvents(request) => Ok(Reply::LibraryEvents {
+                lane: self.library.events(&request)?,
+            }),
+            // Also on the connection thread: reading a handful of manifests and
+            // one settings file is bounded local work that shares nothing with
+            // a recording, which is the same argument the library reads above
+            // are answered here under.
+            Command::Plugins => {
+                let (installed, refused) = crate::plugins::declarations().map_err(|error| {
+                    ProtocolError::new(
+                        ErrorCode::Internal,
+                        format!("the installed plugins could not be read: {error}"),
+                    )
+                })?;
+                Ok(Reply::Plugins { installed, refused })
+            }
             // Also on the connection thread, and for the same reason a library
             // read is: it touches no recording, takes no lock a recording takes
             // and opens a file of its own (`crate::export`). It is the slower
@@ -621,6 +666,16 @@ struct RecordingState {
     /// belongs to the moment the recording started, and a games file edited
     /// while a recording runs does not change what that recording is of.
     catalogue: Catalogue,
+    /// The launchers installed on this machine, as they stood when this process
+    /// started ([`launchers_for_recordings`]).
+    ///
+    /// Read once, for the reason the catalogue is: asking six providers costs a
+    /// registry walk and six directory reads, and a recording resolves what it
+    /// is of when it starts. A game installed while this recorder is running is
+    /// therefore identified by the catalogue's name and path rungs until it is
+    /// restarted, which is the trade
+    /// [`Launchers`](clipped_game_detection::launcher::Launchers) documents.
+    launchers: Launchers,
 }
 
 /// A recording that has been started.
@@ -668,12 +723,38 @@ struct Running {
     /// session record at all, so there was nothing for the library to index; the
     /// session being a field of the recording rather than a step somebody has to
     /// remember is what stops that returning.
-    session: Option<ManualSession>,
+    ///
+    /// Behind a mutex of its own, and shared, because a `save_replay` arriving
+    /// on a connection thread enters its clip in it: it takes this handle from
+    /// under [`RecordingState::current`], lets that lock go, and only then
+    /// writes anything — exactly as `add_bookmark` does with the bookmark log.
+    session: Option<Arc<Mutex<ManualSession>>>,
+    /// The rolling window of the last few minutes, when this recording was
+    /// asked for one.
+    ///
+    /// [`None`] for an ordinary recording, and that is what `save_replay`
+    /// refuses on: a buffer costs memory in proportion to its duration
+    /// (`docs/replay-buffer.md`), so one is kept only when somebody asked for
+    /// it. Shared for the reason the session is — a save runs on the connection
+    /// thread while this one carries on recording.
+    replay: Option<Arc<ReplayRecording>>,
     /// [`None`] while it is still recording.
     outcome: Option<Result<RecordingReport, String>>,
 }
 
 impl Running {
+    /// The same recording, keeping a rolling window to save replays from.
+    ///
+    /// A step after construction rather than a further argument to
+    /// [`RecordingState::begin`], because it is the one thing about a recording
+    /// that is optional: `start` attaches a buffer when `start_recording` asked
+    /// for one and does not otherwise.
+    #[must_use]
+    fn with_replay(mut self, replay: Option<Arc<ReplayRecording>>) -> Self {
+        self.replay = replay;
+        self
+    }
+
     /// The session this recording is the whole of, while it is still running.
     ///
     /// # Panics
@@ -681,10 +762,22 @@ impl Running {
     /// If the recording has already ended: [`RecordingState::finish`] takes the
     /// session to close it, and nothing asks a recording that has stopped what
     /// it is recording into.
-    fn session(&self) -> &ManualSession {
+    fn session(&self) -> &Arc<Mutex<ManualSession>> {
         self.session
             .as_ref()
             .expect("a recording that has not ended still holds its session")
+    }
+
+    /// The settings this recording's session resolved, copied out of it.
+    ///
+    /// A copy rather than a borrow because the session is behind a mutex and
+    /// this is read once, before the recording thread starts.
+    fn resolved_settings(&self) -> clipped_session::config::ResolvedSettings {
+        self.session()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .settings()
+            .clone()
     }
 }
 
@@ -694,6 +787,7 @@ impl RecordingState {
         indexer: Arc<LibraryIndexer>,
         configuration: Configuration,
         catalogue: Catalogue,
+        launchers: Launchers,
     ) -> Self {
         Self {
             current: Mutex::new(None),
@@ -703,6 +797,7 @@ impl RecordingState {
             indexer,
             configuration,
             catalogue,
+            launchers,
         }
     }
 
@@ -752,6 +847,7 @@ impl RecordingState {
             output.clone(),
             &self.configuration,
             &self.catalogue,
+            &self.launchers,
             process,
             now,
         );
@@ -766,7 +862,10 @@ impl RecordingState {
             thread: None,
             progress: RecordingProgress::new(),
             screenshots: ScreenshotRequests::new(),
-            session: Some(session),
+            session: Some(Arc::new(Mutex::new(session))),
+            // Attached afterwards by [`Running::with_replay`], because it is the
+            // one thing about a recording that is optional.
+            replay: None,
             outcome: None,
         }
     }
@@ -776,6 +875,11 @@ impl RecordingState {
     fn start(self: &Arc<Self>, request: &StartRecording) -> Result<Reply, ProtocolError> {
         let args = record_args(request)?;
         let config = RecordingConfig::resolve(&args).map_err(invalid_parameters)?;
+        // Before the window is resolved and before anything is created: a
+        // duration no buffer can hold is a parameter to fix, and finding that
+        // out after a capture session has opened would be finding it out late
+        // (AGENTS.md section 45).
+        let replay = replay_for(request)?;
         let window = resolve_window(&config.target).map_err(unrecordable_target)?;
         let asked_for = settings_for(&config, &window);
 
@@ -807,13 +911,15 @@ impl RecordingState {
         // place a recording of this state is built, which is what makes that —
         // and asking the catalogue what the window is — unforgettable rather
         // than remembered.
-        let mut running = self.begin(
-            id.clone(),
-            output.clone(),
-            target,
-            &window,
-            SystemTime::now(),
-        );
+        let mut running = self
+            .begin(
+                id.clone(),
+                output.clone(),
+                target,
+                &window,
+                SystemTime::now(),
+            )
+            .with_replay(replay);
 
         // What the request asked for, then what the user configured laid over
         // it — `apply_configured_to` and not `apply_to`, for the reason `watch`
@@ -821,7 +927,7 @@ impl RecordingState {
         // every parameter the request named, so a `start_recording` asking for
         // 144 frames per second would record at 60 on every machine with no
         // settings file. Two callers, one rule (AGENTS.md section 55).
-        let settings = running.session().settings().apply_configured_to(asked_for);
+        let settings = running.resolved_settings().apply_configured_to(asked_for);
 
         running.thread = Some(spawn_recording(
             self,
@@ -830,6 +936,7 @@ impl RecordingState {
             running.stop.clone(),
             running.progress.clone(),
             running.screenshots.clone(),
+            running.replay.clone(),
         ));
 
         *current = Some(running);
@@ -984,6 +1091,94 @@ impl RecordingState {
             duration_seconds: taken.duration().map(|span| span.as_secs_f64()),
             bookmarks_file: bookmarks.path().to_string_lossy().into_owned(),
             bookmarks_in_recording: u32::try_from(bookmarks.count()).unwrap_or(u32::MAX),
+        })
+    }
+
+    /// Saves the last few seconds of the recording's replay buffer as a clip.
+    ///
+    /// Everything it needs comes out of [`Self::current`] here, and the lock is
+    /// released before the clip is written: the recording thread stores its
+    /// outcome through that same mutex, and a save that held it across a file
+    /// write would make a recording's end wait on one — the rule `add_bookmark`
+    /// and `take_screenshot` already follow.
+    ///
+    /// `now` is the wall clock, passed in so that this is testable without one
+    /// (AGENTS.md section 25). It is what the clip is stamped with in the
+    /// session's record; where the clip *begins and ends* comes from the
+    /// recording's own timeline.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::NotRecording`] when nothing is being recorded, when a named
+    /// recording is not the one running, or when the recording that is running
+    /// keeps no replay buffer — which is a different sentence, because the
+    /// answer to it is to start one that does;
+    /// [`ErrorCode::InvalidParameters`] for a duration that is not a number of
+    /// seconds; and [`ErrorCode::Internal`] when the clip could not be written,
+    /// which names the file, because a full drive or a name already taken is
+    /// something only the user can fix (AGENTS.md section 45).
+    fn save_replay(
+        &self,
+        request: &SaveReplay,
+        now: SystemTime,
+    ) -> Result<ReplaySummary, ProtocolError> {
+        let destination = destination_for(request)?;
+        // Both parameters are read before the recording state is touched, for
+        // the reason `take_screenshot` reads its format first: what the caller
+        // got wrong is the caller's to fix, and it is the same answer whether
+        // anything is being recorded or not.
+        let asked_for = requested_length(request)?;
+
+        let (recording_id, replay, session) = {
+            let current = self.lock()?;
+            let Some(running) = current.as_ref().filter(|running| running.outcome.is_none()) else {
+                return Err(nothing_to_save());
+            };
+            if let Some(named) = &request.recording_id {
+                if named != &running.id {
+                    return Err(ProtocolError::new(
+                        ErrorCode::NotRecording,
+                        format!("recording `{named}` is not the one this recorder is running"),
+                    ));
+                }
+            }
+            let Some(replay) = running.replay.clone() else {
+                return Err(ProtocolError::new(
+                    ErrorCode::NotRecording,
+                    "this recording is not keeping a replay buffer; start one with                      `replay_seconds` to be able to save from it",
+                ));
+            };
+            (running.id.clone(), replay, Arc::clone(running.session()))
+        };
+
+        // Nothing asked for means the whole window the recording was started
+        // with, which is what a hotkey press means.
+        let keep = asked_for.unwrap_or_else(|| replay.window());
+
+        let saved = crate::replay::save(&replay, &session, keep, destination, now)
+            .map_err(replay_not_saved)?;
+        let clip = &saved.clip;
+
+        tracing::info!(
+            recording = recording_id,
+            path = %RedactedPath::new(clip.path()),
+            seconds = clip.duration().as_secs_f64(),
+            requested_seconds = clip.requested_length().as_secs_f64(),
+            complete = clip.is_complete(),
+            "a replay clip was saved because the desktop application asked for one"
+        );
+
+        Ok(ReplaySummary {
+            path: clip.path().to_string_lossy().into_owned(),
+            recording_id,
+            requested_seconds: clip.requested_length().as_secs_f64(),
+            duration_seconds: clip.duration().as_secs_f64(),
+            source_start_seconds: clip.covered().start().as_secs_f64(),
+            source_end_seconds: clip.covered().end().as_secs_f64(),
+            leading_slack_seconds: clip.leading_slack().as_secs_f64(),
+            complete: clip.is_complete(),
+            shortfall_seconds: clip.shortfall().as_secs_f64(),
+            bytes: clip.byte_len(),
         })
     }
 
@@ -1148,14 +1343,28 @@ impl RecordingState {
             // answered. What makes the recording *findable* is the index, and
             // the run that fills it is asked for below — after the record it
             // reads is on disk, which is the ordering that does matter.
-            let ended = session.finish(&for_the_session, SystemTime::now());
+            //
+            // Through the mutex rather than by taking the session out of it: a
+            // `save_replay` that is still writing a clip holds this lock, and
+            // waiting for it is what stops the session's last write racing the
+            // clip's entry in it (`ManualSession::finish_in_place`).
+            let ended = {
+                let mut session = session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                session
+                    .finish_in_place(&for_the_session, SystemTime::now())
+                    .id()
+                    .as_str()
+                    .to_owned()
+            };
 
             // Off this thread and on to the indexer's: this is the recording
             // thread, and walking the recordings folder here would hold up the
             // reply to whoever asked for the stop.
             tracing::info!(
                 recording = id,
-                session = ended.id().as_str(),
+                session = ended,
                 "asking for the library to be brought up to date, because a session ended"
             );
             self.indexer.request();
@@ -1196,6 +1405,7 @@ fn spawn_recording(
     stop: crate::shutdown::ShutdownSignal,
     progress: RecordingProgress,
     screenshots: ScreenshotRequests,
+    replay: Option<Arc<ReplayRecording>>,
 ) -> JoinHandle<()> {
     let state = Arc::clone(state);
     let id = id.to_owned();
@@ -1203,9 +1413,16 @@ fn spawn_recording(
     thread::Builder::new()
         .name("clipped-recording".to_owned())
         .spawn(move || {
-            let outputs = clipped_session::RecordingOutputs::default()
+            let mut outputs = clipped_session::RecordingOutputs::default()
                 .with_progress(&progress)
                 .with_screenshots(&screenshots);
+            // The buffer is filled from the packets this recording produces —
+            // one encoder, two consumers — and the handle outlives the
+            // recording because whoever saves from it is on another thread
+            // (`clipped_session::replay`).
+            if let Some(replay) = replay.as_deref() {
+                outputs = outputs.with_replay(replay);
+            }
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 clipped_session::record_into(&settings, &stop, &outputs)
             }));
@@ -1254,6 +1471,13 @@ fn status_of(running: Option<&Running>) -> RecorderStatus {
             output: running.output.to_string_lossy().into_owned(),
             target: running.target.clone(),
             elapsed_ms: u64::try_from(running.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            // What a window reads before offering "Save Replay" for this
+            // recording: the feature says the build has the command, and this
+            // says there is a buffer to save from.
+            replay_seconds: running
+                .replay
+                .as_ref()
+                .map(|replay| u32::try_from(replay.window().as_secs()).unwrap_or(u32::MAX)),
         }),
         _ => RecorderStatus::Idle,
     }
@@ -1335,6 +1559,100 @@ fn invalid_parameters(error: ConfigError) -> ProtocolError {
 /// The refusal for a stop with nothing to stop.
 fn nothing_to_stop() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotRecording, "nothing is being recorded")
+}
+
+/// The replay buffer a `start_recording` asked for, if it asked for one.
+///
+/// The bound is `clipped-replay`'s own and the message is its own, so that the
+/// duration a window may ask for over the protocol and the one
+/// `replay --duration` accepts are the same range with the same explanation
+/// (AGENTS.md section 55).
+fn replay_for(request: &StartRecording) -> Result<Option<Arc<ReplayRecording>>, ProtocolError> {
+    let Some(seconds) = request.replay_seconds else {
+        return Ok(None);
+    };
+
+    ReplayRecording::new(std::time::Duration::from_secs(u64::from(seconds)))
+        .map(|replay| Some(Arc::new(replay)))
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))
+}
+
+/// How much a `save_replay` asked to keep, if it said.
+///
+/// A JSON number can be negative, infinite or not a number at all, and none of
+/// those is a duration. Refusing it as a *parameter* is what tells a window it
+/// sent something wrong rather than that the recorder could not do it
+/// (AGENTS.md section 15).
+fn requested_length(request: &SaveReplay) -> Result<Option<std::time::Duration>, ProtocolError> {
+    let Some(seconds) = request.duration_seconds else {
+        return Ok(None);
+    };
+
+    std::time::Duration::try_from_secs_f64(seconds)
+        .map(Some)
+        .map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidParameters,
+                format!(
+                    "`duration_seconds` has to be a number of seconds that is not negative, and                      {seconds} is not one"
+                ),
+            )
+        })
+}
+
+/// Where a `save_replay` was told to put its clip, if it named anywhere.
+///
+/// A blank path is refused here rather than reaching the writer, which would
+/// report it as a file that could not be created — a message about the wrong
+/// thing. A path that is already *taken* is deliberately not refused here: the
+/// writer refuses it, because whether a file exists is a question about the
+/// disk at the moment of writing rather than at the moment of asking
+/// (AGENTS.md section 56).
+fn destination_for(request: &SaveReplay) -> Result<Option<PathBuf>, ProtocolError> {
+    match request.output.as_deref() {
+        None => Ok(None),
+        Some(path) if path.trim().is_empty() => Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            "`output` has to be a path to write the clip to; leave it out to have the clip \
+             named after the session",
+        )),
+        Some(path) => Ok(Some(PathBuf::from(path))),
+    }
+}
+
+/// The refusal for a replay with nothing to save.
+///
+/// A separate sentence from [`nothing_to_stop`] for the reason
+/// [`nothing_to_bookmark`] is: somebody pressed a key and needs to know why
+/// nothing happened (AGENTS.md section 45).
+fn nothing_to_save() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::NotRecording,
+        "nothing is being recorded, so there is no replay buffer to save from",
+    )
+}
+
+/// A replay that could not be saved, as something the desktop application can
+/// render.
+///
+/// The code says what the caller can do about it: a recording with no buffer,
+/// or a buffer with nothing in it yet, is [`ErrorCode::NotRecording`] — nothing
+/// is wrong, and the answer is to wait or to start a recording that keeps one —
+/// and a disk that refused is [`ErrorCode::Internal`] with the file named in the
+/// message.
+fn replay_not_saved(error: ReplaySaveError) -> ProtocolError {
+    let code = match &error {
+        ReplaySaveError::NotBuffering | ReplaySaveError::NothingBuffered(_) => {
+            ErrorCode::NotRecording
+        }
+        ReplaySaveError::NotWritten { .. } => ErrorCode::Internal,
+        // `ReplaySaveError` is `#[non_exhaustive]`, and a variant added there is
+        // a decision to make here rather than a silent `Internal`. It cannot be
+        // caught by the compiler across a crate boundary, so it is caught by the
+        // message instead.
+        _ => ErrorCode::Internal,
+    };
+    ProtocolError::new(code, error.to_string())
 }
 
 /// The refusal for a bookmark with nothing to mark.
@@ -1718,6 +2036,9 @@ mod tests {
             Arc::new(indexer_over(directory)),
             Configuration::defaults(),
             catalogue,
+            // Not the machine's: a test that asked what is installed here would
+            // answer differently on another machine (AGENTS.md section 25).
+            Launchers::none(),
         ))
     }
 
@@ -1747,17 +2068,223 @@ mod tests {
         output: &Path,
         position: Option<Duration>,
     ) -> Running {
-        let running = state.begin(
-            "r-1".to_owned(),
-            output.to_path_buf(),
-            "process cs2.exe".to_owned(),
-            &window_of(4_242, "cs2.exe"),
-            moment(),
-        );
+        started_recording_with(state, output, position, None)
+    }
+
+    /// The same, with or without a replay buffer attached.
+    fn started_recording_with(
+        state: &RecordingState,
+        output: &Path,
+        position: Option<Duration>,
+        replay: Option<Arc<ReplayRecording>>,
+    ) -> Running {
+        let running = state
+            .begin(
+                "r-1".to_owned(),
+                output.to_path_buf(),
+                "process cs2.exe".to_owned(),
+                &window_of(4_242, "cs2.exe"),
+                moment(),
+            )
+            .with_replay(replay);
         if let Some(position) = position {
             running.progress.reached(position);
         }
         running
+    }
+
+    #[test]
+    fn a_replay_asked_for_with_nothing_recording_is_refused_by_its_own_sentence() {
+        // Somebody pressed the key. "Nothing is being recorded" on its own
+        // reads like a fault, so the refusal says what there was to save from
+        // (AGENTS.md section 45).
+        let directory = scratch("no-recording");
+        let state = idle_state(&directory);
+
+        let error = state
+            .save_replay(&SaveReplay::default(), moment())
+            .expect_err("there is no recording");
+
+        assert_eq!(error.code, ErrorCode::NotRecording);
+        assert!(
+            error.message.contains("replay buffer"),
+            "the refusal has to say what is missing: {}",
+            error.message
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_started_without_a_buffer_says_so_rather_than_writing_nothing() {
+        // The refusal that matters most, because it is the one a user can act
+        // on: this recording keeps no history, and the answer is to start one
+        // that does. A build that answered "nothing is being recorded" while a
+        // recording ran would be telling them something false.
+        let directory = scratch("no-buffer");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = recording_at(&output, Some(Duration::from_secs(30)));
+
+        let error = state
+            .save_replay(&SaveReplay::default(), moment())
+            .expect_err("this recording keeps no buffer");
+
+        assert_eq!(error.code, ErrorCode::NotRecording);
+        assert!(
+            error.message.contains("replay_seconds"),
+            "the refusal has to name what to ask for instead: {}",
+            error.message
+        );
+        assert!(
+            matches!(state.status(), RecorderStatus::Recording(active) if active.replay_seconds.is_none()),
+            "and the status has to say the same thing, so a window never offers the control"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_recording_with_a_buffer_says_how_much_it_keeps_and_refuses_until_it_has_some() {
+        // The other half: a recording that *does* keep a buffer advertises the
+        // window on its status, and a save before the encoder has produced
+        // anything is refused rather than writing an empty file — which is the
+        // first second of every buffered recording.
+        let directory = scratch("with-buffer");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = idle_state(&directory);
+        let replay = Arc::new(
+            ReplayRecording::new(Duration::from_secs(90)).expect("ninety seconds is in range"),
+        );
+        let running = started_recording_with(
+            &state,
+            &output,
+            Some(Duration::from_secs(30)),
+            Some(Arc::clone(&replay)),
+        );
+        *state.current.lock().expect("a fresh lock") = Some(running);
+
+        let RecorderStatus::Recording(active) = state.status() else {
+            panic!("the recorder is recording");
+        };
+        assert_eq!(
+            active.replay_seconds,
+            Some(90),
+            "a window reads this before it offers Save Replay for this recording"
+        );
+
+        let error = state
+            .save_replay(&SaveReplay::default(), moment())
+            .expect_err("the encoder has produced nothing yet");
+        assert_eq!(error.code, ErrorCode::NotRecording);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_replay_meant_for_a_recording_that_has_ended_is_not_taken_out_of_its_successor() {
+        // The same race `stop_recording` and `add_bookmark` name a recording
+        // for: the window had one on screen, it ended, and the save must not
+        // land in whatever is running now.
+        let directory = scratch("named-recording");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = recording_at(&output, Some(Duration::from_secs(30)));
+
+        let error = state
+            .save_replay(
+                &SaveReplay {
+                    recording_id: Some("r-99".to_owned()),
+                    ..SaveReplay::default()
+                },
+                moment(),
+            )
+            .expect_err("r-99 is not the recording this recorder is running");
+
+        assert_eq!(error.code, ErrorCode::NotRecording);
+        assert!(error.message.contains("r-99"), "{}", error.message);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_duration_that_is_not_a_number_of_seconds_is_a_parameter_to_fix() {
+        // A JSON number can be negative or infinite, and neither is a duration.
+        // It is `invalid_parameters` rather than `not_recording` because the
+        // caller sent something wrong, which is a different thing to tell a
+        // window (AGENTS.md section 15).
+        let directory = scratch("bad-duration");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = recording_at(&output, Some(Duration::from_secs(30)));
+
+        for seconds in [-1.0, f64::NAN, f64::INFINITY] {
+            let error = state
+                .save_replay(
+                    &SaveReplay {
+                        duration_seconds: Some(seconds),
+                        ..SaveReplay::default()
+                    },
+                    moment(),
+                )
+                .expect_err("that is not a number of seconds");
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidParameters,
+                "{seconds} should be refused as a parameter: {}",
+                error.message
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_blank_output_is_refused_before_it_reaches_the_writer() {
+        // A path of spaces would surface as "the clip could not be created",
+        // which is a message about the wrong thing.
+        let error = destination_for(&SaveReplay {
+            output: Some("   ".to_owned()),
+            ..SaveReplay::default()
+        })
+        .expect_err("a blank path is not a path");
+
+        assert_eq!(error.code, ErrorCode::InvalidParameters);
+        assert!(error.message.contains("output"), "{}", error.message);
+
+        assert_eq!(
+            destination_for(&SaveReplay::default()).expect("nothing named is not an error"),
+            None,
+            "leaving it out means the session names the clip"
+        );
+    }
+
+    #[test]
+    fn a_replay_buffer_a_start_asked_for_is_bounded_by_the_buffers_own_rules() {
+        // The duration a window may ask for over the protocol and the one
+        // `replay --duration` accepts are the same range with the same
+        // explanation, because both come from `clipped-replay` (AGENTS.md
+        // section 55).
+        assert!(replay_for(&StartRecording::default())
+            .expect("no buffer asked for")
+            .is_none());
+
+        let asked = replay_for(&StartRecording {
+            replay_seconds: Some(60),
+            ..StartRecording::default()
+        })
+        .expect("a minute is in range")
+        .expect("a buffer was asked for");
+        assert_eq!(asked.window(), Duration::from_secs(60));
+
+        let error = replay_for(&StartRecording {
+            replay_seconds: Some(4 * 3600),
+            ..StartRecording::default()
+        })
+        .expect_err("four hours is not a supported window");
+        assert_eq!(error.code, ErrorCode::InvalidParameters);
+        assert!(
+            error.message.contains("30.0s") && error.message.contains("1800.0s"),
+            "the refusal has to name the bounds: {}",
+            error.message
+        );
     }
 
     #[test]
@@ -2008,6 +2535,97 @@ mod tests {
         };
         assert_eq!(games.len(), 1);
         assert_eq!(games[0].missing, 1);
+    }
+
+    #[test]
+    fn the_marks_of_a_recording_reach_the_window_placed_in_its_file() {
+        // Issue #329. The window cannot work out where a mark goes: that needs
+        // the recording's span, which it has no way to know. So the recorder
+        // answers with the offset into the file, and this is the wiring that
+        // proves the command reaches the index rather than merely compiling.
+        let directory = scratch("library-events");
+        let path = directory.join("library.db");
+        let recording = {
+            let database = clipped_storage::Database::open(&path).expect("a database opens");
+            let connection = database.connection();
+            connection
+                .execute_batch(
+                    "INSERT INTO games (game_id, name, first_seen_at)                      VALUES ('cs2', 'Counter-Strike 2', '2026-08-11T20:14:00+01:00');                      INSERT INTO sessions (session_id, game_id, started_at)                      VALUES ('cs2-20260811-201400', 'cs2', '2026-08-11T20:14:00+01:00');                      INSERT INTO recordings (session_id, session_index, path, started_at,                          duration_seconds, starts_at_nanos)                      VALUES ('cs2-20260811-201400', 1, 'one.mkv',                              '2026-08-11T20:14:00+01:00', 600.0, 60000000000);",
+                )
+                .expect("a session with one recording inserts");
+            let recording = connection.last_insert_rowid();
+
+            // The recording starts a minute into the session, so a kill at 64 s
+            // on the session's timeline is 4 s into *this file*. Getting that
+            // subtraction backwards is the whole failure this answers.
+            connection
+                .execute(
+                    "INSERT INTO game_events                         (session_id, recording_id, at_nanos, kind, source, document)                      VALUES ('cs2-20260811-201400', ?1, 64000000000,                              'acme-cs2.flashbang_blinded_five', 'acme-cs2', '{}')",
+                    clipped_storage::rusqlite::params![recording],
+                )
+                .expect("an event inserts");
+            recording
+        };
+
+        let service = RecorderService::with_library(
+            EventPublisher::new(),
+            LibraryReader::at(Some(path)),
+            indexer_over(&directory),
+            Catalogue::default(),
+        );
+
+        let Reply::LibraryEvents { lane } = service
+            .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
+                recording: recording.to_string(),
+            }))
+            .expect("the events read")
+        else {
+            panic!("`library_events` was answered with something else");
+        };
+
+        assert_eq!(lane.marks.len(), 1);
+        assert_eq!(
+            lane.marks[0].at, 4_000_000_000,
+            "the mark is 4 s into the file and was placed at {}ns, which is what a mark drawn              against the session's timeline rather than the file's would look like",
+            lane.marks[0].at
+        );
+        assert_eq!(
+            lane.marks[0].kind, "acme-cs2.flashbang_blinded_five",
+            "a kind this build has never met has to arrive and be drawn"
+        );
+        assert_eq!(lane.marks[0].source, "acme-cs2");
+    }
+
+    #[test]
+    fn a_recording_with_no_events_is_answered_as_none_rather_than_refused() {
+        // "None" and "nobody asked" are different things to draw, and the
+        // Editor screen says them differently. An empty lane is the first; a
+        // refusal would make the window guess at the second.
+        let service = service_over_a_library("library-events-none");
+
+        let Reply::LibraryEvents { lane } = service
+            .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
+                recording: "1".to_owned(),
+            }))
+            .expect("a recording with no events is not a failure")
+        else {
+            panic!("`library_events` was answered with something else");
+        };
+
+        assert!(lane.marks.is_empty());
+    }
+
+    #[test]
+    fn an_identifier_that_is_not_a_recording_is_the_callers_mistake() {
+        let service = service_over_a_library("library-events-bad-id");
+
+        let refusal = service
+            .call(Command::LibraryEvents(clipped_ipc::LibraryEvents {
+                recording: "the third one".to_owned(),
+            }))
+            .expect_err("that is not an identifier this library uses");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
     }
 
     #[test]
@@ -2290,14 +2908,16 @@ mod tests {
             moment(),
         );
 
+        let session = running.session().lock().expect("a fresh lock");
         assert_eq!(
-            running.session().session().game(),
+            session.session().game(),
             &clipped_session::automatic::GameIdentity::Unidentified
         );
         assert!(
-            running.session().sidecar_path().is_file(),
+            session.sidecar_path().is_file(),
             "the sitting still has a record, so the recording still reaches the library"
         );
+        drop(session);
 
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -2357,6 +2977,7 @@ mod tests {
             output.clone(),
             &Configuration::defaults(),
             &Catalogue::default(),
+            &Launchers::none(),
             RecordedProcess::new(7, "cs2.exe"),
             moment(),
         );

@@ -601,3 +601,52 @@ fn the_crate_the_desktop_application_may_link_drags_nothing_else_in() {
         );
     }
 }
+
+#[test]
+fn every_plugin_in_the_workspace_is_named_by_the_constant_that_governs_plugins() {
+    // `PLUGINS` is what the two rules above are applied to: nothing may depend
+    // on a plugin, and a plugin may name only `PLUGINS_MAY_NAME`. A plugin
+    // missing from it is not covered by either, and **nothing noticed** —
+    // removing an entry while leaving the crate in the layer table left all
+    // nine tests in this file green.
+    //
+    // That is not hypothetical: a rebase auto-merge did exactly that to #342
+    // and it was caught by hand rather than by a test
+    // ([issue #70](https://github.com/wildware-uk/clipped/issues/70)). The next
+    // plugin arrives by the same route.
+    //
+    // The directory is the source of truth rather than the constant, because
+    // the failure mode is a plugin that exists and is not listed.
+    let plugins = workspace_root().join("plugins");
+    let entries = std::fs::read_dir(&plugins)
+        .unwrap_or_else(|error| panic!("{} should be readable: {error}", plugins.display()));
+
+    let mut missing = Vec::new();
+    for entry in entries.flatten() {
+        let manifest = entry.path().join("Cargo.toml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|error| panic!("{} should be readable: {error}", manifest.display()));
+        // The package name, from the `[package]` table's own `name` — not the
+        // directory, which need not match it.
+        let Some(name) = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("name = "))
+            .map(|value| value.trim().trim_matches('"').to_owned())
+        else {
+            panic!("{} declares no package name", manifest.display());
+        };
+
+        if !PLUGINS.contains(&name.as_str()) {
+            missing.push(name);
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "every member of plugins/ has to be in PLUGINS or the rules that govern plugins do \
+         not reach it: {missing:?} are not listed"
+    );
+}

@@ -51,6 +51,11 @@ import type {
   JsonObject,
   JsonValue,
   LibraryClip,
+  LibraryEventLane,
+  LibraryEventMark,
+  PluginDeclaration,
+  PluginState,
+  RefusedPlugin,
   LibraryGame,
   LibraryRecording,
   LibrarySession,
@@ -62,6 +67,7 @@ import type {
   RecorderStatus,
   RecordingSummary,
   Reply,
+  ReplaySummary,
   ScreenshotSummary,
   ServerMessage,
   Welcome,
@@ -339,12 +345,22 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'bookmark_added', bookmark: readBookmark(reply['bookmark']) };
     case 'screenshot_taken':
       return { reply: 'screenshot_taken', screenshot: readScreenshot(reply['screenshot']) };
+    case 'replay_saved':
+      return { reply: 'replay_saved', clip: readReplay(reply['clip']) };
     case 'library_sessions':
       return { reply: 'library_sessions', page: readSessionPage(reply['page']) };
     case 'library_games':
       return {
         reply: 'library_games',
         games: arrayField(reply['games'], 'a games list', readLibraryGame),
+      };
+    case 'library_events':
+      return { reply: 'library_events', lane: readEventLane(reply['lane']) };
+    case 'plugins':
+      return {
+        reply: 'plugins',
+        installed: arrayField(reply['installed'], 'a plugin list', readPluginDeclaration),
+        refused: arrayField(reply['refused'], 'a refused plugin list', readRefusedPlugin),
       };
     case 'recording_exported':
       return { reply: 'recording_exported', export: readExport(reply['export']) };
@@ -373,11 +389,16 @@ function readReply(value: JsonValue | undefined): Reply {
 
 function readActiveRecording(value: JsonValue | undefined): ActiveRecording {
   const recording = object(value, 'a recording');
+  const replay = optionalNumberField(recording, 'replay_seconds', 'a recording');
   return {
     recording_id: stringField(recording, 'recording_id', 'a recording'),
     output: stringField(recording, 'output', 'a recording'),
     target: stringField(recording, 'target', 'a recording'),
     elapsed_ms: numberField(recording, 'elapsed_ms', 'a recording'),
+    // Absent is "this recording keeps no replay buffer", which is an answer
+    // rather than a gap: the recorder skips the field entirely for one that
+    // was started without one.
+    ...(replay === undefined ? {} : { replay_seconds: replay }),
   };
 }
 
@@ -493,6 +514,23 @@ function readScreenshot(value: JsonValue | undefined): ScreenshotSummary {
   };
 }
 
+function readReplay(value: JsonValue | undefined): ReplaySummary {
+  const clip = object(value, 'a replay clip');
+  const what = 'a replay clip';
+  return {
+    path: stringField(clip, 'path', what),
+    recording_id: stringField(clip, 'recording_id', what),
+    requested_seconds: numberField(clip, 'requested_seconds', what),
+    duration_seconds: numberField(clip, 'duration_seconds', what),
+    source_start_seconds: numberField(clip, 'source_start_seconds', what),
+    source_end_seconds: numberField(clip, 'source_end_seconds', what),
+    leading_slack_seconds: numberField(clip, 'leading_slack_seconds', what),
+    complete: booleanField(clip, 'complete', what),
+    shortfall_seconds: numberField(clip, 'shortfall_seconds', what),
+    bytes: numberField(clip, 'bytes', what),
+  };
+}
+
 function readExport(value: JsonValue | undefined): ExportSummary {
   const summary = object(value, 'an export');
   const what = 'an export';
@@ -589,6 +627,88 @@ function readLibraryClip(value: JsonValue | undefined): LibraryClip {
     ...(missing === undefined ? {} : { missing_since: missing }),
     favourite: booleanField(clip, 'favourite', what),
     tags: stringArrayField(clip, 'tags', what),
+  };
+}
+
+/**
+ * One installed plugin.
+ *
+ * `network` is required rather than defaulted: an absent list and an empty one
+ * would otherwise be indistinguishable, and they are "the recorder did not say"
+ * and "it declares none" — the second of which a screen must state rather than
+ * leave blank.
+ */
+function readPluginDeclaration(value: JsonValue | undefined): PluginDeclaration {
+  const plugin = object(value, 'a plugin');
+  const what = 'a plugin';
+  return {
+    id: stringField(plugin, 'id', what),
+    name: stringField(plugin, 'name', what),
+    version: stringField(plugin, 'version', what),
+    description: stringField(plugin, 'description', what),
+    network: stringArrayField(plugin, 'network', what),
+    enforcement: stringField(plugin, 'enforcement', what),
+    state: readPluginState(plugin['state']),
+  };
+}
+
+/** What a plugin's state is, and what changed when consent has lapsed. */
+function readPluginState(value: JsonValue | undefined): PluginState {
+  const state = object(value, 'a plugin state');
+  const tag = stringField(state, 'state', 'a plugin state');
+  switch (tag) {
+    case 'enabled':
+    case 'not-enabled':
+    case 'turned-off':
+      return { state: tag };
+    case 'needs-consent-again':
+      return {
+        state: tag,
+        agreed_to: stringField(state, 'agreed_to', 'a lapsed consent'),
+        now_declares: stringField(state, 'now_declares', 'a lapsed consent'),
+      };
+    default:
+      unreadable(`\`${tag}\` is not a plugin state this build knows`);
+  }
+}
+
+/** Something that is not a usable plugin, and why. */
+function readRefusedPlugin(value: JsonValue | undefined): RefusedPlugin {
+  const refused = object(value, 'a refused plugin');
+  return {
+    directory: stringField(refused, 'directory', 'a refused plugin'),
+    reason: stringField(refused, 'reason', 'a refused plugin'),
+  };
+}
+
+/**
+ * One recording's marks.
+ *
+ * `marks` is required rather than defaulted: an absent array and an empty one
+ * would otherwise be indistinguishable, and they are "the recorder did not
+ * answer this" and "there are none" — different things to draw.
+ */
+function readEventLane(value: JsonValue | undefined): LibraryEventLane {
+  const lane = object(value, 'an event lane');
+  return { marks: arrayField(lane['marks'], 'a marks list', readEventMark) };
+}
+
+/**
+ * One mark.
+ *
+ * `kind` is read as a plain string and checked against nothing. A kind added
+ * after this build shipped, and a plugin's namespaced custom name, both arrive
+ * here, and a reader that refused one would delete exactly the marks that have
+ * to survive.
+ */
+function readEventMark(value: JsonValue | undefined): LibraryEventMark {
+  const mark = object(value, 'a mark');
+  const what = 'a mark';
+  return {
+    recording: stringField(mark, 'recording', what),
+    at: numberField(mark, 'at', what),
+    kind: stringField(mark, 'kind', what),
+    source: stringField(mark, 'source', what),
   };
 }
 

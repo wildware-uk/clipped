@@ -11,11 +11,15 @@
 //! The shape is one submodule per launcher, which is SPEC.md section 6's
 //! "provider-based so that support for a new launcher is an addition rather than
 //! a change to shared logic". [`steam`] is the first
-//! ([#43](https://github.com/wildware-uk/clipped/issues/43)); Epic, Xbox,
-//! Battle.net, EA, Ubisoft, Riot and GOG are
-//! [#44](https://github.com/wildware-uk/clipped/issues/44) and are deliberately
-//! not stubbed here — an empty provider that always answers "no" is a control
-//! that silently does nothing (AGENTS.md section 27), and
+//! ([#43](https://github.com/wildware-uk/clipped/issues/43)), [`epic`] the
+//! second, [`ubisoft`] the third, [`xbox`] the fourth, [`battlenet`] the fifth
+//! and [`riot`] the sixth
+//! ([#44](https://github.com/wildware-uk/clipped/issues/44), which asks for one
+//! pull request per launcher and is still open for EA).
+//!
+//! EA and GOG are deliberately **not** stubbed
+//! here — an empty provider that always answers "no" is a control that silently
+//! does nothing (AGENTS.md section 27), and
 //! [`LauncherKind`](crate::catalogue::LauncherKind) already carries the
 //! vocabulary they will need.
 //!
@@ -33,12 +37,58 @@
 //!   installer wrote, so they will be missing, half-written and occasionally
 //!   nonsense; every failure says which file (AGENTS.md section 15).
 //!
-//! There is no `trait LauncherProvider` yet, on purpose. One implementation is
-//! not enough to know what the trait's shape should be, and #44 brings three
-//! launchers whose metadata lives in three different kinds of place —
-//! `.item` manifests, the package registry, a product database. Writing the
-//! abstraction now would be guessing at all three (AGENTS.md, "Do not
-//! over-engineer").
+//! There is still no `trait LauncherProvider`, and the fourth implementation is
+//! the one that was expected to settle it. It settled it the other way: Xbox
+//! reads a **two-level** registry key whose entries are not all installations,
+//! and its identifier has to be *derived* from a package full name rather than
+//! read out of a field. The four agree on the same three methods — `discover`,
+//! `candidate_for`, `problems` — and agree on nothing else: Steam follows a
+//! registry key to a library index to a manifest per application across several
+//! drives, Epic reads one directory of JSON, Ubisoft enumerates a registry key
+//! and reads a name out of somebody else's, Xbox enumerates two, and Battle.net
+//! reads its identifier out of a **command line**.
+//!
+//! What the later ones *did* change is what is demonstrably shared, which is now
+//! shared rather than repeated (AGENTS.md section 55):
+//!
+//! - [`registry`] — reading a value and enumerating subkeys, for Steam, Ubisoft
+//!   and Xbox. Extracted from Steam when Ubisoft needed the same two-call
+//!   sizing; Xbox needed the subkey enumeration twice over.
+//! - [`claim`] — which installation directory owns a running executable.
+//!   Extracted from Epic when Ubisoft needed the same rule, with the same two
+//!   details that are easy to get subtly wrong. Xbox uses it unchanged, which is
+//!   the first evidence that the extraction was the right shape rather than a
+//!   convenient one.
+//!
+//! That is the case for waiting, not against it: each extraction happened when a
+//! second caller appeared and named exactly what the two had in common, which a
+//! trait written in advance would have had to guess at.
+//!
+//! What remains of #44 is EA and GOG. Riot was written in the end
+//! ([#513](https://github.com/wildware-uk/clipped/pull/513)), and the thing this
+//! paragraph used to warn about turned out to be the finding rather than the
+//! obstacle: only one of eight `Metadata` directories on a real installation
+//! carries an install path, because the other seven are products the client
+//! *offers*. Reading that correctly is what [`riot`] does, and it is why a
+//! directory listing is not an installation.
+//!
+//! # Who asks all of them
+//!
+//! [`Launchers`] — and until it existed, nothing did. Every provider here was
+//! built, tested and verified against a real installation, and no code outside
+//! their own tests ever called one, so the strongest rung in the catalogue's
+//! precedence order never fired in a shipped build
+//! ([#522](https://github.com/wildware-uk/clipped/issues/522)).
 
+pub mod battlenet;
+mod claim;
+pub mod epic;
+mod installed;
 mod keyvalues;
+mod registry;
+pub mod riot;
 pub mod steam;
+pub mod ubisoft;
+pub mod xbox;
+
+pub use installed::Launchers;

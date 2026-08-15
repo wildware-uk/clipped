@@ -110,6 +110,20 @@ pub struct TrashEntry {
     pub deleted_at: String,
     /// What the file measured when the index last saw it.
     pub size_bytes: Option<i64>,
+    /// How many clips were cut from this recording.
+    ///
+    /// Zero for a clip, which is not a source of anything.
+    ///
+    /// Deleting a recording that clips came from is **not refused** — it is the
+    /// user's decision and the trash makes it recoverable — but it is not
+    /// silent either: those clips are ranges of a file that is no longer where
+    /// they point, and this is what lets a caller say so
+    /// ([issue #74](https://github.com/wildware-uk/clipped/issues/74)).
+    ///
+    /// Automatic cleanup takes the other answer entirely and will not touch
+    /// such a recording (`crate::accounting::cleanup`), because nobody chose
+    /// that deletion.
+    pub dependent_clips: u32,
 }
 
 impl TrashEntry {
@@ -299,6 +313,7 @@ mod tests {
             path: PathBuf::from("trash"),
             original_path: PathBuf::from("original"),
             deleted_at: "2026-08-12T09:00:00+01:00".to_owned(),
+            dependent_clips: 0,
             size_bytes,
         }
     }

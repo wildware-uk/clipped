@@ -234,6 +234,12 @@ one that is not there is `Loaded::Absent` and the defaults, not an error.
   },
   "hotkeys": {
     "save_replay": "Ctrl+F10"
+  },
+  "plugins": {
+    "acme.counter-strike-2": {
+      "enabled": true,
+      "consented_to": "loopback listen 127.0.0.1:3212"
+    }
   }
 }
 ```
@@ -246,6 +252,40 @@ JSON rather than TOML because `clipped-session` already writes JSON for a
 session's sidecar (`docs/sessions.md`) and already depends on `serde_json`; a
 second serialisation format in one crate would be a dependency and a set of
 quoting rules bought for nothing.
+
+### `plugins`
+
+Which plugins the user enabled, and **what they agreed to when they did**
+([#282](https://github.com/wildware-uk/clipped/issues/282)). It does not inherit
+and has no per-game layer: a plugin already decides which games it supports from
+its own manifest.
+
+`consented_to` is the canonical rendering of the plugin's network declaration,
+sorted so that reordering a manifest does not lapse consent and any real change
+does. It is legible on purpose — a person reading their own settings can see
+what they agreed to without running anything, which a hash could not give them.
+
+It is compared with what the plugin declares *now*, every time one is started.
+A plugin that updates and asks for a new endpoint no longer matches, so it is
+not started and the reason is reported; the user is asked again rather than the
+new access being granted on the strength of the old answer.
+
+Three rules follow from that, and they are the whole of the section's
+behaviour:
+
+- **A plugin the file does not mention is off.** Absence is the safe answer:
+  "we have no record of you enabling this" must never resolve to "so run it".
+  It is also what makes a settings file written before this section existed read
+  correctly rather than fail.
+- **An entry marked enabled with no `consented_to` is not obeyed**, and is kept
+  rather than deleted. Running it would grant access nobody examined; deleting
+  it would throw away a record a newer build wrote.
+- **Turning a plugin off keeps its token**, so turning it back on does not ask
+  again for access that has not changed.
+
+`docs/privacy.md` is why none of this can be skipped: every bundled plugin opens
+a loopback socket, and the register on that page is only true if a deliberate
+action is what starts one.
 
 ### Saving
 

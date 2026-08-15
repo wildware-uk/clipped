@@ -37,8 +37,11 @@
 //! waits on a disk it does not have to, because the write lock is held while it
 //! runs (AGENTS.md section 20).
 
+use core::time::Duration;
 use std::path::{Path, PathBuf};
 
+use clipped_edit::RecordingId;
+use clipped_events::{EventTime, RecordedSpan};
 use clipped_storage::rusqlite::{params, OptionalExtension, Savepoint};
 use tracing::debug;
 
@@ -46,7 +49,10 @@ use super::error::IndexProblem;
 use super::moment;
 use super::presence::{self, FileFacts};
 use super::sidecar::{self, SessionSidecar, SidecarError, SidecarGame};
+use crate::events::{Placement, RecordedSegment, SessionRecordings};
 
+/// The words `clips.origin` may hold.
+const CLIP_ORIGINS: &[&str] = &["manual", "replay-buffer", "highlight"];
 /// The words `recordings.outcome` may hold.
 const RECORDING_OUTCOMES: &[&str] = &["recorded", "no-window", "failed"];
 /// The words `recordings.end_reason` may hold.
@@ -75,6 +81,8 @@ pub(crate) struct PreparedSession {
     pub(crate) sidecar_path: PathBuf,
     /// Each recording's file, in the same order as `sidecar.recordings`.
     pub(crate) files: Vec<PreparedFile>,
+    /// Each clip's file, in the same order as `sidecar.clips`.
+    pub(crate) clip_files: Vec<PreparedFile>,
 }
 
 /// One recording's file, as the filesystem describes it.
@@ -98,6 +106,13 @@ pub(crate) struct SessionWrite {
     pub(crate) newly_missing: usize,
     /// Recordings whose file has come back.
     pub(crate) returned: usize,
+    /// Where each recording written sits on the session's timeline: its row
+    /// identifier, its start in nanoseconds, and how long it runs.
+    ///
+    /// Only the recordings that have both numbers, because a span needs both. A
+    /// recording that produced no frame has no start and covers no moment, so
+    /// leaving it out is the truth rather than an omission.
+    pub(crate) segments: Vec<(i64, i64, f64)>,
 }
 
 /// Reads the sidecar at `path` and looks at every file it names.
@@ -117,11 +132,36 @@ pub(crate) fn prepare(path: &Path) -> Result<PreparedSession, SidecarError> {
             PreparedFile { path, facts }
         })
         .collect();
+    // Through the same resolution a recording's path goes through, so that a
+    // folder moved to another drive carries its clips as well as its
+    // recordings.
+    let clip_files = sidecar
+        .clips
+        .iter()
+        .map(|clip| {
+            // A clip with no file has nothing to look at, and asking the
+            // filesystem about the empty path would answer "missing" for a clip
+            // that was never supposed to have one.
+            let Some(named) = clip.path.as_deref() else {
+                return PreparedFile {
+                    path: PathBuf::new(),
+                    facts: FileFacts {
+                        present: false,
+                        size_bytes: None,
+                    },
+                };
+            };
+            let path = sidecar::recording_path(directory, named);
+            let facts = presence::look_at(&path);
+            PreparedFile { path, facts }
+        })
+        .collect();
 
     Ok(PreparedSession {
         sidecar,
         sidecar_path: path.to_path_buf(),
         files,
+        clip_files,
     })
 }
 
@@ -161,7 +201,15 @@ pub(crate) fn write(
 
     write_candidates(savepoint, session)?;
     write_events(savepoint, session)?;
-    write_recordings(savepoint, prepared, observed_at, problems)
+    let written = write_recordings(savepoint, prepared, observed_at, problems)?;
+    // After the recordings, for the same reason the clips below are: a game
+    // event names the recording that covers it, and the row it names has to
+    // exist. It also needs the spans that writing them produced.
+    write_game_events(savepoint, session, &written.segments)?;
+    // After the recordings, because a clip points at the one it was cut from
+    // and the row it points at has to exist.
+    write_clips(savepoint, prepared, problems)?;
+    Ok(written)
 }
 
 /// Writes the session's game, and answers which game the session is of.
@@ -302,6 +350,94 @@ fn write_events(
     Ok(())
 }
 
+/// Replaces the session's game events.
+///
+/// Wholesale, for the same reason [`write_events`] is: they are wholly derived
+/// from the sidecar, and nothing a user can have changed lives in one of these
+/// rows.
+///
+/// # Which recording each event landed in
+///
+/// `segments` is where each of the session's files sits on its timeline, and
+/// `crate::events` is what turns a moment into a file and an offset into it. An
+/// event no file covers keeps a null `recording_id`, which is an ordinary
+/// answer rather than a failure: heard before the first recording started, in
+/// the gap after a window was destroyed and recreated, after the last one
+/// ended, or during a session that wrote nothing at all.
+///
+/// The offset itself is not stored. It is `at_nanos` minus the recording's
+/// `starts_at_nanos`, which is a column on `recordings` (migration `0005`)
+/// precisely so that the subtraction is a join rather than a second read of the
+/// session's sidecar -- a file the index exists so that nothing else has to
+/// open. A stored copy would be a second truth to keep in step with the span it
+/// came from.
+///
+/// # What it refuses to lose
+///
+/// An event whose document this build cannot interpret is still stored: `read`
+/// keeps the envelope and the fields it had no name for, and `to_json` puts
+/// them back, so re-indexing a library with an older Clipped does not strip
+/// what a newer one wrote (AGENTS.md section 56). Only a document that is not a
+/// readable event at all is skipped, and it is said.
+fn write_game_events(
+    savepoint: &Savepoint<'_>,
+    session: &SessionSidecar,
+    segments: &[(i64, i64, f64)],
+) -> Result<(), clipped_storage::rusqlite::Error> {
+    let recordings = SessionRecordings::of(segments.iter().filter_map(
+        |&(recording_id, starts_at, duration)| {
+            let start = EventTime::from_media_nanos(starts_at);
+            let end = start.saturating_add(Duration::from_secs_f64(duration.max(0.0)));
+            RecordedSpan::new(start, end)
+                .map(|span| RecordedSegment::new(RecordingId::new(recording_id.to_string()), span))
+        },
+    ));
+    savepoint
+        .prepare("DELETE FROM game_events WHERE session_id = ?1")?
+        .execute(params![session.session_id])?;
+
+    let mut insert = savepoint.prepare(
+        "INSERT INTO game_events (session_id, recording_id, at_nanos, kind, source, document)          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for document in &session.game_events {
+        let read = match clipped_events::schema::read_value(document.clone()) {
+            Ok(read) => read,
+            Err(error) => {
+                debug!(
+                    session = %session.session_id,
+                    %error,
+                    "a game event that is not a readable event was skipped"
+                );
+                continue;
+            }
+        };
+        let Ok(text) = read.to_json() else {
+            debug!(
+                session = %session.session_id,
+                "a game event that could not be written back was skipped"
+            );
+            continue;
+        };
+        // The identifier goes back through the same string it went out as,
+        // because `clipped_edit::RecordingId` wraps a library identifier and
+        // this is the library that wrote it.
+        let placed_in = match recordings.place(read.event.timing().at()) {
+            Placement::In { recording, .. } => recording.as_str().parse::<i64>().ok(),
+            Placement::NotRecorded(_) => None,
+        };
+
+        insert.execute(params![
+            session.session_id,
+            placed_in,
+            read.event.timing().at().as_media_nanos(),
+            read.event.kind().to_string(),
+            read.event.source().as_str(),
+            text,
+        ])?;
+    }
+    Ok(())
+}
+
 /// Writes the session's recordings, with what the filesystem said about each.
 fn write_recordings(
     savepoint: &mut Savepoint<'_>,
@@ -330,6 +466,13 @@ fn write_recordings(
             Ok(outcome) => {
                 inner.commit()?;
                 written.recording_ids.push(outcome.recording_id);
+                if let (Some(starts_at), Some(duration)) =
+                    (recording.starts_at_nanos, recording.duration_seconds)
+                {
+                    written
+                        .segments
+                        .push((outcome.recording_id, starts_at, duration));
+                }
                 written.recordings += 1;
                 written.newly_missing += usize::from(outcome.newly_missing);
                 written.returned += usize::from(outcome.returned);
@@ -451,7 +594,7 @@ fn write_recording(
                     "UPDATE recordings SET path = ?2, started_at = ?3, ended_at = ?4, \
                          outcome = ?5, end_reason = ?6, duration_seconds = ?7, \
                          frames_encoded = ?8, width = ?9, height = ?10, size_bytes = ?11, \
-                         missing_since = ?12 \
+                         missing_since = ?12, starts_at_nanos = ?13 \
                      WHERE recording_id = ?1",
                 )?
                 .execute(params![
@@ -469,6 +612,7 @@ fn write_recording(
                     recording.height,
                     size_bytes,
                     judged.missing_since,
+                    recording.starts_at_nanos,
                 ])?;
             recording_id
         }
@@ -477,8 +621,8 @@ fn write_recording(
                 .prepare(
                     "INSERT INTO recordings (session_id, session_index, path, started_at, \
                          ended_at, outcome, end_reason, duration_seconds, frames_encoded, \
-                         width, height, size_bytes, missing_since) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                         width, height, size_bytes, missing_since, starts_at_nanos) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 )?
                 .execute(params![
                     session_id,
@@ -496,6 +640,7 @@ fn write_recording(
                     recording.height,
                     size_bytes,
                     judged.missing_since,
+                    recording.starts_at_nanos,
                 ])?;
             savepoint.last_insert_rowid()
         }
@@ -506,6 +651,181 @@ fn write_recording(
         newly_missing: judged.newly_missing,
         returned: judged.returned,
     })
+}
+
+/// Writes the clips the session saved out of its recordings.
+///
+/// A clip's natural key is its **path**, because a clip has no ordinal within
+/// its session the way a recording does: they are saved when somebody presses a
+/// key, and the file is the thing. `clips.path` is `UNIQUE`, so re-indexing the
+/// same sidecar updates the row it wrote last time rather than adding another.
+///
+/// A row the trash has moved is found by where it *came from*
+/// (`clips.deleted_from`) and keeps its own `path`, which is where the file
+/// actually is now — exactly as [`write_recording`] keeps a trashed
+/// recording's. Writing the sidecar's path over it would lose the only record
+/// of where the file went and make restoring it impossible (AGENTS.md
+/// section 56).
+///
+/// Presence is deliberately **not** judged here. Every clip row is looked at by
+/// the pass over rows nothing claimed, in the same run
+/// (`super::reconcile_rows`), so a clip whose file has gone is marked there
+/// with the same rule and counted in the same figures as every other one.
+fn write_clips(
+    savepoint: &Savepoint<'_>,
+    prepared: &PreparedSession,
+    problems: &mut Vec<IndexProblem>,
+) -> Result<(), clipped_storage::rusqlite::Error> {
+    let session = &prepared.sidecar;
+
+    for (clip, file) in session.clips.iter().zip(&prepared.clip_files) {
+        // Absent and empty are different. A clip with no `path` key is one
+        // nothing has exported yet; a `path` that is present and blank is a
+        // malformed record, and reading it as "no file" would turn a broken
+        // sidecar into a clip nobody can find.
+        if clip
+            .path
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            problems.push(IndexProblem::UnknownToken {
+                session_id: session.session_id.clone(),
+                field: "clip path",
+                value: String::new(),
+            });
+            continue;
+        }
+
+        let origin = clip.origin.as_deref().unwrap_or("replay-buffer");
+        if !CLIP_ORIGINS.contains(&origin) {
+            problems.push(IndexProblem::UnknownToken {
+                session_id: session.session_id.clone(),
+                field: "clip origin",
+                value: origin.to_owned(),
+            });
+            continue;
+        }
+
+        let path = clip.path.as_ref().map(|_| file.path.display().to_string());
+        let source_recording_id = match clip.source_recording {
+            None => None,
+            Some(index) => savepoint
+                .prepare(
+                    "SELECT recording_id FROM recordings WHERE session_id = ?1 \
+                     AND session_index = ?2",
+                )?
+                .query_row(params![session.session_id, index], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()?,
+        };
+
+        // Two natural keys, because a clip has two kinds of identity.
+        //
+        // A clip with a **file** is identified by it: that is what `0001` says
+        // and why `clips.path` is UNIQUE. A clip with **no file** has nothing
+        // unique among its columns except why it exists — so a highlight is
+        // identified by its session and its cause, which `origin_detail` holds
+        // as the moment, the kind and the plugin that reported it. Two
+        // highlights of one session cannot share all three: the generator
+        // refuses to cut a second clip over a window it has already taken
+        // (`clipped_session::highlights::generate`).
+        //
+        // Matched rather than rewritten wholesale, and both failures are why: a
+        // key that never matches duplicates every generated clip on every
+        // reconciliation, and rewriting instead would throw away the favourite,
+        // the tags and the title somebody put on one (AGENTS.md section 56).
+        let existing: Option<(i64, Option<String>, bool)> = match &path {
+            Some(path) => savepoint
+                .prepare(
+                    "SELECT clip_id, path, deleted_at IS NOT NULL FROM clips \
+                     WHERE path = ?1 OR deleted_from = ?1",
+                )?
+                .query_row(params![path], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()?,
+            None => savepoint
+                .prepare(
+                    "SELECT clip_id, path, deleted_at IS NOT NULL FROM clips \
+                     WHERE session_id = ?1 AND origin = ?2 \
+                       AND origin_detail IS ?3 AND path IS NULL",
+                )?
+                .query_row(
+                    params![session.session_id, origin, clip.origin_detail],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?,
+        };
+
+        // The size of the file as it is now, or nothing when it is not there —
+        // the row keeps whatever it had, for the reason a recording's does.
+        let size_bytes = file
+            .facts
+            .present
+            .then_some(file.facts.size_bytes)
+            .flatten();
+
+        match existing {
+            Some((clip_id, row_path, deleted)) => {
+                let path = if deleted { row_path } else { path };
+                savepoint
+                    .prepare(
+                        "UPDATE clips SET session_id = ?2, source_recording_id = ?3, path = ?4, \
+                             title = COALESCE(?5, title), created_at = COALESCE(?6, created_at), \
+                             source_start_seconds = ?7, source_end_seconds = ?8, \
+                             duration_seconds = ?9, size_bytes = COALESCE(?10, size_bytes), \
+                             edit = ?11, origin = ?12, origin_detail = ?13 \
+                         WHERE clip_id = ?1",
+                    )?
+                    .execute(params![
+                        clip_id,
+                        session.session_id,
+                        source_recording_id,
+                        path,
+                        clip.title,
+                        clip.created_at,
+                        clip.source_start_seconds,
+                        clip.source_end_seconds,
+                        clip.duration_seconds,
+                        size_bytes,
+                        clip.edit,
+                        origin,
+                        clip.origin_detail,
+                    ])?;
+            }
+            None => {
+                savepoint
+                    .prepare(
+                        "INSERT INTO clips (session_id, source_recording_id, path, title, \
+                             created_at, source_start_seconds, source_end_seconds, \
+                             duration_seconds, size_bytes, edit, origin, origin_detail) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    )?
+                    .execute(params![
+                        session.session_id,
+                        source_recording_id,
+                        path,
+                        clip.title,
+                        // `created_at` is NOT NULL in the schema. A clip whose
+                        // sidecar entry does not say when it was saved is filed
+                        // at the moment the session started, which is the
+                        // nearest true thing this row can say and keeps it
+                        // sortable beside its session.
+                        clip.created_at.as_deref().unwrap_or(&session.started_at),
+                        clip.source_start_seconds,
+                        clip.source_end_seconds,
+                        clip.duration_seconds,
+                        size_bytes,
+                        clip.edit,
+                        origin,
+                        clip.origin_detail,
+                    ])?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The reason the session ended, from the event that says so.
@@ -573,6 +893,72 @@ mod tests {
             }}"#
         );
         sidecar::parse(&text).expect("the sidecar parses")
+    }
+
+    /// A session with one file, covering 0 s to 10 s of its timeline.
+    fn ten_seconds_recorded() -> Vec<(i64, i64, f64)> {
+        vec![(7, 0, 10.0)]
+    }
+
+    /// Where `at_nanos` would be placed among `segments`.
+    fn placed(segments: &[(i64, i64, f64)], at_nanos: i64) -> Option<i64> {
+        let recordings = SessionRecordings::of(segments.iter().filter_map(
+            |&(recording_id, starts_at, duration)| {
+                let start = EventTime::from_media_nanos(starts_at);
+                let end = start.saturating_add(Duration::from_secs_f64(duration.max(0.0)));
+                RecordedSpan::new(start, end).map(|span| {
+                    RecordedSegment::new(RecordingId::new(recording_id.to_string()), span)
+                })
+            },
+        ));
+        match recordings.place(EventTime::from_media_nanos(at_nanos)) {
+            Placement::In { recording, .. } => recording.as_str().parse::<i64>().ok(),
+            Placement::NotRecorded(_) => None,
+        }
+    }
+
+    #[test]
+    fn an_event_no_file_covers_keeps_no_recording_rather_than_the_nearest_one() {
+        // The four ways that happens are ordinary answers, not failures, and
+        // all four must resolve to null rather than to the closest file: a kill
+        // pinned to the nearest frame is a kill drawn in a place it did not
+        // happen (AGENTS.md section 27).
+        let session = ten_seconds_recorded();
+
+        assert_eq!(placed(&session, 5_000_000_000), Some(7), "inside the file");
+        assert_eq!(
+            placed(&session, -1),
+            None,
+            "a moment before the first recording was pinned to it"
+        );
+        assert_eq!(
+            placed(&session, 10_000_000_001),
+            None,
+            "a moment after the last recording was pinned to it"
+        );
+        assert_eq!(
+            placed(&[], 5_000_000_000),
+            None,
+            "a session that recorded nothing placed an event in something"
+        );
+    }
+
+    #[test]
+    fn a_recording_with_no_span_takes_no_events_rather_than_taking_all_of_them() {
+        // A recording that produced no frame has no start, so it is left out of
+        // the segments entirely. The danger is the opposite of dropping it: a
+        // zero-length or zero-start default would make it a file covering the
+        // beginning of the session, and every early event would land in a file
+        // with no frames in it.
+        let with_a_gap = vec![(7, 0, 10.0), (9, 30_000_000_000, 10.0)];
+
+        assert_eq!(placed(&with_a_gap, 5_000_000_000), Some(7));
+        assert_eq!(placed(&with_a_gap, 35_000_000_000), Some(9));
+        assert_eq!(
+            placed(&with_a_gap, 20_000_000_000),
+            None,
+            "a moment in the gap between two recordings was placed in one of them"
+        );
     }
 
     #[test]

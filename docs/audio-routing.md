@@ -877,8 +877,15 @@ cargo test -p clipped-audio
   capture a process tree that **plays nothing** — this test process, or a
   `cmd.exe` chain the test starts — so they make no sound at all and are not
   suppressed by `CLIPPED_SKIP_AUDIO`; what they need is a Windows that can scope
-  a capture to a process, which a GitHub runner cannot, so they skip loudly
-  there. They assert a contiguous timeline of the right length from a tree that
+  a capture to a process, and where it cannot they skip loudly rather than
+  failing. **That is a property of the machine, not of CI** — this page used to
+  say a GitHub runner cannot do it and that they skip there, which is false
+  ([#441](https://github.com/wildware-uk/clipped/issues/441)): the CI failures
+  behind [#341](https://github.com/wildware-uk/clipped/issues/341),
+  [#387](https://github.com/wildware-uk/clipped/issues/387) and
+  [#425](https://github.com/wildware-uk/clipped/issues/425) quote measured track
+  lengths, which a skipped test cannot produce. They assert a contiguous
+  timeline of the right length from a tree that
   is silent; that stopping a capture after a 150 ms stall hands over about
   150 ms of audio rather than losing it, and then reports `NotOpen`; that the
   game exiting is noticed and leaves the track running as silence; and that a

@@ -23,17 +23,20 @@ path = "src/main.rs"
 
 [dependencies]
 clipped-encoder.workspace = true
+# The global hotkeys this process registers, the combinations that reach Clipped
+# while a game has the foreground, and the threads their handlers run on
+# (docs/hotkeys.md, ADR 0009). The recorder is the process that registers them
+# because it is the one that outlives every window and the one that can act on a
+# press; `crate::hotkeys` is `serve`'s handler side and turns a press into the
+# same command the desktop application would have sent, and `src/replay.rs`
+# binds Ctrl+F10 to a save (SPEC.md section 34). A press is delivered on a
+# thread of the action's own, never on a capture thread (AGENTS.md section 20).
+clipped-hotkeys.workspace = true
 # What started, what stopped, and whether it is a game. `watch` waits on the
 # process watcher and hands the catalogue to `clipped_session::automatic`, which
 # owns the policy between the two; this package is only the loop and the window
 # resolution the policy deliberately does not do (docs/sessions.md).
 clipped-game-detection.workspace = true
-# The global hotkeys this process registers, and the threads their handlers run
-# on (docs/hotkeys.md, ADR 0009). The recorder is the process that registers
-# them because it is the one that outlives every window and the one that can act
-# on a press; `crate::hotkeys` is the handler side, and turns a press into the
-# same command the desktop application would have sent.
-clipped-hotkeys.workspace = true
 # The protocol the desktop application drives this process through, and the
 # named pipe it arrives on (docs/ipc.md, ADR 0002). The messages, the framing
 # and the handshake live there so that both ends of the connection use one
@@ -49,6 +52,11 @@ clipped-ipc.workspace = true
 # this package uses directly.
 clipped-library.workspace = true
 clipped-logging.workspace = true
+# The peaks a timeline draws for a recording's audio (issue #66,
+# `src/library.rs`). Named here because this package starts the service: before
+# it did, `clipped-waveform` was in the workspace root manifest and in comments
+# and in nobody's `[dependencies]`, so no waveform was ever generated.
+clipped-waveform.workspace = true
 # Copying a finished recording into MP4 without decoding it (`src/export.rs`,
 # issue #399). The recorder answers `export_recording` because it is the process
 # that may link this: the window is allowed exactly one member of this workspace
@@ -65,6 +73,14 @@ clipped-muxer.workspace = true
 # which is reached by starting a process
 # (tests/integration/tests/workspace_layering.rs).
 clipped-plugins.workspace = true
+# The rolling buffer a `replay` recording keeps, for the two types this package
+# names directly: `SavedClip`, which says what a save produced, and
+# `ConfigError`, which is what refuses a duration no buffer can hold. Filling
+# and reading the buffer is `clipped_session::replay`'s;
+# `clipped-session` already brings this crate in, and naming it here is what
+# deny.toml's `wildcards = "deny"` asks of a dependency this package uses
+# directly.
+clipped-replay.workspace = true
 clipped-session.workspace = true
 # The database file itself: opening it, and the migrations that bring it to this
 # build's schema. `clipped-library` says what the rows mean and this says where

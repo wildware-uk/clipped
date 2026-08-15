@@ -119,6 +119,14 @@ mod rules;
 #[cfg(test)]
 mod tests;
 
+use clipped_edit::RecordingId;
+use clipped_events::{EventTime, RecordedSpan};
+use clipped_library::events::{RecordedSegment, SessionRecordings};
+use clipped_library::virtual_clip::VirtualClip;
+
+use crate::automatic::RecordingOutcomeSummary;
+use crate::config::Scope;
+
 pub use error::{HighlightRuleError, RuleSetting};
 pub use generate::{GeneratedHighlights, HighlightGeneration, NotGenerated, WithheldHighlight};
 pub use merge::Highlight;
@@ -129,3 +137,66 @@ pub use rule::{
     SHORTEST_MAXIMUM_LENGTH,
 };
 pub use rules::HighlightRules;
+
+/// Turns a finished session's events into the clips they were worth.
+///
+/// The caller [issue #76](https://github.com/wildware-uk/clipped/issues/76)
+/// asks for, and the reason every piece beneath it exists: the rules decide
+/// which moments deserve a clip, `generate` cuts the ranges, and the session
+/// carries them to its sidecar and from there into the library.
+///
+/// # What it does not do
+///
+/// **It renders nothing.** A generated clip is a range of a recording and costs
+/// no disk until somebody asks for a file (SPEC.md sections 19, 20 and 44), so
+/// this is arithmetic over events and touches no encoder, no capture thread and
+/// no filesystem.
+///
+/// **It does not run twice to a different answer.** The clips already on the
+/// session are handed to the generator, which refuses to cut a range it has
+/// already taken, and `Session::record_generated` replaces rather than appends.
+/// Re-generating a session it has seen answers the same clips.
+///
+/// # Which rules
+///
+/// The shipped defaults. Nothing records per-game highlight rules yet -- the
+/// configuration model has no notion of them -- so resolving against
+/// [`HighlightRules::none`] is the whole of the answer rather than a
+/// placeholder for one: it *is* what an unconfigured Clipped should generate.
+/// When rules become configurable, this is the one call site that has to read
+/// them.
+///
+/// # Which recordings
+///
+/// Only the ones with a span: a recording that produced no frame covers no
+/// moment, and one whose row predates spans being recorded has no timeline to
+/// cut against. A session with no such recording generates nothing, which is
+/// the truthful answer -- there is no footage for a clip to be a range *of*.
+#[must_use]
+pub fn generate_for(session: &crate::automatic::Session) -> Vec<VirtualClip> {
+    let segments: Vec<RecordedSegment> = session
+        .recordings()
+        .iter()
+        .filter_map(|recording| {
+            let start = EventTime::from_media_nanos(recording.starts_at_nanos()?);
+            let RecordingOutcomeSummary::Recorded { duration, .. } = recording.outcome()? else {
+                return None;
+            };
+            let span = RecordedSpan::new(start, start.saturating_add(*duration))?;
+            // The recording's ordinal, which is how a sidecar names one and how
+            // the library resolves it back to a row (`source_recording`).
+            Some(RecordedSegment::new(
+                RecordingId::new(recording.index().to_string()),
+                span,
+            ))
+        })
+        .collect();
+
+    let recordings = SessionRecordings::of(segments);
+    let rules = HighlightRules::resolve(Scope::Global, &HighlightRules::none(), None);
+
+    HighlightGeneration::new(&rules, &recordings)
+        .with_existing_clips(session.generated())
+        .generate(session.game_events())
+        .into_clips()
+}

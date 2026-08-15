@@ -98,10 +98,19 @@ it was made at.
 
 **JPEG**, at MJPEG quantiser scale 4 (the scale runs 1–31, lower is better).
 A frame of a game is photographic: PNG is roughly ten times the bytes for a
-difference nobody can see at this size, and WebP and AVIF are smaller still but
-need encoders the pinned FFmpeg build does not carry. JPEG is the one format
-every webview, file manager and image viewer on Windows opens without being
-asked, which matters because these are ordinary files in a user's own directory.
+difference nobody can see at this size. JPEG is the one format every webview,
+file manager and image viewer on Windows opens without being asked, which matters
+because these are ordinary files in a user's own directory.
+
+**WebP is smaller and is available**, which this page used to deny
+([#453](https://github.com/wildware-uk/clipped/issues/453)): the pinned build
+carries `libwebp`, screenshot capture already writes it, and
+`tests/capture/screenshot.rs` decodes the pattern back out of a 280-byte lossless
+WebP against JPEG's 5,680 for the same frame. So the reason for JPEG is the one
+above — universal support — and not availability. Whether that still wins for a
+thumbnail nobody opens outside Clipped is a fair question; it should be argued
+against the real options. **AVIF genuinely is unavailable**: the pinned build
+lists no AVIF encoder.
 
 Colour is handled explicitly in both halves: `swscale` is told the source's range
 and matrix and asked for full-range output, and the encoder is told the picture

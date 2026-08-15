@@ -45,9 +45,15 @@ use serde_json::{Map, Value};
 /// `clipped_session::automatic::sidecar::SCHEMA_VERSION` is the writer's copy of
 /// the same number. It is duplicated rather than shared for the reason the
 /// module documentation gives, and
-/// `crates/library/tests/sidecars.rs::the_documented_sidecar_is_the_one_this_build_reads`
-/// is what stops the two drifting quietly.
-pub(crate) const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+/// `clipped_session::automatic::sidecar`'s
+/// `the_reader_this_build_ships_understands_what_this_build_writes` is what
+/// stops the two drifting quietly. That test is why this is `pub`: the writer's
+/// crate is the one that can see both numbers.
+///
+/// Version 2 added `game_events` ([issue
+/// #71](https://github.com/wildware-uk/clipped/issues/71)). A version 1 file is
+/// still read, and simply has none.
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 /// One session, as its sidecar describes it.
 #[derive(Debug, Deserialize)]
@@ -63,8 +69,27 @@ pub(crate) struct SessionSidecar {
     pub(crate) ended_at: Option<String>,
     #[serde(default)]
     pub(crate) recordings: Vec<SidecarRecording>,
+    /// The clips saved out of this session's recordings.
+    ///
+    /// Defaulted rather than required, because a sidecar written before
+    /// [issue #38](https://github.com/wildware-uk/clipped/issues/38) has the
+    /// key but a hand-written one may not, and a session is worth more than the
+    /// list.
+    #[serde(default)]
+    pub(crate) clips: Vec<SidecarClip>,
     #[serde(default)]
     pub(crate) events: Vec<SidecarEvent>,
+    /// What plugins reported, each as the whole document the recorder wrote.
+    ///
+    /// Held as raw JSON rather than parsed into this struct's own shape,
+    /// because `clipped_events::schema::read_value` is what interprets one and
+    /// it keeps the fields this build has no name for. Parsing them into
+    /// borrowed fields here would drop exactly those.
+    ///
+    /// Defaulted: a version 1 sidecar has no such key, and every sidecar
+    /// written before something produces game events has an empty one.
+    #[serde(default)]
+    pub(crate) game_events: Vec<Value>,
 }
 
 /// Which game the session was of, and how sure the catalogue was.
@@ -111,12 +136,85 @@ pub(crate) struct SidecarRecording {
     pub(crate) end_reason: Option<String>,
     #[serde(default)]
     pub(crate) duration_seconds: Option<f64>,
+    /// Where this file starts on the session's timeline, in nanoseconds.
+    ///
+    /// With `duration_seconds` it is the span the file covers, which is what
+    /// places a game event in one recording rather than merely on a session
+    /// ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+    /// Defaulted: a sidecar written before the key existed has none, and a
+    /// recording that produced no frame never had one.
+    #[serde(default)]
+    pub(crate) starts_at_nanos: Option<i64>,
     #[serde(default)]
     pub(crate) frames_encoded: Option<u64>,
     #[serde(default)]
     pub(crate) width: Option<u32>,
     #[serde(default)]
     pub(crate) height: Option<u32>,
+}
+
+/// One shorter file the session produced: today, a save from a recording's
+/// replay buffer.
+///
+/// `source_start_seconds` and `source_end_seconds` are offsets into the
+/// recording `source_recording` names, on that recording's own timeline, which
+/// is what the `clips` table stores and what survives the files being moved
+/// (`crates/session/src/automatic/sidecar.rs`, `docs/sessions.md`).
+///
+/// Everything but the path is optional here, and deliberately. A clip whose
+/// provenance a hand-edited file left out is still a clip the user has, and
+/// filing it with the columns that *are* legible beats refusing to index a file
+/// that exists (AGENTS.md section 16).
+#[derive(Debug, Deserialize)]
+pub(crate) struct SidecarClip {
+    /// The file, as the recorder named it, when there is one.
+    ///
+    /// Absent for a clip nothing has exported yet: a generated highlight is a
+    /// range of a recording and costs no disk until somebody asks for a file
+    /// (SPEC.md sections 19, 20 and 44). A saved replay has one from the moment
+    /// it is written, because the packets it is made of were about to be
+    /// evicted from memory.
+    ///
+    /// Absent and empty are **not** the same thing. A clip whose `path` is
+    /// present and blank is a malformed record and is still refused.
+    #[serde(default)]
+    pub(crate) path: Option<String>,
+    #[serde(default)]
+    pub(crate) created_at: Option<String>,
+    /// Which recording of the session it was cut from.
+    #[serde(default)]
+    pub(crate) source_recording: Option<u32>,
+    #[serde(default)]
+    pub(crate) source_start_seconds: Option<f64>,
+    #[serde(default)]
+    pub(crate) source_end_seconds: Option<f64>,
+    #[serde(default)]
+    pub(crate) duration_seconds: Option<f64>,
+    /// What the user called it, when anything did. Nothing names a replay clip
+    /// today; the column exists for the clips M11 creates.
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    /// What the clip *is*, as `clipped_edit::EditDocument::write` wrote it.
+    ///
+    /// Carried as text and not interpreted here, exactly as it is stored
+    /// (`clips.edit`, migration `0004`). Absent for a saved replay, whose
+    /// window is `source_start_seconds` and `source_end_seconds`.
+    #[serde(default)]
+    pub(crate) edit: Option<String>,
+    /// Why the clip exists: `manual`, `replay-buffer` or `highlight`.
+    ///
+    /// Absent means `replay-buffer`, because that is the only kind a sidecar
+    /// written before this key existed could have described: a clip with no
+    /// file could not be recorded at all.
+    #[serde(default)]
+    pub(crate) origin: Option<String>,
+    /// The rest of the serialised origin.
+    ///
+    /// For a highlight, `{"kind":…,"at":…,"source":…}` -- what happened, when,
+    /// and which plugin said so. **This is what identifies a clip that has no
+    /// file**: see `ingest::write_clips`.
+    #[serde(default)]
+    pub(crate) origin_detail: Option<String>,
 }
 
 /// One thing that happened during the session.
@@ -263,10 +361,17 @@ mod tests {
 
     #[test]
     fn a_sidecar_from_a_newer_build_is_refused_rather_than_half_read() {
-        let text = MINIMAL.replace("\"schema_version\": 1", "\"schema_version\": 2");
+        // One past whatever this build supports, so that the test keeps
+        // testing a refusal rather than becoming a test of the current version
+        // the next time the schema grows a field.
+        let newer = SUPPORTED_SCHEMA_VERSION + 1;
+        let text = MINIMAL.replace(
+            "\"schema_version\": 1",
+            &format!("\"schema_version\": {newer}"),
+        );
 
         match parse(&text) {
-            Err(SidecarError::UnsupportedSchema { found }) => assert_eq!(found, 2),
+            Err(SidecarError::UnsupportedSchema { found }) => assert_eq!(found, newer),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -276,14 +381,22 @@ mod tests {
         // Within a version this build understands, an unknown field is a field
         // added by a writer that still claims compatibility. Refusing the file
         // would lose a whole session over a field nobody needed.
-        let text = MINIMAL.replace(
-            "\"events\": []",
-            "\"events\": [], \"weather\": \"raining\", \"clips\": []",
-        );
+        // `clips` used to be this test's second example, because it was a key
+        // the recorder wrote and this reader ignored. It is read now
+        // ([issue #38](https://github.com/wildware-uk/clipped/issues/38)), so a
+        // key that is still nobody's is used instead — and `bookmarks`, which
+        // the recorder writes and this build has no column for, stands in for
+        // the case that mattered: a field the *writer* has and the reader does
+        // not.
+        let text = MINIMAL.replace("\"events\": []", "\"events\": [], \"weather\": \"raining\"");
 
         let sidecar = parse(&text).expect("an unknown field is not fatal");
 
         assert_eq!(sidecar.session_id, "counter-strike-2-20260811-143205");
+        assert!(
+            sidecar.clips.is_empty(),
+            "a session that saved no clips reads as one that saved none"
+        );
     }
 
     #[test]

@@ -20,6 +20,15 @@ path = "src/main.rs"
 name = "wgc_fullscreen_dx11"
 path = "../../tests/capture/wgc_fullscreen_dx11.rs"
 
+# The screenshot half of the same subject: photograph a display the application
+# has taken and read the pattern back out of the file. Issue #67's first
+# acceptance criterion names fullscreen and `tests/capture/screenshot.rs` could
+# not reach it, because that test belongs to the package that owns
+# `video-pattern` (issue #452).
+[[test]]
+name = "screenshot_fullscreen"
+path = "../../tests/capture/screenshot_fullscreen.rs"
+
 [dependencies]
 clap.workspace = true
 
@@ -34,6 +43,15 @@ clipped-video-pattern.workspace = true
 # the display is the shape it was afterwards, which means knowing how big it is.
 clipped-windows.workspace = true
 clipped-capture.workspace = true
+
+# `screenshot_fullscreen.rs` takes a screenshot the way the recorder does —
+# `clipped_session::screenshot::capture_still` opens the capture and `write`
+# names, encodes and writes the file — so that what it exercises is the
+# product's own path rather than a second one written here (AGENTS.md section
+# 55). Test-only, and `clipped-session` is layer 4 while this package is layer
+# 6, so it follows the dependency direction
+# `tests/integration/tests/workspace_layering.rs` asserts.
+clipped-session.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D11",

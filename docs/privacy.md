@@ -210,7 +210,7 @@ bundled *plugins* do, and they are the three rows below.
 | --- | --- | --- | --- | --- |
 | League of Legends highlight plugin | Loopback | `127.0.0.1:2999`, connect only | Off | Enabling the plugin, whose declaration is this row in the words `plugin.json` says it in |
 | Counter-Strike 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3212`. Receives Game State Integration payloads from Counter-Strike 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin does nothing until its configuration file is installed, and does not install one itself. | Running `clipped-cs2-plugin install <game folder>` by hand, which writes the one file that makes the game post at all. Enabling a plugin having read its declaration is the intended second step and there is no screen for it yet ([issue #281](https://github.com/wildware-uk/clipped/issues/281)), so today the install command is the whole of it. `clipped-cs2-plugin uninstall`, or deleting that file, ends it. |
-| Dota 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3213`. Receives Game State Integration payloads from Dota 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin is a separate executable, it does nothing unless something runs it, and the recorder starts only plugins the user has enabled — which nothing records yet ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), so it starts none. | Running the plugin, which writes the one configuration file that makes the game post at all — and says so, because Dota reads that directory at start-up. Enabling a plugin having read its declaration is the intended second step and there is no screen for it yet ([issue #281](https://github.com/wildware-uk/clipped/issues/281)), nor anything that records which plugins are enabled ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), so today running it by hand is the whole of it. Deleting `gamestate_integration_clipped.cfg` from Dota's own configuration directory ends it. |
+| Dota 2 highlight plugin | Loopback, **listen** | Binds `127.0.0.1:3213`. Receives Game State Integration payloads from Dota 2 on the same machine. Sends nothing: it answers each POST with a status line and no body. | Off. The plugin is a separate executable, it does nothing unless something runs it, and the recorder starts only plugins the settings file records you as having enabled ([issue #282](https://github.com/wildware-uk/clipped/issues/282)) — and there is no screen that writes that record yet ([issue #281](https://github.com/wildware-uk/clipped/issues/281)). | Running the plugin, which writes the one configuration file that makes the game post at all — and says so, because Dota reads that directory at start-up. Enabling a plugin having read its declaration is the intended second step and there is no screen for it yet ([issue #281](https://github.com/wildware-uk/clipped/issues/281)), nor anything that records which plugins are enabled ([issue #282](https://github.com/wildware-uk/clipped/issues/282)), so today running it by hand is the whole of it. Deleting `gamestate_integration_clipped.cfg` from Dota's own configuration directory ends it. |
 
 Each row is spelled out below, because a register entry that has to be decoded
 is not a disclosure ([docs/plugin-api.md](plugin-api.md) is the design).
@@ -253,11 +253,13 @@ than the finished feature: the plugin turns those snapshots into events on its
 own standard output, and **nothing keeps them yet**. A recording now starts the
 plugins it is given, drains what they print and places each event on its own
 timeline ([issue #338](https://github.com/wildware-uk/clipped/issues/338)) — and
-it is given none, because starting a plugin needs the consent the user recorded
-against its declaration and nothing records that yet
-([issue #282](https://github.com/wildware-uk/clipped/issues/282)). So this
-plugin still runs only when somebody runs it by hand, and what it prints then
-reaches nothing at all. Writing a drained event to the local database against
+it is given a plugin only when the settings file records that you enabled it,
+against the declaration you agreed to
+([issue #282](https://github.com/wildware-uk/clipped/issues/282)). There is
+still no screen that shows you a declaration and writes that record
+([issue #281](https://github.com/wildware-uk/clipped/issues/281)), so in a
+build nobody has hand-edited a settings file for, this plugin runs only when
+somebody runs it by hand. Writing a drained event to the local database against
 the recording it belongs to is
 [issue #71](https://github.com/wildware-uk/clipped/issues/71); when both are
 built the destination is that database, and this paragraph should say so in the
@@ -320,12 +322,18 @@ Counter-Strike 2
 consent below are implemented as types in `crates/plugins` and are covered by
 tests. **Mediation is not**, and neither is the plugin manager that would show
 you a declaration before you agreed to it
-([issue #281](https://github.com/wildware-uk/clipped/issues/281)) nor anything
-that records which plugins you enabled
-([issue #282](https://github.com/wildware-uk/clipped/issues/282)). A recording
-does now start the plugins it is given, poll them and drain their events
-([issue #338](https://github.com/wildware-uk/clipped/issues/338)) — and, for
-want of the two above, it is given none. That ordering is deliberate rather
+([issue #281](https://github.com/wildware-uk/clipped/issues/281)). What *is*
+recorded is which plugins you enabled and what you agreed to when you did
+([issue #282](https://github.com/wildware-uk/clipped/issues/282)): the settings
+file's `plugins` section, in legible text, so you can read your own consent
+without running anything. A recording starts the plugins that section enables,
+polls them and drains their events
+([issue #338](https://github.com/wildware-uk/clipped/issues/338)) — and starts
+none that it does not name, including any whose declaration has changed since
+you agreed to it.
+
+For want of #281 there is no screen that writes that section, so a build nobody
+has hand-edited a settings file for still starts no plugin. That ordering is deliberate rather
 than accidental: consent is what produces a startable plugin, so a recorder
 that started one because it was on disk would need the rule on this page to be
 untrue first. The state of

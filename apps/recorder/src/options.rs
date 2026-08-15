@@ -188,6 +188,227 @@ fn parse_dimension(side: &'static str, value: &str) -> Result<u32, ResolutionPar
     Ok(dimension)
 }
 
+/// How much video a replay buffer keeps, in whole seconds.
+///
+/// A newtype for the reason [`Framerate`] is one: the bounds are checked where
+/// the value enters the program, so that `replay --duration 4h` is a usage
+/// error printed before a game is launched rather than a refusal discovered
+/// once capture has started (issue #38's third acceptance criterion).
+///
+/// **There is deliberately no default here.** How much a replay buffer keeps is
+/// a *setting* — `replay_window_seconds`, resolved through the same fold as
+/// every other one, defaulting to five minutes
+/// (`clipped_session::config::DEFAULT_REPLAY_WINDOW`) — and a second default in
+/// this file would be a second answer to a question the configuration API
+/// already answers (AGENTS.md sections 30 and 55). `--duration` overrides it
+/// for one run.
+///
+/// The bounds are `clipped-replay`'s own — 30 seconds to 30 minutes
+/// ([`MINIMUM_WINDOW`](clipped_replay::MINIMUM_WINDOW),
+/// [`MAXIMUM_WINDOW`](clipped_replay::MAXIMUM_WINDOW), SPEC.md section 16) —
+/// read from that crate rather than restated here, so that a buffer which
+/// learns to hold an hour does not have to be told twice (AGENTS.md
+/// section 55).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReplayWindow(u32);
+
+impl ReplayWindow {
+    /// The shortest window a buffer may be configured with, in seconds.
+    #[must_use]
+    pub fn minimum_seconds() -> u32 {
+        seconds_of(clipped_replay::MINIMUM_WINDOW)
+    }
+
+    /// The longest window a buffer may be configured with, in seconds.
+    #[must_use]
+    pub fn maximum_seconds() -> u32 {
+        seconds_of(clipped_replay::MAXIMUM_WINDOW)
+    }
+
+    /// How many seconds it keeps.
+    #[must_use]
+    pub const fn seconds(self) -> u32 {
+        self.0
+    }
+
+    /// The same, as a duration.
+    #[must_use]
+    pub const fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.0 as u64)
+    }
+}
+
+impl fmt::Display for ReplayWindow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// A whole number of seconds, saturating rather than wrapping.
+///
+/// The bounds it converts are constants of a few hundred seconds, so the
+/// saturation is unreachable; it is here because a silent wrap would turn a
+/// thirty-minute maximum into a very small one.
+fn seconds_of(duration: std::time::Duration) -> u32 {
+    u32::try_from(duration.as_secs()).unwrap_or(u32::MAX)
+}
+
+/// Why a `--duration` value was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayWindowParseError {
+    /// The value was not a whole number of seconds.
+    NotANumber {
+        /// What was supplied.
+        value: String,
+    },
+    /// The value was outside what a replay buffer supports.
+    OutOfRange {
+        /// The value that was out of range.
+        value: u32,
+    },
+}
+
+impl fmt::Display for ReplayWindowParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotANumber { value } => write!(
+                formatter,
+                "`{value}` is not a replay duration: expected a whole number of seconds, such \
+                 as 60"
+            ),
+            Self::OutOfRange { value } => write!(
+                formatter,
+                "a replay buffer of {value} seconds is outside the supported range {}-{} \
+                 seconds",
+                ReplayWindow::minimum_seconds(),
+                ReplayWindow::maximum_seconds()
+            ),
+        }
+    }
+}
+
+impl Error for ReplayWindowParseError {}
+
+impl FromStr for ReplayWindow {
+    type Err = ReplayWindowParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        let seconds: u32 = value
+            .parse()
+            .map_err(|_| ReplayWindowParseError::NotANumber {
+                value: value.to_owned(),
+            })?;
+
+        if !(ReplayWindow::minimum_seconds()..=ReplayWindow::maximum_seconds()).contains(&seconds) {
+            return Err(ReplayWindowParseError::OutOfRange { value: seconds });
+        }
+        Ok(Self(seconds))
+    }
+}
+
+/// How much of the buffer one save keeps, in whole seconds.
+///
+/// Separate from [`ReplayWindow`] because the two are bounded differently and a
+/// person gets them wrong in different ways. A *window* has a floor: a buffer
+/// shorter than thirty seconds is not worth the machinery. A *save* has none —
+/// SPEC.md section 15's shortest offered period is fifteen seconds, and "the
+/// last five seconds" is a perfectly sensible thing to ask a sixty-second
+/// buffer for.
+///
+/// What it may not be is longer than the window it is taken from, and that is
+/// checked where both values are known ([`crate::config::ReplayConfig`]) rather
+/// than here, because a value's own parser cannot see the other argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReplayLength(u32);
+
+impl ReplayLength {
+    /// The shortest save accepted.
+    ///
+    /// One second. Below it there is no clip: a replay is bought at keyframe
+    /// granularity, which is two seconds by default, so anything shorter is
+    /// rounded up to one segment anyway (`docs/replay-buffer.md`).
+    pub const MINIMUM_SECONDS: u32 = 1;
+
+    /// How many seconds it keeps.
+    #[must_use]
+    pub const fn seconds(self) -> u32 {
+        self.0
+    }
+
+    /// The same, as a duration.
+    #[must_use]
+    pub const fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.0 as u64)
+    }
+}
+
+impl From<ReplayWindow> for ReplayLength {
+    /// The whole window, which is what a save asks for when nothing said
+    /// otherwise.
+    fn from(window: ReplayWindow) -> Self {
+        Self(window.seconds())
+    }
+}
+
+impl fmt::Display for ReplayLength {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// Why a `--save-duration` value was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayLengthParseError {
+    /// The value was not a whole number of seconds.
+    NotANumber {
+        /// What was supplied.
+        value: String,
+    },
+    /// The value was zero, or longer than any buffer may be.
+    OutOfRange {
+        /// The value that was out of range.
+        value: u32,
+    },
+}
+
+impl fmt::Display for ReplayLengthParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotANumber { value } => write!(
+                formatter,
+                "`{value}` is not a save duration: expected a whole number of seconds, such as 30"
+            ),
+            Self::OutOfRange { value } => write!(
+                formatter,
+                "a save of {value} seconds is outside the supported range {}-{} seconds",
+                ReplayLength::MINIMUM_SECONDS,
+                ReplayWindow::maximum_seconds()
+            ),
+        }
+    }
+}
+
+impl Error for ReplayLengthParseError {}
+
+impl FromStr for ReplayLength {
+    type Err = ReplayLengthParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        let seconds: u32 = value
+            .parse()
+            .map_err(|_| ReplayLengthParseError::NotANumber {
+                value: value.to_owned(),
+            })?;
+
+        if !(Self::MINIMUM_SECONDS..=ReplayWindow::maximum_seconds()).contains(&seconds) {
+            return Err(ReplayLengthParseError::OutOfRange { value: seconds });
+        }
+        Ok(Self(seconds))
+    }
+}
+
 /// How many frames a second to encode.
 ///
 /// A newtype rather than a `u32` so that the bounds are checked once, where the

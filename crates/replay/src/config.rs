@@ -97,6 +97,11 @@ pub struct ReplayConfig {
     window: Duration,
     segment: Duration,
     bitrate: BitRate,
+    /// What the recording's audio costs the buffer per second, if it has any.
+    ///
+    /// Zero for a recording with no audio, which is what
+    /// [`ReplayConfig::new`] gives until a caller says otherwise.
+    audio_bytes_per_second: u64,
     ceiling: Option<u64>,
 }
 
@@ -124,6 +129,7 @@ impl ReplayConfig {
             window,
             segment: DEFAULT_SEGMENT,
             bitrate,
+            audio_bytes_per_second: 0,
             ceiling: None,
         })
     }
@@ -198,7 +204,9 @@ impl ReplayConfig {
     /// the extra being however much of the oldest segment is not yet needed.
     #[must_use]
     pub fn expected_bytes(&self) -> u64 {
-        bytes_for(self.bitrate, self.window.saturating_add(self.segment))
+        let held = self.window.saturating_add(self.segment);
+        bytes_for(self.bitrate, held)
+            .saturating_add(audio_bytes_for(self.audio_bytes_per_second, held))
     }
 
     /// The most memory the buffer's own segments may occupy, in bytes.
@@ -216,6 +224,32 @@ impl ReplayConfig {
                 .saturating_mul(CEILING_HEADROOM_PERCENT)
                 / 100
         })
+    }
+
+    /// The same buffer, told what its recording's audio costs per second.
+    ///
+    /// **Without this the audio is stored and not budgeted for**, and the
+    /// consequence is not an overrun but a quietly shorter replay: audio and
+    /// video share one ceiling, so every byte of audio held evicts a byte of
+    /// video, and the window silently stops being the window that was asked
+    /// for. Measured on a two-track 48 kHz stereo recording, a clip asked for
+    /// five seconds came back holding three
+    /// ([issue #40](https://github.com/wildware-uk/clipped/issues/40)).
+    ///
+    /// The rate is the caller's because only the recording knows it: it is the
+    /// sampling rate, channel count and track count the layout declares, at the
+    /// four bytes a sample the buffer holds them in
+    /// (`clipped_replay::SegmentAudio`).
+    #[must_use]
+    pub const fn with_audio_bytes_per_second(mut self, bytes: u64) -> Self {
+        self.audio_bytes_per_second = bytes;
+        self
+    }
+
+    /// What the recording's audio costs the buffer per second.
+    #[must_use]
+    pub const fn audio_bytes_per_second(&self) -> u64 {
+        self.audio_bytes_per_second
     }
 
     /// What one segment is expected to hold, in bytes.
@@ -246,6 +280,16 @@ impl fmt::Display for ReplayConfig {
 }
 
 /// How many bytes `bitrate` produces in `duration`.
+/// What audio at `bytes_per_second` occupies over `duration`.
+///
+/// Nanoseconds for the same reason [`bytes_for`] uses them: a window is not
+/// always a whole number of seconds, and rounding one down is how a buffer ends
+/// up a segment short of what it promised.
+fn audio_bytes_for(bytes_per_second: u64, duration: Duration) -> u64 {
+    let total = u128::from(bytes_per_second) * duration.as_nanos() / 1_000_000_000;
+    u64::try_from(total).unwrap_or(u64::MAX)
+}
+
 fn bytes_for(bitrate: BitRate, duration: Duration) -> u64 {
     let bits = u64::from(bitrate.as_bits_per_second());
     // Nanoseconds rather than seconds so that a fractional duration is not

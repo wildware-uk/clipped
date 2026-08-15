@@ -380,6 +380,11 @@ mod tests {
         // this module's own documentation must not become a busy-wait that
         // burns a processor for the rest of the session: a watcher that has
         // stopped is worse than useless if it also costs a core.
+        //
+        // The lock is the suite's, not this test's: starting a watcher takes
+        // two of the machine's WMI notification queries, and running two of
+        // these beside each other asked for more than it had (issue #466).
+        let _held = super::super::windows::one_subscription_at_a_time();
         let mut watcher = exhausted_watcher();
 
         let window = Duration::from_millis(800);
@@ -403,6 +408,7 @@ mod tests {
         // The two answers call for opposite responses — keep waiting, or tell
         // the user detection has stopped — so they must not be spelled the same
         // way. Before this distinction existed both were `None`.
+        let _held = super::super::windows::one_subscription_at_a_time();
         let mut live =
             ProcessWatcher::start(config()).expect("a watcher can be started on this machine");
 

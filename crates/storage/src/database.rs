@@ -317,6 +317,8 @@ fn claim(connection: &Connection, path: &Path, writable: bool) -> Result<(), Sto
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::params;
+
     use super::*;
     use crate::test_support::{scratch_directory, table_names};
 
@@ -596,6 +598,288 @@ mod tests {
         assert!(
             mistyped.is_err(),
             "a STRICT table accepted text in an INTEGER column"
+        );
+    }
+
+    /// A session with one recording, for the game-event tests below.
+    ///
+    /// Returns the recording's id.
+    fn a_session_with_a_recording(database: &Database) -> i64 {
+        let connection = database.connection();
+        connection
+            .execute_batch(
+                "INSERT INTO games (game_id, name, first_seen_at) \
+                 VALUES ('counter-strike-2', 'Counter-Strike 2', '2026-08-11T14:32:05+01:00'); \
+                 INSERT INTO sessions (session_id, game_id, started_at) \
+                 VALUES ('counter-strike-2-20260811-143205', 'counter-strike-2', \
+                         '2026-08-11T14:32:05+01:00'); \
+                 INSERT INTO recordings (session_id, session_index, path, started_at) \
+                 VALUES ('counter-strike-2-20260811-143205', 1, 'D:\\clips\\a.mkv', \
+                         '2026-08-11T14:32:09+01:00');",
+            )
+            .expect("the session and its recording can be written");
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn a_game_event_belongs_to_a_recording_or_to_the_session_alone() {
+        // Both shapes, because issue #71's second acceptance criterion is the
+        // one with no file: an event heard before the recorder started, in the
+        // gap between two segments, or during a replay-buffer-only session that
+        // never wrote anything. A schema that forced a recording could not say
+        // it happened at all.
+        let directory = scratch_directory("game-events-shapes");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events \
+                     (session_id, recording_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', ?1, 4200000000, 'kill', 'cs2', \
+                         '{\"schema\":1,\"kind\":\"kill\"}')",
+                params![recording],
+            )
+            .expect("an event in a recording can be written");
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events \
+                     (session_id, recording_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', NULL, -1500000000, 'match-started', \
+                         'cs2', '{\"schema\":1,\"kind\":\"match-started\"}')",
+                [],
+            )
+            .expect("an event belonging to no file can be written");
+
+        // Negative nanoseconds survive as negative: an `EventTime` is signed
+        // because a moment can precede the timeline's origin, and a column that
+        // silently made that positive would move the event.
+        let earliest: i64 = database
+            .connection()
+            .query_row("SELECT MIN(at_nanos) FROM game_events", [], |row| {
+                row.get(0)
+            })
+            .expect("the events can be read");
+        assert_eq!(earliest, -1_500_000_000, "a moment before the origin moved");
+    }
+
+    #[test]
+    fn deleting_a_recording_keeps_what_happened_during_it() {
+        // AGENTS.md section 56. The events are the session's, not the file's:
+        // deleting a recording must not silently take the record of the match
+        // that was played. They stop claiming a position in a file that has
+        // gone, and that is all.
+        let directory = scratch_directory("game-events-recording-deleted");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events \
+                     (session_id, recording_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', ?1, 4200000000, 'kill', 'cs2', '{}')",
+                params![recording],
+            )
+            .expect("the event can be written");
+
+        database
+            .connection()
+            .execute(
+                "DELETE FROM recordings WHERE recording_id = ?1",
+                params![recording],
+            )
+            .expect("the recording can be deleted");
+
+        let (kept, orphaned): (i64, i64) = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*), COUNT(recording_id) FROM game_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the events can be counted");
+        assert_eq!(kept, 1, "deleting a recording took the event with it");
+        assert_eq!(orphaned, 0, "the event still points at a deleted recording");
+    }
+
+    #[test]
+    fn deleting_a_session_takes_its_events_but_an_open_vocabulary_is_accepted() {
+        let directory = scratch_directory("game-events-session-deleted");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        a_session_with_a_recording(&database);
+
+        // A kind this build has never met is stored, not refused. The whole
+        // argument for `document` being the authority is that an event survives
+        // a build that does not understand it, and a vocabulary CHECK here
+        // would refuse exactly those events.
+        database
+            .connection()
+            .execute(
+                "INSERT INTO game_events (session_id, at_nanos, kind, source, document) \
+                 VALUES ('counter-strike-2-20260811-143205', 1, 'acme.tournament/ace', \
+                         'acme-plugin', '{\"schema\":9}')",
+                [],
+            )
+            .expect("a kind this build does not know is still stored");
+
+        let empty = database.connection().execute(
+            "INSERT INTO game_events (session_id, at_nanos, kind, source, document) \
+             VALUES ('counter-strike-2-20260811-143205', 1, '', 'cs2', '{}')",
+            [],
+        );
+        assert!(empty.is_err(), "an event with no kind at all was accepted");
+
+        database
+            .connection()
+            .execute(
+                "DELETE FROM sessions WHERE session_id = 'counter-strike-2-20260811-143205'",
+                [],
+            )
+            .expect("the session can be deleted");
+
+        let left: i64 = database
+            .connection()
+            .query_row("SELECT COUNT(*) FROM game_events", [], |row| row.get(0))
+            .expect("the events can be counted");
+        assert_eq!(left, 0, "a deleted session left its events behind");
+    }
+
+    #[test]
+    fn a_clip_can_exist_without_a_file_and_many_can_at_once() {
+        // Issue #269. A virtual clip is a range of a recording with no file
+        // until somebody exports one, and it is the normal case rather than the
+        // exception -- a session producing twenty interesting moments should
+        // cost disk for none of them.
+        //
+        // The second half is the one worth asserting: `path` is still UNIQUE,
+        // and that only works because SQLite treats NULLs as distinct. A
+        // constraint that counted two missing paths as a collision would allow
+        // exactly one virtual clip in the whole library.
+        let directory = scratch_directory("clips-without-files");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+
+        let mut insert = String::new();
+        for index in 0..3 {
+            insert.push_str(&format!(
+                "INSERT INTO clips (session_id, source_recording_id, created_at, edit, origin,                  origin_detail) VALUES ('counter-strike-2-20260811-143205', {recording},                  '2026-08-11T15:0{index}:00+01:00', '{{\"version\":1}}', 'highlight',                  '{{\"kind\":\"kill\"}}');"
+            ));
+        }
+        database
+            .connection()
+            .execute_batch(&insert)
+            .expect("three clips with no file can be written");
+
+        let (count, without_a_file): (i64, i64) = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*), COUNT(*) - COUNT(path) FROM clips",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the clips can be counted");
+        assert_eq!(count, 3, "a second clip with no file was refused");
+        assert_eq!(without_a_file, 3);
+
+        // A file is still unique when there is one.
+        database
+            .connection()
+            .execute(
+                "INSERT INTO clips (created_at, path, origin) \
+                 VALUES ('2026-08-11T15:10:00+01:00', 'exported.mkv', 'manual')",
+                [],
+            )
+            .expect("an exported clip can be written");
+        let duplicate = database.connection().execute(
+            "INSERT INTO clips (created_at, path, origin) \
+             VALUES ('2026-08-11T15:11:00+01:00', 'exported.mkv', 'manual')",
+            [],
+        );
+        assert!(
+            duplicate.is_err(),
+            "two clips claimed the same file, so an export could overwrite one"
+        );
+    }
+
+    #[test]
+    fn a_clip_of_an_origin_this_build_does_not_know_is_refused() {
+        // Closed on purpose: the library filters on this, and "what did Clipped
+        // generate" is a different question from "what did I save". Free text
+        // would make that a guess.
+        let directory = scratch_directory("clips-origin");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+
+        let invented = database.connection().execute(
+            "INSERT INTO clips (created_at, origin) VALUES ('2026-08-11T15:00:00+01:00', 'vibes')",
+            [],
+        );
+
+        assert!(
+            invented.is_err(),
+            "an origin outside the vocabulary was accepted"
+        );
+        for known in ["manual", "replay-buffer", "highlight"] {
+            database
+                .connection()
+                .execute(
+                    "INSERT INTO clips (created_at, origin)                      VALUES ('2026-08-11T15:00:00+01:00', ?1)",
+                    params![known],
+                )
+                .unwrap_or_else(|error| panic!("{known} is in the vocabulary: {error}"));
+        }
+    }
+
+    #[test]
+    fn rebuilding_the_clips_table_keeps_the_saved_replays_that_were_in_it() {
+        // The migration drops and recreates `clips`. What must survive is a row
+        // somebody's library already had -- a saved replay, which is the only
+        // kind that could have been stored -- with its file, its window and its
+        // link to the recording it came from intact, and filed as the thing it
+        // actually is rather than as a default.
+        //
+        // Written through a database at the schema this build ships, which is
+        // the state a real library reaches: the migration has already run by the
+        // time `Database::open` returns.
+        let directory = scratch_directory("clips-rebuild");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+        database
+            .connection()
+            .execute(
+                "INSERT INTO clips (session_id, source_recording_id, path, created_at, \
+                 source_start_seconds, source_end_seconds, duration_seconds) \
+                 VALUES ('counter-strike-2-20260811-143205', ?1, 'saved-replay.mkv', \
+                         '2026-08-11T15:00:00+01:00', 12.5, 42.5, 30.0)",
+                params![recording],
+            )
+            .expect("a saved replay can be written");
+
+        let (path, start, end, origin, source): (String, f64, f64, String, i64) = database
+            .connection()
+            .query_row(
+                "SELECT path, source_start_seconds, source_end_seconds, origin,                  source_recording_id FROM clips",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("the clip can be read");
+
+        assert_eq!(path, "saved-replay.mkv");
+        assert!((start - 12.5).abs() < f64::EPSILON);
+        assert!((end - 42.5).abs() < f64::EPSILON);
+        assert_eq!(source, recording);
+        assert_eq!(
+            origin, "replay-buffer",
+            "a clip with a file was not filed as the saved replay it is"
         );
     }
 

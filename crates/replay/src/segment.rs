@@ -31,9 +31,24 @@
 use core::fmt;
 use core::time::Duration;
 
+use std::io::{self, Read, Write};
+
 use clipped_encoder::EncodedPacket;
+use clipped_muxer::TrackId;
 
 use crate::range::TimeRange;
+
+/// What a spilled segment file begins with, so that a file which is not one is
+/// refused rather than read as nonsense.
+const MAGIC: u32 = 0x434c_5253;
+
+/// The layout version, bumped when the fields below change.
+///
+/// A file written by a different version is refused rather than reinterpreted:
+/// spill files do not outlive the process that wrote them
+/// ([issue #36](https://github.com/wildware-uk/clipped/issues/36)), so there is
+/// nothing to migrate and everything to lose by guessing.
+const VERSION: u16 = 1;
 
 /// Which segment this is, counted from the first one the buffer opened.
 ///
@@ -44,6 +59,13 @@ use crate::range::TimeRange;
 pub struct SegmentId(u64);
 
 impl SegmentId {
+    /// An identifier a test can name, for the modules that store and reload
+    /// segments without a buffer to get one from.
+    #[cfg(test)]
+    pub(crate) const fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+
     /// The number behind the identifier, for logs and reports.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -107,6 +129,50 @@ impl<'segment> SegmentPacket<'segment> {
     }
 }
 
+/// Where one block of captured audio sits in its segment.
+#[derive(Debug, Clone, Copy)]
+struct BufferedAudio {
+    offset: usize,
+    length: usize,
+    track: TrackId,
+    at: Duration,
+}
+
+/// One block of captured audio, read back out of a segment.
+///
+/// Interleaved `f32` samples, which is what the capture produced and what
+/// [`clipped_muxer::AudioTrackWriter`] takes. They are held in that form rather
+/// than converted to PCM on the way in so that a clip and the recording it was
+/// taken from go through **one** conversion, in one place: a buffer that
+/// encoded its own samples would be a second implementation of the thing the
+/// muxer already does (AGENTS.md section 55).
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentAudio<'segment> {
+    samples: &'segment [f32],
+    track: TrackId,
+    at: Duration,
+}
+
+impl<'segment> SegmentAudio<'segment> {
+    /// The interleaved samples.
+    #[must_use]
+    pub const fn samples(&self) -> &'segment [f32] {
+        self.samples
+    }
+
+    /// Which audio track they belong to.
+    #[must_use]
+    pub const fn track(&self) -> TrackId {
+        self.track
+    }
+
+    /// When the first frame in the block was captured, in media time.
+    #[must_use]
+    pub const fn at(&self) -> Duration {
+        self.at
+    }
+}
+
 /// A sealed run of packets beginning on a keyframe.
 ///
 /// Immutable once built. Everything that reads one — a save, a report, a test —
@@ -117,6 +183,8 @@ pub struct Segment {
     id: SegmentId,
     bytes: Vec<u8>,
     packets: Vec<BufferedPacket>,
+    samples: Vec<f32>,
+    audio: Vec<BufferedAudio>,
     start: Duration,
     last_presentation: Duration,
 }
@@ -180,7 +248,162 @@ impl Segment {
     pub fn resident_bytes(&self) -> usize {
         self.bytes.capacity()
             + self.packets.capacity() * size_of::<BufferedPacket>()
+            + self.samples.capacity() * size_of::<f32>()
+            + self.audio.capacity() * size_of::<BufferedAudio>()
             + size_of::<Self>()
+    }
+
+    /// Writes this segment where it can be read back by [`read_from`](Self::read_from).
+    ///
+    /// The format is this crate's own and deliberately not a general one: it is
+    /// read only by the process that wrote it, within one run
+    /// ([issue #36](https://github.com/wildware-uk/clipped/issues/36)), so it
+    /// carries no compatibility promise and nothing that would need one. Fixed
+    /// little-endian fields and then the two payloads, so reading is one
+    /// allocation each rather than one per packet.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the writer reports, which for a spill file means the disk
+    /// filled or the drive went away.
+    pub(crate) fn write_to(&self, into: &mut impl Write) -> io::Result<()> {
+        into.write_all(&MAGIC.to_le_bytes())?;
+        into.write_all(&VERSION.to_le_bytes())?;
+        put_u64(into, nanos(self.start))?;
+        put_u64(into, nanos(self.last_presentation))?;
+        put_u64(into, self.packets.len() as u64)?;
+        put_u64(into, self.audio.len() as u64)?;
+        put_u64(into, self.bytes.len() as u64)?;
+        put_u64(into, self.samples.len() as u64)?;
+
+        for packet in &self.packets {
+            put_u64(into, packet.offset as u64)?;
+            put_u64(into, packet.length as u64)?;
+            put_u64(into, nanos(packet.presentation))?;
+            put_u64(into, nanos(packet.decode))?;
+            into.write_all(&[u8::from(packet.keyframe)])?;
+        }
+        for block in &self.audio {
+            put_u64(into, block.offset as u64)?;
+            put_u64(into, block.length as u64)?;
+            put_u64(into, track_number(block.track))?;
+            put_u64(into, nanos(block.at))?;
+        }
+
+        into.write_all(&self.bytes)?;
+        for sample in &self.samples {
+            into.write_all(&sample.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Reads back what [`write_to`](Self::write_to) wrote.
+    ///
+    /// The identifier is supplied rather than stored, because it belongs to the
+    /// buffer that is putting the segment back rather than to the file.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidData`] for a file that is not one of these or is
+    /// truncated, and whatever the reader reports otherwise.
+    pub(crate) fn read_from(id: SegmentId, from: &mut impl Read) -> io::Result<Self> {
+        let mut magic = [0_u8; 4];
+        from.read_exact(&mut magic)?;
+        let mut version = [0_u8; 2];
+        from.read_exact(&mut version)?;
+        if u32::from_le_bytes(magic) != MAGIC || u16::from_le_bytes(version) != VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "this is not a replay segment written by this build",
+            ));
+        }
+
+        let start = Duration::from_nanos(get_u64(from)?);
+        let last_presentation = Duration::from_nanos(get_u64(from)?);
+        let packet_count = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+        let audio_count = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+        let byte_count = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+        let sample_count = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+
+        let mut packets = Vec::with_capacity(packet_count.min(1 << 20));
+        for _ in 0..packet_count {
+            let offset = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+            let length = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+            let presentation = Duration::from_nanos(get_u64(from)?);
+            let decode = Duration::from_nanos(get_u64(from)?);
+            let mut keyframe = [0_u8; 1];
+            from.read_exact(&mut keyframe)?;
+            packets.push(BufferedPacket {
+                offset,
+                length,
+                presentation,
+                decode,
+                keyframe: keyframe[0] != 0,
+            });
+        }
+
+        let mut audio = Vec::with_capacity(audio_count.min(1 << 20));
+        for _ in 0..audio_count {
+            let offset = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+            let length = usize::try_from(get_u64(from)?).unwrap_or(usize::MAX);
+            let track = track_of(get_u64(from)?);
+            let at = Duration::from_nanos(get_u64(from)?);
+            audio.push(BufferedAudio {
+                offset,
+                length,
+                track,
+                at,
+            });
+        }
+
+        let mut bytes = vec![0_u8; byte_count];
+        from.read_exact(&mut bytes)?;
+        let mut samples = vec![0_f32; sample_count];
+        for sample in &mut samples {
+            let mut raw = [0_u8; 4];
+            from.read_exact(&mut raw)?;
+            *sample = f32::from_le_bytes(raw);
+        }
+
+        // A file whose index points outside its own payload would panic on the
+        // first read, a long way from here. Refusing it now names the fault.
+        let sound = packets
+            .iter()
+            .all(|packet| packet.offset.saturating_add(packet.length) <= bytes.len())
+            && audio
+                .iter()
+                .all(|block| block.offset.saturating_add(block.length) <= samples.len());
+        if !sound {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a spilled segment's index points outside the bytes it was stored with",
+            ));
+        }
+
+        Ok(Self {
+            id,
+            bytes,
+            packets,
+            samples,
+            audio,
+            start,
+            last_presentation,
+        })
+    }
+
+    /// Every block of captured audio in it, in the order it arrived.
+    ///
+    /// Audio is appended to whichever segment is open when it arrives, and it
+    /// arrives on its own thread, so a block's timestamp is **not** guaranteed
+    /// to lie inside its segment's span. Nothing here tries to correct that:
+    /// selection is by timestamp (`crate::save`), which is the only thing that
+    /// is true of audio captured beside a video stream it was never locked to.
+    pub fn audio(&self) -> impl ExactSizeIterator<Item = SegmentAudio<'_>> + '_ {
+        self.audio.iter().map(|block| SegmentAudio {
+            samples: &self.samples[block.offset..block.offset + block.length],
+            track: block.track,
+            at: block.at,
+        })
     }
 
     /// Every packet, in the order the encoder produced them, which is decode
@@ -192,6 +415,40 @@ impl Segment {
             decode: packet.decode,
             keyframe: packet.keyframe,
         })
+    }
+}
+
+/// Writes a `u64` little-endian.
+fn put_u64(into: &mut impl Write, value: u64) -> io::Result<()> {
+    into.write_all(&value.to_le_bytes())
+}
+
+/// Reads a `u64` little-endian.
+fn get_u64(from: &mut impl Read) -> io::Result<u64> {
+    let mut bytes = [0_u8; 8];
+    from.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// A duration as nanoseconds, saturating rather than wrapping.
+fn nanos(value: Duration) -> u64 {
+    u64::try_from(value.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// A track as one number: zero is the video track, and an audio track is its
+/// index plus one.
+fn track_number(track: TrackId) -> u64 {
+    match track {
+        TrackId::Video => 0,
+        TrackId::Audio(index) => u64::from(index) + 1,
+    }
+}
+
+/// The inverse of [`track_number`].
+fn track_of(number: u64) -> TrackId {
+    match u16::try_from(number.saturating_sub(1)) {
+        Ok(index) if number > 0 => TrackId::Audio(index),
+        _ => TrackId::Video,
     }
 }
 
@@ -225,6 +482,8 @@ pub(crate) struct OpenSegment {
     id: SegmentId,
     bytes: Vec<u8>,
     packets: Vec<BufferedPacket>,
+    samples: Vec<f32>,
+    audio: Vec<BufferedAudio>,
     start: Duration,
     last_presentation: Duration,
     /// How many bytes to add when the byte buffer is full.
@@ -251,6 +510,11 @@ impl OpenSegment {
             id,
             bytes: Vec::with_capacity(reserve.max(keyframe.data().len())),
             packets: Vec::with_capacity(PACKET_INDEX_STEP),
+            // Not reserved ahead: a recording with no audio must not pay for a
+            // pool it never fills, and a segment's worth of samples is far
+            // larger than its coded video.
+            samples: Vec::new(),
+            audio: Vec::new(),
             start: keyframe.presentation_time(),
             last_presentation: keyframe.presentation_time(),
             growth: reserve.max(1),
@@ -317,6 +581,66 @@ impl OpenSegment {
         self.last_presentation = self.last_presentation.max(packet.presentation_time());
     }
 
+    /// What this segment would occupy after appending `samples` of audio.
+    ///
+    /// The audio counterpart of
+    /// [`resident_bytes_after`](Self::resident_bytes_after), and it exists for
+    /// the same reason: the buffer's ceiling has to be checked before the
+    /// memory is committed, and audio is the larger of the two per second of
+    /// recording once several tracks are captured.
+    pub(crate) fn resident_bytes_after_audio(&self, samples: usize) -> usize {
+        let (sample_capacity, index_capacity) = self.audio_capacities_after(samples);
+        self.bytes.capacity()
+            + self.packets.capacity() * size_of::<BufferedPacket>()
+            + sample_capacity * size_of::<f32>()
+            + index_capacity * size_of::<BufferedAudio>()
+            + size_of::<Segment>()
+    }
+
+    /// The capacities [`append_audio`](Self::append_audio) would grow to.
+    ///
+    /// One function for the same reason `capacities_after` is one function: the
+    /// growth policy and the ceiling arithmetic must not drift apart.
+    fn audio_capacities_after(&self, samples: usize) -> (usize, usize) {
+        let sample_capacity = if self.samples.len() + samples > self.samples.capacity() {
+            self.samples.len() + samples + self.growth
+        } else {
+            self.samples.capacity()
+        };
+        let index_capacity = if self.audio.len() == self.audio.capacity() {
+            self.audio.capacity() + PACKET_INDEX_STEP
+        } else {
+            self.audio.capacity()
+        };
+
+        (sample_capacity, index_capacity)
+    }
+
+    /// Adds one block of captured audio.
+    ///
+    /// `at` is when the first frame of the block was captured, on the same
+    /// media clock the video packets carry, which is what lets a save select
+    /// audio for a range that begins on a keyframe.
+    pub(crate) fn append_audio(&mut self, track: TrackId, at: Duration, samples: &[f32]) {
+        let (sample_capacity, index_capacity) = self.audio_capacities_after(samples.len());
+        if sample_capacity > self.samples.capacity() {
+            self.samples
+                .reserve_exact(sample_capacity - self.samples.len());
+        }
+        if index_capacity > self.audio.capacity() {
+            self.audio.reserve_exact(index_capacity - self.audio.len());
+        }
+
+        let offset = self.samples.len();
+        self.samples.extend_from_slice(samples);
+        self.audio.push(BufferedAudio {
+            offset,
+            length: samples.len(),
+            track,
+            at,
+        });
+    }
+
     /// The presentation time of the keyframe it began with.
     pub(crate) const fn start(&self) -> Duration {
         self.start
@@ -337,6 +661,8 @@ impl OpenSegment {
     pub(crate) fn resident_bytes(&self) -> usize {
         self.bytes.capacity()
             + self.packets.capacity() * size_of::<BufferedPacket>()
+            + self.samples.capacity() * size_of::<f32>()
+            + self.audio.capacity() * size_of::<BufferedAudio>()
             + size_of::<Segment>()
     }
 
@@ -349,10 +675,14 @@ impl OpenSegment {
     pub(crate) fn seal(mut self) -> Segment {
         self.bytes.shrink_to_fit();
         self.packets.shrink_to_fit();
+        self.samples.shrink_to_fit();
+        self.audio.shrink_to_fit();
         Segment {
             id: self.id,
             bytes: self.bytes,
             packets: self.packets,
+            samples: self.samples,
+            audio: self.audio,
             start: self.start,
             last_presentation: self.last_presentation,
         }
@@ -371,6 +701,8 @@ impl OpenSegment {
             id: self.id,
             bytes: self.bytes.clone(),
             packets: self.packets.clone(),
+            samples: self.samples.clone(),
+            audio: self.audio.clone(),
             start: self.start,
             last_presentation: self.last_presentation,
         }

@@ -1,0 +1,31 @@
+-- A recording now says where it starts on its session's timeline.
+--
+-- `0003_game_events.sql` stores an event's moment as `at_nanos`, on the
+-- session's timeline, and says the offset into a file "is derived from this and
+-- the recording's span". That is true, and the span was not here: it went into
+-- the sidecar and no further, so the database held `recording_id` -- which file
+-- an event landed in -- and nothing that could turn its moment into a position
+-- *in* that file.
+--
+-- Every consumer needs that position rather than the moment. A timeline draws a
+-- mark at a number of seconds into the file it is showing; a player seeks to
+-- one. Answering either meant re-reading the session's sidecar, which is a file
+-- the library index exists so that nothing else has to open.
+--
+-- So the span lives here too. `duration_seconds` is already on this table, and
+-- with this column it is the whole span:
+--
+--     offset into the file = game_events.at_nanos - recordings.starts_at_nanos
+--
+-- and the row is inside the file when that offset is between zero and the
+-- duration. Both halves of the question a timeline asks, in one join, with no
+-- file opened.
+--
+-- Nullable, because a recording that produced no frame has no timeline to start
+-- on -- and because a row written before this migration has no answer, which is
+-- different from starting at zero. `ALTER TABLE ... ADD COLUMN` rather than a
+-- rebuild: no CHECK, no NOT NULL, nothing that forced `0002` and `0004` to
+-- rebuild their tables, and doing less to a table holding somebody's data is
+-- the whole argument.
+
+ALTER TABLE recordings ADD COLUMN starts_at_nanos INTEGER;

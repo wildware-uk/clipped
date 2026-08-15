@@ -47,6 +47,7 @@ use super::{ensure_recorder, Attachment, SupervisorError, SupervisorSettings};
 use crate::client::{Client, ClientError, EventClient};
 use crate::command::{Command, Reply, Shutdown};
 use crate::error::ProtocolError;
+use crate::hotkeys::{HotkeyBinding, HotkeyState};
 use crate::message::{Event, EventStream};
 use crate::status::{ActiveRecording, RecorderStatus};
 
@@ -90,6 +91,20 @@ pub enum RecorderLinkState {
         /// was replaced" is not something a UI may keep to itself
         /// (AGENTS.md section 27).
         recorder_process_id: u32,
+        /// What that recorder can do, from its handshake.
+        ///
+        /// A control that maps to a feature-gated command asks this before it
+        /// draws itself. Without it the control is drawn against an older
+        /// recorder, the user chooses a file name, and *then* the command is
+        /// refused with `unknown_command` — a refusal that arrives after the
+        /// only part of the interaction that cost them anything, which is what
+        /// AGENTS.md section 27 forbids
+        /// ([issue #447](https://github.com/wildware-uk/clipped/issues/447)).
+        ///
+        /// It describes the recorder named above, not whatever is listening
+        /// now: both travel together so a replacement cannot be read with the
+        /// previous build's capabilities.
+        features: Vec<String>,
         /// What the recorder is doing.
         status: RecorderStatus,
     },
@@ -150,6 +165,32 @@ pub enum RecorderLinkEvent {
         recording_id: String,
         /// What the recorder said failed.
         error: ProtocolError,
+    },
+    /// Windows refused one or more of the recorder's global hotkeys, most often
+    /// because another application already owns the combination.
+    ///
+    /// Asked for once per attachment rather than waited for: the recorder
+    /// registers its combinations before it announces itself
+    /// ([ADR 0009](../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)),
+    /// so `get_hotkeys` has a settled answer the moment there is anything to ask.
+    ///
+    /// Carries every refused binding rather than a count, because what a person
+    /// needs is *which* combination and *which* action
+    /// ([issue #417](https://github.com/wildware-uk/clipped/issues/417)) — and
+    /// the recorder's own sentence for why, which
+    /// [`HotkeyState::Conflict`](crate::HotkeyState::Conflict) already carries.
+    ///
+    /// Sent on **every** attachment, including a reconnection to the same
+    /// recorder. Whether that is worth interrupting anybody for a second time is
+    /// not a question this crate can answer — it does not know what the user has
+    /// already been told — so the link reports the fact and the consumer decides.
+    /// The desktop application's `NotificationPolicy` is where "once, and not on
+    /// every reconnection" is enforced.
+    HotkeysUnavailable {
+        /// The bindings whose state is
+        /// [`Conflict`](crate::HotkeyState::Conflict). Never empty: a link with
+        /// nothing to report sends no event at all.
+        conflicts: Vec<HotkeyBinding>,
     },
 }
 
@@ -704,6 +745,8 @@ fn follow(
         "attached to the recorder"
     );
 
+    report_hotkey_conflicts(settings, sender);
+
     let mut recording: Option<ActiveRecording> = None;
 
     loop {
@@ -718,6 +761,7 @@ fn follow(
                     sender,
                     RecorderLinkState::Attached {
                         recorder_process_id: attachment.recorder_process_id,
+                        features: attachment.features.clone(),
                         status,
                     },
                 );
@@ -758,6 +802,76 @@ fn follow(
             }
         }
     }
+}
+
+/// Asks the recorder which of its hotkeys Windows refused, and says so.
+///
+/// On a control connection of its own, for the reason
+/// [`RecorderLink::call`] opens one: the event subscription this link is about
+/// to read from is a stream the caller blocks on, and a control connection is
+/// request-then-response in strict alternation (`docs/ipc.md`). Opening a pipe
+/// costs one `CreateFile`, and the recorder serves eight connections.
+///
+/// **Nothing here fails the attachment.** A recorder too old to know
+/// `get_hotkeys`, one that refuses it, or one that went away between attaching
+/// and being asked, all mean the same thing to this function: it has nothing to
+/// report. Losing the link over a question about hotkeys would trade a
+/// convenience for the thing the link exists to do (AGENTS.md section 16).
+fn report_hotkey_conflicts(settings: &SupervisorSettings, sender: &Sender<RecorderLinkEvent>) {
+    let mut client = match Client::connect(
+        &settings.endpoint,
+        &settings.client.name,
+        &settings.client.version,
+        CONNECT_TIMEOUT,
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "the recorder could not be asked which hotkeys it holds, so a combination \
+                 another application owns will only be visible on the settings screen"
+            );
+            return;
+        }
+    };
+
+    let hotkeys = match client.call(&Command::GetHotkeys) {
+        Ok(Reply::Hotkeys { hotkeys }) => hotkeys,
+        Ok(_) => {
+            tracing::debug!("the recorder answered `get_hotkeys` with something else");
+            return;
+        }
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "the recorder would not say which hotkeys it holds"
+            );
+            return;
+        }
+    };
+
+    let conflicts: Vec<HotkeyBinding> = hotkeys
+        .into_iter()
+        .filter(|binding| matches!(binding.state, HotkeyState::Conflict { .. }))
+        .collect();
+
+    // No event for a recorder that got everything it asked for. An empty list
+    // travelling the channel would be a consumer's problem to filter, and a
+    // notification policy that received one would have to know it means "all
+    // well" rather than "something is wrong" (AGENTS.md section 27).
+    if conflicts.is_empty() {
+        return;
+    }
+
+    tracing::warn!(
+        refused = conflicts.len(),
+        actions = ?conflicts
+            .iter()
+            .map(|binding| binding.action.as_str())
+            .collect::<Vec<&str>>(),
+        "Windows refused some of the recorder's global hotkeys; pressing them will do nothing"
+    );
+    send(sender, RecorderLinkEvent::HotkeysUnavailable { conflicts });
 }
 
 /// Whether trying the same thing again could plausibly work.
@@ -849,6 +963,199 @@ mod tests {
         }));
     }
 
+    /// A recorder that answers `get_hotkeys` with whatever it was built with.
+    #[cfg(windows)]
+    struct RecorderHolding(Vec<HotkeyBinding>);
+
+    #[cfg(windows)]
+    impl crate::server::CommandHandler for RecorderHolding {
+        fn call(&self, command: Command) -> Result<Reply, ProtocolError> {
+            match command {
+                Command::GetHotkeys => Ok(Reply::Hotkeys {
+                    hotkeys: self.0.clone(),
+                }),
+                _ => Ok(Reply::Pong),
+            }
+        }
+
+        fn status(&self) -> RecorderStatus {
+            RecorderStatus::Idle
+        }
+
+        fn features(&self) -> Vec<String> {
+            vec![crate::features::HOTKEYS.to_owned()]
+        }
+    }
+
+    /// A binding in the state Windows leaves one it would not give out.
+    #[cfg(windows)]
+    fn refused(action: &str, combination: &str) -> HotkeyBinding {
+        HotkeyBinding {
+            action: action.to_owned(),
+            label: "Save replay".to_owned(),
+            hotkey: Some(combination.to_owned()),
+            state: HotkeyState::Conflict {
+                reason: format!("{combination} is already registered by another application"),
+            },
+            handled: true,
+            unavailable: None,
+        }
+    }
+
+    /// A binding Windows accepted.
+    #[cfg(windows)]
+    fn registered(action: &str, combination: &str) -> HotkeyBinding {
+        HotkeyBinding {
+            action: action.to_owned(),
+            label: "Add bookmark".to_owned(),
+            hotkey: Some(combination.to_owned()),
+            state: HotkeyState::Registered,
+            handled: true,
+            unavailable: None,
+        }
+    }
+
+    /// Starts a recorder holding `hotkeys`, attaches a link, and returns what the
+    /// link reported.
+    #[cfg(windows)]
+    fn what_the_link_reports(label: &str, hotkeys: Vec<HotkeyBinding>) -> Vec<RecorderLinkEvent> {
+        let endpoint = crate::transport::Endpoint::named(&format!(
+            "clipped-link-hotkeys-{label}.{}",
+            std::process::id()
+        ))
+        .expect("the generated name is valid");
+        let mut listener =
+            crate::transport::Listener::bind(&endpoint).expect("nothing else has this name");
+        let events_published = crate::server::EventPublisher::new();
+        let server = crate::server::Server::new(
+            Arc::new(RecorderHolding(hotkeys)),
+            events_published.clone(),
+            crate::message::PeerIdentity {
+                name: "clipped-recorder".to_owned(),
+                version: "0.0.0-test".to_owned(),
+            },
+        );
+        let serving = thread::spawn(move || {
+            let _ = server.serve(&mut listener);
+        });
+
+        let settings_endpoint = endpoint.clone();
+        let settings = SupervisorSettings {
+            restart: crate::supervisor::RestartPolicy::NEVER,
+            ..SupervisorSettings::new(
+                endpoint,
+                std::env::temp_dir().join("clipped-no-such-recorder.exe"),
+                crate::message::PeerIdentity {
+                    name: "clipped-ipc-test".to_owned(),
+                    version: "0.0.0".to_owned(),
+                },
+            )
+        };
+        let (link, events) = RecorderLink::start(settings);
+
+        // Everything the link says in the first moments of an attachment. The
+        // hotkey question is asked once it is attached, so the state changes
+        // arrive around it and the order is not this test's business.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut reported = Vec::new();
+        while Instant::now() < deadline {
+            match events.recv_timeout(Duration::from_millis(200)) {
+                Ok(event) => {
+                    let attached = matches!(
+                        event,
+                        RecorderLinkEvent::State(RecorderLinkState::Attached { .. })
+                    );
+                    reported.push(event);
+                    // Attached is published from the first status the
+                    // subscription delivers, which is after the hotkey question
+                    // has been asked and answered.
+                    if attached {
+                        break;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        link.stop();
+        drop(link);
+
+        // Stopped over the protocol, which is what ends the accept loop: a
+        // listener left serving makes the join below never return, and the
+        // desktop application's own fake recorder carries the same note because
+        // the first version of it hung a whole test binary that way. This
+        // recorder answers `status` with `Idle`, so a bare shutdown is not
+        // refused.
+        if let Ok(mut client) = Client::connect(
+            &settings_endpoint,
+            "clipped-ipc-test",
+            "0.0.0",
+            Duration::from_secs(5),
+        ) {
+            let _ = client.call(&Command::Shutdown(Shutdown {
+                finalise_recording: true,
+            }));
+        }
+        events_published.close();
+        let _ = serving.join();
+        reported
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_hotkey_windows_refused_is_reported_the_moment_the_link_attaches() {
+        // Issue #417. The recorder has known which of its combinations Windows
+        // refused since issue #232, and answered `get_hotkeys` about it — but
+        // nothing asked unless somebody opened Settings, so a user found out
+        // that Ctrl+F10 belongs to another application by pressing it in a game
+        // and watching nothing happen.
+        let reported = what_the_link_reports(
+            "refused",
+            vec![
+                registered("add_bookmark", "Ctrl+F9"),
+                refused("save_replay", "Ctrl+F10"),
+            ],
+        );
+
+        let conflicts = reported
+            .iter()
+            .find_map(|event| match event {
+                RecorderLinkEvent::HotkeysUnavailable { conflicts } => Some(conflicts),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the link never reported the refused hotkey: {reported:#?}"));
+
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "only the refused combination is a conflict; the registered one is not: {conflicts:#?}"
+        );
+        assert_eq!(conflicts[0].action, "save_replay");
+        assert_eq!(conflicts[0].hotkey.as_deref(), Some("Ctrl+F10"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_recorder_that_got_every_combination_it_asked_for_reports_nothing() {
+        // The other half, and the reason the event carries a non-empty list: an
+        // event meaning "all well" would have every consumer checking a length
+        // before deciding whether something was wrong (AGENTS.md section 27).
+        let reported = what_the_link_reports(
+            "granted",
+            vec![
+                registered("add_bookmark", "Ctrl+F9"),
+                registered("save_replay", "Ctrl+F10"),
+            ],
+        );
+
+        assert!(
+            !reported
+                .iter()
+                .any(|event| matches!(event, RecorderLinkEvent::HotkeysUnavailable { .. })),
+            "nothing was refused, so nothing should have been reported: {reported:#?}"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_link_that_gave_up_says_so_and_tries_again_when_asked() {
@@ -920,6 +1227,14 @@ mod tests {
             RecorderLinkState::Connecting,
             RecorderLinkState::Attached {
                 recorder_process_id: 4_242,
+                // Two of them, and not the whole list: a window is told what
+                // *this* recorder can do, which is a subset for anything but
+                // the newest build, and the round trip has to keep the subset
+                // rather than a flag saying "some".
+                features: vec![
+                    crate::features::RECORDING.to_owned(),
+                    crate::features::LIBRARY.to_owned(),
+                ],
                 status: RecorderStatus::Idle,
             },
             RecorderLinkState::Reconnecting {

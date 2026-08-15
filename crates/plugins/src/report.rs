@@ -15,13 +15,13 @@
 //! host  → {"command":"detach"}
 //! ```
 //!
-//! # A plugin never says when, on the recording's timeline
+//! # A plugin never says when, on the session's timeline
 //!
 //! It says **how long ago**, in nanoseconds, measured against its own clock.
 //!
 //! This is the one design decision in this module that is not obvious, so it is
 //! worth the paragraph. An event's position in a recording is the whole of its
-//! usefulness (`docs/plugin-api.md`), and the recording's timeline is the
+//! usefulness (`docs/plugin-api.md`), and the session's timeline is the
 //! capture clock's — which a separate process does not have. The two ways to
 //! bridge that are a shared wall clock or a duration, and a duration wins on
 //! every count: two processes reading the same wall clock disagree by whatever
@@ -188,7 +188,7 @@ pub struct ReportedEvent {
 }
 
 impl ReportedEvent {
-    /// Turns a report into an event on a recording's timeline.
+    /// Turns a report into an event on the session's timeline.
     ///
     /// `source` is the plugin's identifier, stamped by the host. `received` is
     /// where the host's own clock was when the report arrived — see
@@ -280,15 +280,30 @@ impl core::error::Error for ReportRefused {
     }
 }
 
-/// The one place a plugin's timing becomes a position in a recording.
+/// The one place a plugin's timing becomes a position on a session's timeline.
 ///
 /// # What it is
 ///
-/// A recording's timeline starts at the timestamp of the first video frame it
+/// A session's timeline starts at the timestamp of the first video frame it
 /// keeps (`docs/av-sync.md`). This holds the reading of *this process's*
 /// monotonic clock at that moment, so that a report arriving later can be
 /// placed on it: [`at`](Self::at) is the subtraction, written once, and
 /// `docs/plugin-api.md` requires it to happen in exactly one named place.
+///
+/// # One per session, and it outlives any one recording
+///
+/// The name is load-bearing. A session that writes several files keeps **this**
+/// timeline across all of them, so the second file's events are stamped from
+/// the same zero as the first's and the second file occupies a span at a
+/// positive offset. [Issue
+/// #338](https://github.com/wildware-uk/clipped/issues/338) says the session
+/// stamps every event through *one* of these, and that is why.
+///
+/// Building a fresh one per recording would compile, would never trip an
+/// assertion, and would put every event of the second file into the first,
+/// because `clipped_library::events` places a moment by asking which segment of
+/// a single axis contains it. The wording here used to say "a recording's
+/// timeline", which invited exactly that.
 ///
 /// # The error it carries, stated
 ///
@@ -300,7 +315,7 @@ impl core::error::Error for ReportRefused {
 /// integrations can claim: Game State Integration is posted on a configurable
 /// interval measured in tens of milliseconds.
 ///
-/// It is a duplication of the recording's timeline all the same, which is what
+/// It is a duplication of the session's timeline all the same, which is what
 /// [issue #253](https://github.com/wildware-uk/clipped/issues/253) exists to
 /// end: a shared time crate that `clipped-capture` and this one both name would
 /// let a session hand over its capture epoch rather than a second reading of a
@@ -315,7 +330,10 @@ impl SessionTimeline {
     /// A timeline whose zero is `epoch`.
     ///
     /// `epoch` is a reading of this process's monotonic clock taken as close as
-    /// possible to the recording's first kept frame.
+    /// possible to the **session's** first kept frame -- that is, the first
+    /// frame of its first recording -- and held for the whole session. A
+    /// session that starts a second recording does not build a second timeline;
+    /// see the type documentation for what that would break.
     #[must_use]
     pub const fn starting_at(epoch: Instant) -> Self {
         Self { epoch }
@@ -327,7 +345,7 @@ impl SessionTimeline {
         Self::starting_at(Instant::now())
     }
 
-    /// Where `moment` sits on the recording's timeline.
+    /// Where `moment` sits on the session's timeline.
     ///
     /// Saturating at the limits of an `i64` of nanoseconds, which is 292 years
     /// either side of the epoch.
@@ -345,7 +363,7 @@ impl SessionTimeline {
         }
     }
 
-    /// Where the recording's timeline is now.
+    /// Where the session's timeline is now.
     #[must_use]
     pub fn now(&self) -> EventTime {
         self.at(Instant::now())

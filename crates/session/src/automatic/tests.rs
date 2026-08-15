@@ -23,6 +23,7 @@ use super::*;
 use crate::config::{Preferences, ResolutionSetting, SettingKey, SettingSource};
 use crate::report::EndReason;
 use crate::settings::{CaptureTargetSettings, RecordingSettings, UnavailableChoice};
+use clipped_game_detection::launcher::Launchers;
 
 /// Three ordinary games, one of which has a known helper, and two more that tie
 /// on a shared executable name.
@@ -193,6 +194,121 @@ fn launch(processes: &[(u32, &str)]) -> WatchEvent {
             .map(|(pid, name)| ProcessSnapshot::new(*pid, 4, None, name))
             .collect(),
     })
+}
+
+/// One process launching, from a path a launcher can be asked about.
+fn launch_at(pid: u32, name: &str, path: &str) -> WatchEvent {
+    WatchEvent::Launched(LaunchGroup {
+        id: LaunchId::ALREADY_RUNNING,
+        processes: vec![ProcessSnapshot::new(pid, 4, Some(path.into()), name)],
+    })
+}
+
+#[test]
+fn a_process_a_launcher_claims_is_filed_under_that_game_though_its_name_is_unknown() {
+    // The whole point of the launcher providers, and for a long time nothing
+    // reached it: `identify_process` never asked them, so
+    // `MatchStrength::LauncherIdentity` never fired in a shipped build
+    // (issue #522).
+    //
+    // The subject is a process the catalogue cannot place by name — an
+    // anti-cheat service the game starts, which is the shape of thing that made
+    // the rung worth having — inside a directory the launcher claims.
+    const CATALOGUE: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "shop-game"
+name = "Shop Game"
+[[game.executables]]
+name = "shop-game.exe"
+[game.launcher]
+kind = "riot"
+app_id = "shop_game"
+"#;
+
+    let directory = TestDirectory::new("launcher-identity");
+    let catalogue =
+        Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
+    let launchers = Launchers::none().with_riot(
+        clipped_game_detection::launcher::riot::Riot::from_products([(
+            "shop_game".to_owned(),
+            "live".to_owned(),
+            std::path::PathBuf::from("C:/Shop/Shop Game"),
+        )]),
+    );
+
+    let mut manager = SessionManager::new(
+        catalogue,
+        AutomaticSettings::new(directory.path().to_path_buf()),
+    )
+    .with_launchers(launchers);
+
+    let actions = manager.observe(
+        &launch_at(
+            4_242,
+            "anticheat.exe",
+            r"C:\Shop\Shop Game\BattlEyenticheat.exe",
+        ),
+        t(0),
+    );
+
+    assert!(
+        !actions.is_empty(),
+        "the launcher claimed the path, so this is a game and should be recorded"
+    );
+    assert_eq!(
+        manager
+            .active_session()
+            .expect("a session was opened")
+            .game(),
+        &GameIdentity::Known {
+            game_id: "shop-game".to_owned(),
+            name: "Shop Game".to_owned(),
+        },
+        "the shop said which of its games this is, which is the rung nothing could reach before"
+    );
+}
+
+#[test]
+fn without_the_launchers_the_same_process_is_not_a_game() {
+    // The other half, and what makes the test above about the wiring rather
+    // than about the catalogue: the same catalogue and the same process, with
+    // no launchers to ask, is unidentified — which is exactly what detection
+    // did before issue #522 and what it still does for a machine with no
+    // launcher installed.
+    const CATALOGUE: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "shop-game"
+name = "Shop Game"
+[[game.executables]]
+name = "shop-game.exe"
+[game.launcher]
+kind = "riot"
+app_id = "shop_game"
+"#;
+
+    let directory = TestDirectory::new("no-launchers");
+    let catalogue =
+        Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
+    let mut manager = SessionManager::new(
+        catalogue,
+        AutomaticSettings::new(directory.path().to_path_buf()),
+    );
+
+    let actions = manager.observe(
+        &launch_at(
+            4_242,
+            "anticheat.exe",
+            r"C:\Shop\Shop Game\BattlEyenticheat.exe",
+        ),
+        t(0),
+    );
+
+    assert!(actions.is_empty(), "{actions:?}");
+    assert!(manager.active_session().is_none());
 }
 
 /// One process exiting.
@@ -1376,6 +1492,10 @@ fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced(
             // the situation: one machine, one catalogue, one game, recorded
             // two different ways.
             &Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            // The equivalence this test is about is between the two *session*
+            // paths, so both are given the same empty set of launchers rather
+            // than one being told about the machine's (issue #522).
+            &Launchers::none(),
             RecordedProcess::new(4_242, "test-game.exe"),
             started,
         );
@@ -1415,4 +1535,65 @@ fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced(
         "{}",
         automatic.1
     );
+}
+
+/// A kill at `seconds` on the session's timeline.
+fn a_kill(seconds: i64) -> clipped_events::GameEvent {
+    use core::time::Duration;
+
+    use clipped_events::{Confidence, EventKind, EventSource, EventTime, EventTiming};
+
+    clipped_events::GameEvent::new(
+        EventKind::Kill,
+        EventTiming::new(
+            EventTime::from_media_nanos(seconds * 1_000_000_000),
+            Duration::ZERO,
+        ),
+        EventSource::plugin("cs2").expect("a legal source"),
+        Confidence::CERTAIN,
+    )
+}
+
+#[test]
+fn what_a_plugin_reports_goes_on_the_open_session() {
+    let mut harness = Harness::new("plugin-events-land");
+    let _ = started(&mut harness, 4242, t(10));
+
+    let kept = harness.manager.record_game_events([a_kill(3), a_kill(1)]);
+
+    assert_eq!(kept, 2, "the open session refused what a plugin reported");
+    let session = harness
+        .manager
+        .active_session()
+        .expect("the session is open");
+    let moments: Vec<i64> = session
+        .game_events()
+        .iter()
+        .map(|event| event.timing().at().as_media_nanos())
+        .collect();
+    assert_eq!(
+        moments,
+        [1_000_000_000, 3_000_000_000],
+        "the session kept them in the order they arrived rather than the order they happened"
+    );
+
+    // On the session, not in its own history: two vocabularies, two lists.
+    assert!(
+        !session.events().is_empty(),
+        "the session's own history was emptied"
+    );
+}
+
+#[test]
+fn events_reported_after_the_session_closed_are_refused_rather_than_swallowed() {
+    // The count is the whole point. A plugin can still be draining when its
+    // session ends, and an event silently discarded is indistinguishable from
+    // one that was never reported (AGENTS.md section 54) — so the caller is
+    // told how many were kept and can say so.
+    let mut harness = Harness::new("plugin-events-after-close");
+
+    let kept = harness.manager.record_game_events([a_kill(1)]);
+
+    assert_eq!(kept, 0, "an event was accepted with no session open");
+    assert!(harness.manager.active_session().is_none());
 }

@@ -132,15 +132,19 @@ impl HotkeyAction {
     /// things this build can do; whether *this* process was given a handler for
     /// them is a separate question, and [`crate::Unhandled`] is what answers it.
     ///
-    /// Saving a replay is the one to read carefully. The buffer and the save
-    /// exist — [issue #37](https://github.com/wildware-uk/clipped/issues/37)
-    /// wrote `clipped_replay::save_clip`, and `clipped_session` can fill a
-    /// buffer while it records. What no build has is a *recording that is
-    /// running one*: nothing starts a buffered session and nothing carries a
-    /// save request to it, which is [issue
-    /// #38](https://github.com/wildware-uk/clipped/issues/38). So this stays
-    /// [`Some`] and names what is genuinely absent, rather than naming a buffer
-    /// that has been built.
+    /// Saving a replay is [`None`] as of
+    /// [issue #38](https://github.com/wildware-uk/clipped/issues/38), and it is
+    /// the one to read carefully because it was [`Some`] for two milestones.
+    /// The buffer and the save had existed since
+    /// [issue #37](https://github.com/wildware-uk/clipped/issues/37); what was
+    /// genuinely absent was a *recording that is running one*, and #38 built
+    /// that — `start_recording` takes `replay_seconds`, the recorder answers
+    /// `save_replay`, and `clipped-recorder replay` binds a key to it. A build
+    /// that still said "a recording with a replay buffer arrives in M3" would
+    /// be telling a user a shipped feature is unbuilt, and would do it
+    /// invisibly, because the sentence goes on reading plausibly (AGENTS.md
+    /// sections 27 and 54). What may still be missing in *this* process is a
+    /// handler, which is [`crate::Unhandled`]'s sentence rather than this one.
     ///
     /// Taking a screenshot is [`None`] as of
     /// [issue #67](https://github.com/wildware-uk/clipped/issues/67), for the
@@ -163,13 +167,9 @@ impl HotkeyAction {
     #[must_use]
     pub const fn planned_subsystem(self) -> Option<PlannedSubsystem> {
         match self {
-            Self::SaveReplay => Some(PlannedSubsystem::new(
-                "a recording with a replay buffer",
-                "M3",
-                38,
-            )),
             Self::OpenOverlay => Some(PlannedSubsystem::new("the in-game overlay", "M5", 53)),
-            Self::AddBookmark
+            Self::SaveReplay
+            | Self::AddBookmark
             | Self::TakeScreenshot
             | Self::ToggleRecording
             | Self::MuteMicrophone
@@ -191,7 +191,7 @@ impl fmt::Display for HotkeyAction {
 ///
 /// The shape is deliberately the one `clipped-ipc` refuses an unbuilt command
 /// with (`ProtocolError::not_implemented`, `docs/ipc.md`): a UI that can say
-/// "Save replay — not in this build (M3, issue #38)" is telling the truth,
+/// "Open overlay — not in this build (M5, issue #53)" is telling the truth,
 /// where a key that silently does nothing is not (AGENTS.md sections 27 and
 /// 54). This crate does not depend on `clipped-ipc` to say it — both sit at the
 /// bottom of the stack and neither may name the other.
@@ -293,24 +293,30 @@ mod tests {
     }
 
     /// The sentence a user is shown, held to what the build can actually do.
-    ///
-    /// It names issue #38 and not #37 deliberately. #37 built the replay buffer
-    /// and its save; what is still missing is a recording running one and a
-    /// route from this key to it, and that is #38. Naming the finished issue
-    /// would tell a user that a shipped feature is unbuilt (AGENTS.md sections
-    /// 27 and 54).
     #[test]
     fn an_unbuilt_action_says_which_milestone_and_issue_builds_it() {
-        let planned = HotkeyAction::SaveReplay
+        let planned = HotkeyAction::OpenOverlay
             .planned_subsystem()
-            .expect("no build runs a recording with a replay buffer yet");
+            .expect("no build has an in-game overlay yet");
 
-        assert_eq!(planned.milestone(), "M3");
-        assert_eq!(planned.tracking_issue(), 38);
+        assert_eq!(planned.milestone(), "M5");
+        assert_eq!(planned.tracking_issue(), 53);
         assert_eq!(
             planned.to_string(),
-            "a recording with a replay buffer arrives in M3 (issue #38)"
+            "the in-game overlay arrives in M5 (issue #53)"
         );
+    }
+
+    #[test]
+    fn a_replay_stopped_being_a_missing_subsystem_when_a_recording_could_run_one() {
+        // Issue #38 built the recording that keeps a buffer, the `save_replay`
+        // command the recorder answers and the key `clipped-recorder replay`
+        // binds to it. A key that still said "a recording with a replay buffer
+        // arrives in M3 (issue #38)" would be telling the user a shipped
+        // feature is unbuilt — the third time this exact failure has happened
+        // in this file, and the reason each of these tests exists (AGENTS.md
+        // sections 27 and 54).
+        assert_eq!(HotkeyAction::SaveReplay.planned_subsystem(), None);
     }
 
     #[test]

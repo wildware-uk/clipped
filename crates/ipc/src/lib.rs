@@ -119,6 +119,7 @@ pub mod frame;
 pub mod hotkeys;
 pub mod library;
 pub mod message;
+mod plugins;
 pub mod schema;
 pub mod server;
 pub mod status;
@@ -127,26 +128,28 @@ pub mod transport;
 
 pub use client::{Client, ClientError, EventClient};
 pub use command::{
-    AddBookmark, Command, ExportRecording, Reply, Shutdown, StartRecording, StopRecording,
-    TakeScreenshot, UnbuiltCommand, UNBUILT_COMMANDS,
+    AddBookmark, Command, ExportRecording, Reply, SaveReplay, Shutdown, StartRecording,
+    StopRecording, TakeScreenshot, UnbuiltCommand, UNBUILT_COMMANDS,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 pub use hotkeys::{HotkeyBinding, HotkeyState};
 pub use library::{
-    LibraryClip, LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
+    LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame, LibraryRecording,
+    LibrarySession, LibrarySessionPage, LibrarySessions,
 };
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
+pub use plugins::{PluginDeclaration, PluginState, RefusedPlugin};
 pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,
     MAX_CONCURRENT_CONNECTIONS,
 };
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
-    ScreenshotSummary,
+    ReplaySummary, ScreenshotSummary,
 };
 pub use supervisor::{
     ensure_recorder, wait_for_recorder_to_exit, Attachment, AttachmentOrigin, RecorderCallError,

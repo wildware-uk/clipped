@@ -62,6 +62,8 @@ import type {
   KnownEventName,
   LibraryClip,
   LibraryGame,
+  LibraryEventsReply,
+  PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
   LibrarySession,
@@ -87,6 +89,9 @@ import type {
   RegisteredHotkey,
   Reply,
   ReplyName,
+  ReplaySavedReply,
+  ReplaySummary,
+  SaveReplayParams,
   ServerMessage,
   StartRecordingParams,
   StatusChangedEvent,
@@ -268,6 +273,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     encoder: 'optional',
     microphone: 'optional',
     system_audio: 'optional',
+    replay_seconds: 'optional',
   }),
   stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
   add_bookmark: fields<AddBookmarkParams>({
@@ -290,6 +296,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     output: 'required',
     target: 'required',
     elapsed_ms: 'required',
+    replay_seconds: 'optional',
   }),
   recording_summary: fields<RecordingSummary>({
     output: 'required',
@@ -314,6 +321,23 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     duration_seconds: 'optional',
     bookmarks_file: 'required',
     bookmarks_in_recording: 'required',
+  }),
+  save_replay: fields<SaveReplayParams>({
+    recording_id: 'optional',
+    duration_seconds: 'optional',
+    output: 'optional',
+  }),
+  replay_summary: fields<ReplaySummary>({
+    path: 'required',
+    recording_id: 'required',
+    requested_seconds: 'required',
+    duration_seconds: 'required',
+    source_start_seconds: 'required',
+    source_end_seconds: 'required',
+    leading_slack_seconds: 'required',
+    complete: 'required',
+    shortfall_seconds: 'required',
+    bytes: 'required',
   }),
   screenshot_summary: fields<ScreenshotSummary>({
     path: 'required',
@@ -418,6 +442,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     screenshot: 'required',
   }),
+  'reply.replay_saved': fields<ReplaySavedReply>({
+    reply: 'required',
+    clip: 'required',
+  }),
   'reply.library_sessions': fields<LibrarySessionsReply>({
     reply: 'required',
     page: 'required',
@@ -425,6 +453,15 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.library_games': fields<LibraryGamesReply>({
     reply: 'required',
     games: 'required',
+  }),
+  'reply.library_events': fields<LibraryEventsReply>({
+    reply: 'required',
+    lane: 'required',
+  }),
+  'reply.plugins': fields<PluginsReply>({
+    reply: 'required',
+    installed: 'required',
+    refused: 'required',
   }),
   'reply.recording_exported': fields<RecordingExportedReply>({
     reply: 'required',
@@ -456,6 +493,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     output: 'required',
     target: 'required',
     elapsed_ms: 'required',
+    replay_seconds: 'optional',
   }),
   'event.status_changed': fields<StatusChangedEvent>({ event: 'required', status: 'required' }),
   'event.recording_failed': fields<RecordingFailedEvent>({
@@ -521,6 +559,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'save_replay',
+    params: 'save_replay',
+    reply: 'reply.replay_saved',
+    available_in_this_build: true,
+  },
+  {
     name: 'library_sessions',
     params: 'library_sessions',
     reply: 'reply.library_sessions',
@@ -530,6 +574,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     name: 'library_games',
     params: null,
     reply: 'reply.library_games',
+    available_in_this_build: true,
+  },
+  {
+    name: 'library_events',
+    params: 'library_events',
+    reply: 'reply.library_events',
+    available_in_this_build: true,
+  },
+  {
+    name: 'plugins',
+    params: null,
+    reply: 'reply.plugins',
     available_in_this_build: true,
   },
   {
@@ -550,7 +606,6 @@ const TYPESCRIPT_COMMANDS: readonly {
     reply: 'reply.shutting_down',
     available_in_this_build: true,
   },
-  { name: 'save_replay', params: null, reply: null, available_in_this_build: false },
   { name: 'apply_settings', params: null, reply: null, available_in_this_build: false },
 ];
 
@@ -582,6 +637,8 @@ function replyDiscriminant(reply: Reply): string {
       return 'bookmark_added';
     case 'screenshot_taken':
       return 'screenshot_taken';
+    case 'replay_saved':
+      return 'replay_saved';
     case 'library_sessions':
       // Whether the page ends the library is part of the path, for the reason
       // `shutting_down`'s is: a mirror that dropped the cursor would otherwise
@@ -590,6 +647,13 @@ function replyDiscriminant(reply: Reply): string {
       return reply.page.next_cursor === undefined ? 'library_sessions' : 'library_sessions.more';
     case 'library_games':
       return 'library_games';
+    case 'plugins':
+      return 'plugins';
+    case 'library_events':
+      // One discriminant, unlike `library_sessions`: an empty lane is not a
+      // different shape, it is the same shape carrying nothing. What tells
+      // "none" from "not asked" is that `marks` is always present.
+      return 'library_events';
     case 'hotkeys':
       return 'hotkeys';
     case 'recording_exported':

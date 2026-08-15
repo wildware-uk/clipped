@@ -507,7 +507,7 @@ fn check_adapter(
     // SAFETY: the caller of `open` guarantees the handle is a live
     // `ID3D11Device` it owns, and this function borrows it for the length of
     // the call without releasing it.
-    let vendor = unsafe { api::device_vendor(device.as_raw()) };
+    let vendor = unsafe { crate::windows::dxgi::device_vendor(device.as_raw()) };
 
     match vendor {
         Some(Vendor::Intel) => Ok(()),

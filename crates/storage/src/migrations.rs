@@ -70,6 +70,21 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "manual_session_end_reason",
         sql: include_str!("../migrations/0002_manual_session_end_reason.sql"),
     },
+    Migration {
+        version: 3,
+        name: "game_events",
+        sql: include_str!("../migrations/0003_game_events.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "clips_without_a_file",
+        sql: include_str!("../migrations/0004_clips_without_a_file.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "recording_spans",
+        sql: include_str!("../migrations/0005_recording_spans.sql"),
+    },
 ];
 
 /// The checksum of every migration that has been released.
@@ -80,7 +95,13 @@ pub const MIGRATIONS: &[Migration] = &[
 /// constant: it is a fact about the repository rather than something the
 /// running application consults.
 #[cfg(test)]
-const CHECKSUMS: &[(u32, &str)] = &[(1, "afab7973dd06f9d1"), (2, "58c7954428d814fa")];
+const CHECKSUMS: &[(u32, &str)] = &[
+    (1, "afab7973dd06f9d1"),
+    (2, "58c7954428d814fa"),
+    (3, "d2cf76386a1d8bbe"),
+    (4, "86f00947424c4989"),
+    (5, "55ed6d143c4f7fe7"),
+];
 
 /// The newest schema version this build understands.
 pub const SCHEMA_VERSION: u32 = latest_version(MIGRATIONS);

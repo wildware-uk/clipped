@@ -93,6 +93,7 @@ mod document;
 mod error;
 mod game;
 mod hotkeys;
+mod plugins;
 mod preferences;
 mod store;
 #[cfg(test)]
@@ -104,6 +105,7 @@ pub use document::{Loaded, FILE_NAME, SCHEMA_VERSION};
 pub use error::{ConfigurationError, Section, SettingError};
 pub use game::{GameKey, InvalidGameKey};
 pub use hotkeys::{HotkeyOverride, HotkeyOverrides, ResolvedHotkeys};
+pub use plugins::{NotStarted, PluginConsent, PluginConsents};
 pub use preferences::{
     AudioDeviceSetting, CaptureTargetSetting, Preferences, ResolvedSettings, DEFAULT_REPLAY_WINDOW,
     MAXIMUM_DEVICE_NAME, MAXIMUM_DIMENSION, MAXIMUM_FRAMERATE, MINIMUM_DIMENSION,
@@ -133,6 +135,7 @@ pub struct Configuration {
     global: Preferences,
     games: BTreeMap<GameKey, Preferences>,
     hotkeys: HotkeyOverrides,
+    plugins: PluginConsents,
     /// Top-level keys from a newer build, kept and written back (AGENTS.md
     /// section 56).
     unknown: BTreeMap<String, serde_json::Value>,
@@ -253,13 +256,26 @@ impl Configuration {
         global: Preferences,
         games: BTreeMap<GameKey, Preferences>,
         hotkeys: HotkeyOverrides,
+        plugins: PluginConsents,
         unknown: BTreeMap<String, serde_json::Value>,
     ) -> Self {
         Self {
             global,
             games,
             hotkeys,
+            plugins,
             unknown,
         }
+    }
+
+    /// Which plugins the user enabled, and what they agreed to.
+    #[must_use]
+    pub const fn plugins(&self) -> &PluginConsents {
+        &self.plugins
+    }
+
+    /// Records what the user decided about a plugin.
+    pub fn set_plugin(&mut self, plugin: String, consent: PluginConsent) {
+        self.plugins.set(plugin, consent);
     }
 }

@@ -34,18 +34,14 @@
 //! module, and freeing it while an encoder is open would leave the session
 //! calling into unmapped memory.
 
-use core::ffi::c_void;
 use core::fmt;
 use core::mem;
 
-use windows::core::{Interface, PCSTR, PCWSTR};
+use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::Foundation::{FreeLibrary, HMODULE};
-use windows::Win32::Graphics::Dxgi::{IDXGIDevice, DXGI_ADAPTER_DESC};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
-
-use crate::codec::Vendor;
 
 use super::sys;
 
@@ -441,38 +437,6 @@ unsafe fn resolve(module: HMODULE) -> Result<Functions, LoadFailure> {
     })
 }
 
-/// The PCI vendor of the adapter a Direct3D 11 device was created on, or
-/// [`None`] if the handle will not answer.
-///
-/// This is how the backend refuses to open on the wrong GPU. A Quick Sync
-/// session encodes on the Intel adapter and nowhere else, and the adapter it
-/// uses is decided by the Direct3D 11 device the caller hands over — so a
-/// device created on a discrete GPU cannot be encoded from, and saying that at
-/// `open` is the difference between a clear message and a status code from
-/// somewhere inside the runtime (`docs/encoder-pipeline.md`, "Hybrid graphics").
-///
-/// # Safety
-///
-/// `device` must be null or a live `ID3D11Device` owned by the caller.
-pub(super) unsafe fn device_vendor(device: *mut c_void) -> Option<Vendor> {
-    if device.is_null() {
-        return None;
-    }
-
-    // SAFETY: the caller guarantees `device` is a live COM object it owns.
-    // `from_raw_borrowed` takes no reference of its own, so the borrow ends
-    // with this function and nothing here releases the caller's device.
-    let unknown = unsafe { windows::core::IUnknown::from_raw_borrowed(&device) }?;
-    let dxgi: IDXGIDevice = unknown.cast().ok()?;
-
-    // SAFETY: `dxgi` is a live DXGI device obtained by querying the caller's
-    // device, and both calls are ordinary queries that return by value or as a
-    // new reference this function drops.
-    let description: DXGI_ADAPTER_DESC = unsafe { dxgi.GetAdapter().ok()?.GetDesc().ok()? };
-
-    Some(Vendor::from_pci_id(description.VendorId))
-}
-
 /// The name oneVPL gives a status code, for diagnostics.
 ///
 /// Every code in the 2.15 headers is listed. An unrecognised one still reports
@@ -607,11 +571,5 @@ mod tests {
             LIBRARIES.len(),
             "the message names a library that is not searched for"
         );
-    }
-
-    #[test]
-    fn a_null_device_has_no_vendor() {
-        // SAFETY: null is one of the two values the contract permits.
-        assert_eq!(unsafe { device_vendor(core::ptr::null_mut()) }, None);
     }
 }

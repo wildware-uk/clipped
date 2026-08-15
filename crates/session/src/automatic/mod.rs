@@ -140,14 +140,16 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use clipped_events::GameEvent;
 use clipped_game_detection::catalogue::{Catalogue, Match, ProcessCandidate};
+use clipped_game_detection::launcher::Launchers;
 use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEvent};
 
 use crate::config::{Configuration, GameKey, ResolvedSettings};
 
 pub use manual::{ManualSession, RecordedProcess};
 pub use session::{
-    GameIdentity, RecordingOutcomeSummary, Session, SessionEndReason, SessionEvent,
+    GameIdentity, RecordingOutcomeSummary, Session, SessionClip, SessionEndReason, SessionEvent,
     SessionEventKind, SessionId, SessionRecording, UNATTRIBUTED,
 };
 pub use settings::{
@@ -320,6 +322,16 @@ impl RecordingOutcome {
 #[derive(Debug)]
 pub struct SessionManager {
     catalogue: Catalogue,
+    /// The launchers installed on this machine, asked before the catalogue so
+    /// that a process can carry the identity of the shop that installed it.
+    ///
+    /// Empty unless a caller hands them over
+    /// ([`with_launchers`](Self::with_launchers)), for the reason
+    /// `apps/recorder`'s `installed_plugins` is handed in rather than
+    /// discovered: reading them touches the registry and six directories, and a
+    /// test whose answer depended on what is installed on the machine running
+    /// it would not be a test (AGENTS.md section 25).
+    launchers: Launchers,
     settings: AutomaticSettings,
     /// What the user has configured, as it stood the last time the driver
     /// handed it over. Read once per recording, in [`Self::begin_recording`].
@@ -389,6 +401,7 @@ impl SessionManager {
     pub fn new(catalogue: Catalogue, settings: AutomaticSettings) -> Self {
         Self {
             catalogue,
+            launchers: Launchers::none(),
             settings,
             configuration: Configuration::defaults(),
             active: None,
@@ -403,6 +416,25 @@ impl SessionManager {
     #[must_use]
     pub fn with_configuration(mut self, configuration: Configuration) -> Self {
         self.configuration = configuration;
+        self
+    }
+
+    /// The same manager, asking these launchers what installed a process.
+    ///
+    /// Without it the launcher rung never fires and detection is exactly what
+    /// it was: the catalogue's name and path rungs, matching as well as they
+    /// always did. With it, a game whose executable name the catalogue does not
+    /// know is still identified, which is what the providers in
+    /// `clipped_game_detection::launcher` were written for
+    /// ([issue #522](https://github.com/wildware-uk/clipped/issues/522)).
+    ///
+    /// Handed in rather than discovered here so that a test's answer does not
+    /// depend on what is installed on the machine running it (AGENTS.md section
+    /// 25). `apps/recorder` reads them once at start-up and passes them
+    /// through.
+    #[must_use]
+    pub fn with_launchers(mut self, launchers: Launchers) -> Self {
+        self.launchers = launchers;
         self
     }
 
@@ -427,6 +459,62 @@ impl SessionManager {
     #[must_use]
     pub fn active_session(&self) -> Option<&Session> {
         self.active.as_ref().map(|active| &active.session)
+    }
+
+    /// Says where a recording of the open session starts on the session's
+    /// timeline.
+    ///
+    /// Returns whether it was recorded. Only the driver can work this out: it
+    /// holds the session's epoch and each recording's own, and the difference
+    /// between them is the number. See
+    /// [issue #71](https://github.com/wildware-uk/clipped/issues/71) for what it
+    /// is for -- with the recording's duration it is the span the file covers,
+    /// and a span is what turns a moment into a position in one file.
+    ///
+    /// Ignored for a recording this manager has moved past, for the same reason
+    /// [`Self::recording_finished`] ignores one.
+    pub fn place_recording(&mut self, recording: &RecordingId, starts_at_nanos: i64) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        if active.session.id() != &recording.session {
+            return false;
+        }
+        let Some(found) = active
+            .session
+            .recordings
+            .iter_mut()
+            .find(|held| held.index == recording.index)
+        else {
+            return false;
+        };
+        found.starts_at_nanos = Some(starts_at_nanos);
+        true
+    }
+
+    /// Puts what a plugin reported on the open session.
+    ///
+    /// Returns how many were kept. **Zero means they were dropped**, which
+    /// happens when no session is open -- a plugin whose process outlived the
+    /// game by a moment, or one still draining after the session ended -- and
+    /// the caller is expected to say so rather than let them vanish quietly
+    /// (AGENTS.md section 54).
+    ///
+    /// The events go on the *session* rather than on a recording, because a
+    /// session is what they belong to: one heard before the first file started,
+    /// or during a replay-buffer-only session, is still the session's. Which
+    /// file covers each moment is decided when the events are placed, not here
+    /// ([issue #71](https://github.com/wildware-uk/clipped/issues/71)).
+    pub fn record_game_events(&mut self, events: impl IntoIterator<Item = GameEvent>) -> usize {
+        let Some(active) = self.active.as_mut() else {
+            return 0;
+        };
+        let mut kept = 0;
+        for event in events {
+            active.session.record_game_event(event);
+            kept += 1;
+        }
+        kept
     }
 
     /// Whether a recording is running.
@@ -1036,7 +1124,12 @@ impl SessionManager {
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
 
-        match identify_process(&self.catalogue, &process.image_name, path.as_deref()) {
+        match identify_process(
+            &self.catalogue,
+            &self.launchers,
+            &process.image_name,
+            path.as_deref(),
+        ) {
             (GameIdentity::Unidentified, _) => None,
             identified => Some(identified),
         }
@@ -1067,13 +1160,20 @@ impl SessionManager {
 /// (`clipped_game_detection::catalogue::matching`).
 fn identify_process(
     catalogue: &Catalogue,
+    launchers: &Launchers,
     image_name: &str,
     image_path: Option<&str>,
 ) -> (GameIdentity, BTreeSet<String>) {
-    let mut candidate = ProcessCandidate::new(image_name);
-    if let Some(path) = image_path {
-        candidate = candidate.with_path(path);
-    }
+    // The launchers are asked first, because what they answer is the
+    // catalogue's strongest rung: a shop saying "this path is application 730"
+    // identifies a game whose executable is called something generic, which no
+    // amount of looking at the process could. A path this build could not read
+    // cannot be claimed by anything, so the candidate is then the name alone —
+    // which is what it always was (issue #522).
+    let candidate = match image_path {
+        Some(path) => launchers.candidate_for(image_name, path),
+        None => ProcessCandidate::new(image_name),
+    };
 
     match catalogue.match_process(&candidate) {
         Match::None => (GameIdentity::Unidentified, BTreeSet::new()),

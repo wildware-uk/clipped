@@ -8,15 +8,22 @@ what it costs, what it does when it cannot have what it asked for, and — since
 [issue #37](https://github.com/wildware-uk/clipped/issues/37) — how a leased
 range becomes a playable file.
 
-**What does not exist yet is anything that asks for one.** The `recorder replay`
-command is [issue #38](https://github.com/wildware-uk/clipped/issues/38) and the
-hotkey is [issue #39](https://github.com/wildware-uk/clipped/issues/39).
-Spilling segments to disk for long durations is
-[issue #36](https://github.com/wildware-uk/clipped/issues/36), and the
-"per-configuration ceiling" section below is the argument for why it has to
-exist. Nothing in the shipped recorder turns a replay buffer on: `clipped-session`
-exposes `record_with_replay` and `crates/session/examples/replay_probe.rs` drives
-it, but the command line has no option that calls it.
+**Something asks for one now.** `clipped-recorder replay` records with a buffer
+and binds `Ctrl`+`F10` to a save
+([issue #38](https://github.com/wildware-uk/clipped/issues/38),
+`docs/recorder-cli.md`); `start_recording` takes a `replay_seconds` and
+`save_replay` saves from it over the protocol (`docs/ipc.md`).
+`clipped_session::replay::ReplayRecording` is the join between the two — it is
+what knows the video in the buffer well enough to write a container header for
+it — and `docs/sessions.md` is where a saved clip is written down.
+
+What still does not exist is a capture that keeps *only* the buffer: SPEC.md
+section 4's Manual/Replay mode writes no continuous file, and this build has no
+recording without one, which is
+[issue #423](https://github.com/wildware-uk/clipped/issues/423). Spilling
+segments to disk for long durations is done
+([issue #36](https://github.com/wildware-uk/clipped/issues/36)) and has its own
+section below.
 
 ## Encoded segments, never raw frames
 
@@ -238,15 +245,49 @@ with `SavedClip::is_complete` false and `shortfall` saying what was missing.
 Refusing would be worse — there is a clip to be had, and it is the clip somebody
 asked for.
 
-### Audio: there is none, deliberately
+### Audio: every track the recording has
 
-A replay is video only. A recording has no audio track yet
-([issue #180](https://github.com/wildware-uk/clipped/issues/180)), so there is
-nothing in the buffer to write, and carrying every audio track into a replay is
-[issue #40](https://github.com/wildware-uk/clipped/issues/40), which is where it
-will be verified. `save_clip` takes a `VideoTrack` rather than a
-`RecordingLayout` so that this is a property of the signature and not a comment:
-a caller cannot hand it audio tracks that would be silently dropped.
+A clip carries the same audio tracks the recording does
+([issue #40](https://github.com/wildware-uk/clipped/issues/40)). Audio is
+appended to whichever segment is open when it arrives, so it is evicted with
+that segment and leased with it, and `save_clip` takes a `RecordingLayout`
+rather than a `VideoTrack` — the signature is what says a clip declares the
+whole set.
+
+There is no compatibility mix to carry, because this build makes none
+([issue #29](https://github.com/wildware-uk/clipped/issues/29)); when there is,
+it is a track like any other and nothing here changes.
+
+Three decisions are worth knowing about, because each is a way to be quietly
+wrong rather than loudly broken.
+
+**Samples are held as the capture produced them.** Interleaved `f32`, not the
+PCM the file gets. A buffer that converted on the way in would be a second
+implementation of something `clipped-muxer` owns, and a clip would have gone
+through a different conversion from the recording beside it. It costs twice the
+memory of PCM, which is the next point.
+
+**Audio is budgeted, not merely stored.** Audio and video share one ceiling, so
+every byte of audio held evicts a byte of video. `ReplayConfig` is told what the
+recording's audio costs per second
+(`with_audio_bytes_per_second`, from the layout's rate, channels and track
+count) and raises the ceiling to match. Without it the failure is not an overrun
+but a silently shorter replay: a two-track 48 kHz stereo recording asked for
+five seconds came back holding three.
+
+**Audio is selected against the video actually written, and merged into it.**
+A clip begins at the keyframe at or before the request, which is earlier than
+what was asked for; the audio written is the audio belonging to *that* range.
+Selecting against the request instead puts the audio up to a segment ahead of
+its picture. The two are then interleaved by timestamp rather than appended one
+after the other, because `MkvWriter` forces a timestamp that goes backwards to
+be monotonic and counts it — so writing all the video first would not produce a
+badly interleaved file, it would produce one whose audio had been dragged to the
+end.
+
+`apps/recorder/tests/replay_clip.rs` pushes a distinct tone into each track,
+saves a clip and asserts each stream carries its own tone and none of the
+other's.
 
 ### Where the work happens
 
@@ -271,8 +312,13 @@ failure, and both files are decoded.
 
 Nothing in `save_clip` invents a file name, and a path that is already taken is
 refused rather than overwritten (AGENTS.md section 56). Deciding what a clip
-should be called belongs to the layer that knows what it is of, which is
-[issue #38](https://github.com/wildware-uk/clipped/issues/38).
+should be called belongs to the layer that knows what it is of, which is the
+**session**: a clip is `clipped-<session-id>-replay-<n>.mkv`, beside the
+recording it came out of and numbered within its sitting, so everything one
+session produced sorts together in a directory listing and no two saves can
+collide (`clipped_session::automatic::Session::clip_path`). A caller that names
+its own destination — `save_replay`'s `output` — gets that instead, and a
+destination that already exists is still refused.
 
 Two saves at once need nothing special: two leases are two independent sets of
 references and two writers are two files. The test above takes two leases a
@@ -393,9 +439,8 @@ decodable, and put the loss in the statistics where somebody can see it.
 Nothing here reserves memory up front, so there is no allocation to fail at
 start-up; and nothing grows without bound, so there is no allocation to fail
 during a match. What a 30-minute window at 3.9 GiB does to a machine with 8 GB of
-RAM is nevertheless a real problem, and the answer to it is issue #36:
-disk-backed buffering, which trades the memory for a bounded amount of disk and
-keeps the long durations SPEC.md section 16 asks for.
+RAM was a real problem, and the answer to it is "Keeping the window on disk"
+below: the same window, in about a megabyte of memory.
 
 ## Measured memory use
 
@@ -521,20 +566,134 @@ a save of the whole window
   working set      188.3 MiB
 ```
 
-**And this is the argument for issue #36.** A 30-minute window costs the better
-part of 5 GiB of resident memory on a machine that is also running a game. That
-is affordable on 32 GB and it is not affordable on 8 or 16, which is why
-disk-backed buffering exists as a ticket rather than as an optimisation.
+**And this was the argument for issue #36.** A 30-minute window costs the better
+part of 5 GiB of resident memory on a machine that is also running a game — which
+is affordable on 32 GB and is not affordable on 8 or 16. The next section is what
+happens instead.
+
+## Keeping the window on disk
+
+A recording's buffer writes its older segments out and keeps only the newest few
+in memory, so **the memory a buffer costs stops depending on how long its window
+is** ([issue #36](https://github.com/wildware-uk/clipped/issues/36)). Measured
+over thirty minutes of media time, at the same bitrate, with and without it:
+
+| | resident | on disk |
+| --- | --- | --- |
+| in memory only | 212 MB | — |
+| spilling | **0.94 MB** | 208 MB |
+
+The window itself is unchanged: the same thirty minutes is held either way, and
+a clip saved from it reads back the same.
+
+### What decides how much stays in memory
+
+Not the memory ceiling. That is derived from the *window* — 6.3 GB for thirty
+minutes — so a spilling buffer that used it as its resident budget would still be
+holding gigabytes before it wrote anything. The budget is eight segments' worth
+of video instead (`SPILL_RESIDENT_SEGMENTS`), which is derived from the bitrate
+and the segment length and **not** from the window. A thirty-minute buffer and a
+thirty-second one hold the same amount.
+
+The ceiling is still there, as the backstop it always was: if the writer cannot
+keep up, the buffer evicts exactly as it did before, and
+`ReplayStats::spills_declined_writer_behind` says how often that happened.
+
+### Where the files go, and when they go away
+
+`%LOCALAPPDATA%\Clipped\replay\<pid>-<n>\`, beside the rest of Clipped's
+per-user state. The system drive rather than the recording's own, because a
+recording directory is chosen for capacity — an external drive, a spinning disk
+kept for the size of it — and a buffer spills continuously while the game runs.
+
+An ordinary exit removes the directory. A crash cannot, so the recorder sweeps
+at start-up. The rule has to survive **two Clipped processes running at once**,
+which is ordinary — `serve` alongside a `replay` run — so "delete what is not
+mine" would have one recording delete another's buffer, and naming the directory
+after the process id is not enough because Windows reuses them.
+
+So each directory holds a lock file its owner keeps open exclusively. The sweep
+tries to open each one: it fails while the owner is alive and succeeds once the
+owner has gone, however it went. That is a rule that cannot delete a live
+buffer's files.
+
+One trap, because it is invisible when you get it wrong: the lock has to be
+released **before** the directory is removed. Windows will not remove a directory
+that still holds an open file, so the obvious order leaves every byte behind and
+nothing notices until a disk fills up over weeks.
+
+### When the disk fills or goes away
+
+The buffer stops spilling, says so once at `warn`, and behaves exactly as it did
+before spilling existed — it evicts to stay under its ceiling. That is a shorter
+window, never a failed recording (AGENTS.md section 17). A buffer that could not
+make its directory in the first place does the same thing and never tries.
+
+### A lease still does not touch a disk under the lock
+
+A save selects its segments while holding the buffer's lock — measured at 0.77 ms
+above — and reads back anything that was spilled **after** releasing it. A
+spilled segment is pinned during the selection by an `Arc` over its file, exactly
+as a resident one is pinned by an `Arc` over its bytes, so eviction cannot take
+it out from under a save that is still reading. If a spilled segment will not
+read, the lease is refused (`LeaseError::Unreadable`) rather than returned with a
+hole in the middle of it.
 
 ## Attached to a live recording
 
 `clipped_session::record_with_replay` is `record` with a buffer to fill. The
-caller owns the buffer, because the caller is what saves from it: a save runs on
-another thread while the recording carries on.
+caller owns the **handle** — `clipped_session::replay::ReplayRecording` — rather
+than the buffer, and the difference is the point: a clip's container needs the
+codec, the picture size and the parameter sets the encoder produced, and those
+exist only once a recording has opened one. The handle is created with a window,
+the recording fills in the rest when its encoder opens, and
+`ReplayRecording::save_last` is what a caller calls. A save runs on another
+thread while the recording carries on.
 
-`crates/session/examples/replay_probe.rs` is how that is exercised without a
-command to drive it. It records a window for a stated number of seconds with a
-buffer attached and prints what the buffer ended up holding. Against
+The filling-in is `clipped_session::start_buffer`, one function rather than two
+statements inside the recording loop, because the two are only correct together:
+the buffer is built from the track the recording will declare and the bitrate
+its encoder was given, and the thing every packet is copied into has to be the
+buffer *that* built. Doing the first and not the second is a recording keeping
+an empty buffer; pushing into a buffer some other handle owns is a clip
+declaring a track it does not contain. Both are silent until somebody presses
+the key, and both are asserted in `apps/recorder/tests/replay_clip.rs` with
+coded video instead of a graphics device.
+
+There is a third way for it to be silently wrong, and it is the one neither of
+those tests can see: **the recording never calling `start_buffer` at all.**
+`record_frames` hands it `outputs.replay` once the encoder is open, and a
+version that hands it `None` instead records exactly the same file, keeps every
+test on either side of the join green, and answers "this recording is not
+keeping a replay buffer" for every recording there will ever be. So that hand-off
+is asserted where it is made rather than around it:
+`crates/session/src/recording.rs`'s
+`a_recording_given_a_replay_handle_starts_that_handle_and_fills_it_from_its_own_encoder`
+runs the real recording loop — a WARP Direct3D device, the software H.264
+encoder, a real Matroska file, no window and no GPU required — with a handle in
+the outputs, and then asks the handle what happened to it: started, holding
+exactly the packets the recording encoded, covering a stretch of the timeline,
+attached before the first keyframe rather than after it.
+
+What that test does **not** pin down is the bitrate the buffer is sized from.
+The ceiling only governs eviction, so a wrong rate costs history rather than
+correctness — a clip out of a buffer sized from four times the real rate still
+decodes, and nothing in the workspace tells the two apart.
+
+**A saved clip is written down where the recording is.** `apps/recorder`'s
+`replay` subcommand and its `serve` both go through one routine
+(`apps/recorder/src/replay.rs`): write the clip, then enter it in the session's
+own record — the sidecar `clipped-library` indexes — so a replay reaches the
+library exactly as the recording beside it does, in the `clips` table that was
+designed for it (`docs/sessions.md`, `docs/storage.md`). The order is the crash
+safety: the file first, the record after it exists, so an interrupted recorder
+leaves a clip nothing indexed rather than a library row for a file that was
+never written.
+
+`crates/session/examples/replay_probe.rs` is the same wiring with the buffer's
+own accounting printed instead of a clip — `clipped-recorder replay` is what a
+person uses. It records a window for a stated number of seconds with a buffer
+attached and prints what the buffer ended up holding. Against
 `test-apps/video-pattern` at 1920×1080 and 60 fps for 50 seconds, on an RTX 4090
 encoding AV1 through NVENC:
 
@@ -598,16 +757,6 @@ and a wrong number in a report is a smaller failure than a recording that stops
 
 ## What is not decided here
 
-- **Audio.** A replay save has to carry every audio track
-  ([issue #40](https://github.com/wildware-uk/clipped/issues/40)), and
-  `clipped-session` has no audio path yet
-  ([issue #180](https://github.com/wildware-uk/clipped/issues/180)). The segment
-  model does not assume one stream, but nothing has been built for more, and a
-  clip written today is video only.
-- **What a clip is called, and where it goes.** `save_clip` writes where it is
-  told and refuses a name that is taken; choosing one is
-  [issue #38](https://github.com/wildware-uk/clipped/issues/38), which is also
-  what will decide whether a saved clip is entered in the recording library.
 - **Interaction with a full-session recording**, and with automatic highlight
   clipping in M10. Both consume the same packets and neither has been written.
 
