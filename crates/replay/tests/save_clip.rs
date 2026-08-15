@@ -12,10 +12,11 @@
 //! one media harness, rather than assertions written here (AGENTS.md sections 22
 //! and 55).
 //!
-//! What is deliberately absent is audio. A recording has no audio track yet
-//! ([issue #180](https://github.com/wildware-uk/clipped/issues/180)), so a clip
-//! is video only and `audio_stream_count(0)` says so; carrying audio into a
-//! replay is [issue #40](https://github.com/wildware-uk/clipped/issues/40).
+//! What is deliberately absent is audio. A recording carries audio tracks
+//! ([issue #180](https://github.com/wildware-uk/clipped/issues/180)), but the
+//! replay buffer holds video packets only, so a clip cut from one is video
+//! only and `audio_stream_count(0)` says so; carrying audio into a replay is
+//! [issue #40](https://github.com/wildware-uk/clipped/issues/40).
 
 mod support;
 

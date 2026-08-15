@@ -22,8 +22,8 @@
 //! ([issue #126](https://github.com/wildware-uk/clipped/issues/126)).
 //!
 //! The recording itself belongs to `clipped-session`; this package is the
-//! command line over it. There is no audio track yet — see [`record`] and
-//! `docs/recorder-cli.md`.
+//! command line over it, including which audio sources a recording captures —
+//! see [`record`] and `docs/recorder-cli.md`.
 //!
 //! # Modules
 //!
