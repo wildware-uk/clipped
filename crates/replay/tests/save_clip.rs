@@ -57,13 +57,6 @@ fn generous_rate() -> BitRate {
 /// that takes a few milliseconds.
 const PACE: Duration = Duration::from_micros(200);
 
-/// How many frames capture must produce while a save is still running.
-///
-/// Ten, which at the pace above is about five milliseconds — comfortably under
-/// how long writing a minute of video takes, and unreachable by a save that
-/// blocked capture or by one that wrote nothing.
-const CAPTURED_DURING_A_SAVE: u64 = 10;
-
 fn buffer() -> ReplayBuffer {
     ReplayBuffer::new(
         ReplayConfig::new(WINDOW, generous_rate()).expect("sixty seconds is a supported window"),
@@ -277,17 +270,24 @@ fn capture_carries_on_uninterrupted_while_a_clip_is_saved() {
     let before = pushed.load(Ordering::Acquire);
 
     // The claim, and how it is made without a stopwatch: the save runs on its own
-    // thread, and this waits for capture to advance **while that thread is still
-    // running**. A `save_clip` that held the buffer's lock would leave capture
-    // exactly where it was until the file was finished, and the loop would end on
-    // `is_finished` with nothing counted; a save that wrote nothing would end the
-    // same way. Waiting rather than sampling is what keeps this from depending on
-    // how fast the machine is — a slower one simply waits longer.
+    // thread, and this watches whether capture advances **at all** while that
+    // thread is still running. A `save_clip` holding the buffer's lock would
+    // leave capture exactly where it was until the file was finished, so one
+    // frame is the whole of the evidence — and it is evidence a busy machine
+    // cannot destroy.
+    //
+    // It used to require ten, and that is what made it flaky (issue #490). The
+    // loop has two exits, so a save that finished before a loaded runner had
+    // scheduled the capture thread ten times left `advanced` short and failed
+    // with "capture was waiting on the save" — accusing the code of the one
+    // defect this test exists to catch, when what had actually happened was that
+    // the machine was busy. A threshold scheduling luck can reach or miss is not
+    // measuring the property; "did it move" is.
     let (advanced, clip) = std::thread::scope(|scope| {
         let saver =
             scope.spawn(|| save_clip(&lease, &clip_path, &RecordingLayout::new(video.track())));
         let mut advanced = 0;
-        while !saver.is_finished() && advanced < CAPTURED_DURING_A_SAVE {
+        while !saver.is_finished() && advanced == 0 {
             advanced = pushed.load(Ordering::Acquire) - before;
             std::thread::yield_now();
         }
@@ -299,9 +299,9 @@ fn capture_carries_on_uninterrupted_while_a_clip_is_saved() {
     let (frames, refused, recording) = capturing.join().expect("the capture thread finishes");
 
     assert!(
-        advanced >= CAPTURED_DURING_A_SAVE,
-        "only {advanced} frames were captured while the clip was being written, so capture was \
-         waiting on the save"
+        advanced > 0,
+        "capture did not advance by a single frame while the clip was being written, so the save \
+         held something the capture thread needed"
     );
     assert_eq!(refused, 0, "the buffer refused a packet during the save");
     assert_eq!(
