@@ -64,19 +64,31 @@
 //! second caller appeared and named exactly what the two had in common, which a
 //! trait written in advance would have had to guess at.
 //!
-//! What remains of #44 is EA, Riot and GOG. Riot is the one to leave
-//! alone: its `RiotClientInstalls.json` publishes no per-game identifier, and
-//! only one of eight `Metadata` directories on a real installation carried an
-//! install path, so a provider would find one game out of seven products (#44
-//! records the measurements). Writing it now would still be guessing (AGENTS.md,
-//! "Do not over-engineer").
+//! What remains of #44 is EA and GOG. Riot was written in the end
+//! ([#513](https://github.com/wildware-uk/clipped/pull/513)), and the thing this
+//! paragraph used to warn about turned out to be the finding rather than the
+//! obstacle: only one of eight `Metadata` directories on a real installation
+//! carries an install path, because the other seven are products the client
+//! *offers*. Reading that correctly is what [`riot`] does, and it is why a
+//! directory listing is not an installation.
+//!
+//! # Who asks all of them
+//!
+//! [`Launchers`] — and until it existed, nothing did. Every provider here was
+//! built, tested and verified against a real installation, and no code outside
+//! their own tests ever called one, so the strongest rung in the catalogue's
+//! precedence order never fired in a shipped build
+//! ([#522](https://github.com/wildware-uk/clipped/issues/522)).
 
 pub mod battlenet;
 mod claim;
 pub mod epic;
+mod installed;
 mod keyvalues;
 mod registry;
 pub mod riot;
 pub mod steam;
 pub mod ubisoft;
 pub mod xbox;
+
+pub use installed::Launchers;

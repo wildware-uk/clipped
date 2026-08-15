@@ -142,6 +142,7 @@ use std::time::{Duration, SystemTime};
 
 use clipped_events::GameEvent;
 use clipped_game_detection::catalogue::{Catalogue, Match, ProcessCandidate};
+use clipped_game_detection::launcher::Launchers;
 use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEvent};
 
 use crate::config::{Configuration, GameKey, ResolvedSettings};
@@ -321,6 +322,16 @@ impl RecordingOutcome {
 #[derive(Debug)]
 pub struct SessionManager {
     catalogue: Catalogue,
+    /// The launchers installed on this machine, asked before the catalogue so
+    /// that a process can carry the identity of the shop that installed it.
+    ///
+    /// Empty unless a caller hands them over
+    /// ([`with_launchers`](Self::with_launchers)), for the reason
+    /// `apps/recorder`'s `installed_plugins` is handed in rather than
+    /// discovered: reading them touches the registry and six directories, and a
+    /// test whose answer depended on what is installed on the machine running
+    /// it would not be a test (AGENTS.md section 25).
+    launchers: Launchers,
     settings: AutomaticSettings,
     /// What the user has configured, as it stood the last time the driver
     /// handed it over. Read once per recording, in [`Self::begin_recording`].
@@ -390,6 +401,7 @@ impl SessionManager {
     pub fn new(catalogue: Catalogue, settings: AutomaticSettings) -> Self {
         Self {
             catalogue,
+            launchers: Launchers::none(),
             settings,
             configuration: Configuration::defaults(),
             active: None,
@@ -404,6 +416,25 @@ impl SessionManager {
     #[must_use]
     pub fn with_configuration(mut self, configuration: Configuration) -> Self {
         self.configuration = configuration;
+        self
+    }
+
+    /// The same manager, asking these launchers what installed a process.
+    ///
+    /// Without it the launcher rung never fires and detection is exactly what
+    /// it was: the catalogue's name and path rungs, matching as well as they
+    /// always did. With it, a game whose executable name the catalogue does not
+    /// know is still identified, which is what the providers in
+    /// `clipped_game_detection::launcher` were written for
+    /// ([issue #522](https://github.com/wildware-uk/clipped/issues/522)).
+    ///
+    /// Handed in rather than discovered here so that a test's answer does not
+    /// depend on what is installed on the machine running it (AGENTS.md section
+    /// 25). `apps/recorder` reads them once at start-up and passes them
+    /// through.
+    #[must_use]
+    pub fn with_launchers(mut self, launchers: Launchers) -> Self {
+        self.launchers = launchers;
         self
     }
 
@@ -1093,7 +1124,12 @@ impl SessionManager {
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
 
-        match identify_process(&self.catalogue, &process.image_name, path.as_deref()) {
+        match identify_process(
+            &self.catalogue,
+            &self.launchers,
+            &process.image_name,
+            path.as_deref(),
+        ) {
             (GameIdentity::Unidentified, _) => None,
             identified => Some(identified),
         }
@@ -1124,13 +1160,20 @@ impl SessionManager {
 /// (`clipped_game_detection::catalogue::matching`).
 fn identify_process(
     catalogue: &Catalogue,
+    launchers: &Launchers,
     image_name: &str,
     image_path: Option<&str>,
 ) -> (GameIdentity, BTreeSet<String>) {
-    let mut candidate = ProcessCandidate::new(image_name);
-    if let Some(path) = image_path {
-        candidate = candidate.with_path(path);
-    }
+    // The launchers are asked first, because what they answer is the
+    // catalogue's strongest rung: a shop saying "this path is application 730"
+    // identifies a game whose executable is called something generic, which no
+    // amount of looking at the process could. A path this build could not read
+    // cannot be claimed by anything, so the candidate is then the name alone —
+    // which is what it always was (issue #522).
+    let candidate = match image_path {
+        Some(path) => launchers.candidate_for(image_name, path),
+        None => ProcessCandidate::new(image_name),
+    };
 
     match catalogue.match_process(&candidate) {
         Match::None => (GameIdentity::Unidentified, BTreeSet::new()),
