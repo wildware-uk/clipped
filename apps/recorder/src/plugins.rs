@@ -378,7 +378,10 @@ mod tests {
         );
         let said = state_of(&plugin, &lapsed);
         assert!(said.starts_with("needs consent again"), "{said}");
-        assert!(said.contains("127.0.0.1:9999"), "what was agreed to: {said}");
+        assert!(
+            said.contains("127.0.0.1:9999"),
+            "what was agreed to: {said}"
+        );
         assert!(said.contains("127.0.0.1:3212"), "what it asks now: {said}");
     }
 
@@ -394,7 +397,10 @@ mod tests {
 
         let said = error.to_string();
         assert!(said.contains("acme.typo"), "{said}");
-        assert!(said.contains("acme.cs2"), "what is installed is not named: {said}");
+        assert!(
+            said.contains("acme.cs2"),
+            "what is installed is not named: {said}"
+        );
     }
 
     #[test]
