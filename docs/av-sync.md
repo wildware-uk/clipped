@@ -141,8 +141,9 @@ The two alternatives, and why not:
 **Not implemented here.** `clipped-capture` gives a session the signed
 `MediaTime` the rule needs, and `crates/capture/src/time.rs` is where the epoch
 is fixed, but applying the rule belongs to whoever owns the recording's sources —
-`clipped-session`, which exists and records video but has no audio source to
-align against yet ([issue #180](https://github.com/wildware-uk/clipped/issues/180)).
+`clipped-session`, which records video and audio together
+([issue #180](https://github.com/wildware-uk/clipped/issues/180)) and aligns
+them on one capture clock.
 [Issue #174](https://github.com/wildware-uk/clipped/issues/174) tracks doing it.
 Until then a recording assembled from these parts inherits the muxer's clamp,
 which is a known error at the head of the file rather than a hidden one.
@@ -505,12 +506,11 @@ reports for a packet, or the endpoint's own buffering is
 - **No file is written.** As with the drift measurement, these are the timestamps
   the pipeline produces, not what a writer wrote. It is the half of
   [issue #173](https://github.com/wildware-uk/clipped/issues/173) that is not
-  done, and it is not done because it cannot be yet: a recording with an audio
-  track in it needs
-  [#126](https://github.com/wildware-uk/clipped/issues/126) to wire capture,
-  encode and mux together and
-  [#180](https://github.com/wildware-uk/clipped/issues/180) to route audio into
-  the same file. Measuring this offset from a produced recording, with the media
+  done. It was blocked on a recording having an audio track at all, which
+  [#126](https://github.com/wildware-uk/clipped/issues/126) and
+  [#180](https://github.com/wildware-uk/clipped/issues/180) have since given it,
+  so what remains is the measurement rather than something to measure.
+  Taking this offset from a produced recording, with the media
   harness reading the pattern's counter out of the video track and the tone out
   of the audio track, is
   [#151](https://github.com/wildware-uk/clipped/issues/151). The stages that

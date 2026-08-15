@@ -1236,7 +1236,8 @@ fn a_recording_driven_entirely_over_the_protocol_produces_a_playable_file() {
             pid: Some(pattern.process_id()),
             output: Some(output.to_string_lossy().into_owned()),
             overwrite: true,
-            // The session cannot record audio yet and would warn on every run;
+            // Asked for explicitly, so the file is the same whatever audio
+            // devices the machine has;
             // a test should ask for what it expects to get.
             microphone: Some("none".to_owned()),
             system_audio: Some("none".to_owned()),

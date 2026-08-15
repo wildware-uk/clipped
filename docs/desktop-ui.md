@@ -726,7 +726,7 @@ the screen says how:
 | Section | What can be changed today |
 | --- | --- |
 | Recording | `clipped-recorder watch --framerate 60 --codec auto …`, per run; #61 is what makes the settings file reach a recording |
-| Audio | The same options, with the recorder's own warning that a recording has no audio track yet (#180) |
+| Audio | The same options. A recording carries its audio tracks (#180); what the settings file cannot yet do is choose the devices per game |
 | Storage | `--output-directory`. The settings file has no key for it at all, which is [#307](https://github.com/wildware-uk/clipped/issues/307) |
 | Hotkeys | The `hotkeys` section of `settings.json`, read when the recorder starts. The section also **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232); binding one from here is #54 |
 | Notifications | **The one thing this window's own behaviour follows**: the four switches in `notifications.json`, named with their keys and their file |

@@ -25,9 +25,9 @@ that implements it, and [ffmpeg.md](ffmpeg.md) how to build against it.
 - `remux_to_mp4` — copies a finished recording into MP4 without decoding it, and
   `Mp4Plan::inspect`, which says what that copy would cost before it is made.
 
-The recorder writes video through this crate; **audio is not wired to a
-recording session yet**, which is
-[issue #180](https://github.com/wildware-uk/clipped/issues/180). What is here is
+The recorder writes video and audio through this crate
+([issue #180](https://github.com/wildware-uk/clipped/issues/180)). What is here
+is
 the container side of it: the tracks, their order and their metadata, and the
 conversion from captured samples to packets, exercised by this crate's own tests
 against real files.

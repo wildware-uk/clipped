@@ -137,7 +137,7 @@ has not counted.
 | Dropped frames | Not reported. The `metrics` event stream is defined and this recorder refuses it with `not_implemented`. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Encoder latency | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Audio drift | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
-| Audio devices | Not reported. No recording captures audio yet. [#180](https://github.com/wildware-uk/clipped/issues/180) |
+| Audio devices | Not reported. A recording does capture audio (#180); which devices it used is not carried into diagnostics. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | **Recording paths** | **The path of the recording in progress**, which arrives inside a `recording` status — or, when nothing is being recorded, that there is none. |
 | Muxer status | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |
 | Disk latency | Not reported. [#100](https://github.com/wildware-uk/clipped/issues/100) |

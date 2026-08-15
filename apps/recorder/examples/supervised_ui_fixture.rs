@@ -192,7 +192,8 @@ fn start_recording(
             pid: Some(pid),
             output: Some(output.to_string_lossy().into_owned()),
             overwrite: true,
-            // The session cannot record audio yet and would warn on every run.
+            // Asked for explicitly: a fixture should produce the same file
+            // on a machine with audio devices and one without.
             microphone: Some("none".to_owned()),
             system_audio: Some("none".to_owned()),
             ..StartRecording::default()
