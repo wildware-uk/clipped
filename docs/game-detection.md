@@ -1162,6 +1162,36 @@ standard input piped and nothing else attached: it is on every Windows machine,
 it starts immediately, and it exits when its input closes — so the test knows
 the exact moment the process began and the exact moment it ended.
 
+#### Ten notification queries, shared with everything else on the machine
+
+WMI gives an account only a few notification queries at once — **ten**, measured
+by opening them until it refused, and confirmed from a second client that got
+the same number. A source takes two of them, one for creations and one for
+deletions, and they are released as soon as the enumerator is dropped: there is
+no leak, only a limit.
+
+That limit is what [#466] was. Four tests in this crate take a source or a whole
+watcher, so a run with enough threads asked for more than the machine had, and
+the ones that lost were reported as `0x8004106C` — which reads as "your WMI is
+misconfigured" and means nothing of the sort. It passed when a crate was run on
+its own and failed under `cargo test --workspace`, which is the shape of failure
+that costs the most trust.
+
+Both halves are addressed, because either alone would leave it:
+
+- `one_subscription_at_a_time` holds those four tests to one at a time, so the
+  suite stops competing with itself.
+- The two tests that assert WMI *answers* accept a quota refusal and say so,
+  because `cargo test --workspace` runs several binaries at once and no lock
+  inside one of them reaches the others. They accept **only** that code: a
+  subscription pointed at a namespace that does not exist still fails both, which
+  is what keeps them from being tests that pass whatever happens.
+- `explain` turns the code into a sentence saying the machine is working and
+  something on it is holding the queries. The code stays in the message, because
+  it is what a search engine answers to.
+
+[#466]: https://github.com/wildware-uk/clipped/issues/466
+
 ### Assumptions and limits
 
 - **A process that starts in the gap between the baseline snapshot and the
