@@ -58,13 +58,22 @@
 //! being listed here is a sitting. So a session's row is built from what the
 //! sitting is: its game, its identifier, the day it started, how much footage it
 //! produced, whether it or anything in it is favourited, the tags on its
-//! recordings and clips, and the titles of those clips. `game:cs2`,
-//! `tag:clutch`, `favourite`, `date:>2026-08-01` and `duration:>30m` therefore
-//! all mean what a person would expect of a session list.
+//! recordings and clips, the titles of **all** of those clips, and the kinds of
+//! event its plugins reported. `game:cs2`, `tag:clutch`, `favourite`,
+//! `date:>2026-08-01`, `duration:>30m`, `title:mirage` and `event:kill`
+//! therefore all mean what a person would expect of a session list.
+//!
+//! The last two are recent. `title:` kept only the *last* clip's title, because
+//! the projection assigned it rather than adding it, and `event:` matched
+//! nothing at all, because nothing here read `session_events`
+//! ([issue #520](https://github.com/wildware-uk/clipped/issues/520)). Both were
+//! invisible from the language's side: the parser accepted the terms and the
+//! matcher implemented them, and the row they were asked about was smaller than
+//! either knew.
 
 use std::collections::HashMap;
 
-use clipped_storage::rusqlite::{params, Connection, Row as SqlRow};
+use clipped_storage::rusqlite::{params, params_from_iter, Connection, Row as SqlRow};
 use clipped_storage::Database;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -254,11 +263,20 @@ pub fn list_sessions(
             .last()
             .map(|header| (header.started_at.clone(), header.session_id.clone()));
 
+        // One statement for the batch rather than one per session: a query
+        // that mentions no event still has to be told the session has none, and
+        // asking 256 times to find that out is 256 round trips.
+        let kinds = match listing.query {
+            Some(_) => event_kinds_of(connection, &headers)?,
+            None => HashMap::new(),
+        };
+
         for header in headers {
+            let events = kinds.get(&header.session_id).cloned().unwrap_or_default();
             let session = hydrate(connection, header)?;
             if listing
                 .query
-                .is_some_and(|query| !query.matches(&row_of(&session)))
+                .is_some_and(|query| !query.matches(&row_of(&session, &events)))
             {
                 continue;
             }
@@ -484,6 +502,43 @@ fn clips_of(connection: &Connection, session_id: &str) -> Result<Vec<IndexedClip
     Ok(clips)
 }
 
+/// The distinct event kinds each of these sessions carries.
+///
+/// One statement for the whole batch, for the reason [`tags_for`] gives. The
+/// kinds rather than the events: a search asks whether a session has an event
+/// *of a kind*, so reading the moments and the details as well would be reading
+/// a timeline to answer a yes-or-no question.
+fn event_kinds_of(
+    connection: &Connection,
+    headers: &[SessionHeader],
+) -> Result<HashMap<String, Vec<String>>, IndexError> {
+    let mut kinds: HashMap<String, Vec<String>> = HashMap::new();
+    if headers.is_empty() {
+        return Ok(kinds);
+    }
+
+    // Bound rather than written into the statement: a session identifier is a
+    // string the recorder generated, and a string is never interpolated into
+    // SQL here however safe this one looks (AGENTS.md section 30).
+    let placeholders = (1..=headers.len())
+        .map(|nth| format!("?{nth}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = connection.prepare(&format!(
+        "SELECT DISTINCT session_id, kind FROM session_events          WHERE session_id IN ({placeholders}) ORDER BY kind"
+    ))?;
+
+    let ids: Vec<&str> = headers
+        .iter()
+        .map(|header| header.session_id.as_str())
+        .collect();
+    let mut rows = statement.query(params_from_iter(ids))?;
+    while let Some(row) = rows.next()? {
+        kinds.entry(row.get(0)?).or_default().push(row.get(1)?);
+    }
+    Ok(kinds)
+}
+
 /// The tags on each of these rows, alphabetically.
 ///
 /// One statement for the whole set rather than one per row: a session with three
@@ -529,8 +584,17 @@ fn tags_for(
 /// duration is the footage the sitting produced rather than the wall-clock span
 /// from its first frame to its last: a session left open across a dinner break
 /// did not record the dinner, and `duration:>2h` should not select it.
-fn row_of(session: &IndexedSession) -> Row {
+fn row_of(session: &IndexedSession, events: &[String]) -> Row {
     let mut row = Row::new().with_session(&session.session_id);
+
+    // What the plugins reported during the sitting. Not part of
+    // `IndexedSession`, because a listing does not draw them — the timeline
+    // does, out of `library_events` — but a session is searchable by them, and
+    // for a while it was not: `event:kill` matched nothing at all, because
+    // nothing put them here (issue #520).
+    for kind in events {
+        row = row.with_event(kind);
+    }
 
     if let Some(game) = &session.game_name {
         row = row.with_game(game);
@@ -976,5 +1040,83 @@ mod tests {
                 "`{text}` should select the sitting that holds it"
             );
         }
+    }
+
+    /// Every session a query selects, by identifier.
+    fn found(database: &Database, text: &str) -> Vec<String> {
+        let query: Query = text.parse().expect("a query parses");
+        list_sessions(
+            database,
+            &SessionListing {
+                query: Some(&query),
+                ..SessionListing::default()
+            },
+        )
+        .expect("a page")
+        .sessions
+        .into_iter()
+        .map(|session| session.session_id)
+        .collect()
+    }
+
+    #[test]
+    fn a_sitting_is_found_by_the_name_of_any_of_its_clips_not_only_the_last() {
+        // A sitting produces one clip per replay saved out of it, and somebody
+        // who names two of them expects to find either. The projection assigned
+        // the title rather than adding it, so the first name was overwritten by
+        // the second and could not be searched for at all — by `title:` or by
+        // typing it (issue #520).
+        let database = library("clip-titles");
+        let session = add_session(&database, 1, Some("cs2"));
+        for (index, title) in [(1, "Ace on Mirage"), (2, "Clutch on Inferno")] {
+            database
+                .connection()
+                .execute(
+                    "INSERT INTO clips (session_id, path, title, created_at, duration_seconds)                      VALUES (?1, ?2, ?3, ?4, 30.0)",
+                    params![
+                        session,
+                        format!(r"D:\clips\{session}-clip{index}.mkv"),
+                        title,
+                        "2026-08-11T12:30:00+01:00",
+                    ],
+                )
+                .expect("a clip inserts");
+        }
+
+        for text in ["title:mirage", "mirage", "title:inferno", "inferno"] {
+            assert_eq!(
+                found(&database, text),
+                vec![session.clone()],
+                "`{text}` names a clip of this sitting"
+            );
+        }
+        assert!(found(&database, "title:dust2").is_empty());
+    }
+
+    #[test]
+    fn a_sitting_is_found_by_an_event_its_plugins_reported() {
+        // `event:` is in the language, the matcher implements it, and
+        // `session_events` has rows in it — and nothing joined the two, so
+        // every `event:` term was false for every session (issue #520).
+        let database = library("session-events");
+        let session = add_session(&database, 2, Some("cs2"));
+        for kind in ["kill", "round_win"] {
+            database
+                .connection()
+                .execute(
+                    "INSERT INTO session_events (session_id, at, kind) VALUES (?1, ?2, ?3)",
+                    params![session, "2026-08-12T12:10:00+01:00", kind],
+                )
+                .expect("an event inserts");
+        }
+
+        for text in ["event:kill", "kill", "event:round_win", "round_win"] {
+            assert_eq!(
+                found(&database, text),
+                vec![session.clone()],
+                "`{text}` names an event of this sitting"
+            );
+        }
+        assert!(found(&database, "event:death").is_empty());
     }
 }
