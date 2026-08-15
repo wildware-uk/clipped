@@ -284,6 +284,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clipped-capture",
+ "clipped-session",
  "clipped-video-pattern",
  "clipped-windows",
  "windows",
