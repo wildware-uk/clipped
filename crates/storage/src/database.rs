@@ -732,4 +732,73 @@ mod tests {
             .expect("the sessions can be counted");
         assert_eq!(sessions, 1);
     }
+
+    #[test]
+    fn an_event_can_be_positioned_in_a_recording_or_belong_to_none() {
+        // What 0003 exists for, and both halves of it. Issue #71 needs an event
+        // to say which recording it landed in and where, because one sitting
+        // can produce several files and each has its own timeline. It also
+        // needs an event that belongs to no file at all — one that arrived
+        // before the first recording started, or during a session that is only
+        // keeping a replay buffer — which is why both columns are nullable.
+        let directory = scratch_directory("event-positions");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let connection = database.connection();
+
+        connection
+            .execute_batch(
+                "INSERT INTO sessions (session_id, started_at)
+                     VALUES ('s', '2026-01-01T00:00:00Z');
+                 INSERT INTO recordings (recording_id, session_id, session_index, path,
+                                         started_at)
+                     VALUES (1, 's', 1, 'one.mkv', '2026-01-01T00:00:00Z');
+                 INSERT INTO session_events (session_id, at, kind, recording_id, offset_seconds)
+                     VALUES ('s', '2026-01-01T00:01:30Z', 'kill', 1, 90.5);
+                 INSERT INTO session_events (session_id, at, kind)
+                     VALUES ('s', '2026-01-01T00:00:05Z', 'match_started');",
+            )
+            .expect("both shapes of event are storable");
+
+        let placed: (Option<i64>, Option<f64>) = connection
+            .query_row(
+                "SELECT recording_id, offset_seconds FROM session_events WHERE kind = 'kill'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the positioned event is there");
+        assert_eq!(placed, (Some(1), Some(90.5)));
+
+        let unplaced: (Option<i64>, Option<f64>) = connection
+            .query_row(
+                "SELECT recording_id, offset_seconds FROM session_events \
+                 WHERE kind = 'match_started'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the event with no recording is there too");
+        assert_eq!(
+            unplaced,
+            (None, None),
+            "an event that happened before any file existed still happened"
+        );
+
+        // And deleting the recording leaves the event, without a position it no
+        // longer has. The alternative — taking the record of what happened with
+        // the file — is the one this schema refuses everywhere else.
+        connection
+            .execute("DELETE FROM recordings WHERE recording_id = 1", [])
+            .expect("a recording can be deleted");
+        let after: (i64, Option<i64>) = connection
+            .query_row(
+                "SELECT COUNT(*), MAX(recording_id) FROM session_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the events survive");
+        assert_eq!(
+            after,
+            (2, None),
+            "both events remain and neither still claims a file that has gone"
+        );
+    }
 }

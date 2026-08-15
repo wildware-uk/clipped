@@ -70,6 +70,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "manual_session_end_reason",
         sql: include_str!("../migrations/0002_manual_session_end_reason.sql"),
     },
+    Migration {
+        version: 3,
+        name: "session_event_positions",
+        sql: include_str!("../migrations/0003_session_event_positions.sql"),
+    },
 ];
 
 /// The checksum of every migration that has been released.
@@ -80,7 +85,11 @@ pub const MIGRATIONS: &[Migration] = &[
 /// constant: it is a fact about the repository rather than something the
 /// running application consults.
 #[cfg(test)]
-const CHECKSUMS: &[(u32, &str)] = &[(1, "afab7973dd06f9d1"), (2, "58c7954428d814fa")];
+const CHECKSUMS: &[(u32, &str)] = &[
+    (1, "afab7973dd06f9d1"),
+    (2, "58c7954428d814fa"),
+    (3, "caf2e607611ade8c"),
+];
 
 /// The newest schema version this build understands.
 pub const SCHEMA_VERSION: u32 = latest_version(MIGRATIONS);
