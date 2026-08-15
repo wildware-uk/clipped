@@ -89,6 +89,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use clipped_game_detection::catalogue::{Catalogue, OverlayStatus};
+use clipped_game_detection::launcher::Launchers;
 use clipped_game_detection::{
     Next, ProcessWatcher, WatchConfig, WatchError as DetectionError, WatchEvent,
 };
@@ -238,6 +239,11 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
     // directories` separates the two the same way).
     let mut driver = Driver::new(
         catalogue,
+        // The third thing read from disk at start-up: which shops are installed
+        // and what each of them says it has. Once, here, for the reason the
+        // other two are read once — and `Launchers` documents what a game
+        // installed afterwards costs (issue #522).
+        Launchers::discover(),
         AutomaticSettings::new(directory.clone()),
         ConfigurationStore::default_path().as_deref(),
         RecordingPlan::from(args),
@@ -604,6 +610,7 @@ impl Driver {
     /// it (AGENTS.md section 25).
     fn new(
         catalogue: Catalogue,
+        launchers: Launchers,
         settings: AutomaticSettings,
         settings_file: Option<&Path>,
         plan: RecordingPlan,
@@ -618,7 +625,12 @@ impl Driver {
         // `attach_plugins` runs on a path that must not go looking for a
         // settings file.
         let plugin_consents = configuration.plugins().clone();
-        let manager = SessionManager::new(catalogue, settings).with_configuration(configuration);
+        let manager = SessionManager::new(catalogue, settings)
+            .with_configuration(configuration)
+            // Without this the launcher rung never fires and a game is
+            // identified by its executable's name and path alone, which is what
+            // detection was before the providers existed (issue #522).
+            .with_launchers(launchers);
         Self {
             manager,
             plan,
@@ -1541,6 +1553,8 @@ name = "test-game.exe"
             Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue");
         let mut driver = Driver::new(
             catalogue,
+            // And no launchers, for the same reason as the plugins below.
+            Launchers::none(),
             AutomaticSettings::new(directory.recordings()),
             Some(settings_file),
             RecordingPlan::from(&args()),

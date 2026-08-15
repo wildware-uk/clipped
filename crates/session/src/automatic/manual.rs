@@ -58,6 +58,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use clipped_game_detection::catalogue::Catalogue;
+use clipped_game_detection::launcher::Launchers;
 
 use crate::config::{Configuration, ResolvedSettings};
 
@@ -167,13 +168,15 @@ impl ManualSession {
         output: PathBuf,
         configuration: &Configuration,
         catalogue: &Catalogue,
+        launchers: &Launchers,
         process: RecordedProcess<'_>,
         now: SystemTime,
     ) -> Self {
         // The child processes the answer carries are the manager's business and
         // not this session's: they are how a *game* is watched for having
         // exited, and this session ends when its one recording does.
-        let (game, _children) = identify_process(catalogue, process.image_name, process.image_path);
+        let (game, _children) =
+            identify_process(catalogue, launchers, process.image_name, process.image_path);
         // A game the catalogue named resolves that game's settings layer, so a
         // frame rate somebody set for Counter-Strike applies to a recording of
         // it however the recording was started. The same fold, the same lookup
@@ -438,6 +441,7 @@ name = "tied.exe"
             directory.join("clipped-20260813-120000.mkv"),
             &Configuration::defaults(),
             catalogue,
+            &Launchers::none(),
             process,
             moment(1_786_458_725),
         )
@@ -595,6 +599,7 @@ name = "tied.exe"
             output.clone(),
             &Configuration::defaults(),
             &catalogue(),
+            &Launchers::none(),
             RecordedProcess::new(4_242, "notepad.exe"),
             moment(1_786_458_725),
         );
@@ -623,6 +628,7 @@ name = "tied.exe"
             output,
             &Configuration::defaults(),
             &catalogue(),
+            &Launchers::none(),
             RecordedProcess::new(4_242, "test-game.exe"),
             moment(1_786_458_725),
         );
@@ -664,6 +670,7 @@ name = "tied.exe"
             directory.join("clipped-20260813-120000.mkv"),
             &Configuration::defaults(),
             &catalogue(),
+            &Launchers::none(),
             RecordedProcess::new(4_242, "cs2.exe"),
             moment(1_786_458_725),
         );
@@ -761,6 +768,7 @@ name = "tied.exe"
             directory.join("clipped-20260813-120000.mkv"),
             &configuration,
             &catalogue(),
+            &Launchers::none(),
             RecordedProcess::new(1, "notepad.exe"),
             moment(1_786_458_725),
         );
@@ -805,6 +813,7 @@ name = "tied.exe"
             directory.join("clipped-20260813-120000.mkv"),
             &configuration,
             &catalogue(),
+            &Launchers::none(),
             RecordedProcess::new(4_242, "test-game.exe"),
             moment(1_786_458_725),
         );
@@ -818,6 +827,7 @@ name = "tied.exe"
             directory.join("clipped-20260813-130000.mkv"),
             &configuration,
             &catalogue(),
+            &Launchers::none(),
             RecordedProcess::new(4_242, "notepad.exe"),
             moment(1_786_462_325),
         );

@@ -247,6 +247,9 @@ fn session(directory: &Path) -> Mutex<ManualSession> {
         // otherwise come from the machine running the test rather than from the
         // test (AGENTS.md section 25).
         &clipped_game_detection::catalogue::Catalogue::default(),
+        // Empty for the same reason: what is installed on the machine running
+        // this test is not one of its inputs.
+        &clipped_game_detection::launcher::Launchers::none(),
         clipped_session::automatic::RecordedProcess::new(4_242, "cs2.exe"),
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725),
     ))

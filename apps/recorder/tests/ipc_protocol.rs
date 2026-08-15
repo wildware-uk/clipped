@@ -1359,6 +1359,7 @@ fn a_real_recorder_indexes_the_recordings_folder_at_start_up_and_answers_from_it
         // is the one input here that would otherwise come from the machine
         // running the test rather than from the test (AGENTS.md section 25).
         &clipped_game_detection::catalogue::Catalogue::default(),
+        &clipped_game_detection::launcher::Launchers::none(),
         clipped_session::automatic::RecordedProcess::new(4_242, "cs2.exe"),
         std::time::SystemTime::now(),
     );
@@ -1464,6 +1465,7 @@ fn earlier_sittings(recordings: &Path, count: usize) {
             // catalogue is the one input here that would otherwise come from
             // the machine running the test (AGENTS.md section 25).
             &clipped_game_detection::catalogue::Catalogue::default(),
+            &clipped_game_detection::launcher::Launchers::none(),
             clipped_session::automatic::RecordedProcess::new(4_242, "cs2.exe"),
             started,
         );

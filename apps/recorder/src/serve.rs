@@ -92,6 +92,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
 
 use clipped_game_detection::catalogue::Catalogue;
+use clipped_game_detection::launcher::Launchers;
 use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
     Endpoint, EventPublisher, HotkeyBinding, ProtocolError, RecorderStatus, RecordingSummary,
@@ -394,6 +395,10 @@ impl RecorderService {
             // And the same catalogue `watch` matches processes against, read
             // once for the same reason (issue #403).
             catalogue_for_recordings(),
+            // And the launchers, so that a recording started from the window is
+            // filed under the game whichever shop installed it, rather than
+            // only when the catalogue knows the executable's name (issue #522).
+            Launchers::discover(),
         )
     }
 
@@ -417,6 +422,10 @@ impl RecorderService {
             indexer,
             Configuration::defaults(),
             catalogue,
+            // A handler built for a test is told nothing about this machine's
+            // launchers, for the reason its catalogue is a fixture (AGENTS.md
+            // section 25).
+            Launchers::none(),
         )
     }
 
@@ -426,6 +435,7 @@ impl RecorderService {
         indexer: LibraryIndexer,
         configuration: Configuration,
         catalogue: Catalogue,
+        launchers: Launchers,
     ) -> Self {
         let indexer = Arc::new(indexer);
         Self {
@@ -434,6 +444,7 @@ impl RecorderService {
                 Arc::clone(&indexer),
                 configuration,
                 catalogue,
+                launchers,
             )),
             library,
             indexer,
@@ -655,6 +666,16 @@ struct RecordingState {
     /// belongs to the moment the recording started, and a games file edited
     /// while a recording runs does not change what that recording is of.
     catalogue: Catalogue,
+    /// The launchers installed on this machine, as they stood when this process
+    /// started ([`launchers_for_recordings`]).
+    ///
+    /// Read once, for the reason the catalogue is: asking six providers costs a
+    /// registry walk and six directory reads, and a recording resolves what it
+    /// is of when it starts. A game installed while this recorder is running is
+    /// therefore identified by the catalogue's name and path rungs until it is
+    /// restarted, which is the trade
+    /// [`Launchers`](clipped_game_detection::launcher::Launchers) documents.
+    launchers: Launchers,
 }
 
 /// A recording that has been started.
@@ -766,6 +787,7 @@ impl RecordingState {
         indexer: Arc<LibraryIndexer>,
         configuration: Configuration,
         catalogue: Catalogue,
+        launchers: Launchers,
     ) -> Self {
         Self {
             current: Mutex::new(None),
@@ -775,6 +797,7 @@ impl RecordingState {
             indexer,
             configuration,
             catalogue,
+            launchers,
         }
     }
 
@@ -824,6 +847,7 @@ impl RecordingState {
             output.clone(),
             &self.configuration,
             &self.catalogue,
+            &self.launchers,
             process,
             now,
         );
@@ -2012,6 +2036,9 @@ mod tests {
             Arc::new(indexer_over(directory)),
             Configuration::defaults(),
             catalogue,
+            // Not the machine's: a test that asked what is installed here would
+            // answer differently on another machine (AGENTS.md section 25).
+            Launchers::none(),
         ))
     }
 
@@ -2950,6 +2977,7 @@ mod tests {
             output.clone(),
             &Configuration::defaults(),
             &Catalogue::default(),
+            &Launchers::none(),
             RecordedProcess::new(7, "cs2.exe"),
             moment(),
         );

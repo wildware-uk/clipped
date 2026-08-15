@@ -23,6 +23,7 @@ use super::*;
 use crate::config::{Preferences, ResolutionSetting, SettingKey, SettingSource};
 use crate::report::EndReason;
 use crate::settings::{CaptureTargetSettings, RecordingSettings, UnavailableChoice};
+use clipped_game_detection::launcher::Launchers;
 
 /// Three ordinary games, one of which has a known helper, and two more that tie
 /// on a shared executable name.
@@ -193,6 +194,121 @@ fn launch(processes: &[(u32, &str)]) -> WatchEvent {
             .map(|(pid, name)| ProcessSnapshot::new(*pid, 4, None, name))
             .collect(),
     })
+}
+
+/// One process launching, from a path a launcher can be asked about.
+fn launch_at(pid: u32, name: &str, path: &str) -> WatchEvent {
+    WatchEvent::Launched(LaunchGroup {
+        id: LaunchId::ALREADY_RUNNING,
+        processes: vec![ProcessSnapshot::new(pid, 4, Some(path.into()), name)],
+    })
+}
+
+#[test]
+fn a_process_a_launcher_claims_is_filed_under_that_game_though_its_name_is_unknown() {
+    // The whole point of the launcher providers, and for a long time nothing
+    // reached it: `identify_process` never asked them, so
+    // `MatchStrength::LauncherIdentity` never fired in a shipped build
+    // (issue #522).
+    //
+    // The subject is a process the catalogue cannot place by name — an
+    // anti-cheat service the game starts, which is the shape of thing that made
+    // the rung worth having — inside a directory the launcher claims.
+    const CATALOGUE: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "shop-game"
+name = "Shop Game"
+[[game.executables]]
+name = "shop-game.exe"
+[game.launcher]
+kind = "riot"
+app_id = "shop_game"
+"#;
+
+    let directory = TestDirectory::new("launcher-identity");
+    let catalogue =
+        Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
+    let launchers = Launchers::none().with_riot(
+        clipped_game_detection::launcher::riot::Riot::from_products([(
+            "shop_game".to_owned(),
+            "live".to_owned(),
+            std::path::PathBuf::from("C:/Shop/Shop Game"),
+        )]),
+    );
+
+    let mut manager = SessionManager::new(
+        catalogue,
+        AutomaticSettings::new(directory.path().to_path_buf()),
+    )
+    .with_launchers(launchers);
+
+    let actions = manager.observe(
+        &launch_at(
+            4_242,
+            "anticheat.exe",
+            r"C:\Shop\Shop Game\BattlEyenticheat.exe",
+        ),
+        t(0),
+    );
+
+    assert!(
+        !actions.is_empty(),
+        "the launcher claimed the path, so this is a game and should be recorded"
+    );
+    assert_eq!(
+        manager
+            .active_session()
+            .expect("a session was opened")
+            .game(),
+        &GameIdentity::Known {
+            game_id: "shop-game".to_owned(),
+            name: "Shop Game".to_owned(),
+        },
+        "the shop said which of its games this is, which is the rung nothing could reach before"
+    );
+}
+
+#[test]
+fn without_the_launchers_the_same_process_is_not_a_game() {
+    // The other half, and what makes the test above about the wiring rather
+    // than about the catalogue: the same catalogue and the same process, with
+    // no launchers to ask, is unidentified — which is exactly what detection
+    // did before issue #522 and what it still does for a machine with no
+    // launcher installed.
+    const CATALOGUE: &str = r#"
+schema_version = 1
+
+[[game]]
+game_id = "shop-game"
+name = "Shop Game"
+[[game.executables]]
+name = "shop-game.exe"
+[game.launcher]
+kind = "riot"
+app_id = "shop_game"
+"#;
+
+    let directory = TestDirectory::new("no-launchers");
+    let catalogue =
+        Catalogue::parse(CATALOGUE, EntrySource::Seed).expect("the fixture is a valid catalogue");
+    let mut manager = SessionManager::new(
+        catalogue,
+        AutomaticSettings::new(directory.path().to_path_buf()),
+    );
+
+    let actions = manager.observe(
+        &launch_at(
+            4_242,
+            "anticheat.exe",
+            r"C:\Shop\Shop Game\BattlEyenticheat.exe",
+        ),
+        t(0),
+    );
+
+    assert!(actions.is_empty(), "{actions:?}");
+    assert!(manager.active_session().is_none());
 }
 
 /// One process exiting.
@@ -1376,6 +1492,10 @@ fn a_session_somebody_asked_for_is_written_exactly_as_a_session_a_game_produced(
             // the situation: one machine, one catalogue, one game, recorded
             // two different ways.
             &Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            // The equivalence this test is about is between the two *session*
+            // paths, so both are given the same empty set of launchers rather
+            // than one being told about the machine's (issue #522).
+            &Launchers::none(),
             RecordedProcess::new(4_242, "test-game.exe"),
             started,
         );

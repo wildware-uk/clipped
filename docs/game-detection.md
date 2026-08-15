@@ -429,6 +429,37 @@ per launcher). EA and GOG are the rest of [#44] and are deliberately not
 stubbed, because a provider that always answers "no" is a control that silently
 does nothing.
 
+### Who asks them, and when
+
+`launcher::Launchers` is the one place that asks all six, and until it existed
+nothing did: `identify_process` built a candidate from a name and a path and
+never called `from_launcher`, so `LauncherIdentity` — the strongest rung, and the
+reason the providers were written — never fired in a shipped build ([#522]).
+Every provider was built, tested and verified against a real installation, and
+no code outside their own tests called one.
+
+They are read **once**, when the recorder starts, beside the catalogue and the
+plugins directory and for the same reason: a process watcher reports every
+process that starts on the machine, and doing a registry walk and six directory
+reads per process would be a registry walk per `svchost`. The consequence is
+stated rather than hidden — a game installed while the recorder is running is
+identified by the name and path rungs until it is restarted, which is the same
+shape of limitation each provider already documents about a game *moved* after
+installation.
+
+A path Windows would not let the recorder read cannot be claimed by anything, so
+such a process is identified by its name alone, exactly as before. A launcher
+that is not installed is absent; one whose metadata could not be read is a
+problem recorded against it, because a corrupt Epic manifest directory must not
+cost the user the Steam games on the same machine.
+
+**Nothing else changes today.** Only the five Steam entries in `data/games.toml`
+carry an `app_id`, so only they can reach the rung; the other launchers'
+entries have none, and [#514] is why adding them is not yet safe.
+
+[#522]: https://github.com/wildware-uk/clipped/issues/522
+[#514]: https://github.com/wildware-uk/clipped/issues/514
+
 There is still no `trait LauncherProvider`. Xbox was expected to settle it and
 settled it the other way: it reads a *two-level* registry key whose entries are
 not all installations, and its identifier has to be derived from a package full

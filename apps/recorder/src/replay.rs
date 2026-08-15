@@ -224,6 +224,9 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
     // footage is what cannot be made again (`crate::serve`, AGENTS.md section
     // 17).
     let catalogue = crate::serve::catalogue_for_recordings();
+    // The launchers as well, so a replay saved from the command line is filed
+    // under the same game a recording of the same process would be (issue #522).
+    let launchers = clipped_game_detection::launcher::Launchers::discover();
 
     enable_dpi_awareness();
     let window = resolve_window(&config.recording.target)?;
@@ -242,6 +245,7 @@ pub fn run(args: &ReplayArgs) -> Result<(), ReplayCommandError> {
         config.recording.output.clone(),
         &configuration,
         &catalogue,
+        &launchers,
         // The image path as well as the name, because most catalogue entries
         // are qualified by one: Counter-Strike 2 is `cs2.exe` *in the directory
         // Steam installs it into* (`clipped_game_detection::catalogue`).
