@@ -106,6 +106,15 @@ pub enum Command {
     /// List the windows that can be captured.
     ListWindows(ListWindowsArgs),
 
+    /// See what a plugin declares, and allow or stop one.
+    ///
+    /// A plugin is a program somebody else wrote, and every bundled one opens a
+    /// loopback socket. Enabling one **is** the consent to what it declares, so
+    /// the declaration is printed before it is taken and again whenever it
+    /// changes (`docs/privacy.md`). The screen that will do this in the window
+    /// is issue #281.
+    Plugins(PluginsArgs),
+
     /// Report the encoders and codecs detected on this machine.
     ///
     /// Says which answers were measured here and which were inferred from
@@ -262,6 +271,44 @@ pub struct WatchArgs {
     /// device name.
     #[arg(long, value_name = "DEVICE", default_value_t = AudioDeviceSelection::Default)]
     pub system_audio: AudioDeviceSelection,
+}
+
+/// Arguments to `clipped-recorder plugins`.
+#[derive(Debug, Args)]
+pub struct PluginsArgs {
+    /// What to do.
+    #[command(subcommand)]
+    pub action: PluginsAction,
+}
+
+/// What `plugins` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum PluginsAction {
+    /// Show what is installed, what each asks for, and what you have agreed to.
+    ///
+    /// The reading action, and the one to run before any other: enabling a
+    /// plugin is agreeing to the network access it declares, and this is where
+    /// that declaration is printed.
+    List,
+
+    /// Allow a plugin to run, agreeing to what it declares now.
+    ///
+    /// The declaration is printed first, every time, including when you have
+    /// enabled this plugin before — consent to something you were not shown is
+    /// not consent (`docs/privacy.md`).
+    Enable {
+        /// The plugin's identifier, as `plugins list` prints it.
+        plugin: String,
+    },
+
+    /// Stop a plugin running, keeping what you agreed to.
+    ///
+    /// Turning it back on will not ask again unless its declaration has
+    /// changed in the meantime.
+    Disable {
+        /// The plugin's identifier, as `plugins list` prints it.
+        plugin: String,
+    },
 }
 
 /// Arguments to `clipped-recorder start-at-login`.

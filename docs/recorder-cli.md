@@ -80,6 +80,7 @@ clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
 clipped-recorder serve [--endpoint <NAME>]
 clipped-recorder start-at-login <enable|disable|status>
+clipped-recorder plugins <list|enable <ID>|disable <ID>>
 ```
 
 Nothing is currently specified without being declared: `record`,
@@ -87,8 +88,9 @@ Nothing is currently specified without being declared: `record`,
 `watch` ([#46](https://github.com/wildware-uk/clipped/issues/46)),
 `list-windows` ([#10](https://github.com/wildware-uk/clipped/issues/10)),
 `capabilities` ([#14](https://github.com/wildware-uk/clipped/issues/14)),
-`serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)) and
-`start-at-login` ([#106](https://github.com/wildware-uk/clipped/issues/106)) are
+`serve` ([#49](https://github.com/wildware-uk/clipped/issues/49)),
+`start-at-login` ([#106](https://github.com/wildware-uk/clipped/issues/106)) and
+`plugins` ([#492](https://github.com/wildware-uk/clipped/issues/492)) are
 all implemented below (AGENTS.md section 27).
 
 Adding one is a variant on `Command` in `apps/recorder/src/cli.rs` and an arm in
@@ -473,6 +475,61 @@ The desktop application cannot drive this yet, and cannot see a session even
 when the recorder is running one: the control protocol describes a recording by
 its capture target and has no vocabulary for a game or a session. That is
 [#241](https://github.com/wildware-uk/clipped/issues/241).
+
+## `plugins`
+
+Shows what a plugin declares, and allows or stops one.
+
+```text
+clipped-recorder plugins list
+clipped-recorder plugins enable <ID>
+clipped-recorder plugins disable <ID>
+```
+
+A plugin is a program somebody else wrote, and every bundled one opens a
+loopback socket. **Enabling one *is* the consent to the network access it
+declares**, so the declaration is printed before consent is taken — every time,
+including when you have enabled that plugin before, because consent to something
+you were not shown is not consent ([docs/privacy.md](privacy.md)).
+
+```text
+acme.counter-strike-2  Counter-Strike 2 highlight plugin  0.1.0
+  Reports kills, deaths and rounds from Game State Integration.
+  Listens on 127.0.0.1:3212 (this machine only) — receives Counter-Strike 2 game state
+  Clipped shows what a plugin declares and refuses to start one whose declaration
+  has changed since you allowed it. It cannot yet stop a plugin from using the
+  network in ways it did not declare.
+  status: not enabled — run `plugins enable` to allow what it declares above
+```
+
+That last sentence is not decoration. A declaration shown without it reads as a
+guarantee, and the guarantee Clipped can actually make is narrower than the one
+a reader would assume.
+
+`list` also prints anything under the plugins directory that could not be read
+and why, because something you put there expecting it to work, which does not,
+is exactly what you need told.
+
+### The four states
+
+| Status | What it means |
+| --- | --- |
+| `enabled` | It will start with the next game it supports. |
+| `not enabled` | Nothing has ever allowed it. This is what a plugin you have just installed says. |
+| `turned off` | You allowed it and then stopped it. What you agreed to is kept, so turning it back on will not ask again unless the plugin has changed. |
+| `needs consent again` | It asks for something other than what you agreed to. Both texts are printed. It does not run until `enable` agrees to the new one. |
+
+The state comes from the same resolution a recording uses, rather than being
+worked out separately here: two answers to "will this start?" that could
+disagree is the defect this command exists to prevent.
+
+### What it does not do
+
+It does not talk to a running recorder, so it reports no health — whether a
+plugin is running, restarting, or was stopped for flooding is a live session's
+business and belongs with the screen
+([#281](https://github.com/wildware-uk/clipped/issues/281)), along with showing
+all of this in a window rather than a terminal.
 
 ## `list-windows`
 
