@@ -747,6 +747,143 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_can_exist_without_a_file_and_many_can_at_once() {
+        // Issue #269. A virtual clip is a range of a recording with no file
+        // until somebody exports one, and it is the normal case rather than the
+        // exception -- a session producing twenty interesting moments should
+        // cost disk for none of them.
+        //
+        // The second half is the one worth asserting: `path` is still UNIQUE,
+        // and that only works because SQLite treats NULLs as distinct. A
+        // constraint that counted two missing paths as a collision would allow
+        // exactly one virtual clip in the whole library.
+        let directory = scratch_directory("clips-without-files");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+
+        let mut insert = String::new();
+        for index in 0..3 {
+            insert.push_str(&format!(
+                "INSERT INTO clips (session_id, source_recording_id, created_at, edit, origin,                  origin_detail) VALUES ('counter-strike-2-20260811-143205', {recording},                  '2026-08-11T15:0{index}:00+01:00', '{{\"version\":1}}', 'highlight',                  '{{\"kind\":\"kill\"}}');"
+            ));
+        }
+        database
+            .connection()
+            .execute_batch(&insert)
+            .expect("three clips with no file can be written");
+
+        let (count, without_a_file): (i64, i64) = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*), COUNT(*) - COUNT(path) FROM clips",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the clips can be counted");
+        assert_eq!(count, 3, "a second clip with no file was refused");
+        assert_eq!(without_a_file, 3);
+
+        // A file is still unique when there is one.
+        database
+            .connection()
+            .execute(
+                "INSERT INTO clips (created_at, path, origin) \
+                 VALUES ('2026-08-11T15:10:00+01:00', 'exported.mkv', 'manual')",
+                [],
+            )
+            .expect("an exported clip can be written");
+        let duplicate = database.connection().execute(
+            "INSERT INTO clips (created_at, path, origin) \
+             VALUES ('2026-08-11T15:11:00+01:00', 'exported.mkv', 'manual')",
+            [],
+        );
+        assert!(
+            duplicate.is_err(),
+            "two clips claimed the same file, so an export could overwrite one"
+        );
+    }
+
+    #[test]
+    fn a_clip_of_an_origin_this_build_does_not_know_is_refused() {
+        // Closed on purpose: the library filters on this, and "what did Clipped
+        // generate" is a different question from "what did I save". Free text
+        // would make that a guess.
+        let directory = scratch_directory("clips-origin");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+
+        let invented = database.connection().execute(
+            "INSERT INTO clips (created_at, origin) VALUES ('2026-08-11T15:00:00+01:00', 'vibes')",
+            [],
+        );
+
+        assert!(
+            invented.is_err(),
+            "an origin outside the vocabulary was accepted"
+        );
+        for known in ["manual", "replay-buffer", "highlight"] {
+            database
+                .connection()
+                .execute(
+                    "INSERT INTO clips (created_at, origin)                      VALUES ('2026-08-11T15:00:00+01:00', ?1)",
+                    params![known],
+                )
+                .unwrap_or_else(|error| panic!("{known} is in the vocabulary: {error}"));
+        }
+    }
+
+    #[test]
+    fn rebuilding_the_clips_table_keeps_the_saved_replays_that_were_in_it() {
+        // The migration drops and recreates `clips`. What must survive is a row
+        // somebody's library already had -- a saved replay, which is the only
+        // kind that could have been stored -- with its file, its window and its
+        // link to the recording it came from intact, and filed as the thing it
+        // actually is rather than as a default.
+        //
+        // Written through a database at the schema this build ships, which is
+        // the state a real library reaches: the migration has already run by the
+        // time `Database::open` returns.
+        let directory = scratch_directory("clips-rebuild");
+        let database = Database::open(directory.join("library.db")).expect("a database");
+        let recording = a_session_with_a_recording(&database);
+        database
+            .connection()
+            .execute(
+                "INSERT INTO clips (session_id, source_recording_id, path, created_at, \
+                 source_start_seconds, source_end_seconds, duration_seconds) \
+                 VALUES ('counter-strike-2-20260811-143205', ?1, 'saved-replay.mkv', \
+                         '2026-08-11T15:00:00+01:00', 12.5, 42.5, 30.0)",
+                params![recording],
+            )
+            .expect("a saved replay can be written");
+
+        let (path, start, end, origin, source): (String, f64, f64, String, i64) = database
+            .connection()
+            .query_row(
+                "SELECT path, source_start_seconds, source_end_seconds, origin,                  source_recording_id FROM clips",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("the clip can be read");
+
+        assert_eq!(path, "saved-replay.mkv");
+        assert!((start - 12.5).abs() < f64::EPSILON);
+        assert!((end - 42.5).abs() < f64::EPSILON);
+        assert_eq!(source, recording);
+        assert_eq!(
+            origin, "replay-buffer",
+            "a clip with a file was not filed as the saved replay it is"
+        );
+    }
+
+    #[test]
     fn a_database_that_needed_no_migration_still_enforces_its_references() {
         // The interesting case, and one a mutation caught: migrating a database
         // turns referential integrity back on at the end, so a *newly created*
