@@ -778,6 +778,24 @@ impl Session {
     pub(crate) fn end(&mut self, reason: SessionEndReason, at: SystemTime) {
         self.ended_at = Some(at);
         self.record(at, SessionEventKind::Ended { reason });
+
+        // After the session is closed, not during it. Generation reads the
+        // recordings' spans and the events, and both are only complete once
+        // nothing more can be added -- a clip cut from a session still running
+        // would be cut from half of it.
+        //
+        // It is arithmetic over events: no encoder, no filesystem, and nothing
+        // a capture thread waits for. A session that heard nothing generates
+        // nothing, which costs a walk of an empty list.
+        let generated = crate::highlights::generate_for(self);
+        if !generated.is_empty() {
+            tracing::info!(
+                session = %self.id(),
+                clips = generated.len(),
+                "this session's events were worth clips"
+            );
+        }
+        self.record_generated(generated);
     }
 }
 

@@ -378,7 +378,16 @@ impl SidecarClip {
         Some(Self {
             path: None,
             created_at: created_at.to_owned(),
-            source_recording: None,
+            // The recording the document is cut from, by the ordinal a sidecar
+            // names one with -- which is what the library resolves back to a
+            // row. Without it a generated clip would be indexed with no link to
+            // the footage it is a range of, and "what depends on this
+            // recording?" would answer wrongly before a deletion (issue #111).
+            source_recording: clip
+                .edit()
+                .sources
+                .first()
+                .and_then(|source| source.recording.as_str().parse().ok()),
             source_start_seconds: None,
             source_end_seconds: None,
             duration_seconds: clip.duration().map(|length| length.as_secs_f64()),
@@ -874,6 +883,84 @@ mod tests {
                 .iter()
                 .all(|event| event["event"] != "kill"),
             "a game event was written into the session's own history"
+        );
+    }
+
+    /// A kill `seconds` into the session's timeline.
+    fn a_kill(seconds: i64) -> clipped_events::GameEvent {
+        use core::time::Duration;
+
+        use clipped_events::{Confidence, EventKind, EventSource, EventTiming};
+
+        clipped_events::GameEvent::new(
+            EventKind::Kill,
+            EventTiming::new(
+                clipped_events::EventTime::from_media_nanos(seconds * 1_000_000_000),
+                Duration::ZERO,
+            ),
+            EventSource::plugin("acme-cs2").expect("a legal source"),
+            Confidence::CERTAIN,
+        )
+    }
+
+    #[test]
+    fn a_kill_during_a_session_is_a_clip_in_its_record_when_it_ends() {
+        // Issue #76, end to end within this crate: a plugin reports a kill, the
+        // session ends, and the range it was worth is in the file the library
+        // reads. Nothing is rendered -- a generated clip is a description until
+        // somebody asks for a file.
+        // Three seconds into a recording that runs for six, so the moment is
+        // one the footage actually covers.
+        let mut session = session();
+        session.record_game_event(a_kill(3));
+        session.recordings[0].starts_at_nanos = Some(0);
+        session.end(SessionEndReason::GameExited, at(1_786_458_800));
+
+        let json = serde_json::to_string(&SidecarFile::of(&session)).expect("the shape encodes");
+        let file: Value = serde_json::from_str(&json).expect("what serde wrote is JSON");
+
+        let generated: Vec<&Value> = file["clips"]
+            .as_array()
+            .expect("the clips are a list")
+            .iter()
+            .filter(|clip| clip["origin"] == "highlight")
+            .collect();
+
+        assert_eq!(
+            generated.len(),
+            1,
+            "a kill 3 s into a recording that covers it produced no clip: {}",
+            file["clips"]
+        );
+        assert!(
+            generated[0].get("path").is_none(),
+            "the clip was written with a file it does not have"
+        );
+        assert_eq!(
+            generated[0]["source_recording"],
+            Value::from(1),
+            "the clip is not linked to the recording it is a range of, so nothing could answer              what depends on that recording before deleting it"
+        );
+    }
+
+    #[test]
+    fn a_session_whose_recording_has_no_span_generates_nothing() {
+        // A clip is a range *of a recording*. A recording that produced no
+        // frame has no span, so there is nothing for a range to be of, and the
+        // honest answer is no clip rather than one pointing at footage that
+        // does not exist (AGENTS.md section 27).
+        let mut session = session();
+        session.record_game_event(a_kill(3));
+        session.end(SessionEndReason::GameExited, at(1_786_458_800));
+
+        assert!(
+            session.generated().is_empty(),
+            "a session with no placed recording generated a clip anyway"
+        );
+        assert_eq!(
+            session.game_events().len(),
+            1,
+            "the event is still the session's, and was lost"
         );
     }
 
