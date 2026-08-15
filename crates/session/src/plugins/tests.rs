@@ -238,7 +238,7 @@ fn a_plugins_events_are_placed_on_the_recordings_own_timeline() {
     ));
 
     let progress = RecordingProgress::new();
-    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, impatient());
+    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, None, impatient());
 
     // The recording's first frame, two seconds ago.
     let epoch = Instant::now() - Duration::from_secs(2);
@@ -311,7 +311,7 @@ fn a_plugin_starts_only_once_the_recording_has_a_timeline_to_place_it_on() {
     ));
 
     let progress = RecordingProgress::new();
-    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, impatient());
+    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, None, impatient());
 
     // Long enough that a plugin which was going to be started would have said
     // hello. It is not measured against the policy's start-up budget, which is
@@ -355,7 +355,7 @@ fn nothing_a_recording_does_can_be_delayed_by_a_plugin_that_floods() {
     ));
 
     let progress = RecordingProgress::new();
-    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, impatient());
+    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, None, impatient());
 
     let recording = progress.clone();
     let capture = thread::Builder::new()
@@ -481,7 +481,7 @@ fn a_plugin_that_hangs_does_not_delay_the_end_of_a_recording() {
         ..impatient()
     };
     let progress = RecordingProgress::new();
-    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, policy);
+    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, None, policy);
     progress.timeline_began(Instant::now());
 
     let mut reports = Vec::new();
@@ -539,7 +539,7 @@ fn a_plugin_that_crashes_is_reported_rather_than_swallowed() {
     ));
 
     let progress = RecordingProgress::new();
-    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, impatient());
+    let plugins = SessionPlugins::start(vec![plugin], session(), &progress, None, impatient());
     progress.timeline_began(Instant::now());
 
     let mut reports = Vec::new();
@@ -596,7 +596,7 @@ fn a_plugin_that_does_not_support_the_game_being_recorded_is_not_started() {
 
     let progress = RecordingProgress::new();
     // `session()` is a recording of `cs2.exe`.
-    let plugins = SessionPlugins::start(vec![dota], session(), &progress, impatient());
+    let plugins = SessionPlugins::start(vec![dota], session(), &progress, None, impatient());
     progress.timeline_began(Instant::now());
 
     thread::sleep(Duration::from_millis(750));
@@ -641,4 +641,57 @@ fn every_plugin_a_user_installed_and_never_enabled_is_named() {
         vec!["acme-cs2"],
         "only the plugins that claim the game being recorded are worth naming"
     );
+}
+
+#[test]
+fn a_sessions_second_recording_stamps_its_events_from_the_sessions_zero() {
+    // Issue #488. A session that writes two files -- a window destroyed and
+    // recreated, or a game relaunched inside its restart grace -- must stamp
+    // both files' events against one origin, because
+    // `clipped_library::events` places a moment by sorting a session's
+    // recordings on a single axis and asking which contains it. Two files each
+    // measured from their own zero cannot be sorted or searched, and every
+    // event of the second would land in the first.
+    //
+    // The failure this guards is silent: without the session's epoch, the
+    // number below is a small positive one that looks entirely reasonable.
+    let root = TemporaryDirectory::new("second-recording-shares-the-zero");
+    let plugin = enabled(install(
+        &root,
+        "acme-cs2",
+        "example_plugin",
+        "example-plugin",
+        "cs2.exe",
+    ));
+
+    // The session started ten minutes ago; this, its second recording, began
+    // two seconds ago.
+    let session_epoch = Instant::now() - Duration::from_secs(600);
+    let recording_epoch = Instant::now() - Duration::from_secs(2);
+
+    let progress = RecordingProgress::new();
+    let plugins = SessionPlugins::start(
+        vec![plugin],
+        session(),
+        &progress,
+        Some(session_epoch),
+        impatient(),
+    );
+    progress.timeline_began(recording_epoch);
+
+    let mut events = Vec::new();
+    until("the example plugin to report a kill", || {
+        events.extend(plugins.take_events());
+        !events.is_empty()
+    });
+
+    let at = events[0].timing().at().as_media_nanos();
+    assert!(
+        at > 500_000_000_000,
+        "the kill happened ten minutes into the session and was placed at {at}ns — which is \
+         where it would sit if this recording had been given a timeline of its own, putting \
+         every event of a session's second file inside its first"
+    );
+
+    let _ = plugins.finish();
 }

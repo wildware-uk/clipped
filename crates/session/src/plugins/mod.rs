@@ -56,10 +56,20 @@
 //! [`SessionTimeline`] places a moment before the epoch at a negative position,
 //! deliberately.
 //!
-//! One [`SessionPlugins`] belongs to one *recording*, not to one session. A
+//! One [`SessionPlugins`] belongs to one *recording*, not to one session: a
 //! session that records twice — the same game relaunched inside its restart
-//! grace — starts its plugins twice, because each recording has an epoch of its
-//! own and a plugin's events have to be placed on the file they belong to.
+//! grace — starts its plugins twice, and a plugin does not outlive the recording
+//! that started it.
+//!
+//! **The timeline does outlive it.** The second recording is given the
+//! session's zero rather than its own, through `session_epoch` on
+//! [`SessionPlugins::start`], so both files' events are stamped against one
+//! origin. That is what `clipped_library::events` needs: it places a moment by
+//! sorting a session's recordings on a single axis and asking which contains
+//! it, and two files each measured from their own zero can be neither sorted
+//! nor searched — every event of the second would land in the first, silently,
+//! because every number involved stays a plausible small one
+//! ([issue #488](https://github.com/wildware-uk/clipped/issues/488)).
 //!
 //! # What a session does with a plugin nobody has enabled
 //!
@@ -93,16 +103,6 @@
 //! heard it.
 //!
 //! # What is not here
-//!
-//! **One timeline for the whole session.** This type is created per recording
-//! and takes its epoch from that recording's first kept frame, so a session
-//! that writes two files stamps the second one's events from the second one's
-//! zero. The model says otherwise — `docs/av-sync.md` and
-//! [issue #338](https://github.com/wildware-uk/clipped/issues/338) both say one
-//! timeline per session — and reconciling them is
-//! [issue #488](https://github.com/wildware-uk/clipped/issues/488). It is
-//! latent while nothing starts a plugin in a shipped build
-//! ([issue #282](https://github.com/wildware-uk/clipped/issues/282)).
 //!
 //! **Deciding which file an event landed in.** The row's `recording_id` is null
 //! until something writes each recording's span on the session's timeline into
@@ -197,11 +197,19 @@ impl SessionPlugins {
     /// attached when it publishes an epoch, which is the moment the first frame
     /// reaches the file; see the module documentation for why that wait exists
     /// and what it costs.
+    ///
+    /// `session_epoch` is the zero every event of this **session** is stamped
+    /// against, when the session already has one -- which it does for every
+    /// recording after its first. Pass [`None`] for the first, and this adopts
+    /// the recording's own epoch, which is the session's by definition. The
+    /// caller keeps it and passes it back for the next recording; see the module
+    /// documentation, "One timeline for the whole session".
     #[must_use]
     pub fn start(
         plugins: Vec<EnabledPlugin>,
         session: SessionDetails,
         progress: &RecordingProgress,
+        session_epoch: Option<Instant>,
         policy: SupervisionPolicy,
     ) -> Self {
         let shared = Arc::new(Shared::default());
@@ -209,6 +217,7 @@ impl SessionPlugins {
             shared: Arc::clone(&shared),
             progress: progress.clone(),
             session,
+            session_epoch,
             policy,
         };
 
@@ -421,6 +430,8 @@ struct Runner {
     shared: Arc<Shared>,
     progress: RecordingProgress,
     session: SessionDetails,
+    /// The session's zero, when it already has one. See [`SessionPlugins::start`].
+    session_epoch: Option<Instant>,
     policy: SupervisionPolicy,
 }
 
@@ -429,7 +440,11 @@ impl Runner {
     fn run(self, plugins: Vec<EnabledPlugin>) {
         let (mut supervisor, receiver) = PluginSupervisor::new(self.policy);
 
-        let Some(epoch) = self.wait_for_the_recordings_timeline() else {
+        // The session's zero when there is one, and this recording's otherwise.
+        // Waiting happens either way: a plugin attached before the first frame
+        // would be reporting against a file that may never exist, and the log
+        // line below is the honest answer to a recording that produced none.
+        let Some(recording_epoch) = self.wait_for_the_recordings_timeline() else {
             tracing::info!(
                 session = self.session.session.as_str(),
                 plugins = plugins.len(),
@@ -440,9 +455,12 @@ impl Runner {
             return;
         };
 
-        // The one conversion, built once, from the reading taken beside the
-        // capture epoch. Every plugin below is given this same value.
-        let timeline = SessionTimeline::starting_at(epoch);
+        // The one conversion, built once. Its zero is the *session's* first kept
+        // frame, not this recording's, so that a session which writes several
+        // files stamps all their events against one origin -- which is the only
+        // thing `clipped_library::events` can place against
+        // ([issue #488](https://github.com/wildware-uk/clipped/issues/488)).
+        let timeline = SessionTimeline::starting_at(self.session_epoch.unwrap_or(recording_epoch));
         let attached = self.attach_all(&mut supervisor, plugins, timeline);
 
         while !self.shared.rest(POLL_INTERVAL) {

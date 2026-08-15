@@ -555,6 +555,16 @@ struct Driver {
     /// Read once at start-up, beside the plugins themselves and for the same
     /// reason.
     plugin_consents: PluginConsents,
+    /// The zero every event of the open session is stamped against.
+    ///
+    /// Taken from the first recording that produces a frame and held until the
+    /// session ends. A session that writes several files stamps all their
+    /// events against this one origin, which is the only thing
+    /// `clipped_library::events` can place against — it sorts a session's
+    /// recordings on one axis and asks which contains a moment, and both
+    /// operations are nonsense if every file has its own zero
+    /// ([issue #488](https://github.com/wildware-uk/clipped/issues/488)).
+    session_epoch: Option<Instant>,
     running: Option<Running>,
 }
 
@@ -569,6 +579,12 @@ struct Running {
     /// Dropped when the recording is collected, which stops every one of them
     /// whether or not this loop asked politely first.
     plugins: SessionPlugins,
+    /// This recording's account of its own timeline.
+    ///
+    /// Kept so that the driver can read the epoch back once the first frame has
+    /// fixed it, and hold it as the *session's* zero for every later recording
+    /// of the same session.
+    progress: RecordingProgress,
 }
 
 impl Driver {
@@ -608,6 +624,7 @@ impl Driver {
             plan,
             installed_plugins,
             plugin_consents,
+            session_epoch: None,
             running: None,
         }
     }
@@ -698,9 +715,37 @@ impl Driver {
         Some((running.id, outcome))
     }
 
+    /// Takes the session's zero from the first recording that produces a frame,
+    /// and lets it go when the session does.
+    ///
+    /// Reading it is one atomic load from a `OnceLock` the capture thread has
+    /// already written; nothing waits, and nothing is asked of the recording.
+    ///
+    /// The clearing half is the one that matters. A zero held past the end of a
+    /// session would stamp the next session's events against a previous
+    /// session's first frame -- every event minutes or hours out, and every
+    /// number still a plausible one, which is the failure mode
+    /// [issue #488](https://github.com/wildware-uk/clipped/issues/488) is about.
+    fn hold_the_sessions_epoch(&mut self) {
+        if self.manager.active_session().is_none() {
+            self.session_epoch = None;
+            return;
+        }
+
+        if self.session_epoch.is_some() {
+            return;
+        }
+
+        if let Some(running) = self.running.as_ref() {
+            self.session_epoch = running.progress.timeline_epoch();
+        }
+    }
+
     /// Puts what this recording's plugins have said in front of the user, and
     /// what they reported on the session.
     fn report_plugin_activity(&mut self) {
+        self.hold_the_sessions_epoch();
+
         let Some(running) = self.running.as_ref() else {
             return;
         };
@@ -821,6 +866,7 @@ impl Driver {
             stop,
             thread,
             plugins,
+            progress,
         });
     }
 
@@ -853,7 +899,13 @@ impl Driver {
             report_plugin_not_started(problem, request);
         }
 
-        SessionPlugins::start(enabled, session, progress, SupervisionPolicy::default())
+        SessionPlugins::start(
+            enabled,
+            session,
+            progress,
+            self.session_epoch,
+            SupervisionPolicy::default(),
+        )
     }
 }
 
