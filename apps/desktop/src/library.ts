@@ -1,4 +1,9 @@
-import type { LibraryGame, LibrarySession, LibrarySessionPage } from '@clipped/shared';
+import type {
+  LibraryEventLane,
+  LibraryGame,
+  LibrarySession,
+  LibrarySessionPage,
+} from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { useCallback, useEffect, useState } from 'react';
 
@@ -72,6 +77,21 @@ export async function readSessions(request: SessionsRequest): Promise<LibrarySes
 /** Reads what the library holds per game. */
 export async function readGames(): Promise<readonly LibraryGame[]> {
   return invoke<LibraryGame[]>('library_games');
+}
+
+/**
+ * Reads the marks on one recording's timeline.
+ *
+ * Already placed in that recording's file: `at` is nanoseconds into the file,
+ * not a moment on the session's timeline. The recorder does that subtraction
+ * because it needs the recording's span, which this process has no way to know.
+ *
+ * An empty `marks` means the recording has no events. It does **not** mean the
+ * question was not asked — a caller that has not called this at all has no lane,
+ * and the two are drawn differently.
+ */
+export async function readEvents(recording: string): Promise<LibraryEventLane> {
+  return invoke<LibraryEventLane>('library_events', { recording });
 }
 
 /**

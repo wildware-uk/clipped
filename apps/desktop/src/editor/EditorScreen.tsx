@@ -70,7 +70,7 @@ const MISSING: readonly Missing[] = [
   {
     does: 'Show what a plugin reported during the recording, on the timeline, filtered by kind',
     needs:
-      'The lane and the filter are built (issue #71), and so is the arithmetic that puts an event in the right file (crates/library). Nothing supplies the events: they are rows of a database this window cannot read, and there is no command that serves them. Issues #329 and #301',
+      'The lane, the filter and the arithmetic are built (issue #71), and the recorder serves the marks already placed in the file: library_events, which readEvents calls (issue #329). What is missing is a clip to draw them on — nothing opens one in this window yet. Issues #301 and #306',
   },
   {
     does: 'The picture at the playhead, and a waveform under each audio track',
