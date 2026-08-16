@@ -303,8 +303,18 @@ mod tests {
 
         let input_total = 2000.0 * packet_frames as f64;
         let expected_total = input_total * ratio;
+
+        // At most one frame out, and that bound is structural rather than
+        // generous: the phase accumulator holds the fraction of a frame it has
+        // not yet emitted, so the count trails the ideal by that fraction and
+        // never by more. Checked rather than assumed — running the same loop
+        // eight times longer (16,000 packets, 7,680,768 ideal) leaves the error
+        // at exactly one frame, so it is a boundary and not a drift. A
+        // per-packet rounding error, which is what this test exists to catch,
+        // would have been two thousand frames out here and sixteen thousand
+        // there.
         assert!(
-            (produced_total as f64 - expected_total).abs() < 1.0,
+            (produced_total as f64 - expected_total).abs() <= 1.0,
             "produced {produced_total} frames, expected close to {expected_total}"
         );
     }
