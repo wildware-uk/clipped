@@ -117,6 +117,20 @@ function renderWindowed(
   return shell;
 }
 
+/**
+ * Vitest's default is five seconds, and these take three or four on a fast
+ * machine — because mounting ten thousand sessions in jsdom is genuinely that
+ * slow, and mounting them is the thing being measured rather than an accident
+ * of the setup. On a CI runner that margin is not there: every case in this
+ * file has timed out at five seconds on one.
+ *
+ * Raised rather than shrinking the fixture, because the ten thousand is
+ * `docs/library.md`'s own figure and the point of these cases is what the
+ * component does at that scale. A timeout tuned to the machine would be an
+ * assertion about the runner, not about the code.
+ */
+const MOUNTING_TEN_THOUSAND = 30_000;
+
 /** No recording controls exercised here; only their absence from the DOM matters. */
 const ACTIONS = {
   outcome: { state: 'idle' } as const,
@@ -130,56 +144,72 @@ describe('SessionList, scrolled against a measured shell', () => {
     document.body.replaceChildren();
   });
 
-  it('mounts every session when nothing has been measured yet', () => {
-    const shell = document.createElement('main');
-    shell.className = 'clipped-shell__main';
-    document.body.appendChild(shell);
-    // clientHeight stays at jsdom's default of 0: nothing here mocks it.
+  it(
+    'mounts every session when nothing has been measured yet',
+    () => {
+      const shell = document.createElement('main');
+      shell.className = 'clipped-shell__main';
+      document.body.appendChild(shell);
+      // clientHeight stays at jsdom's default of 0: nothing here mocks it.
 
-    render(<SessionList sessions={TEN_THOUSAND_SESSIONS} label="Sessions" actions={ACTIONS} />, {
-      container: shell,
-    });
+      render(<SessionList sessions={TEN_THOUSAND_SESSIONS} label="Sessions" actions={ACTIONS} />, {
+        container: shell,
+      });
 
-    const table = shell.querySelector('table');
-    expect(table).not.toBeNull();
-    expect(sessionBodies(table as HTMLElement)).toHaveLength(10_000);
-  });
+      const table = shell.querySelector('table');
+      expect(table).not.toBeNull();
+      expect(sessionBodies(table as HTMLElement)).toHaveLength(10_000);
+    },
+    MOUNTING_TEN_THOUSAND,
+  );
 
-  it('holds a small, bounded slice of ten thousand sessions once the shell reports a real height', () => {
-    const shell = renderWindowed(TEN_THOUSAND_SESSIONS, 900, 0);
-    const table = shell.querySelector('table') as HTMLElement;
+  it(
+    'holds a small, bounded slice of ten thousand sessions once the shell reports a real height',
+    () => {
+      const shell = renderWindowed(TEN_THOUSAND_SESSIONS, 900, 0);
+      const table = shell.querySelector('table') as HTMLElement;
 
-    const bodies = sessionBodies(table);
-    expect(bodies.length).toBeGreaterThan(0);
-    expect(bodies.length).toBeLessThan(50);
-    // The library's other 9,900-odd sessions are still accounted for, in the
-    // one spacer row standing in for the height beneath what is mounted.
-    expect(tbodyCount(table)).toBeLessThan(bodies.length + 3);
-  });
+      const bodies = sessionBodies(table);
+      expect(bodies.length).toBeGreaterThan(0);
+      expect(bodies.length).toBeLessThan(50);
+      // The library's other 9,900-odd sessions are still accounted for, in the
+      // one spacer row standing in for the height beneath what is mounted.
+      expect(tbodyCount(table)).toBeLessThan(bodies.length + 3);
+    },
+    MOUNTING_TEN_THOUSAND,
+  );
 
-  it('draws the sessions actually near the scroll position, not a fixed prefix of the library', () => {
-    // What tells a real window from one that only ever truncated the list to
-    // its first N: scrolled halfway down a ten-thousand-session library, the
-    // sessions on screen are from the middle of it.
-    const shell = renderWindowed(TEN_THOUSAND_SESSIONS, 900, 400_000);
-    const table = shell.querySelector('table') as HTMLElement;
+  it(
+    'draws the sessions actually near the scroll position, not a fixed prefix of the library',
+    () => {
+      // What tells a real window from one that only ever truncated the list to
+      // its first N: scrolled halfway down a ten-thousand-session library, the
+      // sessions on screen are from the middle of it.
+      const shell = renderWindowed(TEN_THOUSAND_SESSIONS, 900, 400_000);
+      const table = shell.querySelector('table') as HTMLElement;
 
-    const bodies = sessionBodies(table);
-    expect(bodies.length).toBeGreaterThan(0);
-    expect(bodies.length).toBeLessThan(50);
+      const bodies = sessionBodies(table);
+      expect(bodies.length).toBeGreaterThan(0);
+      expect(bodies.length).toBeLessThan(50);
 
-    const names = bodies.map((body) => body.textContent ?? '');
-    expect(names.some((text) => text.includes('Session 0'))).toBe(false);
-    expect(names.some((text) => /Session \d{4}/.test(text))).toBe(true);
-  });
+      const names = bodies.map((body) => body.textContent ?? '');
+      expect(names.some((text) => text.includes('Session 0'))).toBe(false);
+      expect(names.some((text) => /Session \d{4}/.test(text))).toBe(true);
+    },
+    MOUNTING_TEN_THOUSAND,
+  );
 
-  it('reaches the last session once scrolled to the end of the library', () => {
-    const shell = renderWindowed(TEN_THOUSAND_SESSIONS, 900, 1_000_000_000);
-    const table = shell.querySelector('table') as HTMLElement;
+  it(
+    'reaches the last session once scrolled to the end of the library',
+    () => {
+      const shell = renderWindowed(TEN_THOUSAND_SESSIONS, 900, 1_000_000_000);
+      const table = shell.querySelector('table') as HTMLElement;
 
-    const bodies = sessionBodies(table);
-    expect(bodies.length).toBeGreaterThan(0);
-    expect(bodies.length).toBeLessThan(50);
-    expect(bodies[bodies.length - 1]?.textContent).toContain('Session 9999');
-  });
+      const bodies = sessionBodies(table);
+      expect(bodies.length).toBeGreaterThan(0);
+      expect(bodies.length).toBeLessThan(50);
+      expect(bodies[bodies.length - 1]?.textContent).toContain('Session 9999');
+    },
+    MOUNTING_TEN_THOUSAND,
+  );
 });
