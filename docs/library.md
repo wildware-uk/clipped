@@ -32,6 +32,7 @@ application is opened.
 [#301]: https://github.com/wildware-uk/clipped/issues/301
 [#385]: https://github.com/wildware-uk/clipped/issues/385
 [#402]: https://github.com/wildware-uk/clipped/issues/402
+[#449]: https://github.com/wildware-uk/clipped/issues/449
 
 ## The shape of it
 
@@ -344,12 +345,25 @@ in the trash (`deleted_at`) is a different thing and is left out — it is delet
 as far as the library is concerned, and the trash has a screen of its own
 ([#94]).
 
-**A search runs the matcher rather than a compiler.** A query ([#59]) is applied
-by building the `search::Row` a session projects and asking `Query::matches`.
-Compiling the query into SQL would be a second implementation of what a match
-means, and the two disagreeing would be a bug nobody could see. What that costs
-is a walk of the sessions rather than an index lookup, which is the figure the
-table below exists to make honest.
+**A search is compiled to SQL, and checked against the matcher.** A query
+([#59]) becomes a `WHERE` fragment (`search::sql`) that the statement reading a
+page carries, so the sessions a search reads are the ones it returns.
+
+It used to run the matcher instead: build the `search::Row` each session
+projects — four further statements per session, for its recordings, its clips,
+their tags and its events — and ask `Query::matches`. The reason was that
+compiling is a second implementation of what a match means and two of those
+disagreeing is a bug nobody can see. The reason was right; the cost was 316 ms
+over ten thousand sittings on every keystroke ([#449]).
+
+So the reason is answered rather than dropped. The matcher is still the
+definition, `browse::row_of` still builds the row it is defined over, and
+`the_database_and_the_matcher_select_the_same_sessions` runs both over one
+library and fails if they part company. The folding is not duplicated either:
+the SQL calls `search::fold` itself, registered on the connection, rather than
+SQLite's ASCII-only `lower()` — a stored folded column was tried and dropped,
+because a writer that forgot to fill it would silently stop returning matches
+rather than fail.
 
 ### What a page costs
 
@@ -359,23 +373,23 @@ asks for.
 
 | Read | 2,000 sessions | 10,000 sessions |
 | --- | --- | --- |
-| First page of 25 | **1.4 ms** | **4.8 ms** |
-| The 21st page of 25 | **1.1 ms** | **4.0 ms** |
-| A search matching one game in twenty | 23 ms | 188 ms |
-| A search matching nothing at all | 37 ms | 316 ms |
-| The games view, every game at once | 0.9 ms | 11 ms |
+| First page of 25 | **1.2 ms** | **4.6 ms** |
+| The 21st page of 25 | **1.0 ms** | **4.1 ms** |
+| A search matching one game in twenty | **1.0 ms** | **4.3 ms** |
+| A search matching nothing at all | **0.5 ms** | **3.8 ms** |
+| The games view, every game at once | 1.1 ms | 8.3 ms |
 
 The second row is the whole claim keyset paging makes, and it is the row to
 watch: **page twenty-one costs what page one costs.** An offset would show a
 curve there.
 
-The two search rows are the cost of running the matcher, and they bound it from
-both sides. A search that finds a full page stops as soon as it has one; a
-search that matches nothing walks every session in the library, which is the
-worst case and is 316 ms for ten thousand. That is a search box that answers
-between keystrokes-plus-a-beat rather than instantly, on a library larger than
-most people will have. The moment it stops being fast enough the answer is a
-query compiler checked against this matcher, not instead of it.
+The two search rows are the point of [#449], and what they now say is that
+**a search costs what browsing costs.** Before it was compiled, the same two
+rows read 23 ms and 37 ms at two thousand sessions and 188 ms and 316 ms at ten
+thousand — because a search that matched nothing hydrated every session in the
+library to reject it, which is the worst case and the one a search box hits on
+every keystroke. A search matching nothing is now the *cheapest* of the four
+reads, because it is the one that carries no sessions back.
 
 The games view is not a page — it is every game at once, which is what SPEC.md
 section 17 draws, and it is counted by SQLite rather than by walking rows.
@@ -386,8 +400,10 @@ to size the page against the frame budget and once to send it
 (`apps/recorder/src/library.rs`); that is not measured here, and it is a pass
 over a hundred-odd kilobytes rather than a query.
 
-Memory is bounded by the page rather than by the library: a search reads session
-rows a batch of 256 at a time and never holds more than one batch.
+Memory is bounded by the page rather than by the library, and more simply than it
+used to be: the statement carries the query and a `LIMIT`, so the sessions read
+are the sessions returned. A search no longer reads batches of rows it will
+discard, because there are none.
 
 ## The games view
 

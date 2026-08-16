@@ -34,8 +34,21 @@ authors.workspace = true
 # application (SPEC.md section 3) and pulling a wasm runtime's FFI into the
 # dependency graph to not use it is a licence and advisory surface for nothing.
 #
+# `functions` lets a caller register a Rust function SQLite can call in a
+# statement. `clipped-library` needs exactly one: the Unicode case folding its
+# search language is defined by. SQLite's own `lower()` and `COLLATE NOCASE`
+# fold ASCII and nothing else, so a search answered with them would disagree
+# with `clipped_library::search::Query::matches` for every non-ASCII game, tag
+# and title — which is to say on exactly the searches the folding exists for.
+# Registering the matcher's own `fold` makes the two agree by construction
+# rather than by a stored second copy of the text that something could forget to
+# write (issue #449).
+#
 # MIT, as is `libsqlite3-sys`. SQLite itself is public domain.
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.40", default-features = false, features = [
+    "bundled",
+    "functions",
+] }
 
 # The logging facade. Diagnostics go through `tracing`; `clipped-logging` only
 # decides where they end up (docs/logging.md). This crate logs the two things a
@@ -52,6 +65,7 @@ tracing.workspace = true
 # enabled for test builds and not for the library the recorder links.
 rusqlite = { version = "0.40", default-features = false, features = [
     "bundled",
+    "functions",
     "hooks",
 ] }
 

@@ -55,29 +55,31 @@
 //!   and the database behind it
 //!   ([issue #55](https://github.com/wildware-uk/clipped/issues/55)) are built.
 //!
-//! # How a database-backed executor uses this
+//! # How the database answers one
 //!
-//! It consumes the same [`Query`] this module produces, and walks it instead of
-//! calling [`Query::matches`]:
+//! `sql` consumes the same [`Query`] this module produces and walks it into a
+//! `WHERE` fragment instead of calling [`Query::matches`]. `crate::index::browse`
+//! pastes that into the statement that reads a page, so a search is one query
+//! plan rather than a walk of the library
+//! ([issue #449](https://github.com/wildware-uk/clipped/issues/449)).
 //!
 //! - [`Expr::All`], [`Expr::Any`] and [`Expr::Not`] become `AND`, `OR` and
 //!   `NOT` around bracketed fragments, which is why the parser resolves
 //!   precedence into the tree rather than leaving it to the caller.
-//! - [`Term::Text`] becomes a `LIKE '%' || ? || '%'` against a **folded**
-//!   column, with [`FoldedText::folded`] as the bound parameter. It must not
-//!   use SQLite's `COLLATE NOCASE`, which folds ASCII only and would answer
-//!   differently from this module for every non-ASCII game, tag and title. That
-//!   is what [`fold`] is public for: the indexer writes the folded column with
-//!   it, so the two agree by construction.
-//! - [`Term::Favourite`] is a boolean column; [`Term::Date`] and
-//!   [`Term::Duration`] are comparisons against columns worth an index, using
-//!   [`Comparison`] as written.
-//! - [`TextField::Anywhere`] is the one that decides the schema: it is an `OR`
-//!   across every text column, or a single denormalised column holding all of
-//!   them folded together. Either satisfies this module's definition.
+//! - [`Term::Text`] becomes `instr(clipped_fold(<column>), ?) > 0`, with
+//!   [`FoldedText::folded`] as the bound parameter — and `clipped_fold` is
+//!   [`fold`] itself, registered on the connection as a scalar function. SQLite's
+//!   `COLLATE NOCASE` and `lower()` fold ASCII only and would answer differently
+//!   from this module for every non-ASCII game, tag and title, which is to say on
+//!   exactly the searches the folding exists for.
+//! - [`Term::Favourite`] reads `favourited_at`; [`Term::Date`] and
+//!   [`Term::Duration`] are comparisons using [`Comparison`] as written.
+//! - [`TextField::Anywhere`] is an `OR` across every text a session carries.
 //!
-//! Whatever it does, [`Query::matches`] stays the reference answer, and the two
-//! disagreeing is a bug in the executor.
+//! [`Query::matches`] stays the reference answer, and the two disagreeing is a
+//! bug in the SQL —
+//! `index::browse::tests::the_database_and_the_matcher_select_the_same_sessions`
+//! is what would notice.
 //!
 //! # Threading
 //!
@@ -92,6 +94,7 @@ mod matcher;
 mod parser;
 mod query;
 mod row;
+pub(crate) mod sql;
 mod text;
 
 use core::str::FromStr;
