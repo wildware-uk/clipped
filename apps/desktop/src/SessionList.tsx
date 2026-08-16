@@ -9,6 +9,7 @@ import {
   missingCount,
   presentBytes,
 } from './library';
+import type { Favourites, FavouriteTarget } from './favourites';
 import { canActOn, fileName, type RecordingActions } from './recordingActions';
 
 /**
@@ -41,6 +42,14 @@ import { canActOn, fileName, type RecordingActions } from './recordingActions';
  * explanation, and a disabled control that says why is what AGENTS.md sections
  * 27 and 45 ask for.
  *
+ * # Favouriting is offered for a recording whose file has gone
+ *
+ * Deliberately, and unlike the three above. A favourite is a statement about
+ * what to keep, and the moment it matters most is a recording somebody is about
+ * to go looking for: marking it protects the row from automatic cleanup
+ * (`docs/library.md`) whether or not the file is where the index last saw it.
+ * The three actions need the file; this does not.
+ *
  * # No thumbnails
  *
  * The deck draws a grid of them. Thumbnails are generated beside the recordings
@@ -60,10 +69,18 @@ export interface SessionListProps {
    * Absent draws the sittings alone, which is what Home wants.
    */
   readonly actions?: RecordingActions;
+  /**
+   * Marking a sitting or a recording as one to keep (issue #58).
+   *
+   * Absent draws no stars at all. Home passes none for the same reason it
+   * passes no actions: it is a summary of what has been recorded lately, and
+   * the Library is where a sitting is acted on.
+   */
+  readonly favourites?: Favourites;
 }
 
 /** The sittings, one row each, and their recordings under them. */
-export function SessionList({ sessions, label, actions }: SessionListProps): ReactNode {
+export function SessionList({ sessions, label, actions, favourites }: SessionListProps): ReactNode {
   return (
     <table className="clipped-table" aria-label={label}>
       <thead>
@@ -73,6 +90,7 @@ export function SessionList({ sessions, label, actions }: SessionListProps): Rea
           <th scope="col">Footage</th>
           <th scope="col">Size</th>
           <th scope="col">Files</th>
+          {favourites !== undefined && <th scope="col">Keep</th>}
         </tr>
       </thead>
       {sessions.map((session) => (
@@ -88,6 +106,18 @@ export function SessionList({ sessions, label, actions }: SessionListProps): Rea
             <td>{formatDuration(footageSeconds(session))}</td>
             <td>{formatBytes(presentBytes(session))}</td>
             <td>{describeFiles(session)}</td>
+            {favourites !== undefined && (
+              <td>
+                <FavouriteButton
+                  favourites={favourites}
+                  target={{ kind: 'session', sessionId: session.session_id }}
+                  asRead={session.favourite}
+                  of={`the ${session.game_name ?? 'unrecognised'} sitting from ${formatMoment(
+                    session.started_at,
+                  )}`}
+                />
+              </td>
+            )}
           </tr>
           {actions !== undefined &&
             session.recordings.map((recording) => (
@@ -96,6 +126,7 @@ export function SessionList({ sessions, label, actions }: SessionListProps): Rea
                 recording={recording}
                 actions={actions}
                 session={session}
+                {...(favourites === undefined ? {} : { favourites })}
               />
             ))}
         </tbody>
@@ -109,10 +140,12 @@ function RecordingRow({
   recording,
   actions,
   session,
+  favourites,
 }: {
   readonly recording: LibraryRecording;
   readonly actions: RecordingActions;
   readonly session: LibrarySession;
+  readonly favourites?: Favourites;
 }): ReactNode {
   const available = canActOn(recording);
   const busy =
@@ -176,7 +209,55 @@ function RecordingRow({
           {busy === 'Exporting' ? 'Exporting…' : 'Export MP4'}
         </button>
       </td>
+      {favourites !== undefined && (
+        <td>
+          <FavouriteButton
+            favourites={favourites}
+            target={{ kind: 'recording', id: recording.recording_id }}
+            asRead={recording.favourite}
+            of={of}
+          />
+        </td>
+      )}
     </tr>
+  );
+}
+
+/**
+ * The star, as a toggle rather than as two buttons.
+ *
+ * `aria-pressed` is what carries the state to a screen reader, and the glyph
+ * changes shape as well as weight — a filled star against a hollow one — so the
+ * mark survives being read in monochrome (AGENTS.md section 46). The label names
+ * the thing rather than saying "Favourite", because a table of forty rows
+ * otherwise announces forty identical buttons.
+ */
+function FavouriteButton({
+  favourites,
+  target,
+  asRead,
+  of,
+}: {
+  readonly favourites: Favourites;
+  readonly target: FavouriteTarget;
+  readonly asRead: boolean;
+  readonly of: string;
+}): ReactNode {
+  const marked = favourites.isFavourite(target, asRead);
+  const changing = favourites.isChanging(target);
+
+  return (
+    <button
+      type="button"
+      aria-pressed={marked}
+      disabled={changing}
+      aria-label={marked ? `Stop keeping ${of}` : `Keep ${of}`}
+      onClick={() => {
+        favourites.set(target, !marked);
+      }}
+    >
+      <span aria-hidden="true">{marked ? '★' : '☆'}</span> {marked ? 'Kept' : 'Keep'}
+    </button>
   );
 }
 

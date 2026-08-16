@@ -146,6 +146,7 @@ export const COMMANDS = [
   'library_trash',
   'restore_from_trash',
   'empty_trash',
+  'set_favourite',
   'plugins',
   'export_recording',
   'get_hotkeys',
@@ -231,6 +232,7 @@ export const REPLIES = [
   'library_trash',
   'restored',
   'trash_emptied',
+  'favourited',
   'plugins',
   'recording_exported',
   'hotkeys',
@@ -948,6 +950,58 @@ export interface TrashEmptiedReply {
   readonly emptied: TrashEmptied;
 }
 
+/**
+ * Marking one thing a favourite, or clearing the mark.
+ *
+ * The target takes two fields because the schema does: a sitting is addressed by
+ * the identifier the recorder generated, which is text, and a recording or a
+ * clip by the integer key the index gave it. `kind` says which of the two to
+ * read, and the recorder refuses a request that filled in neither rather than
+ * marking whatever row is at zero.
+ */
+export interface SetFavourite {
+  /** `session`, `recording` or `clip`. */
+  readonly kind: string;
+  /** The sitting's own identifier, for `session`. */
+  readonly session_id: string;
+  /** The library's integer identifier, for `recording` and `clip`. */
+  readonly id: number;
+  /**
+   * Whether it should be a favourite afterwards.
+   *
+   * The state to be in, not a toggle: two windows open on one library would
+   * disagree about what a toggle means.
+   */
+  readonly favourite: boolean;
+}
+
+/** What the mark is now. */
+export interface FavouriteMark {
+  /** Which thing it was, echoed so a window can match the reply to the row. */
+  readonly kind: string;
+  /** The sitting's identifier, for `session`. */
+  readonly session_id: string;
+  /** The integer identifier, for `recording` and `clip`. */
+  readonly id: number;
+  /** Whether it is a favourite now, which is what a screen draws. */
+  readonly favourite: boolean;
+  /**
+   * Whether this request is what changed it.
+   *
+   * `false` for a star that was already full: the difference between "you did
+   * that" and "that was already so".
+   */
+  readonly changed: boolean;
+}
+
+/** A favourite mark was set or cleared. */
+export interface FavouritedReply {
+  /** The tag. */
+  readonly reply: 'favourited';
+  /** Which thing, and what its mark is now. */
+  readonly mark: FavouriteMark;
+}
+
 /** The marks on one recording's timeline. */
 export interface LibraryEventsReply {
   /** The tag. */
@@ -1138,6 +1192,7 @@ export type Reply =
   | LibraryTrashReply
   | RestoredReply
   | TrashEmptiedReply
+  | FavouritedReply
   | PluginsReply
   | RecordingExportedReply
   | HotkeysReply
