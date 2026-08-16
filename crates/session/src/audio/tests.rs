@@ -993,3 +993,92 @@ fn the_compatibility_track_carries_every_source_and_the_isolated_tracks_stay_iso
         .synchronised_within(Duration::from_millis(40))
         .assert_valid();
 }
+
+/// What [`plan_system_audio`] decides, which is the whole of issues #26 and #27
+/// that can be decided without a machine.
+///
+/// Opening a capture needs Windows, an endpoint and a running process. Deciding
+/// *which* captures to open needs none of those, and it is where the failure
+/// this pair of issues exists to prevent actually lives: a plan that scopes the
+/// game one way and everything-else another puts the game's audio on two tracks,
+/// and nobody finds that until they mute the game track in an editor and the
+/// game is still audible.
+mod planning {
+    use super::*;
+
+    /// The pid is arbitrary; what matters is that the same one reaches both.
+    const GAME: u32 = 4242;
+
+    #[test]
+    fn a_window_recording_scopes_the_game_and_everything_else_to_the_same_tree() {
+        let planned =
+            plan_system_audio(&AudioSourceSetting::SystemDefault, Some(GAME)).expect("a plan");
+
+        assert_eq!(
+            planned,
+            vec![
+                PlannedSource::GameTree(GAME),
+                PlannedSource::EverythingExceptGameTree(GAME),
+            ],
+            "a window recording gets both halves of the split, against one tree"
+        );
+    }
+
+    /// The invariant the pair exists for, stated as its own test because it is
+    /// the one a future change is most likely to break: no plan may contain a
+    /// whole-endpoint capture *and* a process-scoped one. The first records the
+    /// game along with everything else, so together they write the game's audio
+    /// to two tracks.
+    #[test]
+    fn no_plan_mixes_a_scoped_capture_with_the_whole_endpoint() {
+        for game_process in [None, Some(GAME)] {
+            for setting in [AudioSourceSetting::Off, AudioSourceSetting::SystemDefault] {
+                let planned = plan_system_audio(&setting, game_process).expect("a plan");
+
+                let whole = planned.contains(&PlannedSource::WholeEndpoint);
+                let scoped = planned
+                    .iter()
+                    .any(|source| !matches!(source, PlannedSource::WholeEndpoint));
+
+                assert!(
+                    !(whole && scoped),
+                    "{setting:?} with {game_process:?} planned {planned:?}, which records the \
+                     game twice"
+                );
+            }
+        }
+    }
+
+    /// A monitor recording, or a window whose process has already exited. One
+    /// unscoped system track is a worse recording than the split, and a better
+    /// one than none.
+    #[test]
+    fn a_recording_with_no_process_falls_back_to_the_whole_endpoint() {
+        let planned = plan_system_audio(&AudioSourceSetting::SystemDefault, None).expect("a plan");
+
+        assert_eq!(planned, vec![PlannedSource::WholeEndpoint]);
+    }
+
+    /// `--system-audio none` means none, and a resolvable game process is not a
+    /// reason to open two captures the user turned off.
+    #[test]
+    fn system_audio_off_opens_nothing_even_when_a_game_is_known() {
+        let planned = plan_system_audio(&AudioSourceSetting::Off, Some(GAME)).expect("a plan");
+
+        assert!(
+            planned.is_empty(),
+            "off planned {planned:?}, so a recording somebody asked to be silent is not"
+        );
+    }
+
+    /// Refused rather than silently recording the default endpoint (#316).
+    #[test]
+    fn a_named_system_audio_device_is_still_refused() {
+        let named = AudioSourceSetting::Named("Speakers".to_owned());
+
+        assert!(matches!(
+            plan_system_audio(&named, Some(GAME)),
+            Err(SessionError::AudioDeviceNotSelectable)
+        ));
+    }
+}

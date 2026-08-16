@@ -44,13 +44,26 @@
 //! # What this module does not decide
 //!
 //! What goes into a compatibility mix
-//! ([issue #29](https://github.com/wildware-uk/clipped/issues/29)), how a game's
-//! own audio is separated from everything else
-//! ([issue #26](https://github.com/wildware-uk/clipped/issues/26)), or what to
+//! ([issue #29](https://github.com/wildware-uk/clipped/issues/29)), or what to
 //! do about a drift it has measured
 //! ([issue #30](https://github.com/wildware-uk/clipped/issues/30)). It opens the
 //! sources this build can capture, places what they produce where their own
 //! hardware said it happened, and reports how far the result moved.
+//!
+//! # Which sources those are
+//!
+//! A recording of a window scopes its system audio to that window's process
+//! tree, twice: once for the tree and once for everything except it, which is
+//! [`AudioSource::Game`] and [`AudioSource::OtherSystemAudio`] (issues
+//! [#26](https://github.com/wildware-uk/clipped/issues/26) and
+//! [#27](https://github.com/wildware-uk/clipped/issues/27), SPEC.md section 11).
+//! A recording with no process to scope to — a monitor, or a window whose
+//! process has gone — records the whole endpoint on one track instead.
+//! [`plan_system_audio`] is that decision, and it is separate from opening
+//! anything so that it can be tested without a machine.
+//!
+//! Routing a *named* application to a track of its own is still
+//! [issue #33](https://github.com/wildware-uk/clipped/issues/33).
 
 mod placement;
 
@@ -132,6 +145,26 @@ impl AudioCapture for clipped_audio::windows::MicrophoneCapture {
     }
 }
 
+impl AudioCapture for clipped_audio::windows::ProcessLoopbackCapture {
+    fn read(&mut self, timeout: Duration) -> Result<Capture<'_>, AudioError> {
+        Self::read(self, timeout)
+    }
+
+    /// Hands over what the engine is still holding, then releases the device.
+    ///
+    /// The one capture that can. `finish` drains the buffered audio that a bare
+    /// `close` throws away — up to 200 ms of it — so a game track and an
+    /// other-system-audio track end where the recording ends rather than a
+    /// fifth of a second early. The trait's contract is only that `close`
+    /// releases the device, and this satisfies it by doing more; the two
+    /// endpoint captures cannot yet, which is
+    /// [issue #320](https://github.com/wildware-uk/clipped/issues/320).
+    fn close(&mut self) {
+        Self::finish(self);
+        Self::close(self);
+    }
+}
+
 /// One source a recording will record, opened and ready to be read.
 pub(crate) struct OpenSource {
     /// Which of the recording's tracks this feeds.
@@ -174,31 +207,57 @@ impl core::fmt::Debug for OpenSource {
 /// [`SessionError::AudioDeviceNotSelectable`] for a named system-audio device,
 /// which this build cannot honour.
 pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, SessionError> {
-    use clipped_audio::windows::{MicrophoneCapture, MicrophoneSelection, SystemAudioCapture};
+    use clipped_audio::windows::{
+        MicrophoneCapture, MicrophoneSelection, ProcessLoopbackCapture, SystemAudioCapture,
+    };
 
     let mut sources = Vec::new();
 
-    match settings.system_audio() {
-        AudioSourceSetting::Off => {}
-        AudioSourceSetting::SystemDefault => {
-            let capture = SystemAudioCapture::open().map_err(|source| SessionError::Audio {
-                track: SYSTEM_AUDIO_SOURCE.track_name(),
-                source,
-            })?;
-            sources.push(OpenSource {
-                source: SYSTEM_AUDIO_SOURCE,
-                device: capture.endpoint_name().map(str::to_owned),
-                format: capture.format(),
-                capture: Box::new(capture),
-            });
-        }
-        AudioSourceSetting::Named(_) => {
-            // Refused rather than quietly recording the default endpoint, which
-            // is what a control that silently does something else looks like
-            // (AGENTS.md section 27). `clipped-audio` opens loopback against
-            // the endpoint Windows is *playing through* and offers no way to
-            // name another; issue #316 is adding one.
-            return Err(SessionError::AudioDeviceNotSelectable);
+    for planned in plan_system_audio(settings.system_audio(), settings.target().game_process())? {
+        match planned {
+            PlannedSource::WholeEndpoint => {
+                let capture = SystemAudioCapture::open().map_err(|source| SessionError::Audio {
+                    track: AudioSource::OtherSystemAudio.track_name(),
+                    source,
+                })?;
+                sources.push(OpenSource {
+                    source: AudioSource::OtherSystemAudio,
+                    device: capture.endpoint_name().map(str::to_owned),
+                    format: capture.format(),
+                    capture: Box::new(capture),
+                });
+            }
+            PlannedSource::GameTree(root) => {
+                let capture =
+                    ProcessLoopbackCapture::open(root).map_err(|source| SessionError::Audio {
+                        track: AudioSource::Game.track_name(),
+                        source,
+                    })?;
+                sources.push(OpenSource {
+                    source: AudioSource::Game,
+                    // A process-scoped capture is not opened against an endpoint
+                    // the user chose, so there is no device name to report. The
+                    // field says which device somebody would go and unplug, and
+                    // for this source the answer is "none of them".
+                    device: None,
+                    format: capture.format(),
+                    capture: Box::new(capture),
+                });
+            }
+            PlannedSource::EverythingExceptGameTree(root) => {
+                let capture = ProcessLoopbackCapture::open_excluding(root).map_err(|source| {
+                    SessionError::Audio {
+                        track: AudioSource::OtherSystemAudio.track_name(),
+                        source,
+                    }
+                })?;
+                sources.push(OpenSource {
+                    source: AudioSource::OtherSystemAudio,
+                    device: None,
+                    format: capture.format(),
+                    capture: Box::new(capture),
+                });
+            }
         }
     }
 
@@ -226,23 +285,65 @@ pub(crate) fn open(settings: &RecordingSettings) -> Result<Vec<OpenSource>, Sess
     Ok(sources)
 }
 
-/// Which of the recording's tracks the whole output endpoint goes to.
+/// One system-audio capture a recording will open.
 ///
-/// Not [`AudioSource::Game`]: a WASAPI loopback of the default endpoint is
-/// everything the machine played, and calling that the game's track would be a
-/// label a downstream editor would act on.
+/// The microphone is not here: it is one device whichever way the system side is
+/// scoped, and issues #26 and #27 did not change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlannedSource {
+    /// Loopback of the endpoint Windows is playing through — everything the
+    /// machine played, filed as [`AudioSource::OtherSystemAudio`].
+    ///
+    /// Not [`AudioSource::Game`]: calling the whole machine's output the game's
+    /// track would be a label a downstream editor acts on.
+    WholeEndpoint,
+    /// The named process and its children, filed as [`AudioSource::Game`].
+    GameTree(u32),
+    /// Everything the machine played *except* that process tree, filed as
+    /// [`AudioSource::OtherSystemAudio`].
+    EverythingExceptGameTree(u32),
+}
+
+/// Which system-audio captures to open, decided before anything is opened.
 ///
-/// `clipped_audio::windows::ProcessLoopbackCapture` can now scope a capture to a
-/// game's process tree ([issue #26](https://github.com/wildware-uk/clipped/issues/26)),
-/// so a real `Game` track is buildable — but the *other* half of the model is
-/// not: Windows' inverse mode, everything the machine played except one process
-/// tree, is not exposed by that crate, and a session has to have both or the
-/// same audio appears on two tracks. Routing is
-/// [issue #27](https://github.com/wildware-uk/clipped/issues/27) and
-/// [#33](https://github.com/wildware-uk/clipped/issues/33). Until then this
-/// recording has one system track, and it is the one that is *not* scoped to a
-/// process.
-const SYSTEM_AUDIO_SOURCE: AudioSource = AudioSource::OtherSystemAudio;
+/// The pair is the whole point. Windows' process loopback has an include mode
+/// and an exclude mode against the same process tree
+/// (`clipped_audio::windows::ProcessLoopbackCapture::open` and `open_excluding`,
+/// issues [#26](https://github.com/wildware-uk/clipped/issues/26) and
+/// [#27](https://github.com/wildware-uk/clipped/issues/27)), and a recording has
+/// to open **both or neither**: one alone leaves either the game or everything
+/// else unrecorded, and opening a scoped capture beside a whole-endpoint one
+/// would put the game's audio on two tracks — which is the failure SPEC.md
+/// section 11 exists to prevent, and the one a user only discovers in an editor
+/// when muting the game does not silence it.
+///
+/// A recording with no process to scope to — a monitor capture, or a window
+/// whose process has already gone — gets the unscoped endpoint instead. That is
+/// a worse recording rather than a failed one: the tracks are still separate
+/// from the microphone, and SPEC.md section 45's walkthrough is about a game
+/// window.
+///
+/// # Errors
+///
+/// [`SessionError::AudioDeviceNotSelectable`] for a named system-audio device.
+/// Refused rather than quietly recording the default endpoint, which is what a
+/// control that silently does something else looks like (AGENTS.md section 27);
+/// `clipped-audio` opens loopback against the endpoint Windows is *playing
+/// through* and offers no way to name another, and issue #316 is adding one.
+pub(crate) fn plan_system_audio(
+    setting: &AudioSourceSetting,
+    game_process: Option<u32>,
+) -> Result<Vec<PlannedSource>, SessionError> {
+    match (setting, game_process) {
+        (AudioSourceSetting::Off, _) => Ok(Vec::new()),
+        (AudioSourceSetting::Named(_), _) => Err(SessionError::AudioDeviceNotSelectable),
+        (AudioSourceSetting::SystemDefault, Some(root)) => Ok(vec![
+            PlannedSource::GameTree(root),
+            PlannedSource::EverythingExceptGameTree(root),
+        ]),
+        (AudioSourceSetting::SystemDefault, None) => Ok(vec![PlannedSource::WholeEndpoint]),
+    }
+}
 
 /// The microphone whose name contains `wanted`.
 ///

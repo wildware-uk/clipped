@@ -461,6 +461,7 @@ dependencies = [
  "clipped-plugins",
  "clipped-replay",
  "clipped-storage",
+ "clipped-windows",
  "rusty_ffmpeg",
  "serde",
  "serde_json",
