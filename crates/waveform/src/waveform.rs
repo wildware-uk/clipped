@@ -5,8 +5,9 @@ use core::num::NonZeroUsize;
 use core::ops::Range;
 use core::time::Duration;
 
+use clipped_background::SourceIdentity;
+
 use crate::peaks::{build_levels, read_levels, Level, Peak};
-use crate::source::SourceIdentity;
 use crate::WaveformError;
 
 /// Which audio track of a recording a waveform belongs to.

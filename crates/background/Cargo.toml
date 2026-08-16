@@ -1,0 +1,42 @@
+[package]
+name = "clipped-background"
+description = "The low-priority background worker clipped-waveform and clipped-library's thumbnails share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Reports what the worker is doing (docs/logging.md). Every log line here is
+# free of paths: the one thing a caller's `process` closure hands back is a
+# path, and this crate never formats one into a message itself, so it has no
+# reason to take `clipped-logging` and no reason to sit above layer 0 for it
+# (see `src/lib.rs`, "Why this is layer 0 and not clipped-logging's neighbour").
+tracing.workspace = true
+
+# Thread priority, and nothing else. Generating a waveform or a thumbnail for a
+# library must not take processor or disk bandwidth from a game that is being
+# recorded (AGENTS.md section 18), and on Windows the mechanism for that is
+# `THREAD_MODE_BACKGROUND_BEGIN`, which lowers I/O priority as well as CPU
+# priority — this work is as much disk as processor. Isolated in `src/windows`
+# (AGENTS.md section 5); everything above it is platform-neutral and compiles
+# and tests anywhere.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    # `GetCurrentThread`, `SetThreadPriority`, `GetThreadPriority` and the
+    # `THREAD_MODE_BACKGROUND_BEGIN`/`THREAD_PRIORITY_LOWEST` constants.
+    "Win32_System_Threading",
+]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# `src/source.rs`'s own tests need a real file to stat, and this is the
+# workspace's one place that knows how to make a temporary directory that
+# deletes itself, rather than a third copy of that (tests/media,
+# docs/testing.md).
+clipped-media-validation.workspace = true

@@ -18,6 +18,15 @@ tracing.workspace = true
 # and this crate is layer 1, so this follows the dependency direction.
 clipped-logging.workspace = true
 
+# The background worker `clipped-library`'s thumbnail module also needs: one
+# low-priority thread, a bounded queue that drops the oldest request, and a
+# real blocking suspend/resume for the duration of a recording. Both crates
+# implemented this for themselves until issue #293 (AGENTS.md section 55);
+# `clipped-background` is layer 0, so this follows the dependency direction.
+# It is also where the Windows thread-priority calls moved to, which is why
+# this crate no longer names `windows` itself.
+clipped-background.workspace = true
+
 # The raw FFmpeg FFI. Reading a finished recording means demuxing a container
 # and decoding whichever audio codec is in it, and there is no lower-layer route
 # to that: `clipped-muxer` owns the safe wrappers over the container API and is
@@ -33,21 +42,6 @@ clipped-logging.workspace = true
 # imports before `main` runs. The DLLs are placed beside the binaries by the
 # build script; the shipped application already distributes them (ADR 0004).
 rusty_ffmpeg.workspace = true
-
-# Thread priority, and nothing else. Generating waveforms for a library must not
-# take CPU or disk bandwidth from a game that is being recorded (AGENTS.md
-# section 18), and on Windows the mechanism for that is
-# `THREAD_MODE_BACKGROUND_BEGIN` — which lowers I/O priority as well as CPU
-# priority, and this work is as much disk as CPU. Isolated in `src/windows`
-# (AGENTS.md section 5); everything above it is platform-neutral and compiles
-# and tests anywhere.
-[target.'cfg(windows)'.dependencies.windows]
-workspace = true
-features = [
-    # `GetCurrentThread`, `SetThreadPriority`, `GetThreadPriority` and the
-    # `THREAD_MODE_BACKGROUND_BEGIN`/`THREAD_PRIORITY_LOWEST` constants.
-    "Win32_System_Threading",
-]
 
 [lints]
 workspace = true

@@ -55,10 +55,10 @@ use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use clipped_background::SourceIdentity;
 use tracing::{debug, warn};
 
 use crate::format;
-use crate::source::SourceIdentity;
 use crate::waveform::{Waveform, WaveformState};
 use crate::WaveformError;
 
@@ -175,7 +175,7 @@ impl WaveformCache {
             }
             Err(cause) => {
                 warn!(
-                    recording = %current.redacted(),
+                    recording = %clipped_logging::RedactedPath::new(current.path()),
                     error = %cause,
                     "a waveform cache entry could not be read; it will be generated again"
                 );
@@ -193,7 +193,7 @@ impl WaveformCache {
                 // costing a lookup and costing a re-demux of a multi-gigabyte
                 // recording, every time, for ever.
                 WaveformState::Unavailable(WaveformError::Remembered {
-                    path: current.redacted(),
+                    path: clipped_logging::RedactedPath::new(current.path()),
                     reason,
                 })
             }
@@ -202,14 +202,14 @@ impl WaveformCache {
                 // way the entry describes something else and is about to be
                 // overwritten by the regenerated one.
                 debug!(
-                    recording = %current.redacted(),
+                    recording = %clipped_logging::RedactedPath::new(current.path()),
                     "the cached waveform belongs to an older version of this recording"
                 );
                 WaveformState::Pending
             }
             Err(corrupt) => {
                 warn!(
-                    recording = %current.redacted(),
+                    recording = %clipped_logging::RedactedPath::new(current.path()),
                     reason = %corrupt,
                     "a waveform cache entry was unreadable and has been discarded"
                 );

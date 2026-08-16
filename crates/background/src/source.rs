@@ -1,35 +1,33 @@
-//! Which recording a cached waveform belongs to, and whether it is still the
-//! same recording.
+//! Which recording something derived — a waveform, a thumbnail — was made
+//! from, and whether it is still the same recording.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clipped_logging::RedactedPath;
+/// The modification time of a file whose filesystem does not report one.
+pub const UNKNOWN_MODIFIED: i64 = i64::MIN;
 
-/// What is recorded about a source file so that a cached waveform can be shown
-/// to have come from it.
+/// What is recorded about a source file so that something computed from it —
+/// a waveform, a thumbnail — can be shown to have come from it.
 ///
-/// Path, length and modification time. Not a content hash: hashing a two-gigabyte
-/// recording to decide whether to redraw a waveform would cost more than
-/// generating the waveform did, and the failure this needs to catch is a file
-/// that was replaced or re-encoded in place, which changes at least one of the
-/// three.
+/// Path, length and modification time. Not a content hash: hashing a
+/// two-gigabyte recording to decide whether to redraw a waveform, or a
+/// thumbnail forty kilobytes in size, would cost more than making the thing
+/// did, and the failure this has to catch is a file that was trimmed,
+/// re-encoded or replaced in place, which changes at least one of the three.
 ///
 /// The modification time is [`UNKNOWN_MODIFIED`] on a filesystem that does not
 /// report one. That is a valid identity: it simply means the length is all
 /// there is to compare, and a same-length replacement is not detected. It is
-/// recorded rather than being an error, because losing a waveform is cheap and
-/// refusing to make one is not.
+/// recorded rather than being an error, because losing a cached result is
+/// cheap and refusing to make one is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceIdentity {
     path: PathBuf,
     size: u64,
     modified_nanos: i64,
 }
-
-/// The modification time of a file whose filesystem does not report one.
-pub const UNKNOWN_MODIFIED: i64 = i64::MIN;
 
 impl SourceIdentity {
     /// Reads the identity of the file at `path`.
@@ -49,10 +47,12 @@ impl SourceIdentity {
         })
     }
 
-    /// Assembles an identity from values that were read back from a cache file.
-    pub(crate) fn from_parts(path: PathBuf, size: u64, modified_nanos: i64) -> Self {
+    /// Assembles an identity from values that were read back from a cache
+    /// entry.
+    #[must_use]
+    pub fn from_parts(path: impl Into<PathBuf>, size: u64, modified_nanos: i64) -> Self {
         Self {
-            path,
+            path: path.into(),
             size,
             modified_nanos,
         }
@@ -64,7 +64,7 @@ impl SourceIdentity {
         &self.path
     }
 
-    /// Its length in bytes when it was analysed.
+    /// Its length in bytes when it was read.
     #[must_use]
     pub fn size(&self) -> u64 {
         self.size
@@ -77,11 +77,11 @@ impl SourceIdentity {
         self.modified_nanos
     }
 
-    /// Whether a cached waveform recorded against `self` still describes the
-    /// file `current` was just read from.
+    /// Whether an entry recorded against `self` still describes the file
+    /// `current` was just read from.
     ///
-    /// Paths are compared without regard to case on Windows, where two spellings
-    /// of the same path name the same file.
+    /// Paths are compared without regard to case on Windows, where two
+    /// spellings of the same path name the same file.
     #[must_use]
     pub fn still_describes(&self, current: &Self) -> bool {
         self.size == current.size
@@ -91,25 +91,32 @@ impl SourceIdentity {
 
     /// The cache entry name for this source.
     ///
-    /// A digest of the path, not of the contents, so that looking a waveform up
-    /// costs a `stat` and one file open. It reuses `clipped-logging`'s digest
-    /// rather than introducing a second hash into the workspace; it is not
-    /// cryptographic, and it does not have to be, because the entry carries the
-    /// whole identity and [`still_describes`](Self::still_describes) checks it.
-    /// A collision therefore costs a recomputation, not a wrong waveform.
+    /// A digest of the path, not of the contents, so that looking a cached
+    /// result up costs a `stat` and one small file open. Not cryptographic,
+    /// and it does not have to be, because the entry carries the whole
+    /// identity and [`still_describes`](Self::still_describes) checks it — a
+    /// collision therefore costs a recomputation, not a wrong result.
     #[must_use]
     pub fn cache_key(&self) -> String {
-        format!("{:016x}", RedactedPath::new(normalise(&self.path)).digest())
+        format!("{:016x}", fnv1a_64(normalise(&self.path).as_bytes()))
     }
 
-    /// The path in the form logs record it.
+    /// The path as a cache writes it down.
+    ///
+    /// Lossy, because a cache entry that is text — JSON, in the thumbnail
+    /// sidecar — can only be text. A path Windows cannot spell in Unicode
+    /// would come back as a different path, fail
+    /// [`still_describes`](Self::still_describes) and be regenerated — the
+    /// same outcome as a cache miss, which is the right one for derived
+    /// data.
     #[must_use]
-    pub fn redacted(&self) -> RedactedPath {
-        RedactedPath::new(&self.path)
+    pub fn path_text(&self) -> String {
+        self.path.to_string_lossy().into_owned()
     }
 }
 
-/// A path in the form the cache key is taken over.
+/// A path in the form the cache key and [`SourceIdentity::still_describes`]
+/// are taken over.
 fn normalise(path: &Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) {
@@ -130,9 +137,9 @@ fn same_path(left: &Path, right: &Path) -> bool {
 
 /// A modification time as nanoseconds since the Unix epoch.
 ///
-/// Signed, and clamped rather than wrapping, so a file dated before 1970 — which
-/// a copy tool can produce — is an ordinary early time rather than a time in the
-/// far future.
+/// Signed, and clamped rather than wrapping, so a file dated before 1970 —
+/// which a copy tool can produce — is an ordinary early time rather than a
+/// time in the far future.
 fn nanos_since_epoch(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(since) => i64::try_from(since.as_nanos()).unwrap_or(i64::MAX),
@@ -140,6 +147,29 @@ fn nanos_since_epoch(time: SystemTime) -> i64 {
             i64::try_from(before.duration().as_nanos()).map_or(UNKNOWN_MODIFIED + 1, |nanos| -nanos)
         }
     }
+}
+
+/// FNV-1a, 64-bit.
+///
+/// The same algorithm `clipped_logging::RedactedPath` uses for the same
+/// reason: the digest only has to be stable and cheap, not irreversible, and
+/// implementing it here is eleven lines against a dependency this crate is
+/// not allowed to take — `clipped-logging` is layer 0 too, and a layer-0
+/// crate depends on nothing else in this workspace (`src/lib.rs`). The two
+/// copies computing the same digest for the same bytes is not a coincidence
+/// worth hiding: a cache key here and a log digest there being able to
+/// correlate is a small, free benefit of having picked the same algorithm
+/// independently, not a contract either crate relies on.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -196,7 +226,7 @@ mod tests {
 
     #[test]
     fn the_identity_of_a_real_file_is_its_length_and_its_time() {
-        let directory = clipped_media_validation::TemporaryDirectory::new("waveform-identity");
+        let directory = clipped_media_validation::TemporaryDirectory::new("background-identity");
         let path = directory.file("recording.bin");
         std::fs::write(&path, b"0123456789").expect("the file can be written");
 
@@ -211,7 +241,16 @@ mod tests {
 
     #[test]
     fn a_missing_file_has_no_identity() {
-        let directory = clipped_media_validation::TemporaryDirectory::new("waveform-identity");
+        let directory = clipped_media_validation::TemporaryDirectory::new("background-identity");
         assert!(SourceIdentity::of(directory.file("absent.mkv")).is_err());
+    }
+
+    #[test]
+    fn path_text_round_trips_an_ordinary_path() {
+        // What the thumbnail sidecar stores and reads back (issue #293's
+        // consumer): lossy in general, exact for any path made of valid
+        // Unicode, which is every path either crate's own tests write.
+        let identity = identity(r"C:\Videos\Clipped\match.mkv", 1, 1);
+        assert_eq!(identity.path_text(), r"C:\Videos\Clipped\match.mkv");
     }
 }
