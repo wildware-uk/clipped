@@ -24,10 +24,12 @@ Three documents divide this up, and it is worth knowing which is which:
 > subject is _the libraries_: they are conveyed unmodified, as ordinary files,
 > replaceable in place. It also carries the licence texts and third-party
 > notices, in `licences/` beside the binaries
-> ([#123](https://github.com/wildware-uk/clipped/issues/123)): `npm run
-stage:installer-payload` runs `scripts/collect-notices.ps1` and then stages
-> what it produced, and **refuses to build an installer at all** when those
-> texts are absent — in the same shape as the refusals for a missing recorder or
+> ([#123](https://github.com/wildware-uk/clipped/issues/123)):
+> `scripts/collect-notices.ps1` produces them and
+> `scripts/stage-installer-payload.ps1` puts them in the bundle, **refusing to
+> build an installer at all** when they are absent. The release workflow runs
+> the collector before either job stages anything; a local `npm run build:app`
+> is refused until you have run it yourself, and the refusal names it — in the same shape as the refusals for a missing recorder or
 > a missing FFmpeg, and for a stronger reason. A build without them is not one
 > anybody is licensed to distribute, so it is a refusal rather than a warning.
 >

@@ -14,7 +14,7 @@
     "build": "vite build",
     "build:app": "tauri build",
     "collect:notices": "powershell -ExecutionPolicy Bypass -File ../../scripts/collect-notices.ps1",
-    "stage:installer-payload": "npm run collect:notices && powershell -ExecutionPolicy Bypass -File ../../scripts/stage-installer-payload.ps1",
+    "stage:installer-payload": "powershell -ExecutionPolicy Bypass -File ../../scripts/stage-installer-payload.ps1",
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "tauri"
