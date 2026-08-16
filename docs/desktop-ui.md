@@ -361,6 +361,50 @@ submission rather than on every keystroke — `game:` on the way to `game:cs2` i
 a parse error nobody asked about — and a query the recorder will not parse is
 reported with what was wrong with it rather than as an empty result set.
 
+### Scrolling a large library
+
+Issue #60's second acceptance criterion: "large libraries scroll smoothly
+(measured with a documented fixture size)". Every earlier round of this issue
+left it unmet, because the Library screen mounted one `<tbody>` per sitting —
+a header row and one row per recording — with nothing bounding how many of
+them existed at once. A page of 25 is nothing; the library
+[library.md](library.md) measures its own reconciliation cost against, ten
+thousand sessions, is not.
+
+`SessionList.tsx` and `virtualWindow.ts` fix the cause rather than the
+symptom. `useSessionWindow` measures `.clipped-shell__main` — the one element
+in the shell that scrolls (`AppShell.tsx`) — around the table, and trims which
+sessions are actually mounted to what that viewport needs, plus a small
+overscan either side; two `aria-hidden` spacer rows stand in for whatever was
+skipped, so the scrollbar keeps roughly the length a fully-mounted table would
+have had. Each sitting's height is *estimated* from its row count rather than
+measured, because measuring it would mean mounting it — the cost this exists
+to avoid — and the estimate only has to keep the window roughly right, not
+pixel-perfect.
+
+It is a no-op — every session renders, exactly as it always did — whenever
+there is nothing real to measure: `sessionWindow`'s `viewportHeight: 0` branch,
+which is what jsdom reports for every existing case in
+`LibraryScreen.test.tsx` and `HomeScreen.test.tsx`, having no layout engine of
+its own. It only starts trimming the table once there is a measured
+`.clipped-shell__main` with a real height, which in this build means a real
+window.
+
+**What is measured, and what is honestly not.** Nothing in this process can
+paint a frame, so no frame rate was observed and none is claimed — the same
+position [issue #309](https://github.com/wildware-uk/clipped/pull/309) took
+about drawing the screen at all. What `virtualWindow.test.ts` measures instead,
+against the same ten-thousand-session fixture `library.md` uses, is the
+property a frame rate actually depends on: at every scroll position across the
+whole library, the window stays a small, bounded slice of it — under fifty
+sessions, whatever the total — and the sessions it draws are the ones actually
+near the scroll position, not a fixed prefix of the list. `SessionList.test.tsx`
+proves the same property through the component itself, against a
+`.clipped-shell__main` built by hand with the dimensions a real one would have
+reported, because jsdom has none of its own to offer. Whether a real window
+scrolls smoothly on the strength of that has not been watched happen, and
+`docs/desktop-ui.md` says so rather than claiming it.
+
 ## The Games screen
 
 SPEC.md sections 6 and 17, and issue #107. The deck draws it as a table of
