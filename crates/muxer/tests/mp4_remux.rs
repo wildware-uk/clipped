@@ -744,7 +744,6 @@ fn every_sound_track_can_be_chosen_and_the_copy_carries_the_one_that_was() {
                 AudioStream::codec("pcm_s16le")
                     .sample_rate(48_000)
                     .channels(2)
-                    .title(title)
                     .packets((SECONDS * AUDIO_PACKETS_PER_SECOND) as u64),
             )
             // The assertion the feature exists for. Anything else on this track
@@ -763,6 +762,22 @@ fn every_sound_track_can_be_chosen_and_the_copy_carries_the_one_that_was() {
             )
             .monotonic_timestamps()
             .assert_valid();
+
+        // The name follows the track, which is what tells a selector what it is
+        // offering. It moves as `TrackShape` describes above — Matroska's
+        // `Name` becomes MP4's `udta`/`name`, which `ffprobe` reports as `name`
+        // rather than as `title` — so it is read the way that comparison reads
+        // it rather than through `AudioStream::title`, which asks for `title`.
+        let carried = copy
+            .audio_streams()
+            .first()
+            .and_then(|stream| stream.tag("title").or_else(|| stream.tag("name")))
+            .map(str::to_owned);
+        assert_eq!(
+            carried.as_deref(),
+            Some(title),
+            "the copy of stream {stream} carries the wrong track's name"
+        );
     }
 
     assert!(
