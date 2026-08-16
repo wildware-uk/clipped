@@ -197,9 +197,16 @@ pub struct RecoverArgs {
     #[arg(long)]
     pub adopt: bool,
 
-    /// Delete one recording's file and record that you did. [default: off]
+    /// Move one recording's file to the trash and record that you did.
+    /// [default: off]
     ///
-    /// Requires `--session`, because this is footage that cannot be made again.
+    /// The file is moved rather than deleted, so it is recoverable — but not
+    /// yet through the trash screen or its retention, because a recovered
+    /// fragment has no library row for those to key off.
+    /// `docs/recorder-cli.md` and `docs/storage-management.md` say exactly
+    /// what that costs. Requires `--session`: even a recoverable action on
+    /// footage is refused in bulk, so it always names the one recording it
+    /// moves (AGENTS.md section 56).
     #[arg(long, requires = "session")]
     pub discard: bool,
 }

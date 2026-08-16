@@ -736,7 +736,7 @@ footage is not lost. Nothing knows about it.
 ```text
 clipped-recorder recover                                  list, and change nothing
 clipped-recorder recover --adopt                          keep them
-clipped-recorder recover --discard --session <ID>         delete one, and say so
+clipped-recorder recover --discard --session <ID>         move one to the trash, and say so
 ```
 
 `watch` says the same thing at start-up, once, and does nothing about it —
@@ -753,11 +753,17 @@ container, which `clipped-muxer` cannot do yet
 is that the footage is *known* — named, sized, attributed, and indexed like any
 other recording rather than looking like one still being written.
 
-Discarding deletes the file and writes the `discarded` outcome. It names one
-session, always: this is footage that cannot be made again, so there is
-deliberately no way to throw away everything at once (AGENTS.md section 56). The
-entry stays either way, because the record that a recording existed and was
-thrown away is worth more than a gap.
+Discarding moves the file into `clipped-library`'s trash and writes the
+`discarded` outcome — not `remove_file`, since [issue #451] found that a
+delete a user has not necessarily watched yet was the wrong default once a
+trash existed to catch it. It names one session, always: even a recoverable
+choice is refused in bulk, so there is deliberately no way to move everything
+at once (AGENTS.md section 56). The entry stays either way, because the
+record that a recording existed and was discarded is worth more than a gap.
+[recorder-cli.md](recorder-cli.md#recover) has what moving it to the trash
+means in practice, including the one thing it does not yet do.
+
+[issue #451]: https://github.com/wildware-uk/clipped/issues/451
 
 Both are read-modify-write over the sidecar as JSON rather than through a typed
 mirror of the schema, so a file written by a newer Clipped keeps its newer fields

@@ -152,6 +152,20 @@ impl TrashEntry {
     }
 }
 
+/// What moving a file into the trash without a row produced.
+///
+/// Only [`Trash::stow_untracked`](super::Trash::stow_untracked) returns this —
+/// see there for what a caller gives up by reaching for it instead of
+/// [`Trash::send`](super::Trash::send), and why that trade is sometimes the
+/// honest one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntrackedStow {
+    /// Where the file is now, or [`None`] if there was nothing to move — the
+    /// same "the media had already gone" case
+    /// [`Trash::send`](super::Trash::send) reports for a tracked item.
+    pub path: Option<PathBuf>,
+}
+
 /// Where a restored item ended up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreOutcome {

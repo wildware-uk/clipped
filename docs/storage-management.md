@@ -581,6 +581,32 @@ Four interlocks, each in one place so that each can be reviewed:
   two filesystem failures in a row, so the file could not be put back either — is
   reported as an error naming both paths rather than logged and forgotten.
 
+### A file with no row: `clipped-recorder recover --discard`
+
+Everything above assumes a row to key off — that is what lets an item be
+listed, restored and swept by retention. `recover --discard`
+([issue #451](https://github.com/wildware-uk/clipped/issues/451)) hands the
+trash a fragment an interrupted recorder left, and that has no row: the library
+only indexes a recording once its session record says it is finished, which is
+the thing discarding is in the middle of doing. Giving it one purely so it
+could be trashed would mean a delete command doing the library's indexing —
+not this crate's job, and not free, since the sidecar outcome recovery writes
+is not yet a word the indexer recognises
+([issue #278](https://github.com/wildware-uk/clipped/issues/278)) — a separate
+gap this does not paper over.
+
+So `Trash::stow_untracked` does only the physical half: the same rename, into
+the same trash directory, under the same cross-volume refusal as an ordinary
+delete. What it does not do is give the file a row, and that is a real cost
+stated plainly rather than hidden — it will not appear on the trash screen, is
+not counted towards what emptying the trash would reclaim, and is not swept by
+retention, because there is no `deleted_at` for retention to be judged from.
+The file is on disk, in the trash directory, byte for byte, which is the one
+guarantee that makes a mistaken `--discard` recoverable at all; getting the
+rest of the bookkeeping is future work, not something this quietly promises.
+[recorder-cli.md](recorder-cli.md#recover) is what a person running the command
+is told about the difference.
+
 ### Where the trash runs
 
 Synchronously, on a thread the caller owns, and **never a capture thread**: a
