@@ -651,6 +651,109 @@ fn three_sources_produce_three_tracks_with_no_sound_shared_between_them() {
     );
 }
 
+/// #34's third assertion: the compatibility track carries **all three** sources.
+///
+/// The mix is what a player that takes one audio track arbitrarily takes
+/// (SPEC.md section 13), so a mix missing the game is a recording that sounds
+/// empty to everybody who does not go looking for track 1. Measured the way the
+/// two-source mix test measures its own: `Tone::at` asserts the *dominant*
+/// frequency and a mix of equal tones has none, so each is checked against the
+/// track's own peak instead.
+#[test]
+fn the_compatibility_mix_carries_the_game_the_rest_of_the_machine_and_the_microphone() {
+    let Some(video) = coded_video() else {
+        return;
+    };
+    // The same short script the two-source mix test uses, and for the same
+    // reason: inside the mixer's `MAX_SOURCE_LAG`, so no scripted source can run
+    // far enough ahead in media time to be left out of the mix.
+    const SCRIPT_SECONDS: f64 = 0.4;
+
+    let directory = TemporaryDirectory::new("session-mix-of-three");
+    let path = directory.file("recording.mkv");
+
+    record_with(
+        video,
+        &path,
+        vec![
+            scripted(AudioSource::Game, 2, tone(GAME_TONE, 2, SCRIPT_SECONDS, 0)),
+            scripted(
+                AudioSource::OtherSystemAudio,
+                2,
+                tone(SYSTEM_TONE, 2, SCRIPT_SECONDS, 0),
+            ),
+            scripted(
+                AudioSource::Microphone,
+                1,
+                tone(MICROPHONE_TONE, 1, SCRIPT_SECONDS, 0),
+            ),
+        ],
+        SCRIPT_SECONDS,
+        true,
+    );
+
+    let media = Media::open(&path).expect("a finished recording opens");
+    let mix = media
+        .audio_content(0)
+        .expect("the compatibility track can be decoded");
+    let quiet = mix.peak_amplitude() as f64 / 8.0;
+    let game = mix.magnitude_at(GAME_TONE);
+    let system = mix.magnitude_at(SYSTEM_TONE);
+    let microphone = mix.magnitude_at(MICROPHONE_TONE);
+
+    media
+        .validate()
+        .that(game > quiet, || {
+            format!(
+                "the mix should carry the game at {GAME_TONE} Hz, and it measures {game:.4}                  against a peak of {:.4}",
+                mix.peak_amplitude()
+            )
+        })
+        .that(system > quiet, || {
+            format!(
+                "the mix should carry the rest of the machine at {SYSTEM_TONE} Hz, and it                  measures {system:.4} against a peak of {:.4}",
+                mix.peak_amplitude()
+            )
+        })
+        .that(microphone > quiet, || {
+            format!(
+                "the mix should carry the microphone at {MICROPHONE_TONE} Hz, and it measures                  {microphone:.4} against a peak of {:.4}",
+                mix.peak_amplitude()
+            )
+        })
+        // Four tracks: the mix, and the three it was made from.
+        .audio_stream_count(4)
+        .audio(
+            0,
+            AudioStream::codec("pcm_s16le")
+                .title("Compatibility Mix")
+                .default_track(true),
+        )
+        .audio(1, AudioStream::codec("pcm_s16le").title("Game"))
+        .audio(2, AudioStream::codec("pcm_s16le").title("Other System Audio"))
+        .audio(3, AudioStream::codec("pcm_s16le").title("Microphone"))
+        // And mixing changed none of the tracks it read.
+        .audio_tone(
+            1,
+            Tone::at(GAME_TONE)
+                .isolated_from(SYSTEM_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            2,
+            Tone::at(SYSTEM_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            3,
+            Tone::at(MICROPHONE_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(SYSTEM_TONE),
+        )
+        .assert_valid();
+}
+
 fn a_recording_with_no_audio_sources_is_a_video_only_file() {
     // `--microphone none --system-audio none`. No device is opened, no thread is
     // started and — the part a container makes visible — no audio track is
