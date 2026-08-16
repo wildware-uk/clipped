@@ -1,5 +1,5 @@
 import type { LibraryRecording, LibrarySession } from '@clipped/shared';
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { SessionList } from './SessionList';
@@ -106,7 +106,13 @@ function renderWindowed(
   // browser sends continuously as somebody scrolls, and it is what this hook
   // listens for to re-measure; firing one is how this test asks it to look
   // again now that there is something real to find.
-  shell.dispatchEvent(new Event('scroll'));
+  // Inside `act`, because the listener this wakes sets React state. Outside it
+  // the update is scheduled and never flushed before the assertions read the
+  // DOM, so the test sees the unwindowed first render and reports that the
+  // window did not engage - which is what it did report until this wrapped it.
+  act(() => {
+    shell.dispatchEvent(new Event('scroll'));
+  });
 
   return shell;
 }
