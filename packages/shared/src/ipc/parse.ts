@@ -52,6 +52,8 @@ import type {
   JsonValue,
   LibraryClip,
   LibraryEventLane,
+  TrashListing,
+  TrashedItem,
   LibraryEventMark,
   PluginDeclaration,
   PluginState,
@@ -356,6 +358,8 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'library_events':
       return { reply: 'library_events', lane: readEventLane(reply['lane']) };
+    case 'library_trash':
+      return { reply: 'library_trash', trash: readTrashListing(reply['trash']) };
     case 'plugins':
       return {
         reply: 'plugins',
@@ -709,6 +713,43 @@ function readEventMark(value: JsonValue | undefined): LibraryEventMark {
     at: numberField(mark, 'at', what),
     kind: stringField(mark, 'kind', what),
     source: stringField(mark, 'source', what),
+  };
+}
+
+/** What is in the trash, and what emptying it would take. */
+function readTrashListing(value: JsonValue | undefined): TrashListing {
+  const listing = object(value, 'a trash listing');
+  const what = 'a trash listing';
+  return {
+    items: arrayField(listing['items'], 'a trash list', readTrashedItem),
+    total_items: numberField(listing, 'total_items', what),
+    total_bytes: numberField(listing, 'total_bytes', what),
+    directory: stringField(listing, 'directory', what),
+  };
+}
+
+/**
+ * One thing waiting in the trash.
+ *
+ * `expires_at` and `size_bytes` are optional and stay optional: a trash whose
+ * retention this build cannot work out, and a file the index never measured,
+ * are both real states, and inventing a date or a zero would be a screen saying
+ * something nobody measured.
+ */
+function readTrashedItem(value: JsonValue | undefined): TrashedItem {
+  const item = object(value, 'a trashed item');
+  const what = 'a trashed item';
+  const expires = optionalStringField(item, 'expires_at', what);
+  const size = optionalNumberField(item, 'size_bytes', what);
+  return {
+    kind: stringField(item, 'kind', what),
+    id: numberField(item, 'id', what),
+    path: stringField(item, 'path', what),
+    original_path: stringField(item, 'original_path', what),
+    deleted_at: stringField(item, 'deleted_at', what),
+    ...(expires === undefined ? {} : { expires_at: expires }),
+    ...(size === undefined ? {} : { size_bytes: size }),
+    dependent_clips: numberField(item, 'dependent_clips', what),
   };
 }
 

@@ -56,7 +56,7 @@ use std::time::SystemTime;
 use clipped_ipc::{
     ErrorCode, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
     LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, ProtocolError,
-    MAX_FRAME_BYTES,
+    TrashListing, TrashedItem, MAX_FRAME_BYTES,
 };
 use clipped_library::index::{
     cursor_of, game_summaries, list_sessions, reconcile, GameSummary, IndexControl, IndexReport,
@@ -77,6 +77,35 @@ pub struct LibraryReader {
     /// directory at all — which on Windows means `%LOCALAPPDATA%` is unset.
     path: Option<PathBuf>,
     database: Mutex<Option<Database>>,
+    /// Where deleted media waits, so that a trash listing can say where the
+    /// files went rather than only that they went.
+    ///
+    /// Listing the trash reads the *index* — the directory is not consulted —
+    /// so this is here to be reported rather than to be walked.
+    trash_directory: Option<PathBuf>,
+}
+
+/// One trash entry, as the window is told about it.
+///
+/// `original_path` is the one a person recognises: a file inside the trash is
+/// named for the trash, and a screen that showed only that would be asking
+/// somebody to identify their own recording by a name they have never seen.
+fn trashed_item(entry: clipped_library::trash::TrashEntry) -> TrashedItem {
+    TrashedItem {
+        kind: match entry.item.kind {
+            clipped_library::trash::ItemKind::Recording => "recording".to_owned(),
+            clipped_library::trash::ItemKind::Clip => "clip".to_owned(),
+        },
+        id: entry.item.id,
+        path: entry.path.to_string_lossy().into_owned(),
+        original_path: entry.original_path.to_string_lossy().into_owned(),
+        deleted_at: entry.deleted_at,
+        // See `LibraryReader::trash`: nothing configures the retention period,
+        // so there is no date to give that would not be invented.
+        expires_at: None,
+        size_bytes: entry.size_bytes,
+        dependent_clips: entry.dependent_clips,
+    }
 }
 
 impl LibraryReader {
@@ -84,9 +113,12 @@ impl LibraryReader {
     /// `%LOCALAPPDATA%\Clipped\library.db`, beside the logs (`docs/storage.md`).
     #[must_use]
     pub fn for_this_user() -> Self {
-        Self::at(
+        let mut reader = Self::at(
             clipped_logging::application_directory().map(|directory| directory.join(LIBRARY_FILE)),
-        )
+        );
+        reader.trash_directory = crate::config::default_output_directory()
+            .map(|recordings| clipped_session::config::trash_beside(&recordings));
+        reader
     }
 
     /// A reader for the library at a named path, or for no library at all.
@@ -95,7 +127,54 @@ impl LibraryReader {
         Self {
             path,
             database: Mutex::new(None),
+            trash_directory: None,
         }
+    }
+
+    /// What is waiting in the trash, newest deletion first.
+    ///
+    /// Reads the index and nothing else: an entry is a row with `deleted_at`
+    /// set, so a trash on a drive that is not present still *lists*, and each
+    /// item says where its file is. That is the difference between a screen
+    /// that says "your deleted recordings are on a drive that is not here" and
+    /// one that appears empty
+    /// ([issue #450](https://github.com/wildware-uk/clipped/issues/450)).
+    ///
+    /// `expires_at` is absent on every item, deliberately: nothing configures
+    /// the retention period yet, and a date computed from a policy nobody set
+    /// would be a screen promising a deletion date it cannot keep.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::LibraryUnavailable`] when the index cannot be read.
+    pub fn trash(&self) -> Result<TrashListing, ProtocolError> {
+        let directory = self
+            .trash_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        self.with_database(|database| {
+            let entries = clipped_library::trash::Trash::new(&directory)
+                .list(database)
+                .map_err(|error| {
+                    ProtocolError::new(
+                        ErrorCode::LibraryUnavailable,
+                        format!("the trash could not be read: {error}"),
+                    )
+                })?;
+
+            let total_bytes = entries
+                .iter()
+                .map(clipped_library::trash::TrashEntry::bytes)
+                .sum();
+
+            Ok(TrashListing {
+                total_items: entries.len() as u64,
+                total_bytes,
+                directory: directory.to_string_lossy().into_owned(),
+                items: entries.into_iter().map(trashed_item).collect(),
+            })
+        })
     }
 
     /// One page of the library.

@@ -43,6 +43,7 @@
         "library_sessions",
         "library_games",
         "library_events",
+        "library_trash",
         "plugins",
         "export_recording",
         "get_hotkeys",
@@ -161,6 +162,7 @@
         "hotkeys",
         "shutting_down",
         "library_events",
+        "library_trash",
         "plugins"
       ],
       "tolerates_unrecognised": false
@@ -502,6 +504,13 @@
       ],
       "optional": []
     },
+    "reply.library_trash": {
+      "required": [
+        "reply",
+        "trash"
+      ],
+      "optional": []
+    },
     "reply.plugins": {
       "required": [
         "installed",
@@ -714,6 +723,12 @@
       "name": "library_events",
       "params": "library_events",
       "reply": "reply.library_events",
+      "available_in_this_build": true
+    },
+    {
+      "name": "library_trash",
+      "params": "library_trash",
+      "reply": "reply.library_trash",
       "available_in_this_build": true
     },
     {
@@ -1305,6 +1320,38 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_events"
+    },
+    {
+      "name": "what is waiting in the trash, and what emptying it would take",
+      "direction": "server",
+      "frame": {
+        "id": 14,
+        "outcome": {
+          "ok": {
+            "reply": "library_trash",
+            "trash": {
+              "directory": "D:\\\\Clips.trash",
+              "items": [
+                {
+                  "deleted_at": "2026-08-15T09:00:00+01:00",
+                  "dependent_clips": 2,
+                  "expires_at": "2026-09-14T09:00:00+01:00",
+                  "id": 1,
+                  "kind": "recording",
+                  "original_path": "D:\\\\Clips\\\\clipped-cs2-20260814-201500.mkv",
+                  "path": "D:\\\\Clips.trash\\\\clipped-cs2-20260814-201500.mkv",
+                  "size_bytes": 2147483648
+                }
+              ],
+              "total_bytes": 2147483648,
+              "total_items": 1
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.library_trash"
     },
     {
       "name": "what is installed, and what each plugin asks for",

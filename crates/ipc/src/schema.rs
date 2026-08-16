@@ -557,6 +557,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::SaveReplay(_) => Some("save_replay".to_owned()),
                 Command::LibrarySessions(_) => Some("library_sessions".to_owned()),
                 Command::LibraryEvents(_) => Some("library_events".to_owned()),
+                Command::LibraryTrash(_) => Some("library_trash".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
@@ -577,6 +578,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibrarySessions(_) => Some("reply.library_sessions".to_owned()),
                 Command::LibraryGames => Some("reply.library_games".to_owned()),
                 Command::LibraryEvents(_) => Some("reply.library_events".to_owned()),
+                Command::LibraryTrash(_) => Some("reply.library_trash".to_owned()),
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
@@ -859,6 +861,35 @@ fn samples() -> Vec<Sample> {
                                 source: "acme-cs2".to_owned(),
                             },
                         ],
+                    },
+                }),
+            }),
+        ),
+        (
+            "what is waiting in the trash, and what emptying it would take",
+            ServerMessage::Response(Response {
+                id: 14,
+                outcome: Outcome::Ok(Reply::LibraryTrash {
+                    trash: crate::library::TrashListing {
+                        items: vec![crate::library::TrashedItem {
+                            kind: "recording".to_owned(),
+                            id: 1,
+                            path: r"D:\\Clips.trash\\clipped-cs2-20260814-201500.mkv".to_owned(),
+                            original_path: r"D:\\Clips\\clipped-cs2-20260814-201500.mkv"
+                                .to_owned(),
+                            deleted_at: "2026-08-15T09:00:00+01:00".to_owned(),
+                            expires_at: Some("2026-09-14T09:00:00+01:00".to_owned()),
+                            size_bytes: Some(2_147_483_648),
+                            // Two clips were cut from it, and they point at a
+                            // file that is not where they think it is. A screen
+                            // says so before somebody empties the trash,
+                            // because that is when they stop being
+                            // recoverable.
+                            dependent_clips: 2,
+                        }],
+                        total_items: 1,
+                        total_bytes: 2_147_483_648,
+                        directory: r"D:\\Clips.trash".to_owned(),
                     },
                 }),
             }),
@@ -1284,6 +1315,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         // tells "none" from "not asked" is that `marks` is always present, and
         // that is a property of the type rather than of the path.
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
+        Reply::LibraryTrash { .. } => "library_trash".to_owned(),
         Reply::Plugins { .. } => "plugins".to_owned(),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
@@ -1824,6 +1856,7 @@ fn every_built_command() -> Vec<Command> {
         Command::LibraryEvents(crate::library::LibraryEvents {
             recording: "1".to_owned(),
         }),
+        Command::LibraryTrash(crate::library::LibraryTrash {}),
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
         Command::GetHotkeys,
@@ -1841,6 +1874,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibrarySessions(_)
             | Command::LibraryGames
             | Command::LibraryEvents(_)
+            | Command::LibraryTrash(_)
             | Command::Plugins
             | Command::ExportRecording(_)
             | Command::GetHotkeys
@@ -2030,6 +2064,25 @@ fn every_reply() -> Vec<Reply> {
                 }],
             },
         },
+        Reply::LibraryTrash {
+            trash: crate::library::TrashListing {
+                items: vec![crate::library::TrashedItem {
+                    kind: "recording".to_owned(),
+                    id: 1,
+                    path: r"D:\Clips.trash\clipped-cs2-20260814-201500.mkv".to_owned(),
+                    original_path: r"D:\Clips\clipped-cs2-20260814-201500.mkv".to_owned(),
+                    deleted_at: "2026-08-15T09:00:00+01:00".to_owned(),
+                    // `Some`, or the field is skipped and the schema would not
+                    // see it.
+                    expires_at: Some("2026-09-14T09:00:00+01:00".to_owned()),
+                    size_bytes: Some(2_147_483_648),
+                    dependent_clips: 2,
+                }],
+                total_items: 1,
+                total_bytes: 2_147_483_648,
+                directory: r"D:\Clips.trash".to_owned(),
+            },
+        },
         Reply::Plugins {
             installed: vec![exemplar_plugin()],
             refused: vec![crate::plugins::RefusedPlugin {
@@ -2050,6 +2103,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::LibrarySessions { .. }
             | Reply::LibraryGames { .. }
             | Reply::LibraryEvents { .. }
+            | Reply::LibraryTrash { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::RecordingExported { .. }

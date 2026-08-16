@@ -587,6 +587,12 @@ impl CommandHandler for RecorderService {
             Command::LibraryEvents(request) => Ok(Reply::LibraryEvents {
                 lane: self.library.events(&request)?,
             }),
+            // A read like the three above it, answered on the connection thread
+            // for the same reason: it is one statement over the index and
+            // shares nothing with a recording.
+            Command::LibraryTrash(_) => Ok(Reply::LibraryTrash {
+                trash: self.library.trash()?,
+            }),
             // Also on the connection thread: reading a handful of manifests and
             // one settings file is bounded local work that shares nothing with
             // a recording, which is the same argument the library reads above

@@ -48,6 +48,14 @@ export interface CommandAnswers {
   readonly sessions?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `library_games` answers. */
   readonly games?: () => Promise<unknown>;
+  /**
+   * What `library_trash` answers.
+   *
+   * The default is a rejection, like the other library reads: a stub that
+   * quietly answered with an empty trash would let a screen test pass while the
+   * screen never asked, and "nothing has been deleted" is a claim.
+   */
+  readonly trash?: () => Promise<unknown>;
   /** What `record_target` answers: the process the button would record. */
   readonly recordTarget?: () => unknown;
   /**
@@ -193,6 +201,9 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'library_events') {
         return commands.events?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'library_trash') {
+        return commands.trash?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'record_target') {
         return Promise.resolve(commands.recordTarget?.() ?? null);

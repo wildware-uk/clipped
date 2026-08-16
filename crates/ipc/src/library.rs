@@ -455,3 +455,74 @@ mod tests {
         assert!(!json.contains("game_name"), "{json}");
     }
 }
+
+/// Asking what is in the trash.
+///
+/// No paging: the trash is what a user deleted and has not emptied, bounded by
+/// the retention period rather than by the size of the library. A library with
+/// ten thousand sittings in it can have an empty trash, and one that needs
+/// paging is one whose owner has bigger problems than a screen — if that turns
+/// out to be wrong, a cursor is added the way [`LibrarySessions`] has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LibraryTrash {}
+
+/// One thing waiting in the trash.
+///
+/// The window may not link `clipped-library`, so this is the projection of
+/// `clipped_library::trash::TrashEntry` that a screen needs: what it was, when
+/// it went, when it expires, and what it would cost to keep or free
+/// ([issue #450](https://github.com/wildware-uk/clipped/issues/450)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashedItem {
+    /// `recording` or `clip`, which is what a screen groups by.
+    pub kind: String,
+    /// The library's own identifier for it, which `restore_from_trash` names.
+    pub id: i64,
+    /// Where the file is **now**, inside the trash.
+    pub path: String,
+    /// Where it was, and where restoring puts it back.
+    ///
+    /// The one a person recognises: a file's name inside the trash is not what
+    /// they deleted, and a screen that showed only that would be asking them to
+    /// identify their own recording by a name they have never seen.
+    pub original_path: String,
+    /// When it was deleted, RFC 3339 with an offset.
+    pub deleted_at: String,
+    /// When it will be removed for good, RFC 3339, or absent when the retention
+    /// period is not known here.
+    ///
+    /// Absent rather than computed in the window: how long the trash keeps
+    /// things is the recorder's setting, and a screen that worked it out itself
+    /// would be a second answer that could disagree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// What it occupied when the index last saw it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    /// How many clips were cut from this recording, and are now pointing at a
+    /// file that is not where they think it is.
+    ///
+    /// Zero for a clip. A screen says so before somebody empties the trash,
+    /// because that is the moment those clips stop being recoverable.
+    pub dependent_clips: u32,
+}
+
+/// What is in the trash, and what emptying it would take.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashListing {
+    /// Everything in it, newest deletion first.
+    pub items: Vec<TrashedItem>,
+    /// How many there are, which is half of what `empty_trash` confirms.
+    pub total_items: u64,
+    /// What they occupy, which is the other half.
+    ///
+    /// The pair travels because `empty_trash` takes it back: a window that
+    /// showed "3 recordings, 12 GB" and then emptied a trash that had gained a
+    /// fourth is refused rather than deleting something nobody saw
+    /// (`clipped_library::trash::EmptyTrash`).
+    pub total_bytes: u64,
+    /// Where the trash directory is, so that a screen can say where the files
+    /// went rather than only that they went.
+    pub directory: String,
+}
