@@ -64,14 +64,48 @@
 //! — audible as a faint tick, and pointless. [`DEADBAND`] is far wider than the
 //! jitter and far narrower than a perceptible synchronisation error.
 //!
-//! The cost is that a device whose sample clock genuinely runs at a slightly
-//! different rate from the performance counter is corrected in one
+//! Left alone, a device whose sample clock genuinely runs at a slightly
+//! different rate from the performance counter would be corrected in one
 //! [`DEADBAND`]-sized step rather than continuously: a few parts per million of
 //! drift reaches 20 ms about once an hour, and produces one 20 ms silence or
-//! one 20 ms trim when it does. Removing that step needs resampling against a
-//! reference clock, which is
-//! [issue #30](https://github.com/wildware-uk/clipped/issues/30). Until then a
-//! rare, bounded correction is the honest trade against unbounded drift.
+//! one 20 ms trim when it does. That was the whole story before
+//! [issue #30](https://github.com/wildware-uk/clipped/issues/30); what it added
+//! is below.
+//!
+//! # Continuous correction
+//!
+//! The deadband bounds an *ignored* offset; it says nothing about a *steady*
+//! one. A device running a genuine 5 ppm fast is inside the deadband on every
+//! single packet — the offset per packet is a fraction of a microsecond — and
+//! still 20 ms out an hour later, because the same small error is added every
+//! time. [`Timeline::correction_ratio`] turns that observation around: instead
+//! of waiting for the ignored offset to cross the deadband and then erasing it
+//! in one step, it measures the *rate* the offset has been growing at since the
+//! last time the timeline was known to be right, and hands back a resampling
+//! ratio a fraction of a percent from `1.0` that the caller applies to the next
+//! real packet's samples (`crate::resample`) so the offset stops growing in the
+//! first place. The deadband and the step correction are still here — a real
+//! gap or a device change is not a rate to track, it is silence to fill or
+//! samples to trim, exactly as before — but a steady clock no longer needs
+//! either, and the correction that used to be one 20 ms event an hour is now a
+//! resampling ratio too small to hear, applied on every packet.
+//!
+//! The rate is only trustworthy once it has been measured for a while:
+//! [`MIN_SERVO_WINDOW`] holds the ratio at `1.0` until enough time has passed
+//! since the last reset for the offset to say more about the clock than about
+//! jitter, and [`MAX_DRIFT_RATIO`] bounds how far the ratio can move from `1.0`
+//! however wrong a measurement is, because real hardware drifts by single-digit
+//! parts per million and a bug here must not be free to retune a track by more
+//! than that.
+//!
+//! "The last time the timeline was known to be right" is deliberately not "the
+//! anchor". Anything that already produces [`Continuity::SilenceFirst`],
+//! [`Continuity::Trim`] or [`Continuity::Drop`] — a real gap, an endpoint
+//! reopened on a different device — throws away everything the rate estimate
+//! knew, because it may describe a different piece of hardware with a different
+//! clock. Averaging across that event would blend two devices' drift into one
+//! wrong number; resetting at it means the estimate that comes out the other
+//! side is always about the device that is playing right now.
 
 use crate::format::AudioFormat;
 use crate::time::AudioTimestamp;
@@ -115,6 +149,30 @@ const ANCHOR_GRACE: u64 = 250_000_000;
 /// whatever happens to the consumer (AGENTS.md section 18).
 const SILENCE_CHUNK: u64 = 100_000_000;
 
+/// How long the timeline waits, after a reset, before trusting a drift-rate
+/// estimate enough to act on it.
+///
+/// The deadband (20 ms) bounds how far a single packet's position may be from
+/// where it is expected without triggering a correction, so immediately after
+/// a reset the only offset available to estimate a rate from is smaller than
+/// that — a few tens of microseconds of jitter, divided by a few milliseconds
+/// of elapsed time, is a wildly noisy ppm figure that says nothing about the
+/// device's real clock. Two seconds is about 200 packets of averaging, long
+/// enough for the jitter to wash out against a genuine parts-per-million
+/// drift.
+const MIN_SERVO_WINDOW: u64 = 2_000_000_000;
+
+/// How far [`Timeline::correction_ratio`] may move from `1.0`, either way.
+///
+/// 1000 ppm (0.1%) is far beyond any real clock this crate has been run
+/// against — a few parts per million is typical, tens of ppm would be a
+/// notably bad crystal — so this is a backstop against a bad measurement
+/// rather than a bound this crate expects to reach. A ratio this large would
+/// still be inaudible as a steady pitch shift, but is clamped anyway: nothing
+/// about a wrong estimate should be free to retune a track by more than a
+/// bad device's own hardware could.
+const MAX_DRIFT_RATIO: f64 = 0.001;
+
 /// What to do with a packet that has just arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Continuity {
@@ -142,6 +200,16 @@ pub(crate) struct Timeline {
     frames: u64,
     /// Frames of silence owed to the caller and not yet handed over.
     silence_owed: u64,
+    /// The performance-counter reading of the packet that last reset the
+    /// drift-rate estimate: the anchor, or the most recent packet that needed
+    /// [`Continuity::SilenceFirst`], [`Continuity::Trim`] or
+    /// [`Continuity::Drop`]. [`None`] before the timeline is anchored.
+    servo_since: Option<u64>,
+    /// The signed offset (`arrived - expected`, in nanoseconds) at
+    /// `servo_since`, so [`correction_ratio`](Self::correction_ratio) can
+    /// measure the offset accrued *since* the reset rather than the whole
+    /// offset, which may predate it.
+    servo_offset: i64,
 }
 
 impl Timeline {
@@ -153,12 +221,73 @@ impl Timeline {
             anchor: None,
             frames: 0,
             silence_owed: 0,
+            servo_since: None,
+            servo_offset: 0,
         }
     }
 
     /// Frames handed to the caller so far, real and synthesised.
     pub(crate) fn frames_emitted(&self) -> u64 {
         self.frames
+    }
+
+    /// The resampling ratio [`crate::resample`] should apply to the *next*
+    /// real packet reported at `arrived`, to correct for the drift measured
+    /// since the last reset.
+    ///
+    /// `1.0` — no correction — until the timeline is anchored and
+    /// [`MIN_SERVO_WINDOW`] has passed since the last reset; otherwise `1.0 +
+    /// offset / elapsed`, clamped to [`MAX_DRIFT_RATIO`], where `offset` is how
+    /// much `arrived` has moved against
+    /// [`expected_nanos`](Self::expected_nanos) since the reset and `elapsed`
+    /// is how long ago that reset was. A source running fast arrives earlier
+    /// than expected over time, giving a ratio below `1.0` that asks for fewer
+    /// output frames per input frame — a small time-compression that keeps the
+    /// track from running ahead of the reference clock — and a slow source the
+    /// mirror image.
+    ///
+    /// Read-only: this only reports what [`plan`](Self::plan) has already
+    /// measured, so calling it any number of times, or not at all, changes
+    /// nothing.
+    pub(crate) fn correction_ratio(&self, arrived: AudioTimestamp) -> f64 {
+        let (Some(expected), Some(servo_since)) = (self.expected_nanos(), self.servo_since) else {
+            return 1.0;
+        };
+        let arrived = arrived.as_nanos();
+        let Some(elapsed) = arrived.checked_sub(servo_since) else {
+            // A position that is not even later than the reset says nothing
+            // useful about a rate; `plan` will treat it as its own event.
+            return 1.0;
+        };
+        if elapsed < MIN_SERVO_WINDOW {
+            return 1.0;
+        }
+
+        let offset_now = i128::from(arrived) - i128::from(expected);
+        let accrued = (offset_now - i128::from(self.servo_offset)) as f64;
+        let ratio = 1.0 + accrued / elapsed as f64;
+        ratio.clamp(1.0 - MAX_DRIFT_RATIO, 1.0 + MAX_DRIFT_RATIO)
+    }
+
+    /// Discards the drift-rate estimate without touching the anchor or the
+    /// frame count.
+    ///
+    /// Called when the stream a capture is reading from is replaced — a
+    /// device change, or a reopen after a failure — so that a rate measured
+    /// against one piece of hardware is never used to correct another. Safe to
+    /// call even when the replacement stream turns out to need no correction
+    /// of its own: [`correction_ratio`](Self::correction_ratio) reports `1.0`
+    /// until the next packet re-establishes a baseline, exactly as it does
+    /// before the first packet ever arrives.
+    pub(crate) fn reset_drift_correction(&mut self) {
+        self.servo_since = None;
+    }
+
+    /// Records `arrived` and the signed offset from `expected` as the new
+    /// baseline the drift-rate estimate measures from.
+    fn reset_servo(&mut self, arrived: u64, offset: i64) {
+        self.servo_since = Some(arrived);
+        self.servo_offset = offset;
     }
 
     /// Decides what to do with a packet reported at `arrived`.
@@ -171,6 +300,7 @@ impl Timeline {
             // Nothing emitted yet and no silence owed: this packet defines
             // where the track starts, with the device's own reading.
             self.anchor = Some(arrived);
+            self.reset_servo(arrived, 0);
             return Continuity::Continue;
         };
 
@@ -178,6 +308,9 @@ impl Timeline {
             if gap < DEADBAND {
                 return Continuity::Continue;
             }
+            // A gap this large is a real event — silence, a reopen — not a
+            // rate to track; see "Continuous correction" in the module docs.
+            self.reset_servo(arrived, i64::try_from(gap).unwrap_or(i64::MAX));
             return Continuity::SilenceFirst(self.format.nanos_to_frames(gap));
         }
 
@@ -186,6 +319,10 @@ impl Timeline {
             return Continuity::Continue;
         }
         let overlap_frames = self.format.nanos_to_frames(overlap);
+        self.reset_servo(
+            arrived,
+            i64::try_from(overlap).map_or(i64::MIN, |overlap| -overlap),
+        );
         if overlap_frames >= packet_frames {
             Continuity::Drop
         } else {
@@ -576,6 +713,157 @@ mod tests {
         assert_eq!(
             timeline.frames_emitted(),
             50 * PACKET_FRAMES + 4 * 2 * 48_000
+        );
+    }
+
+    #[test]
+    fn correction_ratio_is_unity_before_a_timeline_is_anchored() {
+        // No packet has arrived yet, so there is nothing to measure a rate
+        // against — the same "no evidence yet" position `plan` is in before
+        // its first call.
+        let timeline = timeline();
+        assert_eq!(timeline.correction_ratio(at(31_107_500 * SECOND)), 1.0);
+    }
+
+    #[test]
+    fn correction_ratio_is_unity_until_the_servo_window_has_elapsed() {
+        // A single packet's offset against the anchor is jitter, not a rate:
+        // dividing a small offset by a small elapsed time is noise, however
+        // large the resulting "ppm" looks, so the ratio must not move on it.
+        let mut timeline = timeline();
+        let start = 31_107_500 * SECOND;
+        timeline.plan(at(start), PACKET_FRAMES);
+        timeline.emit(PACKET_FRAMES);
+
+        // One second since the reset: below MIN_SERVO_WINDOW (two seconds),
+        // whatever the apparent offset.
+        let arrived = at(start + SECOND + 5_000_000);
+        assert_eq!(timeline.correction_ratio(arrived), 1.0);
+    }
+
+    #[test]
+    fn correction_ratio_reports_the_measured_drift_once_the_window_has_passed() {
+        // Two seconds of packets arriving exactly on time, so the track's
+        // `expected` position is exactly two seconds after the anchor and the
+        // servo's baseline is still the anchor itself (nothing has reset it).
+        let mut timeline = timeline();
+        let start = 31_107_500 * SECOND;
+        run_steady(&mut timeline, start, 200);
+        let expected_now = start + 2 * SECOND;
+
+        // A hypothetical next packet arriving 400 microseconds later than
+        // that: 200 ppm fast, comfortably inside the deadband (20 ms) so
+        // `plan` alone would ignore it, and comfortably past the servo
+        // window.
+        let offset = 400_000i64;
+        let arrived = at(expected_now + offset as u64);
+        let ratio = timeline.correction_ratio(arrived);
+
+        let elapsed = 2 * SECOND + offset as u64;
+        let expected_ratio = 1.0 + offset as f64 / elapsed as f64;
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-12,
+            "got {ratio}, expected {expected_ratio}"
+        );
+        assert!(
+            ratio > 1.0,
+            "a packet arriving later than expected is a fast source, which needs a ratio \
+             above 1.0 to emit more frames and slow the track down: got {ratio}"
+        );
+    }
+
+    #[test]
+    fn correction_ratio_is_negative_going_for_a_source_running_slow() {
+        // The mirror image of the test above: a packet arriving *earlier*
+        // than expected is a source running slow, and the fix is to emit
+        // fewer frames — a ratio below 1.0. Three seconds of baseline rather
+        // than two, so that subtracting the offset still leaves the elapsed
+        // time comfortably past the servo window.
+        let mut timeline = timeline();
+        let start = 31_107_500 * SECOND;
+        run_steady(&mut timeline, start, 300);
+        let expected_now = start + 3 * SECOND;
+
+        let offset = 400_000u64;
+        let arrived = at(expected_now - offset);
+        let ratio = timeline.correction_ratio(arrived);
+        assert!(
+            ratio < 1.0,
+            "a packet arriving earlier than expected is a slow source, which needs a ratio \
+             below 1.0: got {ratio}"
+        );
+    }
+
+    #[test]
+    fn correction_ratio_is_clamped_rather_than_following_a_bad_measurement() {
+        // A synthetic offset far larger than any real hardware clock would
+        // produce. Whatever the arithmetic says, the ratio this crate hands
+        // to a resampler must not move further than MAX_DRIFT_RATIO from
+        // 1.0.
+        let mut timeline = timeline();
+        let start = 31_107_500 * SECOND;
+        run_steady(&mut timeline, start, 200);
+        let expected_now = start + 2 * SECOND;
+
+        let arrived = at(expected_now + 500_000_000); // 500 ms against 2.5 s: 20% "drift".
+        assert_eq!(
+            timeline.correction_ratio(arrived),
+            1.0 + MAX_DRIFT_RATIO,
+            "an outrageous offset must be clamped, not passed straight through"
+        );
+    }
+
+    #[test]
+    fn a_real_gap_resets_the_drift_estimate_rather_than_extending_it() {
+        // Two seconds of on-time packets establish a baseline at the anchor,
+        // then a five-second gap — a real event, not a rate — arrives. If the
+        // servo were not reset by it, the huge offset the gap produces would
+        // still be sitting in the estimate afterwards; because it is reset,
+        // a packet shortly after the gap sees the same "not enough history
+        // yet" answer a freshly anchored timeline would.
+        let mut timeline = timeline();
+        let start = 31_107_500 * SECOND;
+        let after_sound = run_steady(&mut timeline, start, 200);
+
+        let resumes = after_sound + 5 * SECOND;
+        let plan = timeline.plan(at(resumes), PACKET_FRAMES);
+        assert_eq!(plan, Continuity::SilenceFirst(5 * 48_000));
+        timeline.owe_silence(5 * 48_000);
+        while timeline.silence_owed() > 0 {
+            let instalment = timeline.take_silence_instalment();
+            timeline.emit(instalment);
+        }
+        timeline.emit(PACKET_FRAMES);
+
+        // Only one second since the packet that closed the gap: below the
+        // servo window, so the ratio has to be 1.0 — which it could only be
+        // if the reset actually happened, since eight seconds have passed
+        // since the *original* anchor.
+        let ratio = timeline.correction_ratio(at(resumes + SECOND));
+        assert_eq!(
+            ratio, 1.0,
+            "the estimate should have restarted at the gap rather than carrying pre-gap history"
+        );
+    }
+
+    #[test]
+    fn reset_drift_correction_clears_the_estimate_without_touching_the_track() {
+        let mut timeline = timeline();
+        let start = 31_107_500 * SECOND;
+        run_steady(&mut timeline, start, 200);
+        let frames_before = timeline.frames_emitted();
+
+        timeline.reset_drift_correction();
+
+        assert_eq!(
+            timeline.correction_ratio(at(start + 10 * SECOND)),
+            1.0,
+            "a reset estimate reports no correction until a new baseline is measured"
+        );
+        assert_eq!(
+            timeline.frames_emitted(),
+            frames_before,
+            "resetting the drift estimate must not touch the frame count"
         );
     }
 }

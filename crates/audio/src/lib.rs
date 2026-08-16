@@ -35,16 +35,18 @@
 //! source's own track.
 //!
 //! The rest of the track model is not built. Capturing everything *except* a
-//! game is [issue #27](https://github.com/wildware-uk/clipped/issues/27),
+//! game is [issue #27](https://github.com/wildware-uk/clipped/issues/27), and
 //! microphone processing and the optional raw microphone track are
 //! [issue #31](https://github.com/wildware-uk/clipped/issues/31) and
-//! [issue #32](https://github.com/wildware-uk/clipped/issues/32), and
-//! resampling between capture clocks is
-//! [issue #30](https://github.com/wildware-uk/clipped/issues/30) — which is also
-//! what the mix needs before it can carry a source captured at a different rate
-//! from its own. Nothing consumes the mix yet: a recording session opens the
-//! captures and writes their tracks (`clipped-session`), and giving the mix
-//! track its samples is the remaining half of
+//! [issue #32](https://github.com/wildware-uk/clipped/issues/32).
+//! [Issue #30](https://github.com/wildware-uk/clipped/issues/30) is a source's
+//! own clock staying aligned with the reference clock over a long recording
+//! (`timeline` and `resample`); it does not make the mix able to carry a
+//! source captured at a genuinely different rate from its own, which is still
+//! refused when the source is added (see [`Mixer::add_source`]). Nothing
+//! consumes the mix yet: a recording session opens the captures and writes
+//! their tracks (`clipped-session`), and giving the mix track its samples is
+//! the remaining half of
 //! [issue #29](https://github.com/wildware-uk/clipped/issues/29).
 //!
 //! # Responsibilities
@@ -137,6 +139,7 @@ mod buffer;
 mod error;
 mod format;
 mod mix;
+mod resample;
 mod time;
 mod timeline;
 
