@@ -304,6 +304,8 @@ struct RawDecision {
 struct RawLauncher {
     kind: LauncherKind,
     app_id: Option<String>,
+    #[serde(default)]
+    not_the_game: Vec<String>,
 }
 
 /// A `[game.capture]` table.
@@ -485,13 +487,23 @@ fn validate_game(
 
     let launcher = match game.launcher {
         None => None,
-        Some(raw) => Some(match raw.app_id {
-            None => Launcher::new(raw.kind),
-            Some(app_id) if app_id.trim().is_empty() => {
-                return Err(fail(EntryProblem::LauncherAppIdEmpty));
+        Some(raw) => {
+            for name in &raw.not_the_game {
+                if name.trim().is_empty() || is_path(name) {
+                    return Err(fail(EntryProblem::LauncherNotTheGameInvalid {
+                        name: name.clone(),
+                    }));
+                }
             }
-            Some(app_id) => Launcher::new(raw.kind).with_app_id(app_id),
-        }),
+            let launcher = match raw.app_id {
+                None => Launcher::new(raw.kind),
+                Some(app_id) if app_id.trim().is_empty() => {
+                    return Err(fail(EntryProblem::LauncherAppIdEmpty));
+                }
+                Some(app_id) => Launcher::new(raw.kind).with_app_id(app_id),
+            };
+            Some(launcher.with_not_the_game(raw.not_the_game))
+        }
     };
 
     let icon = match game.icon {

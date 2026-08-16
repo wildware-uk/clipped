@@ -124,6 +124,11 @@ pub enum EntryProblem {
     },
     /// The launcher's `app_id` is present but empty. Omit the key instead.
     LauncherAppIdEmpty,
+    /// A `not_the_game` name is empty or contains a directory separator.
+    LauncherNotTheGameInvalid {
+        /// What was written.
+        name: String,
+    },
     /// `icon` is present but empty. Omit the key instead.
     IconEmpty,
     /// A capture `note` is present but empty. Omit the key instead.
@@ -181,6 +186,10 @@ impl fmt::Display for EntryProblem {
             Self::ChildProcessInvalid { name } => write!(
                 formatter,
                 "the child process `{name}` is not a bare executable file name"
+            ),
+            Self::LauncherNotTheGameInvalid { name } => write!(
+                formatter,
+                "`[game.launcher] not_the_game` holds `{name}`, which is not a bare executable                  file name"
             ),
             Self::LauncherAppIdEmpty => {
                 formatter.write_str("`[game.launcher] app_id` is empty; omit the key instead")

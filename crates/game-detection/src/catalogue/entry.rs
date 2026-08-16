@@ -228,12 +228,17 @@ impl fmt::Display for LauncherKind {
 pub struct Launcher {
     kind: LauncherKind,
     app_id: Option<String>,
+    not_the_game: Vec<String>,
 }
 
 impl Launcher {
     /// A launcher with no identifier.
     pub(crate) const fn new(kind: LauncherKind) -> Self {
-        Self { kind, app_id: None }
+        Self {
+            kind,
+            app_id: None,
+            not_the_game: Vec::new(),
+        }
     }
 
     /// The same launcher, with the identifier it uses for this game.
@@ -249,10 +254,52 @@ impl Launcher {
         self.kind
     }
 
+    /// The same launcher, with the processes in its directory that are not the
+    /// game.
+    #[must_use]
+    pub(crate) fn with_not_the_game<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.not_the_game = names.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// The launcher's own identifier for the game, where one is recorded.
     #[must_use]
     pub fn app_id(&self) -> Option<&str> {
         self.app_id.as_deref()
+    }
+
+    /// Processes that live in this game's install directory and are not it.
+    ///
+    /// A launcher claims a *directory*, so every process under it carries the
+    /// game's identity — including the ones that are not the game. League of
+    /// Legends is the case this exists for: `LeagueClient.exe` sits beside the
+    /// game and runs for as long as somebody has the shop open, including while
+    /// they are playing something else
+    /// ([issue #514](https://github.com/wildware-uk/clipped/issues/514)).
+    ///
+    /// Deliberately **not** the executable list. An entry's executables are what
+    /// the name and path rungs match; this is a statement about the launcher
+    /// rung only, and it has to be, because the whole value of that rung is
+    /// identifying a game whose executable name the catalogue does not know.
+    #[must_use]
+    pub fn not_the_game(&self) -> &[String] {
+        &self.not_the_game
+    }
+
+    /// Whether `executable_name` is one of them.
+    ///
+    /// Compared without case, as every executable name in this module is:
+    /// Windows does not distinguish them and a catalogue written by hand should
+    /// not have to.
+    #[must_use]
+    pub fn is_not_the_game(&self, executable_name: &str) -> bool {
+        self.not_the_game
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(executable_name))
     }
 }
 

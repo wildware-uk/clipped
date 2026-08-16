@@ -453,9 +453,49 @@ that is not installed is absent; one whose metadata could not be read is a
 problem recorded against it, because a corrupt Epic manifest directory must not
 cost the user the Steam games on the same machine.
 
-**Nothing else changes today.** Only the five Steam entries in `data/games.toml`
-carry an `app_id`, so only they can reach the rung; the other launchers'
-entries have none, and [#514] is why adding them is not yet safe.
+### What a launcher may not claim
+
+A launcher claims a **directory**, so every process under it carries the game's
+identity — including the ones that are not the game. League of Legends is the
+case that settled this ([#514]): `LeagueClient.exe`, `LeagueClientUx.exe` and
+`LeagueClientUxRender.exe` all live in League's install directory and run for as
+long as somebody has the shop open, including while they are playing something
+else. Detection is process-start driven, so opening the shop would have started
+a recording of League.
+
+So an entry may name the processes in its directory that are not it:
+
+```toml
+[game.launcher]
+kind = "riot"
+app_id = "league_of_legends"
+not_the_game = ["LeagueClient.exe", "LeagueClientUx.exe", "LeagueClientUxRender.exe"]
+```
+
+Three things about the shape are deliberate:
+
+- **It affects the launcher rung and nothing else.** A named process still
+  reaches the name and path rungs, so an entry written for the client itself
+  finds it — this is not a way to make a process undetectable by accident.
+- **It is not the executable list.** Constraining the rung by an entry's
+  executables was the obvious alternative and it destroys the rung's purpose: a
+  game whose executable name the catalogue does not know would stop being
+  identified, which is the case the rung was built for. Everything else in
+  League's directory — an anti-cheat service nobody has written down — is still
+  League.
+- **Steam is unaffected.** A Steam game's install directory holds that game, and
+  no Steam entry needs the key.
+
+**Verified against the real installation** by `examples/launchers_probe.rs`:
+
+```text
+League of Legends.exe — Riot league_of_legends → league-of-legends
+some-anticheat.exe    — Riot league_of_legends → league-of-legends
+LeagueClient.exe      — Riot league_of_legends → no catalogue entry names it
+```
+
+The third line is the point: Riot still claims the client, and the catalogue
+refuses to call it a game.
 
 **Verified against this machine**, by `examples/launchers_probe.rs`, which asks
 every launcher about every running process — or about one path, so that an
