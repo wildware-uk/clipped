@@ -57,6 +57,8 @@ const BUFFER_FRAMES: usize = SAMPLE_RATE as usize / 100;
 /// Nothing here may assume the epoch is small.
 const EPOCH: u64 = 31_107_000 * 1_000_000_000;
 
+/// The game's own audio, in AGENTS.md section 26's vocabulary.
+const GAME_TONE: f64 = 440.0;
 const SYSTEM_TONE: f64 = 880.0;
 const MICROPHONE_TONE: f64 = 1320.0;
 
@@ -558,6 +560,97 @@ fn a_recording_with_both_sources_has_a_named_track_for_each_and_the_right_sound_
 }
 
 #[test]
+/// The critical feature, measured rather than asserted: three sources, three
+/// tracks, and each track carrying its own sound and none of the others.
+///
+/// This is the automated half of
+/// [issue #34](https://github.com/wildware-uk/clipped/issues/34) and the proof
+/// that the routing issues [#26](https://github.com/wildware-uk/clipped/issues/26)
+/// and [#27](https://github.com/wildware-uk/clipped/issues/27) added does what
+/// SPEC.md section 11 asks. The tones are section 26's: 440 Hz for the game,
+/// 880 Hz for everything else the machine played, 1320 Hz for the microphone.
+///
+/// **What this does and does not prove.** The sources are scripted through
+/// [`AudioCapture`], so what is measured is the *routing* — that the session
+/// declares three tracks, puts each source on its own, and writes a file in
+/// which they are separable. It is not measured against Windows: whether
+/// `ProcessLoopbackCapture`'s include and exclude modes really partition the
+/// machine's audio is the system half of #34, needs the test applications of
+/// [#136](https://github.com/wildware-uk/clipped/issues/136), and is what the
+/// manual procedure in `docs/testing.md` covers. A session that routed two
+/// sources to one track passes every structural assertion above the tone ones
+/// and fails here, which is the whole reason the tones exist.
+#[test]
+fn three_sources_produce_three_tracks_with_no_sound_shared_between_them() {
+    let Some(video) = coded_video() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("session-audio-isolation");
+    let path = directory.file("recording.mkv");
+
+    let reports = record(
+        video,
+        &path,
+        vec![
+            scripted(AudioSource::Game, 2, tone(GAME_TONE, 2, 2.0, 0)),
+            scripted(
+                AudioSource::OtherSystemAudio,
+                2,
+                tone(SYSTEM_TONE, 2, 2.0, 0),
+            ),
+            scripted(AudioSource::Microphone, 1, tone(MICROPHONE_TONE, 1, 2.0, 0)),
+        ],
+        2.0,
+    );
+
+    Media::open(&path)
+        .expect("a finished recording opens")
+        .validate()
+        .audio_stream_count(3)
+        // The order is the model's, not the order the sources were declared in:
+        // `AudioSource::ordering_rank` puts the game before everything else and
+        // the microphone last, so "track 2 is the microphone" keeps being true
+        // across recordings.
+        .audio(0, AudioStream::codec("pcm_s16le").title("Game"))
+        .audio(
+            1,
+            AudioStream::codec("pcm_s16le").title("Other System Audio"),
+        )
+        .audio(2, AudioStream::codec("pcm_s16le").title("Microphone"))
+        // The measurement. Each track's own tone must be at least eight times
+        // the strength of either tone belonging to another source, which is the
+        // documented rejection threshold #34 asks for
+        // (`Tone::DEFAULT_RATIO`).
+        .audio_tone(
+            0,
+            Tone::at(GAME_TONE)
+                .isolated_from(SYSTEM_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            1,
+            Tone::at(SYSTEM_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(MICROPHONE_TONE),
+        )
+        .audio_tone(
+            2,
+            Tone::at(MICROPHONE_TONE)
+                .isolated_from(GAME_TONE)
+                .isolated_from(SYSTEM_TONE),
+        )
+        .monotonic_timestamps()
+        .synchronised_within(Duration::from_millis(40))
+        .assert_valid();
+
+    let names: Vec<&str> = reports.iter().map(AudioTrackReport::track_name).collect();
+    assert_eq!(
+        names,
+        vec!["Game", "Other System Audio", "Microphone"],
+        "all three sources should have reported, in the model's order"
+    );
+}
+
 fn a_recording_with_no_audio_sources_is_a_video_only_file() {
     // `--microphone none --system-audio none`. No device is opened, no thread is
     // started and — the part a container makes visible — no audio track is
