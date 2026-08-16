@@ -905,7 +905,14 @@ impl RecordingState {
     /// recording.
     fn start(self: &Arc<Self>, request: &StartRecording) -> Result<Reply, ProtocolError> {
         let args = record_args(request)?;
-        let config = RecordingConfig::resolve(&args).map_err(invalid_parameters)?;
+        // The same settings file every other command reads, and the same
+        // answer: a recording the window started goes where the settings screen
+        // said, unless the request named a file itself (issue #307).
+        let configured = crate::watch::load_configuration(
+            clipped_session::config::ConfigurationStore::default_path().as_deref(),
+        );
+        let config = RecordingConfig::resolve(&args, configured.storage().recording_directory())
+            .map_err(invalid_parameters)?;
         // Before the window is resolved and before anything is created: a
         // duration no buffer can hold is a parameter to fix, and finding that
         // out after a capture session has opened would be finding it out late
