@@ -83,113 +83,11 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_NO_MORE_FILES, HANDLE};
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-};
+use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
 
 use crate::process::{file_time_now, FileTime, ProcessHandle};
+use crate::process_table::{process_table, ProcessTableEntry};
 use crate::WindowsError;
-
-/// One row of the process table.
-///
-/// Deliberately not more than this. The table is read every scan and gives a
-/// name for nothing, whereas an executable path costs an `OpenProcess` per
-/// process on the machine — several hundred — and this module opens only the
-/// handful of processes it is actually adopting.
-#[derive(Clone, Debug)]
-struct TableRow {
-    /// The process identifier.
-    pid: u32,
-    /// The identifier of the process that created this one, which may since
-    /// have exited and may since name something else entirely.
-    parent_pid: u32,
-    /// The executable's file name, such as `cs2.exe`.
-    name: String,
-}
-
-/// A snapshot handle, closed when this value is dropped.
-///
-/// The handle from `CreateToolhelp32Snapshot` is a kernel object like any
-/// other: leaking one leaks the copy of the process table behind it, and a tree
-/// takes one every scan for as long as a recording lasts (AGENTS.md section
-/// 58).
-struct SnapshotHandle(HANDLE);
-
-impl SnapshotHandle {
-    /// Takes a snapshot of the process table.
-    fn take() -> Result<Self, WindowsError> {
-        // SAFETY: the call takes two integers and returns either a handle or an
-        // error. The handle it returns is owned by the value built from it here
-        // and closed exactly once, in `Drop`.
-        let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
-            .map_err(|error| WindowsError::api("CreateToolhelp32Snapshot", error))?;
-        Ok(Self(handle))
-    }
-}
-
-impl Drop for SnapshotHandle {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` came from `CreateToolhelp32Snapshot`, is not a
-        // pseudo-handle, and cannot already have been closed: the field is
-        // private, the type is not `Copy`, and `Drop` runs once.
-        //
-        // The result is discarded deliberately. There is nothing a caller could
-        // do about a handle that will not close, and this call fails only for a
-        // handle that was never valid (AGENTS.md section 15 allows an ignored
-        // failure that is documented).
-        let _ = unsafe { CloseHandle(self.0) };
-    }
-}
-
-/// Every process running now, by identifier, creator and name.
-///
-/// # Errors
-///
-/// [`WindowsError::Api`] when Windows will not produce the process table at
-/// all, which is the machine being in trouble rather than an ordinary
-/// condition. Individual rows are never dropped: the enumeration either works
-/// or does not.
-fn process_table() -> Result<Vec<TableRow>, WindowsError> {
-    let snapshot = SnapshotHandle::take()?;
-
-    let mut entry = PROCESSENTRY32W {
-        dwSize: u32::try_from(size_of::<PROCESSENTRY32W>())
-            .expect("PROCESSENTRY32W is far smaller than u32::MAX"),
-        ..Default::default()
-    };
-
-    // SAFETY: `entry` is a live, correctly sized `PROCESSENTRY32W` — the API
-    // rejects the call outright if `dwSize` is wrong — and `snapshot.0` is a
-    // handle this scope owns and has not closed.
-    if let Err(error) = unsafe { Process32FirstW(snapshot.0, &mut entry) } {
-        return Err(WindowsError::api("Process32FirstW", error));
-    }
-
-    let mut rows = Vec::with_capacity(512);
-    loop {
-        rows.push(TableRow {
-            pid: entry.th32ProcessID,
-            parent_pid: entry.th32ParentProcessID,
-            name: executable_name(&entry.szExeFile),
-        });
-
-        // SAFETY: as above; `entry` is reused, which is what this API expects.
-        match unsafe { Process32NextW(snapshot.0, &mut entry) } {
-            Ok(()) => {}
-            Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => break,
-            Err(error) => return Err(WindowsError::api("Process32NextW", error)),
-        }
-    }
-
-    Ok(rows)
-}
-
-/// The name out of a `PROCESSENTRY32W`, up to its terminator.
-fn executable_name(raw: &[u16]) -> String {
-    let end = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
-    String::from_utf16_lossy(&raw[..end])
-}
 
 /// What is known about one member, without the handle that pins it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,9 +154,12 @@ impl Lineage {
     }
 
     /// The rows that claim descent from a member and are not members already.
-    fn candidates<'rows>(&self, rows: &'rows [TableRow]) -> Vec<&'rows TableRow> {
+    fn candidates<'rows>(
+        &self,
+        rows: &'rows [ProcessTableEntry],
+    ) -> Vec<&'rows ProcessTableEntry> {
         rows.iter()
-            .filter(|row| self.contains(row.parent_pid) && !self.contains(row.pid))
+            .filter(|row| self.contains(row.parent_pid()) && !self.contains(row.pid()))
             .collect()
     }
 
@@ -617,12 +518,17 @@ impl ProcessTree {
     }
 
     /// Decides one candidate, adopting it if it can be pinned and verified.
-    fn consider(&mut self, row: &TableRow, table_read_at: FileTime, change: &mut TreeChange) {
-        let Some(parent_created) = self.lineage.created(row.parent_pid) else {
+    fn consider(
+        &mut self,
+        row: &ProcessTableEntry,
+        table_read_at: FileTime,
+        change: &mut TreeChange,
+    ) {
+        let Some(parent_created) = self.lineage.created(row.parent_pid()) else {
             return;
         };
 
-        let handle = match ProcessHandle::open_to_follow(row.pid) {
+        let handle = match ProcessHandle::open_to_follow(row.pid()) {
             Ok(handle) => handle,
             Err(error) => {
                 if is_permission_refusal(&error) {
@@ -630,7 +536,7 @@ impl ProcessTree {
                     // will: it runs at a higher integrity level. Worth
                     // reporting, because its audio will not be in the game's
                     // track.
-                    change.refused.push(row.name.clone());
+                    change.refused.push(row.name().to_owned());
                 }
                 // Otherwise it exited between the table being read and now.
                 // There is nothing to capture and nothing to say.
@@ -652,10 +558,11 @@ impl ProcessTree {
         // the only route to any orphan it left behind, and the identifier is
         // pinned from here on, so the route stays honest.
         let live = !handle.has_exited();
-        self.lineage.insert(row.pid, row.parent_pid, created, live);
-        self.pins.insert(row.pid, handle);
+        self.lineage
+            .insert(row.pid(), row.parent_pid(), created, live);
+        self.pins.insert(row.pid(), handle);
         if live {
-            change.joined.push(row.pid);
+            change.joined.push(row.pid());
         }
     }
 }
@@ -668,12 +575,8 @@ mod tests {
     const fn assert_send<T: Send>() {}
     const _: () = assert_send::<ProcessTree>();
 
-    fn row(pid: u32, parent_pid: u32, name: &str) -> TableRow {
-        TableRow {
-            pid,
-            parent_pid,
-            name: name.to_owned(),
-        }
+    fn row(pid: u32, parent_pid: u32, name: &str) -> ProcessTableEntry {
+        ProcessTableEntry::for_test(pid, parent_pid, name)
     }
 
     fn at(ticks: u64) -> FileTime {
@@ -705,7 +608,7 @@ mod tests {
         let candidates: Vec<u32> = lineage
             .candidates(&rows)
             .iter()
-            .map(|row| row.pid)
+            .map(|row| row.pid())
             .collect();
 
         assert_eq!(candidates, vec![300]);
@@ -765,7 +668,7 @@ mod tests {
         let candidates: Vec<u32> = lineage
             .candidates(&rows)
             .iter()
-            .map(|row| row.pid)
+            .map(|row| row.pid())
             .collect();
 
         assert_eq!(candidates, vec![300]);
@@ -813,34 +716,6 @@ mod tests {
 
         assert!(is_permission_refusal(&denied));
         assert!(!is_permission_refusal(&gone));
-    }
-
-    #[test]
-    fn the_process_table_contains_this_process_and_names_it() {
-        let rows = process_table().expect("the process table can always be read");
-        let own = rows
-            .iter()
-            .find(|row| row.pid == std::process::id())
-            .expect("a process is in its own process table");
-
-        assert!(
-            own.name.to_lowercase().ends_with(".exe"),
-            "expected an executable name, got {}",
-            own.name
-        );
-        assert_ne!(own.parent_pid, own.pid);
-    }
-
-    #[test]
-    fn a_name_stops_at_its_terminator() {
-        let mut raw = [0_u16; 8];
-        for (slot, unit) in raw.iter_mut().zip("game.exe".encode_utf16()) {
-            *slot = unit;
-        }
-
-        assert_eq!(executable_name(&raw), "game.exe");
-        assert_eq!(executable_name(&[b'a' as u16, 0, b'b' as u16]), "a");
-        assert_eq!(executable_name(&[]), "");
     }
 
     #[test]
