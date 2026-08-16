@@ -78,7 +78,7 @@ clipped-recorder replay --window <TITLE> [--duration <SECONDS>]
 clipped-recorder watch [--output-directory <PATH>]
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
-clipped-recorder serve [--endpoint <NAME>]
+clipped-recorder serve [--endpoint <NAME>] [--watch-for-games]
 clipped-recorder start-at-login <enable|disable|status>
 clipped-recorder plugins <list|enable <ID>|disable <ID>>
 ```
@@ -724,12 +724,33 @@ actually runs in beside a user interface: it listens on a named pipe and takes
 its instructions over the control protocol, for as long as it is left running.
 
 ```text
-clipped-recorder serve [--endpoint <NAME>]
+clipped-recorder serve [--endpoint <NAME>] [--watch-for-games]
 ```
 
 | Option | Default | Notes |
 | --- | --- | --- |
 | `--endpoint <NAME>` | `clipped-recorder.<session>` | A name, never a path |
+| `--watch-for-games` | off | Also record games as they launch, in this process |
+
+**`--watch-for-games` is what a shipped build passes.** It runs the same launch
+watcher `watch` runs, on a thread of its own, in the process that serves the
+protocol and owns the global hotkeys — so a bookmark, a screenshot and a stop
+reach a recording nobody had to start, through the same commands they reach one
+somebody did ([#421](https://github.com/wildware-uk/clipped/issues/421),
+[sessions.md](sessions.md)). `start-at-login` writes it into the `Run` key and
+the desktop supervisor passes it when it starts a recorder.
+
+It is a flag rather than the default because a `serve` started by hand, or by a
+test, must not begin recording whatever game happens to be running on the
+machine, or create that person's recordings folder (AGENTS.md section 25).
+Recordings go where the settings file says, and to the Clipped folder of the
+videos directory when it says nothing — the same three layers `watch` resolves,
+minus the flag it has no command line to read.
+
+Nothing about it can stop the recorder serving. A recordings folder that cannot
+be made, or a machine that cannot be watched for launches, is reported and then
+left: a recorder that refused to answer the window because it could not create a
+folder would be a far worse thing to ship (AGENTS.md sections 16 and 17).
 
 [ipc.md](ipc.md) is the protocol itself — the framing, the handshake, the
 compatibility policy, every command and event, and what the transport does and
