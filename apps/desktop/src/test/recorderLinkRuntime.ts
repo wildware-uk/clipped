@@ -56,6 +56,10 @@ export interface CommandAnswers {
    * screen never asked, and "nothing has been deleted" is a claim.
    */
   readonly trash?: () => Promise<unknown>;
+  /** What `restore_from_trash` answers, given what it was asked to restore. */
+  readonly restoreFromTrash?: (args: Record<string, unknown>) => Promise<unknown>;
+  /** What `empty_trash` answers, given the confirmation it was sent. */
+  readonly emptyTrash?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `record_target` answers: the process the button would record. */
   readonly recordTarget?: () => unknown;
   /**
@@ -204,6 +208,12 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'library_trash') {
         return commands.trash?.() ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'restore_from_trash') {
+        return commands.restoreFromTrash?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'empty_trash') {
+        return commands.emptyTrash?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'record_target') {
         return Promise.resolve(commands.recordTarget?.() ?? null);

@@ -64,6 +64,8 @@ import type {
   LibraryGame,
   LibraryEventsReply,
   LibraryTrashReply,
+  RestoredReply,
+  TrashEmptiedReply,
   PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
@@ -463,6 +465,14 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     trash: 'required',
   }),
+  'reply.restored': fields<RestoredReply>({
+    reply: 'required',
+    restored: 'required',
+  }),
+  'reply.trash_emptied': fields<TrashEmptiedReply>({
+    reply: 'required',
+    emptied: 'required',
+  }),
   'reply.plugins': fields<PluginsReply>({
     reply: 'required',
     installed: 'required',
@@ -594,6 +604,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'restore_from_trash',
+    params: 'restore_from_trash',
+    reply: 'reply.restored',
+    available_in_this_build: true,
+  },
+  {
+    name: 'empty_trash',
+    params: 'empty_trash',
+    reply: 'reply.trash_emptied',
+    available_in_this_build: true,
+  },
+  {
     name: 'plugins',
     params: null,
     reply: 'reply.plugins',
@@ -665,6 +687,12 @@ function replyDiscriminant(reply: Reply): string {
       // different shape, it is the same shape carrying nothing. What tells
       // "none" from "not asked" is that `marks` is always present.
       return 'library_events';
+    case 'restored':
+      return 'restored';
+    case 'trash_emptied':
+      // One discriminant: a refusal list that is empty is the same shape
+      // carrying nothing, and it is always present.
+      return 'trash_emptied';
     case 'library_trash':
       // One discriminant, for the same reason: an empty trash is the same
       // shape carrying nothing, and there is no paging to lose.

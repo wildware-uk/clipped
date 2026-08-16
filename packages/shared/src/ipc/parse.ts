@@ -52,6 +52,8 @@ import type {
   JsonValue,
   LibraryClip,
   LibraryEventLane,
+  RestoredItem,
+  TrashEmptied,
   TrashListing,
   TrashedItem,
   LibraryEventMark,
@@ -360,6 +362,10 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'library_events', lane: readEventLane(reply['lane']) };
     case 'library_trash':
       return { reply: 'library_trash', trash: readTrashListing(reply['trash']) };
+    case 'restored':
+      return { reply: 'restored', restored: readRestoredItem(reply['restored']) };
+    case 'trash_emptied':
+      return { reply: 'trash_emptied', emptied: readTrashEmptied(reply['emptied']) };
     case 'plugins':
       return {
         reply: 'plugins',
@@ -713,6 +719,32 @@ function readEventMark(value: JsonValue | undefined): LibraryEventMark {
     at: numberField(mark, 'at', what),
     kind: stringField(mark, 'kind', what),
     source: stringField(mark, 'source', what),
+  };
+}
+
+/** What came back out of the trash. */
+function readRestoredItem(value: JsonValue | undefined): RestoredItem {
+  const item = object(value, 'a restored item');
+  const what = 'a restored item';
+  return {
+    kind: stringField(item, 'kind', what),
+    id: numberField(item, 'id', what),
+    path: stringField(item, 'path', what),
+    file_restored: booleanField(item, 'file_restored', what),
+    renamed: booleanField(item, 'renamed', what),
+  };
+}
+
+/** What emptying the trash destroyed. */
+function readTrashEmptied(value: JsonValue | undefined): TrashEmptied {
+  const emptied = object(value, 'an emptied trash');
+  const what = 'an emptied trash';
+  return {
+    removed: numberField(emptied, 'removed', what),
+    reclaimed_bytes: numberField(emptied, 'reclaimed_bytes', what),
+    refused: arrayField(emptied['refused'], 'a refusal list', (entry) =>
+      typeof entry === 'string' ? entry : String(entry),
+    ),
   };
 }
 

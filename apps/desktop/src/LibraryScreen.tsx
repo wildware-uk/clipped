@@ -1,6 +1,15 @@
+import type { TrashListing, TrashedItem } from '@clipped/shared';
 import { type ReactNode, useState } from 'react';
 
-import { describeProblem, headlineProblem, useSessions, useTrash } from './library';
+import {
+  asProblem,
+  describeProblem,
+  emptyTrash,
+  headlineProblem,
+  restoreFromTrash,
+  useSessions,
+  useTrash,
+} from './library';
 import {
   describeActionProblem,
   fileName,
@@ -78,11 +87,6 @@ const WAITING: readonly Waiting[] = [
     shows: 'Playing a clip, from the list',
     needs: 'The playback screen. Issue #52',
   },
-  {
-    shows: 'Restoring something deleted by mistake, and emptying the trash',
-    needs:
-      'The two commands that change it. The trash itself is built (#94) and listing it is on this screen now (#450); `restore_from_trash` and `empty_trash` are the other half, and emptying has to take back the listing it was shown, so a trash that changed in between is refused rather than emptied',
-  },
 ];
 
 /** How a size is shown, in the unit a person reads. */
@@ -110,7 +114,46 @@ function size(bytes: number | undefined): string {
  * can at least see that it is recoverable, and where the file went.
  */
 function Trash(): ReactNode {
-  const read = useTrash();
+  const { read, again } = useTrash();
+  const [outcome, setOutcome] = useState<string | undefined>(undefined);
+  const [confirming, setConfirming] = useState(false);
+
+  const restore = (item: TrashedItem) => {
+    restoreFromTrash(item.kind, item.id)
+      .then((restored) => {
+        setOutcome(
+          restored.file_restored
+            ? `Put ${restored.path} back${restored.renamed ? ', under a new name because something was in the way' : ''}.`
+            : `${restored.path} is back in your library, and its file had already gone before it was deleted, so it will show as missing.`,
+        );
+        again();
+      })
+      .catch((thrown: unknown) => {
+        setOutcome(describeProblem(asProblem(thrown)));
+      });
+  };
+
+  const empty = (listing: TrashListing) => {
+    setConfirming(false);
+    // The counts the user was looking at. If the trash has gained anything
+    // since, the recorder refuses and says so rather than deleting something
+    // they never saw.
+    emptyTrash(listing.total_items, listing.total_bytes)
+      .then((emptied) => {
+        const refused =
+          emptied.refused.length > 0
+            ? ` ${String(emptied.refused.length)} could not be removed: ${emptied.refused.join('; ')}`
+            : '';
+        setOutcome(
+          `Removed ${String(emptied.removed)} thing(s), ${size(emptied.reclaimed_bytes)}.${refused}`,
+        );
+        again();
+      })
+      .catch((thrown: unknown) => {
+        setOutcome(describeProblem(asProblem(thrown)));
+        again();
+      });
+  };
 
   return (
     <section className="clipped-panel" aria-label="Trash">
@@ -121,10 +164,10 @@ function Trash(): ReactNode {
       {read.state === 'unread' && (
         <>
           {/*
-           * Its own headline rather than `headlineProblem`'s: the sessions
-           * panel above says "Your library could not be read", and two panels
-           * saying the same sentence about different reads would leave somebody
-           * unable to tell which one failed.
+           * Its own headline rather than `headlineProblem`'s: the sessions panel
+           * above says "Your library could not be read", and two panels saying
+           * the same sentence about different reads would leave somebody unable
+           * to tell which one failed.
            */}
           <h3 className="clipped-panel__heading">The trash could not be read</h3>
           <p className="clipped-panel__body">{describeProblem(read.problem)}</p>
@@ -150,6 +193,7 @@ function Trash(): ReactNode {
                 <th scope="col">Deleted</th>
                 <th scope="col">Size</th>
                 <th scope="col">Where it was</th>
+                <th scope="col">Put back</th>
               </tr>
             </thead>
             <tbody>
@@ -159,10 +203,10 @@ function Trash(): ReactNode {
                   <td>{item.deleted_at.slice(0, 10)}</td>
                   <td>{size(item.size_bytes)}</td>
                   {/*
-                   * The path it had, not the one it has: a file inside the
-                   * trash is named for the trash, and asking somebody to
-                   * recognise their own recording by a name they have never
-                   * seen is not showing them anything.
+                   * The path it had, not the one it has: a file inside the trash
+                   * is named for the trash, and asking somebody to recognise
+                   * their own recording by a name they have never seen is not
+                   * showing them anything.
                    */}
                   <td>
                     <code className="clipped-code">{item.original_path}</code>
@@ -173,16 +217,75 @@ function Trash(): ReactNode {
                       </span>
                     )}
                   </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="clipped-btn clipped-btn--secondary"
+                      onClick={() => {
+                        restore(item);
+                      }}
+                    >
+                      Restore
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="clipped-panel__body clipped-muted">
-            Restoring puts a file back where it was, byte for byte, and is the other half of this
-            screen (issue #450). Deleting the file from the folder above does the same job and
-            breaks nothing.
-          </p>
+
+          {/*
+           * Two presses rather than one, and the second says what it is about to
+           * destroy. Emptying is the one thing on this screen that cannot be
+           * undone, and a single button beside a list of somebody's recordings
+           * is a mis-click away from losing all of them (AGENTS.md section 17).
+           */}
+          {confirming ? (
+            <p className="clipped-panel__body">
+              Destroy {read.value.total_items} thing(s), {size(read.value.total_bytes)}? This cannot
+              be undone.{' '}
+              <button
+                type="button"
+                className="clipped-btn clipped-btn--secondary"
+                onClick={() => {
+                  empty(read.value);
+                }}
+              >
+                Empty the trash
+              </button>{' '}
+              <button
+                type="button"
+                className="clipped-btn clipped-btn--secondary"
+                onClick={() => {
+                  setConfirming(false);
+                }}
+              >
+                Keep them
+              </button>
+            </p>
+          ) : (
+            <button
+              type="button"
+              className="clipped-btn clipped-btn--secondary"
+              onClick={() => {
+                setConfirming(true);
+              }}
+            >
+              Empty the trash…
+            </button>
+          )}
         </>
+      )}
+
+      {/*
+       * One region for what the last action did, announced rather than only
+       * drawn: restoring and emptying both change files, and a screen that said
+       * nothing would leave somebody unsure whether the button worked
+       * (AGENTS.md sections 45 and 46).
+       */}
+      {outcome !== undefined && (
+        <p role="status" className="clipped-panel__body">
+          {outcome}
+        </p>
       )}
     </section>
   );

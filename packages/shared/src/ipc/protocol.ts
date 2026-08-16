@@ -144,6 +144,8 @@ export const COMMANDS = [
   'library_games',
   'library_events',
   'library_trash',
+  'restore_from_trash',
+  'empty_trash',
   'plugins',
   'export_recording',
   'get_hotkeys',
@@ -227,6 +229,8 @@ export const REPLIES = [
   'library_games',
   'library_events',
   'library_trash',
+  'restored',
+  'trash_emptied',
   'plugins',
   'recording_exported',
   'hotkeys',
@@ -892,6 +896,58 @@ export interface LibraryTrashReply {
   readonly trash: TrashListing;
 }
 
+/** What came back out of the trash. */
+export interface RestoredItem {
+  /** Which one it was. */
+  readonly kind: string;
+  /** Its identifier. */
+  readonly id: number;
+  /** Where the file is now, which is where the index now points. */
+  readonly path: string;
+  /**
+   * Whether there was a file to move back.
+   *
+   * `false` for something whose media had already gone before it was deleted:
+   * the row returns to the library and reports itself missing, which is the
+   * truth rather than a row with no explanation.
+   */
+  readonly file_restored: boolean;
+  /** Whether it had to go somewhere else, because something was in the way. */
+  readonly renamed: boolean;
+}
+
+/** One thing was put back where it was. */
+export interface RestoredReply {
+  /** The tag. */
+  readonly reply: 'restored';
+  /** What came back. */
+  readonly restored: RestoredItem;
+}
+
+/** What emptying the trash destroyed, and what it could not. */
+export interface TrashEmptied {
+  /** How many things were destroyed. */
+  readonly removed: number;
+  /** What the volume got back. */
+  readonly reclaimed_bytes: number;
+  /**
+   * What would not go, each saying why.
+   *
+   * Always present. A file another program had open is a real outcome and the
+   * next sweep tries it again; a window that showed only the count would say
+   * the trash is empty when it is not.
+   */
+  readonly refused: readonly string[];
+}
+
+/** The trash was emptied. */
+export interface TrashEmptiedReply {
+  /** The tag. */
+  readonly reply: 'trash_emptied';
+  /** What was destroyed, and what would not go. */
+  readonly emptied: TrashEmptied;
+}
+
 /** The marks on one recording's timeline. */
 export interface LibraryEventsReply {
   /** The tag. */
@@ -1080,6 +1136,8 @@ export type Reply =
   | LibraryGamesReply
   | LibraryEventsReply
   | LibraryTrashReply
+  | RestoredReply
+  | TrashEmptiedReply
   | PluginsReply
   | RecordingExportedReply
   | HotkeysReply

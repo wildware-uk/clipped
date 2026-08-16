@@ -56,7 +56,7 @@ use std::time::SystemTime;
 use clipped_ipc::{
     ErrorCode, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
     LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, ProtocolError,
-    TrashListing, TrashedItem, MAX_FRAME_BYTES,
+    RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing, TrashedItem, MAX_FRAME_BYTES,
 };
 use clipped_library::index::{
     cursor_of, game_summaries, list_sessions, reconcile, GameSummary, IndexControl, IndexReport,
@@ -83,6 +83,44 @@ pub struct LibraryReader {
     /// Listing the trash reads the *index* — the directory is not consulted —
     /// so this is here to be reported rather than to be walked.
     trash_directory: Option<PathBuf>,
+}
+
+/// The item a request names, or a refusal saying what a kind may be.
+fn trash_item(kind: &str, id: i64) -> Result<clipped_library::trash::TrashItem, ProtocolError> {
+    match kind {
+        "recording" => Ok(clipped_library::trash::TrashItem::recording(id)),
+        "clip" => Ok(clipped_library::trash::TrashItem::clip(id)),
+        other => Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!("`{other}` is not something the trash holds; it holds `recording` and `clip`"),
+        )),
+    }
+}
+
+/// Why a restore did not happen.
+fn restore_refused(error: clipped_library::trash::TrashError) -> ProtocolError {
+    // A named item the trash does not hold is the caller's mistake and a
+    // different thing from a library that could not be read, which is a
+    // machine's problem. Saying so is what lets a window offer the right next
+    // step (AGENTS.md section 15).
+    let code = match &error {
+        clipped_library::trash::TrashError::NoSuchItem { .. }
+        | clipped_library::trash::TrashError::NotInTrash { .. } => ErrorCode::InvalidParameters,
+        _ => ErrorCode::LibraryUnavailable,
+    };
+    ProtocolError::new(code, error.to_string())
+}
+
+/// Why the trash was not emptied.
+fn empty_refused(error: clipped_library::trash::TrashError) -> ProtocolError {
+    let code = match &error {
+        // The confirmation did not match what is there. The message names both
+        // counts, so a window can say what changed rather than only that
+        // something did.
+        clipped_library::trash::TrashError::Changed { .. } => ErrorCode::InvalidParameters,
+        _ => ErrorCode::LibraryUnavailable,
+    };
+    ProtocolError::new(code, error.to_string())
 }
 
 /// One trash entry, as the window is told about it.
@@ -327,6 +365,108 @@ impl LibraryReader {
         }
 
         read(held.as_ref().expect("the database was just opened"))
+    }
+
+    /// Puts one thing back where it was.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] for a kind this build does not know or
+    /// an item the trash does not hold, and [`ErrorCode::LibraryUnavailable`]
+    /// when the index or the file system refuses.
+    pub fn restore(&self, request: &RestoreFromTrash) -> Result<RestoredItem, ProtocolError> {
+        let item = trash_item(&request.kind, request.id)?;
+        let directory = self.trash_path();
+
+        self.with_database_mut(|database| {
+            let outcome = clipped_library::trash::Trash::new(&directory)
+                .restore(database, item)
+                .map_err(restore_refused)?;
+
+            Ok(RestoredItem {
+                kind: request.kind.clone(),
+                id: request.id,
+                path: outcome.path.to_string_lossy().into_owned(),
+                file_restored: outcome.file_restored,
+                renamed: outcome.path != outcome.original_path,
+            })
+        })
+    }
+
+    /// Destroys everything in the trash, if it is still what the caller was
+    /// shown.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] when the trash is not what was
+    /// confirmed — naming both counts, so a window can say what changed and
+    /// show the new listing — and [`ErrorCode::LibraryUnavailable`] when it
+    /// could not be read.
+    pub fn empty(&self, request: &clipped_ipc::EmptyTrash) -> Result<TrashEmptied, ProtocolError> {
+        let directory = self.trash_path();
+        let confirmation = clipped_library::trash::EmptyTrash::confirmed(
+            usize::try_from(request.items).unwrap_or(usize::MAX),
+            request.bytes,
+        );
+
+        self.with_database_mut(|database| {
+            let report = clipped_library::trash::Trash::new(&directory)
+                .empty(database, confirmation)
+                .map_err(empty_refused)?;
+
+            Ok(TrashEmptied {
+                removed: report.removed.len() as u64,
+                reclaimed_bytes: report.bytes_reclaimed(),
+                // Each failure names the item it is about as well as the
+                // reason, because "one file would not go" without saying which
+                // is a sentence nobody can act on (AGENTS.md section 15).
+                refused: report
+                    .failures
+                    .iter()
+                    .map(|failure| format!("{}: {}", failure.item, failure.error))
+                    .collect(),
+            })
+        })
+    }
+
+    /// Where deleted media waits, as this reader was told.
+    fn trash_path(&self) -> PathBuf {
+        self.trash_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// The same, for the two commands that change the trash.
+    ///
+    /// Restoring and emptying write, and the trash module's every statement is
+    /// its own transaction (`clipped_library::trash`), so this holds the same
+    /// connection the reads use rather than opening a second one. The indexer
+    /// has a connection of its own and may be reconciling at the same moment;
+    /// the database is in write-ahead logging mode, which is what makes that
+    /// safe (`docs/storage.md`).
+    fn with_database_mut<T>(
+        &self,
+        write: impl FnOnce(&mut Database) -> Result<T, ProtocolError>,
+    ) -> Result<T, ProtocolError> {
+        let mut held = self.database.lock().map_err(poisoned)?;
+
+        if held.is_none() {
+            let path = self.path.as_ref().ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::LibraryUnavailable,
+                    "this machine describes no per-user application directory, so Clipped has                      nowhere to keep its library index",
+                )
+            })?;
+            let opened = Database::open(path).map_err(|error| {
+                ProtocolError::new(
+                    ErrorCode::LibraryUnavailable,
+                    format!("the recording library could not be opened: {error}"),
+                )
+            })?;
+            *held = Some(opened);
+        }
+
+        write(held.as_mut().expect("the database was just opened"))
     }
 }
 

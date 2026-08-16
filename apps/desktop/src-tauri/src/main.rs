@@ -189,6 +189,8 @@ fn main() {
             library_events,
             library_games,
             library_trash,
+            restore_from_trash,
+            empty_trash,
             record_target,
             recorder_status,
             recorder_hotkeys,
@@ -424,6 +426,42 @@ fn library_trash(
     ))? {
         clipped_ipc::Reply::LibraryTrash { trash } => Ok(trash),
         _ => Err(wrong_reply("library_trash")),
+    }
+}
+
+/// Puts one thing back where it was (issue #450).
+#[tauri::command(async)]
+fn restore_from_trash(
+    link: tauri::State<'_, RecorderLink>,
+    kind: String,
+    id: i64,
+) -> Result<clipped_ipc::RestoredItem, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::RestoreFromTrash(
+        clipped_ipc::RestoreFromTrash { kind, id },
+    ))? {
+        clipped_ipc::Reply::Restored { restored } => Ok(restored),
+        _ => Err(wrong_reply("restore_from_trash")),
+    }
+}
+
+/// Destroys everything in the trash, confirmed against the listing shown.
+///
+/// Both numbers are the listing the user was looking at. The recorder refuses if
+/// the trash has gained anything since, because the alternative is deleting
+/// something they never saw — which is why this takes two numbers rather than a
+/// boolean (issue #450).
+#[tauri::command(async)]
+fn empty_trash(
+    link: tauri::State<'_, RecorderLink>,
+    items: u64,
+    bytes: u64,
+) -> Result<clipped_ipc::TrashEmptied, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::EmptyTrash(clipped_ipc::EmptyTrash {
+        items,
+        bytes,
+    }))? {
+        clipped_ipc::Reply::TrashEmptied { emptied } => Ok(emptied),
+        _ => Err(wrong_reply("empty_trash")),
     }
 }
 

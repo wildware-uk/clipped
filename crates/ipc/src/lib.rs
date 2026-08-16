@@ -135,8 +135,9 @@ pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
 pub use hotkeys::{HotkeyBinding, HotkeyState};
 pub use library::{
-    LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame, LibraryRecording,
-    LibrarySession, LibrarySessionPage, LibrarySessions, LibraryTrash, TrashListing, TrashedItem,
+    EmptyTrash, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
+    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, LibraryTrash,
+    RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing, TrashedItem,
 };
 pub use message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
