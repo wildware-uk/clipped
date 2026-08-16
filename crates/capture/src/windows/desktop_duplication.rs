@@ -855,9 +855,12 @@ impl Running {
         // the case `DXGI_ERROR_ACCESS_DENIED` describes and exactly the case a
         // game recorder must survive. The one failure that genuinely cannot be
         // retried away is a display that has been rotated mid-recording, which
-        // is refused every time until it is rotated back; that is
-        // [issue #138](https://github.com/wildware-uk/clipped/issues/138), and
-        // until then the warning below is what says so.
+        // is refused every time until it is rotated back — Desktop Duplication
+        // declines a rotated display outright rather than record it wrongly
+        // (see [`Session::open`] and
+        // [issue #138](https://github.com/wildware-uk/clipped/issues/138) for
+        // why) — and the warning below is what says so for as long as it stays
+        // rotated.
         let session = match Session::open(&output, self.region) {
             Ok(session) => session,
             Err(error) => {
@@ -1017,12 +1020,18 @@ impl Session {
     fn open(output: &Output, region: Region) -> Result<Self, CaptureError> {
         // A rotated output hands over its desktop image in the *unrotated*
         // orientation, so a portrait display duplicates as a landscape image
-        // that an application is expected to rotate itself. Recording that
-        // sideways would be a silently wrong recording, and cropping a window
-        // out of it would be worse: the window's coordinates are in the rotated
-        // desktop's space and would name the wrong pixels. Refusing is the
-        // honest answer until issue #138 adds the rotation
-        // (AGENTS.md section 54).
+        // that an application is expected to rotate itself. Correcting it would
+        // be the first GPU blit anywhere in this pipeline — there is no shader,
+        // no Direct2D interop, nothing that turns a texture — and getting the
+        // direction of a transpose wrong is exactly the kind of bug that is
+        // invisible without a physically rotated display to check it against,
+        // which neither this development machine nor CI has (issue #138's own
+        // notes say so). A wrongly-rotated recording would look like a fix and
+        // be one nobody could tell was broken; refusing it, naming why, is the
+        // honest answer for now (AGENTS.md section 54). Windows Graphics
+        // Capture, which composes the rotation for the caller before this
+        // process ever sees a frame, is unaffected and remains the way to
+        // record a rotated display.
         if !is_upright(output.rotation) {
             return Err(CaptureError::UnsupportedTarget {
                 method: METHOD,
@@ -1030,9 +1039,7 @@ impl Session {
                     Region::WholeOutput => TargetKind::Monitor,
                     Region::Window(_) => TargetKind::Window,
                 },
-                reason: "the display is rotated, and Desktop Duplication hands over a \
-                         rotated display's image unrotated, so the recording would be \
-                         sideways",
+                reason: rotated_display_refusal(region),
             });
         }
 
@@ -1679,6 +1686,34 @@ fn is_upright(rotation: DXGI_MODE_ROTATION) -> bool {
     rotation == DXGI_MODE_ROTATION_IDENTITY || rotation == DXGI_MODE_ROTATION_UNSPECIFIED
 }
 
+/// Why Desktop Duplication refuses `region` on a rotated display.
+///
+/// The two regions fail differently, and a message that only ever says
+/// "sideways" undersells the window case. A whole-output capture really would
+/// just be sideways: DXGI hands over the unrotated desktop image and nothing
+/// else is wrong with it. A window capture is worse, not merely sideways —
+/// [`client_rect_in_desktop`] reads the window's position from
+/// `ClientToScreen`, which Windows reports in the *rotated* desktop's
+/// coordinate space, while the duplicated image this backend would crop it out
+/// of is in the *unrotated* one. The rectangle that math produces does not
+/// land on the window at all, so the recording would not merely be a sideways
+/// version of the right thing, it would be a crop of the wrong pixels
+/// entirely.
+fn rotated_display_refusal(region: Region) -> &'static str {
+    match region {
+        Region::WholeOutput => {
+            "the display is rotated, and Desktop Duplication hands over a rotated \
+             display's image unrotated, so the recording would be sideways"
+        }
+        Region::Window(_) => {
+            "the display is rotated, and Desktop Duplication hands over a rotated \
+             display's image unrotated while window positions are reported in the \
+             rotated desktop's coordinate space, so the crop would be taken from the \
+             wrong pixels entirely rather than merely being sideways"
+        }
+    }
+}
+
 /// Turns a `DuplicateOutput` failure into an error that says what it means.
 ///
 /// The codes it has for "no" mean quite different things to a user, and
@@ -2195,13 +2230,46 @@ mod tests {
     #[test]
     fn a_display_that_is_not_the_right_way_up_is_refused_rather_than_recorded_sideways() {
         use windows::Win32::Graphics::Dxgi::Common::{
-            DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE90,
+            DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270, DXGI_MODE_ROTATION_ROTATE90,
         };
 
         assert!(is_upright(DXGI_MODE_ROTATION_IDENTITY));
         assert!(is_upright(DXGI_MODE_ROTATION_UNSPECIFIED));
         assert!(!is_upright(DXGI_MODE_ROTATION_ROTATE90));
         assert!(!is_upright(DXGI_MODE_ROTATION_ROTATE180));
+        assert!(
+            !is_upright(DXGI_MODE_ROTATION_ROTATE270),
+            "270 degrees is portrait, the same as 90, and must be refused the same way"
+        );
+    }
+
+    #[test]
+    fn the_rotated_display_refusal_names_the_worse_problem_for_a_window() {
+        // A monitor target really is just sideways: DXGI's image is the whole
+        // truth, only unrotated.
+        let monitor_reason = rotated_display_refusal(Region::WholeOutput);
+        assert!(
+            monitor_reason.contains("sideways"),
+            "a whole-output capture of a rotated display has exactly one thing wrong \
+             with it: {monitor_reason}"
+        );
+
+        // A window target is worse than sideways: the crop coordinates and the
+        // duplicated image disagree about which orientation they are in, so the
+        // crop lands on the wrong pixels, not a rotated version of the right
+        // ones. That distinction has to survive in the message a diagnostics
+        // screen shows, not just in a code comment nobody using the app reads.
+        let window_reason = rotated_display_refusal(Region::Window(HWND(core::ptr::null_mut())));
+        assert!(
+            window_reason.contains("wrong pixels"),
+            "a window capture of a rotated display is cropped from the wrong place \
+             entirely, which is a stronger claim than \"sideways\" and the message must \
+             say so: {window_reason}"
+        );
+        assert_ne!(
+            monitor_reason, window_reason,
+            "the two regions fail for different reasons and must not share one message"
+        );
     }
 
     #[test]
