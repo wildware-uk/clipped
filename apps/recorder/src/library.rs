@@ -1976,6 +1976,61 @@ mod tests {
     }
 
     #[test]
+    fn a_recordings_own_lock_reaches_the_window_as_its_own_lock() {
+        // The column beside it is `favourited_at`, and reading that one instead
+        // would be invisible to every other test here: the cascade case asks
+        // about a *session's* lock, and the negative case has both columns
+        // empty. So this one locks the recording and favourites nothing, which
+        // is the only arrangement that tells the two columns apart.
+        let library = library_with_a_missing_recording("lock-own-on-the-wire");
+
+        library
+            .set_lock(&locking("recording", "", 1, true), at())
+            .expect("the recording locks");
+
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+        let recording = &page.sessions[0].recordings[0];
+
+        assert!(recording.locked, "its own lock is what it carries");
+        assert!(recording.protected, "and its own lock protects it");
+        assert!(
+            !recording.favourite,
+            "nothing favourited it, so a `locked` read off the favourite column \
+             would be false here rather than true"
+        );
+        assert!(
+            !page.sessions[0].locked,
+            "the sitting has no lock of its own"
+        );
+    }
+
+    #[test]
+    fn a_favourite_is_not_mistaken_for_a_lock() {
+        // The other direction of the same off-by-one: favouriting a recording
+        // must not make it look locked.
+        let library = library_with_a_missing_recording("favourite-is-not-a-lock");
+
+        library
+            .set_favourite(&asking("recording", "", 1, true), at())
+            .expect("the recording is favourited");
+
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+        let recording = &page.sessions[0].recordings[0];
+
+        assert!(recording.favourite);
+        assert!(!recording.locked, "a favourite is not a lock");
+        assert!(
+            !recording.protected,
+            "and it does not protect against cleanup through the lock path — \
+             `Protection::Favourite` is a different rule, in `accounting::cleanup`"
+        );
+    }
+
+    #[test]
     fn a_recording_with_no_lock_anywhere_reaches_the_window_unprotected() {
         // The other side of the same rule, or the assertion above would be
         // satisfied by a field that was always true.
