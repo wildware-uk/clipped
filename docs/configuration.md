@@ -162,6 +162,33 @@ because deletion is a rename and so must stay on the volume, and because a trash
 *inside* the recordings root would be counted as recordings by storage
 accounting — which `StorageRoots` refuses outright.
 
+### Seeing what a limit would do before you set one
+
+`clipped-recorder storage` measures the library and prints what automatic
+cleanup would take. It never deletes — there is no `--apply` — and it takes the
+**same measurement the sweep does**, so it cannot disagree with what actually
+happens: the sweep is that measurement plus the last step.
+
+```text
+Recordings  C:\Users\you\Videos\Clipped
+Trash       C:\Users\you\Videos\Clipped.trash
+Using       20.0 MB of the drive, with 162.4 GB free
+  recordings 20.0 MB
+
+Limits      none set, so nothing is ever deleted automatically.
+
+Nothing would be deleted.
+7 recording(s) are protected and would never be taken.
+
+Largest recordings
+      1.7 MB  2026-08-14  …\clipped-20260814-095157.mkv
+```
+
+It runs with no limit configured on purpose. "You have 400 GB of recordings and
+no limit" is the most useful thing it can say to somebody deciding whether to
+set one, and the list of the largest recordings is the review path [#111] asks
+for: a chance to act before automatic deletion does.
+
 [#111]: https://github.com/wildware-uk/clipped/issues/111
 
 The vocabulary is the command line's, deliberately: `--codec hevc` and

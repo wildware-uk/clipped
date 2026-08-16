@@ -58,6 +58,7 @@ pub mod replay;
 pub mod serve;
 pub mod shutdown;
 pub mod start_at_login;
+pub mod storage;
 pub mod watch;
 
 use std::error::Error;
@@ -109,6 +110,8 @@ pub enum RunError {
     Replay(replay::ReplayCommandError),
     /// `plugins` failed.
     Plugins(plugins::PluginsError),
+    /// `storage` failed.
+    Storage(storage::StorageError),
 }
 
 impl RunError {
@@ -137,6 +140,10 @@ impl RunError {
             // is the same ordinary one: it did not do what was asked, and said
             // why.
             Self::Plugins(_) => EXIT_FAILURE,
+            // Nothing this command does can lose a recording either: it reads,
+            // measures and prints. A failure means it could not say what the
+            // library holds, which is ordinary.
+            Self::Storage(_) => EXIT_FAILURE,
             // A selector that named no window, or more than one, is a command
             // line to fix; a desktop that could not be enumerated is not.
             Self::ListWindows(list_windows::ListWindowsError::Resolution(_)) => EXIT_USAGE,
@@ -198,6 +205,7 @@ impl fmt::Display for RunError {
             Self::Record(error) => write!(formatter, "{error}"),
             Self::ListWindows(error) => write!(formatter, "{error}"),
             Self::Capabilities(error) => write!(formatter, "{error}"),
+            Self::Storage(error) => write!(formatter, "{error}"),
             Self::Serve(error) => write!(formatter, "{error}"),
             Self::StartAtLogin(error) => write!(formatter, "{error}"),
             Self::Watch(error) => write!(formatter, "{error}"),
@@ -220,6 +228,7 @@ impl Error for RunError {
             Self::Recover(error) => Some(error),
             Self::Replay(error) => Some(error),
             Self::Plugins(error) => Some(error),
+            Self::Storage(error) => Some(error),
         }
     }
 }
@@ -331,6 +340,7 @@ pub fn run(cli: &Cli) -> Result<(), RunError> {
         Command::Recover(args) => recover::run(args).map_err(RunError::from),
         Command::Replay(args) => replay::run(args).map_err(RunError::from),
         Command::Plugins(args) => plugins::run(args).map_err(RunError::Plugins),
+        Command::Storage(args) => storage::run(args).map_err(RunError::Storage),
     }
 }
 

@@ -144,6 +144,25 @@ pub enum Command {
     /// a session record that never says the recording finished. With no
     /// arguments this lists them and changes nothing (docs/sessions.md).
     Recover(RecoverArgs),
+
+    /// Say what the library occupies, and what automatic cleanup would do.
+    ///
+    /// Reads and prints; it never deletes. The dry run issue #111 asks for —
+    /// exactly what a sweep would take, before anybody trusts a storage limit
+    /// with their recordings — and the list of the largest recordings, so that
+    /// somebody can act before automatic deletion does.
+    Storage(StorageArgs),
+}
+
+/// Arguments to `clipped-recorder storage`.
+#[derive(Debug, Default, Args)]
+pub struct StorageArgs {
+    /// Directory to measure. [default: the Clipped folder of your videos
+    /// directory]
+    ///
+    /// The same directory `watch` writes into.
+    #[arg(long, value_name = "PATH")]
+    pub directory: Option<PathBuf>,
 }
 
 /// Arguments to `clipped-recorder recover`.
