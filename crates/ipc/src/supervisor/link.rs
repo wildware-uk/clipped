@@ -754,7 +754,10 @@ fn follow(
             Ok(Event::StatusChanged { status }) => {
                 recording = match &status {
                     RecorderStatus::Recording(active) => Some(active.clone()),
-                    RecorderStatus::Idle => None,
+                    // Watching is not recording. A recorder that goes on
+                    // watching after a file is finished has nothing that could
+                    // be interrupted by the connection ending.
+                    RecorderStatus::Idle | RecorderStatus::Watching(_) => None,
                 };
                 publish(
                     shared,
@@ -782,6 +785,16 @@ fn follow(
                     },
                 );
             }
+            // A sitting ended. Not forwarded, deliberately: this link exists to
+            // say whether there is a recorder and what it is doing, and a
+            // finished sitting is neither — it is something for a library screen
+            // to show, on a connection of the window's own. Nothing subscribes
+            // to a [`RecorderLinkEvent`] for that, and inventing a variant here
+            // for a recorder that cannot yet publish one would be a wire with no
+            // end (AGENTS.md section 27). Wiring it to a screen belongs with the
+            // recorder that produces it,
+            // [issue #421](https://github.com/wildware-uk/clipped/issues/421).
+            Ok(Event::SessionEnded { .. }) => {}
             // An event invented after this build was compiled. Ignored rather
             // than treated as a fault, which is what `docs/ipc.md`'s
             // compatibility policy requires of a reader.

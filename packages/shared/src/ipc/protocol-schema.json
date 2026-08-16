@@ -1,9 +1,9 @@
 {
   "schema_format": 1,
   "regenerate_with": "cargo run -p clipped-ipc --bin protocol-schema",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "supported_protocol_versions": [
-    1
+    2
   ],
   "framing": {
     "length_prefix_bytes": 4,
@@ -101,6 +101,7 @@
     "event": {
       "values": [
         "status_changed",
+        "session_ended",
         "recording_failed"
       ],
       "tolerates_unrecognised": true
@@ -123,7 +124,8 @@
         "library",
         "export",
         "hotkeys",
-        "replay"
+        "replay",
+        "automatic"
       ],
       "tolerates_unrecognised": true
     },
@@ -145,6 +147,7 @@
     "recorder_state": {
       "values": [
         "idle",
+        "watching",
         "recording"
       ],
       "tolerates_unrecognised": false
@@ -190,7 +193,8 @@
         "target"
       ],
       "optional": [
-        "replay_seconds"
+        "replay_seconds",
+        "session"
       ]
     },
     "add_bookmark": {
@@ -241,6 +245,13 @@
         "error",
         "event",
         "recording_id"
+      ],
+      "optional": []
+    },
+    "event.session_ended": {
+      "required": [
+        "event",
+        "session"
       ],
       "optional": []
     },
@@ -438,7 +449,16 @@
         "target"
       ],
       "optional": [
-        "replay_seconds"
+        "replay_seconds",
+        "session"
+      ]
+    },
+    "recorder_status.watching": {
+      "required": [
+        "state"
+      ],
+      "optional": [
+        "session"
       ]
     },
     "recording_summary": {
@@ -631,6 +651,29 @@
         "recording_id"
       ]
     },
+    "session_recording": {
+      "required": [
+        "output",
+        "session_index"
+      ],
+      "optional": [
+        "duration_ms",
+        "outcome"
+      ]
+    },
+    "session_summary": {
+      "required": [
+        "recordings",
+        "session_id",
+        "started_at"
+      ],
+      "optional": [
+        "end_reason",
+        "ended_at",
+        "game_id",
+        "game_name"
+      ]
+    },
     "shutdown": {
       "required": [],
       "optional": [
@@ -801,7 +844,7 @@
           "name": "clipped-desktop",
           "version": "0.1.0"
         },
-        "protocol_version": 1,
+        "protocol_version": 2,
         "role": "control",
         "streams": [
           "status"
@@ -819,7 +862,7 @@
           "name": "clipped-desktop",
           "version": "0.1.0"
         },
-        "protocol_version": 1,
+        "protocol_version": 2,
         "role": "events",
         "streams": [
           "status",
@@ -949,9 +992,10 @@
           "library",
           "export",
           "hotkeys",
-          "replay"
+          "replay",
+          "automatic"
         ],
-        "protocol_version": 1,
+        "protocol_version": 2,
         "recorder": {
           "name": "clipped-recorder",
           "version": "0.1.0"
@@ -973,12 +1017,12 @@
         "detail": {
           "detail": "unsupported_protocol_version",
           "recorder_version": "0.1.0",
-          "requested": 2,
+          "requested": 3,
           "supported": [
-            1
+            2
           ]
         },
-        "message": "this recorder speaks protocol version 1, and 2 was asked for",
+        "message": "this recorder speaks protocol version 2, and 3 was asked for",
         "type": "refused"
       },
       "parses": true,
@@ -1018,6 +1062,60 @@
       "discriminant": "response.ok.status.idle"
     },
     {
+      "name": "the status of a recorder watching for a game to start",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "state": "watching"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.watching"
+    },
+    {
+      "name": "the status of a recorder watching for a game that just exited to come back",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "session": {
+                "game_id": "cs2",
+                "game_name": "Counter-Strike 2",
+                "recordings": [
+                  {
+                    "duration_ms": 1800000,
+                    "outcome": "recorded",
+                    "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                    "session_index": 1
+                  },
+                  {
+                    "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                    "session_index": 2
+                  }
+                ],
+                "session_id": "cs2-20260811-201400",
+                "started_at": "2026-08-11T20:14:00+01:00"
+              },
+              "state": "watching"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.watching"
+    },
+    {
       "name": "the status of a recorder that is recording",
       "direction": "server",
       "frame": {
@@ -1027,7 +1125,48 @@
             "reply": "status",
             "status": {
               "elapsed_ms": 4200,
-              "output": "D:\\clips\\session.mkv",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+              "recording_id": "r-1",
+              "replay_seconds": 60,
+              "session": {
+                "game_id": "cs2",
+                "game_name": "Counter-Strike 2",
+                "recordings": [
+                  {
+                    "duration_ms": 1800000,
+                    "outcome": "recorded",
+                    "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                    "session_index": 1
+                  },
+                  {
+                    "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                    "session_index": 2
+                  }
+                ],
+                "session_id": "cs2-20260811-201400",
+                "started_at": "2026-08-11T20:14:00+01:00"
+              },
+              "state": "recording",
+              "target": "process `cs2.exe`"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.status.recording"
+    },
+    {
+      "name": "the status of a recording that belongs to no sitting",
+      "direction": "server",
+      "frame": {
+        "id": 7,
+        "outcome": {
+          "ok": {
+            "reply": "status",
+            "status": {
+              "elapsed_ms": 4200,
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
               "recording_id": "r-1",
               "replay_seconds": 60,
               "state": "recording",
@@ -1703,9 +1842,27 @@
           "ok": {
             "finalising": {
               "elapsed_ms": 4200,
-              "output": "D:\\clips\\session.mkv",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
               "recording_id": "r-1",
               "replay_seconds": 60,
+              "session": {
+                "game_id": "cs2",
+                "game_name": "Counter-Strike 2",
+                "recordings": [
+                  {
+                    "duration_ms": 1800000,
+                    "outcome": "recorded",
+                    "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                    "session_index": 1
+                  },
+                  {
+                    "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                    "session_index": 2
+                  }
+                ],
+                "session_id": "cs2-20260811-201400",
+                "started_at": "2026-08-11T20:14:00+01:00"
+              },
               "target": "process `cs2.exe`"
             },
             "reply": "shutting_down"
@@ -1790,9 +1947,27 @@
         "event": "status_changed",
         "status": {
           "elapsed_ms": 4200,
-          "output": "D:\\clips\\session.mkv",
+          "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
           "recording_id": "r-1",
           "replay_seconds": 60,
+          "session": {
+            "game_id": "cs2",
+            "game_name": "Counter-Strike 2",
+            "recordings": [
+              {
+                "duration_ms": 1800000,
+                "outcome": "recorded",
+                "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                "session_index": 1
+              },
+              {
+                "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                "session_index": 2
+              }
+            ],
+            "session_id": "cs2-20260811-201400",
+            "started_at": "2026-08-11T20:14:00+01:00"
+          },
           "state": "recording",
           "target": "process `cs2.exe`"
         },
@@ -1800,6 +1975,99 @@
       },
       "parses": true,
       "discriminant": "event.status_changed.recording"
+    },
+    {
+      "name": "a recorder settling back to watching after a game exited",
+      "direction": "server",
+      "frame": {
+        "event": "status_changed",
+        "status": {
+          "session": {
+            "game_id": "cs2",
+            "game_name": "Counter-Strike 2",
+            "recordings": [
+              {
+                "duration_ms": 1800000,
+                "outcome": "recorded",
+                "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+                "session_index": 1
+              },
+              {
+                "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+                "session_index": 2
+              }
+            ],
+            "session_id": "cs2-20260811-201400",
+            "started_at": "2026-08-11T20:14:00+01:00"
+          },
+          "state": "watching"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.status_changed.watching"
+    },
+    {
+      "name": "a sitting ending, with the files it produced",
+      "direction": "server",
+      "frame": {
+        "event": "session_ended",
+        "session": {
+          "end_reason": "game-exited",
+          "ended_at": "2026-08-11T22:03:00+01:00",
+          "game_id": "cs2",
+          "game_name": "Counter-Strike 2",
+          "recordings": [
+            {
+              "duration_ms": 1800000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+              "session_index": 1
+            },
+            {
+              "duration_ms": 1140000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+              "session_index": 2
+            }
+          ],
+          "session_id": "cs2-20260811-201400",
+          "started_at": "2026-08-11T20:14:00+01:00"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.session_ended.game-exited"
+    },
+    {
+      "name": "a sitting of a game the catalogue would not attribute ending",
+      "direction": "server",
+      "frame": {
+        "event": "session_ended",
+        "session": {
+          "end_reason": "recorder-stopping",
+          "ended_at": "2026-08-11T22:03:00+01:00",
+          "recordings": [
+            {
+              "duration_ms": 1800000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+              "session_index": 1
+            },
+            {
+              "duration_ms": 1140000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-02.mkv",
+              "session_index": 2
+            }
+          ],
+          "session_id": "unattributed-20260811-201400",
+          "started_at": "2026-08-11T20:14:00+01:00"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.session_ended.recorder-stopping"
     },
     {
       "name": "a recording that ended by itself",
@@ -1907,6 +2175,32 @@
       },
       "parses": true,
       "discriminant": "event.unrecognised"
+    },
+    {
+      "name": "a reason for a sitting to end invented later",
+      "direction": "server",
+      "frame": {
+        "event": "session_ended",
+        "session": {
+          "end_reason": "disk_full",
+          "ended_at": "2026-08-11T22:03:00+01:00",
+          "game_id": "cs2",
+          "game_name": "Counter-Strike 2",
+          "recordings": [
+            {
+              "duration_ms": 1800000,
+              "outcome": "recorded",
+              "output": "D:\\clips\\cs2-20260811-201400-01.mkv",
+              "session_index": 1
+            }
+          ],
+          "session_id": "cs2-20260811-201400",
+          "started_at": "2026-08-11T20:14:00+01:00"
+        },
+        "type": "event"
+      },
+      "parses": true,
+      "discriminant": "event.session_ended.disk_full"
     },
     {
       "name": "a feature invented later",

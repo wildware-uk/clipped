@@ -96,6 +96,9 @@ import type {
   ReplaySummary,
   SaveReplayParams,
   ServerMessage,
+  SessionEndedEvent,
+  SessionRecording,
+  SessionSummary,
   StartRecordingParams,
   StatusChangedEvent,
   ShutdownParams,
@@ -104,6 +107,7 @@ import type {
   StopRecordingParams,
   UnboundHotkey,
   UnsupportedProtocolVersionDetail,
+  WatchingStatus,
   Welcome,
 } from './protocol';
 import {
@@ -300,6 +304,22 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     target: 'required',
     elapsed_ms: 'required',
     replay_seconds: 'optional',
+    session: 'optional',
+  }),
+  session_summary: fields<SessionSummary>({
+    session_id: 'required',
+    game_id: 'optional',
+    game_name: 'optional',
+    started_at: 'required',
+    ended_at: 'optional',
+    end_reason: 'optional',
+    recordings: 'required',
+  }),
+  session_recording: fields<SessionRecording>({
+    session_index: 'required',
+    output: 'required',
+    outcome: 'optional',
+    duration_ms: 'optional',
   }),
   recording_summary: fields<RecordingSummary>({
     output: 'required',
@@ -502,6 +522,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   }),
   'reply.hotkeys': fields<HotkeysReply>({ reply: 'required', hotkeys: 'required' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
+  'recorder_status.watching': fields<WatchingStatus>({ state: 'required', session: 'optional' }),
   'recorder_status.recording': fields<RecordingStatus>({
     state: 'required',
     recording_id: 'required',
@@ -509,8 +530,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     target: 'required',
     elapsed_ms: 'required',
     replay_seconds: 'optional',
+    session: 'optional',
   }),
   'event.status_changed': fields<StatusChangedEvent>({ event: 'required', status: 'required' }),
+  'event.session_ended': fields<SessionEndedEvent>({ event: 'required', session: 'required' }),
   'event.recording_failed': fields<RecordingFailedEvent>({
     event: 'required',
     recording_id: 'required',
@@ -717,6 +740,11 @@ function eventDiscriminant(event: RecorderEvent): string {
   switch (event.event) {
     case 'status_changed':
       return `status_changed.${event.status.state}`;
+    case 'session_ended':
+      // The reason is part of the path, because it is the one thing this event
+      // says that a window shows differently — and dropping a reason invented
+      // later would otherwise reach the same answer as keeping it.
+      return `session_ended.${event.session.end_reason ?? 'unstated'}`;
     case 'recording_failed':
       return 'recording_failed';
     case undefined:
