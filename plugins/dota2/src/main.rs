@@ -33,6 +33,8 @@
 use core::time::Duration;
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
@@ -57,20 +59,81 @@ use clipped_dota2_plugin::{LISTEN_ADDRESS, PLUGIN_ID};
 /// (`docs/plugin-api.md`).
 const HEARTBEAT: Duration = Duration::from_secs(2);
 
-fn main() {
+/// What this program does, when it is not being a plugin.
+#[derive(Debug, clap::Parser)]
+#[command(name = "clipped-dota2-plugin", about, version)]
+struct Arguments {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The three things a person asks this program to do.
+///
+/// Separate from being a plugin on purpose, and the same separation
+/// `clipped-cs2-plugin` makes. Installing writes a file into the user's game
+/// directory, and `docs/plugin-api.md` does not allow that to be a side effect
+/// of a session starting: it is something a person asks for, having been told
+/// what it writes and where. A plugin attached without it says so and stops
+/// ([issue #382](https://github.com/wildware-uk/clipped/issues/382)).
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Write the Game State Integration configuration into Dota 2.
+    ///
+    /// Prints the full path of the file it wrote and what it asks the game to
+    /// do. Nothing else in your game directory is touched, and `uninstall`
+    /// removes it.
+    Install {
+        /// Dota 2's `gamestate_integration` folder. Found from Steam's own
+        /// records when it is not given, which is what it is for.
+        game_directory: Option<PathBuf>,
+    },
+    /// Remove the configuration file this plugin wrote, and nothing else.
+    Uninstall {
+        /// As above.
+        game_directory: Option<PathBuf>,
+    },
+    /// Say whether the integration is set up, and where.
+    Status,
+}
+
+fn main() -> ExitCode {
+    match <Arguments as clap::Parser>::parse().command {
+        None => run_as_plugin(),
+        Some(Command::Install { game_directory }) => report(install(game_directory.as_deref())),
+        Some(Command::Uninstall { game_directory }) => report(uninstall(game_directory.as_deref())),
+        Some(Command::Status) => report(status()),
+    }
+}
+
+/// Prints what a subcommand had to say, and turns a failure into an exit code.
+fn report(outcome: Result<String, String>) -> ExitCode {
+    match outcome {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The plugin proper.
+fn run_as_plugin() -> ExitCode {
     let mut output = io::stdout().lock();
 
     // 1. The host writes one `attach` line as soon as the process exists.
     let mut line = String::new();
     if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
-        return;
+        return ExitCode::SUCCESS;
     }
     let session = match read_command(line.trim_end()) {
         Ok(HostCommand::Attach { session, .. }) => session,
-        Ok(HostCommand::Detach) => return,
+        Ok(HostCommand::Detach) => return ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("dota 2 plugin: could not read the attach command: {error}");
-            return;
+            return ExitCode::FAILURE;
         }
     };
 
@@ -85,8 +148,16 @@ fn main() {
     // 3. A token, a socket, and a configuration file — in that order, because
     //    each one is worth reporting on its own and the socket is the one that
     //    decides whether there is any point in the rest.
+    // Before the socket, and before anything is written anywhere: a plugin
+    // attached to a Dota that was never set up has nothing to listen for, and
+    // saying so is more use than a listener nobody posts to (issue #382).
+    if let Err(reason) = installed_configuration() {
+        problem(&mut output, &reason);
+        return ExitCode::SUCCESS;
+    }
+
     let Some(token) = token(&mut output) else {
-        return;
+        return ExitCode::FAILURE;
     };
     let address: SocketAddr = LISTEN_ADDRESS
         .parse()
@@ -106,11 +177,10 @@ fn main() {
             // to the user (`docs/plugin-api.md`); a process that stayed alive
             // reporting nothing would look like an integration with nothing to
             // say.
-            return;
+            return ExitCode::FAILURE;
         }
     };
     let opened = Instant::now();
-    configure(&mut output, &token);
 
     let payloads = listener.serve("dota 2 plugin");
     let mut cadence = Cadence::opened_at(opened);
@@ -165,10 +235,12 @@ fn main() {
                     &mut output,
                     "Clipped stopped listening for Dota 2's game state unexpectedly.",
                 );
-                return;
+                return ExitCode::FAILURE;
             }
         }
     }
+
+    ExitCode::SUCCESS
 }
 
 /// The token this machine's Dota is configured with, or nothing and a reason.
@@ -191,55 +263,165 @@ fn token(output: &mut impl Write) -> Option<clipped_dota2_plugin::gsi::AuthToken
     }
 }
 
-/// Puts the Game State Integration configuration in place, and says what that
-/// means for the user.
-///
-/// Never fatal. A user who has installed the configuration file by hand, or who
-/// is running a Dota that Steam has no manifest for, still gets a working
-/// listener — so a failure here is something to report rather than a reason to
-/// stop.
-fn configure(output: &mut impl Write, token: &clipped_dota2_plugin::gsi::AuthToken) {
-    let directory = match installation::configuration_directory() {
-        Ok(directory) => directory,
-        Err(error) => {
-            problem(output, &format!("{error}"));
-            return;
-        }
+/// Where Dota's configuration file is, or why it cannot be found.
+fn configuration_path(given: Option<&Path>) -> Result<PathBuf, String> {
+    let directory = match given {
+        Some(directory) => directory.to_path_buf(),
+        None => installation::configuration_directory().map_err(|error| error.to_string())?,
     };
+    Ok(directory.join(installation::CONFIG_FILE))
+}
 
-    let integration = match Integration::new(
+/// Whether Dota has been set up, and what to say when it has not.
+///
+/// The check the plugin makes on attach. It never writes: putting the file in
+/// place is `install`'s, because writing into somebody's game directory is a
+/// thing they ask for rather than something that happens to them when a game
+/// starts (`docs/plugin-api.md`, issue #382).
+fn installed_configuration() -> Result<PathBuf, String> {
+    let path = configuration_path(None).map_err(|reason| {
+        format!(
+            "Clipped could not work out where Dota 2 keeps its Game State Integration configuration, so it cannot tell whether it is set up: {reason}"
+        )
+    })?;
+
+    if path.is_file() {
+        return Ok(path);
+    }
+
+    Err(format!(
+        "Dota 2 is not set up to report its state, so this recording will have no events. Run `clipped-dota2-plugin install` once, then restart Dota 2. It writes {} and nothing else.",
+        path.display()
+    ))
+}
+
+/// The token this plugin listens with, kept beside its own settings.
+fn plugin_token() -> Result<clipped_dota2_plugin::gsi::AuthToken, String> {
+    let directory = clipped_logging::application_directory().ok_or_else(|| {
+        "Clipped could not find a place to keep the token Dota 2 identifies itself with".to_owned()
+    })?;
+    let directory = directory.join("plugins").join(PLUGIN_ID);
+    remembered_token(&directory)
+        .map(|(token, _)| token)
+        .map_err(|error| error.to_string())
+}
+
+/// What this plugin asks Dota to send, rendered with `token`.
+fn rendered(token: &clipped_dota2_plugin::gsi::AuthToken) -> Result<String, String> {
+    Integration::new(
         "Clipped",
         &format!("http://{LISTEN_ADDRESS}/"),
         dota::COMPONENTS,
-    ) {
-        Ok(integration) => integration,
-        Err(error) => {
-            problem(output, &format!("{error}"));
-            return;
-        }
-    };
-    let installation = match Installation::new(&directory, installation::CONFIG_FILE) {
-        Ok(installation) => installation,
-        Err(error) => {
-            problem(output, &format!("{error}"));
-            return;
+    )
+    .map(|integration| integration.render(token))
+    .map_err(|error| error.to_string())
+}
+
+/// `install`: the only thing this program ever writes into a game directory.
+fn install(game_directory: Option<&Path>) -> Result<String, String> {
+    let path = configuration_path(game_directory)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| "that configuration path has no directory".to_owned())?
+        .to_path_buf();
+    let token = plugin_token()?;
+    let contents = rendered(&token)?;
+
+    let installation =
+        Installation::new(directory, installation::CONFIG_FILE).map_err(|e| e.to_string())?;
+    let outcome = installation.apply(&contents).map_err(|e| e.to_string())?;
+
+    let written = match outcome {
+        Installed::Written { path } => path,
+        Installed::AlreadyCurrent { path } => {
+            return Ok(format!(
+                "{} is already what Clipped would write. Nothing was changed.",
+                path.display()
+            ))
         }
     };
 
-    match installation.apply(&integration.render(token)) {
-        // Valve's client reads this directory when *it* starts, so a file
-        // written now is a file this session of Dota will never read
-        // (`gsi::config`). Phrased as what is wrong rather than as what
-        // succeeded, because the user's copy of it is a line on a `problem`
-        // channel and "Clipped has set Dota 2 up" is not a thing to act on —
-        // restarting Dota is (AGENTS.md section 28).
-        Ok(Installed::Written { .. }) => problem(
-            output,
-            "Dota 2 has to be restarted before Clipped can report its events, so this recording \
-             will not have any.",
-        ),
-        Ok(Installed::AlreadyCurrent { .. }) => {}
-        Err(error) => problem(output, &format!("{error}")),
+    Ok(format!(
+        "Wrote {}
+         
+         It asks Dota 2 to post its state to http://{LISTEN_ADDRESS}/ while you play, with a          token so that nothing else on this machine can pretend to be the game.
+         Nothing leaves this computer. Delete that file, or run `uninstall`, to stop it.
+         
+         Restart Dota 2 for it to take effect.",
+        written.display()
+    ))
+}
+
+/// `uninstall`: takes back exactly what `install` wrote, and nothing else.
+fn uninstall(game_directory: Option<&Path>) -> Result<String, String> {
+    let path = configuration_path(game_directory)?;
+    if !path.is_file() {
+        return Ok("There was no configuration file to remove.".to_owned());
+    }
+
+    // Only a file this plugin would have written. A file somebody else put
+    // there under the same name is theirs, and deleting it because it is in the
+    // way is not this program's decision to make.
+    let token = plugin_token()?;
+    let ours = rendered(&token)?;
+    let found = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "{} could not be read, so it was left alone: {error}",
+            path.display()
+        )
+    })?;
+    if found.trim() != ours.trim() {
+        return Err(format!(
+            "{} was written by something other than Clipped, or edited by hand, and has been left alone. Delete it yourself if you meant to.",
+            path.display()
+        ));
+    }
+
+    std::fs::remove_file(&path)
+        .map_err(|error| format!("{} could not be removed: {error}", path.display()))?;
+
+    Ok(format!(
+        "Removed {}
+Dota 2 will stop posting its state next time it starts.",
+        path.display()
+    ))
+}
+
+/// `status`: what a person needs before they can ask a useful question.
+fn status() -> Result<String, String> {
+    let path = match configuration_path(None) {
+        Ok(path) => path,
+        Err(reason) => {
+            return Ok(format!(
+                "Not installed, and where it would go is unknown: {reason}"
+            ))
+        }
+    };
+
+    if !path.is_file() {
+        return Ok(format!(
+            "Not installed.
+             Run `clipped-dota2-plugin install` to set it up. It will write {} and listen on {LISTEN_ADDRESS}.",
+            path.display()
+        ));
+    }
+
+    let token = plugin_token()?;
+    let ours = rendered(&token)?;
+    let found = std::fs::read_to_string(&path)
+        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+
+    if found.trim() == ours.trim() {
+        Ok(format!(
+            "Installed: {}
+Dota 2 posts to http://{LISTEN_ADDRESS}/ with a token this plugin checks on every payload.",
+            path.display()
+        ))
+    } else {
+        Ok(format!(
+            "{} is there and is not what Clipped would write — another tool's, or edited by hand. It has been left alone; run `install` to replace it with Clipped's.",
+            path.display()
+        ))
     }
 }
 

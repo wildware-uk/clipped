@@ -223,6 +223,7 @@ dependencies = [
 name = "clipped-dota2-plugin"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "clipped-events",
  "clipped-game-detection",
  "clipped-logging",
