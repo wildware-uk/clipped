@@ -53,7 +53,55 @@ impl TestDirectory {
 impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+        // The trash is a *sibling* of the recordings directory, not a child of
+        // it, so removing the directory does not take it. Without this, every
+        // run of the discard test leaves a copy of its fixture in the
+        // machine's temporary directory for good.
+        let _ = fs::remove_dir_all(trash_beside(&self.0));
     }
+}
+
+/// Where the trash goes when the settings file names no directory: beside the
+/// recordings, same name with `.trash` appended.
+///
+/// Restated here rather than imported from `clipped_session::config`, for the
+/// reason [`EXIT_USAGE`] is: this test should fail if that rule changes, not
+/// quietly follow it somewhere else.
+fn trash_beside(recordings: &Path) -> PathBuf {
+    let mut name = recordings.as_os_str().to_os_string();
+    name.push(".trash");
+    PathBuf::from(name)
+}
+
+/// The one file anywhere under `root`, or [`None`] if `root` holds none.
+///
+/// # Panics
+///
+/// If there is more than one, which would mean a discard left something behind
+/// as well as what it moved.
+fn only_file_under(root: &Path) -> Option<PathBuf> {
+    fn collect(directory: &Path, into: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, into);
+            } else {
+                into.push(path);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    collect(root, &mut found);
+    assert!(
+        found.len() <= 1,
+        "expected at most one file under {}, found {found:?}",
+        root.display()
+    );
+    found.pop()
 }
 
 fn recorder(arguments: &[&str]) -> Output {
@@ -221,10 +269,17 @@ fn discarding_without_naming_a_session_is_refused_before_anything_is_deleted() {
     assert!(recording.exists(), "nothing should have been deleted");
 }
 
+/// `--discard` used to unlink the file, and this test used to assert that the
+/// space came back ("8.0 KiB freed"). Issue #451 changed it to a move into the
+/// trash, which means the bytes are still on the disk and that promise would
+/// now be a lie — so what is asserted here is the thing the change was made
+/// for: the footage is recoverable, byte for byte, by somebody who typed
+/// `--discard` and then wished they had not (AGENTS.md section 56).
 #[test]
-fn discarding_a_named_recording_deletes_it_and_records_that_it_did() {
+fn discarding_a_named_recording_moves_it_to_the_trash_and_records_that_it_did() {
     let directory = TestDirectory::new("discard");
     let recording = interrupted(directory.path());
+    let original = fs::read(&recording).expect("the fixture was just written");
 
     let output = recorder(&[
         "recover",
@@ -236,11 +291,34 @@ fn discarding_a_named_recording_deletes_it_and_records_that_it_did() {
     ]);
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!recording.exists(), "the file should be gone");
     assert!(
-        stderr(&output).contains("8.0 KiB freed"),
-        "{}",
-        stderr(&output)
+        !recording.exists(),
+        "the file should be gone from the recording directory"
+    );
+
+    // Gone from where it was, and still there to be had back.
+    let stowed = only_file_under(&trash_beside(directory.path())).unwrap_or_else(|| {
+        panic!(
+            "--discard should have left the recording in the trash: {}",
+            stderr(&output)
+        )
+    });
+    assert_eq!(
+        fs::read(&stowed).expect("the trashed file can be read"),
+        original,
+        "the trashed file is not the recording that was discarded",
+    );
+
+    // And the message has to name where it went, because nothing else will:
+    // this file has no library row, so no trash screen lists it.
+    let message = stderr(&output);
+    assert!(
+        message.contains(&stowed.display().to_string()),
+        "the message should say where the file is now: {message}",
+    );
+    assert!(
+        !message.contains("freed"),
+        "nothing was freed - the bytes are still on the disk: {message}",
     );
 
     // The entry stays, saying what happened. A gap is not a record.
