@@ -92,11 +92,12 @@ describe('the Editor screen with a clip open', () => {
 
     // The ruler's spacer is hidden from the accessibility tree, so what is left
     // is the video lane and one lane per audio track: SPEC.md section 19's
-    // "audio should visually appear as individual editable tracks".
+    // "audio should visually appear as individual editable tracks". Each audio
+    // lane carries a Solo button ahead of what it contributes.
     expect(tracks.map((track) => track.textContent)).toEqual([
       'Video3 segments',
-      'Game-3.0 dB',
-      'MicrophoneMuted',
+      'GameSolo-3.0 dB',
+      'MicrophoneSoloMuted',
     ]);
   });
 
@@ -106,15 +107,39 @@ describe('the Editor screen with a clip open', () => {
     expect(screen.getByText('Muted')).toBeVisible();
   });
 
-  it('says which track is silenced by a solo elsewhere', () => {
-    renderWithClip({
-      audio_tracks: [
-        { name: 'Game', inputs: [{ source: 0, stream: 0 }], soloed: true },
-        { name: 'Microphone', inputs: [{ source: 0, stream: 1 }] },
-      ],
-    });
+  it('silences the other tracks in the preview when one is soloed, and says so', async () => {
+    // Soloing is issue #85's `Solo`: the editor's own listening state, held
+    // here rather than on the document — the fixture carries no `soloed`
+    // field at all, because format 2 has none. Soloing the second track
+    // ("Microphone") should silence the first ("Game") in the preview.
+    const user = userEvent.setup();
+    renderWithClip();
+
+    await user.click(screen.getAllByRole('button', { name: 'Solo' })[1]!);
 
     expect(screen.getByText('Silent while another track is soloed')).toBeVisible();
+  });
+
+  it('is reversible, and is this window’s own state rather than an edit', async () => {
+    // Nothing in `crates/edit`'s document model has anywhere to hold a solo
+    // (issue #85), and nothing in this screen writes one anywhere. Pressing
+    // Solo a second time restores exactly what was on screen before the
+    // first press, which a mutation of the document would have no reason to
+    // do — there is no undo wired to this button, only a toggle of local
+    // state.
+    const user = userEvent.setup();
+    renderWithClip();
+    const trackLanes = () =>
+      within(screen.getByRole('list', { name: 'Tracks' }))
+        .getAllByRole('listitem')
+        .map((track) => track.textContent);
+    const before = trackLanes();
+
+    await user.click(screen.getAllByRole('button', { name: 'Solo' })[0]!);
+    expect(trackLanes()).not.toEqual(before);
+
+    await user.click(screen.getAllByRole('button', { name: 'Solo' })[0]!);
+    expect(trackLanes()).toEqual(before);
   });
 
   it('says a lane has no waveform rather than drawing a flat line', () => {
@@ -176,7 +201,7 @@ describe('the Editor screen with a clip open', () => {
   it('says an empty clip is empty rather than showing a broken one', () => {
     render(
       <EditorScreen
-        clip={JSON.stringify({ schema_version: 1, title: 'Empty', sources: [], segments: [] })}
+        clip={JSON.stringify({ schema_version: 2, title: 'Empty', sources: [], segments: [] })}
       />,
     );
 
@@ -191,15 +216,24 @@ describe('the playhead', () => {
     renderWithClip();
 
     // Zoom out and Fit are both disabled at the first zoom step, so the tab
-    // order is Export, Zoom in, and then the playhead itself. This is the same
-    // order `docs/desktop-ui.md` sets out and `EditorEvents.test.tsx` asserts
-    // whole, seen on a clip with no events: the kind filters and the marks that
-    // would sit between Zoom in and the playhead are simply absent here.
+    // order is Export, Zoom in, each track's Solo button, and then the
+    // playhead itself. This is the same order `docs/desktop-ui.md` sets out
+    // and `EditorEvents.test.tsx` asserts whole, seen on a clip with no
+    // events: the kind filters and the marks that would sit between the Solo
+    // buttons and the playhead are simply absent here.
     await user.tab();
     expect(document.activeElement).toHaveTextContent('Export…');
 
     await user.tab();
     expect(document.activeElement).toHaveTextContent('Zoom in');
+
+    // The fixture has two audio tracks, "Game" and "Microphone", each with
+    // its own Solo button.
+    await user.tab();
+    expect(document.activeElement).toHaveTextContent('Solo');
+
+    await user.tab();
+    expect(document.activeElement).toHaveTextContent('Solo');
 
     await user.tab();
     expect(document.activeElement).toBe(playhead());
@@ -293,18 +327,21 @@ describe('the playhead', () => {
     const user = userEvent.setup();
     renderWithClip();
 
-    // The three zoom controls and Export are the only controls on the screen.
-    // Both are things this component can actually perform: the zoom is how the
-    // timeline is drawn, and Export opens a dialog, which is this component's
-    // own state. Every other action of an editor is somebody else's ticket, and
-    // a button that could not reach it would be a button with nothing behind
-    // it — which is also why the dialog Export opens has no Export button of
-    // its own (issue #322).
+    // The three zoom controls, Export and each track's Solo are the only
+    // controls on the screen. All of them are things this component can
+    // actually perform: the zoom is how the timeline is drawn, Export opens a
+    // dialog, and Solo is issue #85's listening state, none of which needs a
+    // path to `crates/edit`. Every other action of an editor is somebody
+    // else's ticket, and a button that could not reach it would be a button
+    // with nothing behind it — which is also why the dialog Export opens has
+    // no Export button of its own (issue #322).
     expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual([
       'Export…',
       'Zoom out',
       'Zoom in',
       'Fit',
+      'Solo',
+      'Solo',
     ]);
     expect(screen.getByRole('button', { name: 'Zoom out' })).toBeDisabled();
 

@@ -59,7 +59,7 @@ import {
   type EditDocument,
   type Segment,
 } from './document';
-import { anySoloed, trackOutput, NANOS_PER_SECOND } from './timeline';
+import { resolve, NANOS_PER_SECOND } from './timeline';
 
 /**
  * Why an audio track cannot be copied as it stands: `MixReason` in
@@ -137,14 +137,22 @@ function isUntransformed(segment: Segment): boolean {
   );
 }
 
-/** Why `track` is a mix rather than one recorded stream, if it is. */
-function mixReasonOf(track: AudioTrack, soloed: boolean): MixReason | null {
+/**
+ * Why `track` is a mix rather than one recorded stream, if it is.
+ *
+ * `resolve` rather than `monitor`: this is what `ExportPlan::of` asks
+ * `document.track_output` — the **export** answer — and a solo left on
+ * elsewhere is never part of it ([issue
+ * #85](https://github.com/wildware-uk/clipped/issues/85)). Muting is the only
+ * way a track reaches this window's export silent.
+ */
+function mixReasonOf(track: AudioTrack): MixReason | null {
   // The order is `plan_audio`'s, and it matters: a track that is both muted and
   // boosted is reported as silenced, because silence is what comes out of it.
   if (track.inputs.length > 1) {
     return 'severalInputs';
   }
-  if (!trackOutput(track, soloed).audible) {
+  if (!resolve(track).audible) {
     return 'silenced';
   }
   if (track.gain_db !== 0) {
@@ -176,7 +184,6 @@ export function copyOutlook(document: EditDocument): CopyOutlook {
     blockers.push({ kind: 'severalRecordings', recordings: recordings.length });
   }
 
-  const soloed = anySoloed(document);
   for (const [index, track] of document.audio_tracks.entries()) {
     if (track.inputs.length === 0) {
       // `EditDocument::validate` refuses this, and `ExportPlan::of` runs that
@@ -191,7 +198,7 @@ export function copyOutlook(document: EditDocument): CopyOutlook {
           'cannot be exported as it stands.',
       };
     }
-    const reason = mixReasonOf(track, soloed);
+    const reason = mixReasonOf(track);
     if (reason !== null) {
       blockers.push({ kind: 'trackNeedsMixing', track: index, reason });
     }
@@ -277,10 +284,11 @@ function describeMix(track: AudioTrack, index: number, reason: MixReason): Reaso
           'A sum has to be produced sample by sample. A track fed by one recorded stream is copied as it is.',
       };
     case 'silenced':
+      // Muting is the only way a track reaches an export silent: a solo left
+      // on elsewhere never does (issue #85), so there is only one sentence to
+      // say here.
       return {
-        what: track.muted
-          ? `The “${name}” track is muted.`
-          : `The “${name}” track is silent because another track is soloed.`,
+        what: `The “${name}” track is muted.`,
         change:
           'The clip keeps the track, so its silence has to be produced rather than copied. Make it audible again and it is copied.',
       };

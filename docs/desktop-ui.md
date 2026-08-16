@@ -538,16 +538,22 @@ mute and solo are resolved.
 
 ### No editing controls, and why
 
-There are none — not a Split, not a volume slider. The four operations that cut
-a clip up are **built and tested**, in `crates/edit` with undo and redo (#84),
-and a button here could not reach them any more than it could open a clip. The
-mix is #85, framing and speed #86, overlays #87 and combining recordings #88,
-and each owns its own control.
+There are almost none — not a Split, not a volume slider, not a mute button.
+The four operations that cut a clip up are **built and tested**, in
+`crates/edit` with undo and redo (#84), and a button here could not reach them
+any more than it could open a clip. Track volume, mute and fades are #85's
+still, framing and speed #86, overlays #87 and combining recordings #88, and
+each owns its own control — one that needs a path to `crates/edit`, which this
+window does not have until #306.
 
-The three zoom controls are the exception, because zoom is this component's own
+The three zoom controls are an exception, because zoom is this component's own
 state and they do exactly what they say. Each is disabled at the end of the
-scale where it would do nothing. **Export** is the fourth, for the same reason:
-opening a dialog is this component's own state.
+scale where it would do nothing. **Export** is another, for the same reason:
+opening a dialog is this component's own state. **Each track's Solo button** is
+the third: soloing is `Solo` (`crates/edit/src/audio.rs`), a
+value the editor listens with rather than a field of the document (#85), so it
+needs no operation and no path to the crate — pressing it changes only what
+this window's preview plays, never anything a save could carry.
 
 ### The export dialog
 
@@ -592,7 +598,7 @@ and names the rest instead of guessing:
 | The clip joins more than one recording | A cut that does not fall on a keyframe |
 | A segment is sped up, cropped or rotated | A codec the container writer cannot describe |
 | Text is drawn over the picture | Pictures stored out of the order they are shown |
-| A track is a mix: several inputs, a level, a mute or a solo elsewhere, a fade | A segment covering no pictures, and the recording's shape |
+| A track is a mix: several inputs, a level, a mute, a fade | A segment covering no pictures, and the recording's shape |
 
 That split is the crate's own structure rather than an approximation of it, and
 `exportPlan.test.ts` holds the port to the cases `crates/export`'s own tests
@@ -663,8 +669,10 @@ them is decided here rather than left to whichever branch merged last:
 2. **Zoom in**, and Zoom out and Fit when they are enabled — all three are
    disabled at the first zoom step, where only Zoom in is a tab stop;
 3. **the kind filters**, one per kind of event on the clip, when there are any;
-4. **the event marks**, in the order they occur on the edited timeline;
-5. **the playhead**.
+4. **each track's Solo button**, in the order its lane is drawn, when the clip
+   has any audio tracks;
+5. **the event marks**, in the order they occur on the edited timeline;
+6. **the playhead**.
 
 Two rules produce that list, and both are worth stating because the plausible
 alternative — content first, whole-document actions last — fails them:
