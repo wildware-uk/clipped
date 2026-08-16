@@ -135,10 +135,16 @@ describe('the Editor screen with a clip open', () => {
         .map((track) => track.textContent);
     const before = trackLanes();
 
-    await user.click(screen.getAllByRole('button', { name: 'Solo' })[0]!);
+    // The second track, as in the test above, and for the reason that test
+    // gives: soloing "Microphone" silences "Game", whose lane then says so.
+    // Soloing the *first* track changes no text at all, because the only other
+    // audio track is already muted and mute wins over solo — so a lane that
+    // reads "Muted" goes on reading it. That is correct behaviour and it makes
+    // the first track useless for observing a change.
+    await user.click(screen.getAllByRole('button', { name: 'Solo' })[1]!);
     expect(trackLanes()).not.toEqual(before);
 
-    await user.click(screen.getAllByRole('button', { name: 'Solo' })[0]!);
+    await user.click(screen.getAllByRole('button', { name: 'Solo' })[1]!);
     expect(trackLanes()).toEqual(before);
   });
 

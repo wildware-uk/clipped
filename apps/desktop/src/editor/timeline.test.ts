@@ -300,7 +300,16 @@ describe('the fade envelope of a track', () => {
     // The preview plays the fade the export will write; the solo only decides
     // which tracks it plays it for — `crates/edit`'s
     // `a_soloed_preview_is_still_faded`.
-    expect(monitoredAmplitudeAt(faded(), 2, 2, SECOND, clipNanos)).toBeCloseTo(0.5, 12);
+    // Against what the export writes, rather than against 0.5: the fade is a
+    // half here, but the fixture's track also carries -3 dB, so the amplitude
+    // is 0.354 and a literal 0.5 asserts the fade alone. Comparing the two
+    // functions states the property this test is named for — the preview plays
+    // the fade the export will write — and cannot rot if the fixture's gain
+    // changes.
+    expect(monitoredAmplitudeAt(faded(), 2, 2, SECOND, clipNanos)).toBeCloseTo(
+      trackAmplitudeAt(faded(), SECOND, clipNanos),
+      12,
+    );
     // A track the solo silences reads silent for the whole clip.
     expect(monitoredAmplitudeAt(faded(), 0, 2, SECOND, clipNanos)).toBe(0);
     expect(monitoredAmplitudeAt(faded(), 2, SOLO_NONE, SECOND, clipNanos)).toBe(
