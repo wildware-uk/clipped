@@ -32,12 +32,16 @@ of it.
 
 ## The measurement
 
-Run on 2026-08-16 against **Microsoft Edge 151.0.4129** — the same Chromium
-build as the WebView2 runtime installed on the same machine
-(`C:\Program Files (x86)\Microsoft\EdgeWebView\Application\151.0.4129.86`) — and
-then confirmed in the Clipped window itself. Each file was loaded into a
-`<video>` from an HTTP server answering byte ranges, played, and then asked what
-it had **decoded**: `webkitVideoDecodedByteCount` and
+Run on 2026-08-16 against **Microsoft Edge 151.0.4129**, headless, which is the
+same Chromium build as the WebView2 runtime installed on the same machine
+(`C:\Program Files (x86)\Microsoft\EdgeWebView\Application\151.0.4129.86`) —
+WebView2 *is* Edge, without the browser's own interface, and the media stack is
+the same one. It was not driven inside the Clipped window itself, which is the
+one gap in this measurement and is worth closing the next time somebody has that
+window open.
+
+Each file was loaded into a `<video>` from an HTTP server answering byte ranges,
+played, and then asked what it had **decoded**: `webkitVideoDecodedByteCount` and
 `webkitAudioDecodedByteCount`, which count bytes through the decoders rather
 than bytes fetched. A container that demuxes but cannot decode reports zero.
 
@@ -74,6 +78,28 @@ Two further measurements, because they decide the rest of the design:
   a media element plays is the first sound track the container declares.
 
 Fact 1 also stands, and is unchanged by any of this.
+
+### Seeking
+
+Measured on the same engine, over a server answering byte ranges exactly as the
+`clip` scheme does: a **10 minute 37 second** recording — a real Clipped
+recording looped by a stream copy, 188 MB, AV1 1280×720 with two PCM tracks in
+Matroska.
+
+| What | Measured |
+| --- | --- |
+| Metadata (`loadedmetadata`) | 16 ms |
+| Seek to 25% (2:39) | 18 ms |
+| Seek to 50% (5:19) | 6 ms |
+| Seek to 90% (9:34) | 27 ms |
+| Back to 10% (1:04) | 8 ms |
+| Seek to 99% (10:31) | 13 ms |
+
+Every seek landed on the time it was given and none took longer than 30 ms. The
+element asks for the range it needs and reads it; nothing rewinds the file, and
+nothing waits for the whole of it. What a seek is *not* is frame-accurate: the
+picture that comes up is the nearest keyframe at or before the position, which
+is the practical limit SPEC.md section 42's "where practical" leaves room for.
 
 ## Decision
 
