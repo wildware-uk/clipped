@@ -213,7 +213,14 @@ impl Error for WatchCommandError {
 /// finalised and written out: the failure paths below all go through the same
 /// shutdown as Ctrl+C.
 pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
-    let directory = output_directory(args)?;
+    // Read here as well as in `Driver::new`, which reads it for the per-game
+    // settings it resolves. Two reads of a small file at start-up, rather than
+    // handing the driver a `Configuration` - `Driver::new` takes the path on
+    // purpose, so that the whole path from a file on disk to the settings a
+    // recording starts with is one thing a test can exercise.
+    let settings_file = ConfigurationStore::default_path();
+    let configuration = load_configuration(settings_file.as_deref());
+    let directory = output_directory(args, configuration.storage().recording_directory())?;
     let catalogue = load_catalogue()?;
 
     // A property of the process, set once, and before anything measures a
@@ -262,10 +269,19 @@ pub fn run(args: &WatchArgs) -> Result<(), WatchCommandError> {
 }
 
 /// Where recordings and session records go.
-fn output_directory(args: &WatchArgs) -> Result<PathBuf, WatchCommandError> {
-    let directory = match &args.output_directory {
-        Some(named) => named.clone(),
-        None => {
+fn output_directory(
+    args: &WatchArgs,
+    configured: Option<&Path>,
+) -> Result<PathBuf, WatchCommandError> {
+    // Three layers, top down: the flag, then the settings file, then the videos
+    // folder this build would pick on its own. The middle one is step 3 of
+    // SPEC.md section 45 - a directory chosen once in the settings screen has to
+    // be the one an automatic recording lands in, since nobody is at a command
+    // line when a game launches (issue #307).
+    let directory = match (&args.output_directory, configured) {
+        (Some(named), _) => named.clone(),
+        (None, Some(chosen)) => chosen.to_path_buf(),
+        (None, None) => {
             crate::config::default_output_directory().ok_or(WatchCommandError::NoOutputDirectory)?
         }
     };
@@ -1207,7 +1223,9 @@ where
 {
     let game = request.game.display_name();
     let args = plan.args_for(request.process_id, &request.output);
-    let config = match RecordingConfig::resolve(&args) {
+    // `plan.args_for` always names an output file, so the settings file has
+    // already been consulted where that directory was chosen (`output_directory`).
+    let config = match RecordingConfig::resolve(&args, None) {
         Ok(config) => config,
         Err(error) => return failure(&error, game),
     };
