@@ -116,6 +116,16 @@ impl Harness {
             .spawn()
             .expect("the plugin starts");
 
+        // Printed so that a run which hangs can be matched against the machine's
+        // process list afterwards. The suite runs four of these at once, each
+        // holding a loopback port, and a log saying only "a plugin did not exit"
+        // names none of them (issue #549).
+        eprintln!(
+            "clipped-cs2-plugin under test: process {} on port {}",
+            child.id(),
+            self.port
+        );
+
         let attach = HostCommand::Attach {
             contract: CONTRACT,
             session: SessionDetails {
@@ -255,9 +265,39 @@ impl Running {
         }
         drop(self.child.stdin.take());
 
+        let pid = self.child.id();
         match wait_for_exit(&mut self.child, PATIENCE) {
             Ok(status) => status,
-            Err(problem) => panic!("{problem} after being detached"),
+            Err(problem) => panic!(
+                "{problem} after being detached (process {pid}). \
+                 The last thing it said: {}",
+                self.last_words()
+            ),
+        }
+    }
+
+    /// Everything the plugin wrote that no assertion consumed.
+    ///
+    /// The reader thread is still draining its standard output into the channel
+    /// while [`detach`](Self::detach) waits, so a plugin that printed a
+    /// `problem` on its way out has already said why — and until this existed
+    /// that line was dropped on the floor, leaving a timeout whose message was
+    /// only ever "it did not exit".
+    ///
+    /// Not an assertion, and deliberately not one: it is whatever is there, and
+    /// on the run that produced [issue
+    /// #549](https://github.com/wildware-uk/clipped/issues/549) there may be
+    /// nothing at all. "nothing" is itself worth printing, because it rules the
+    /// plugin's own error path out.
+    fn last_words(&self) -> String {
+        let mut lines = Vec::new();
+        while let Ok(line) = self.reports.try_recv() {
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            "nothing — it printed no report between the last assertion and the deadline".to_owned()
+        } else {
+            lines.join(" | ")
         }
     }
 }
@@ -629,4 +669,60 @@ fn a_child_that_does_stop_is_reported_rather_than_killed() {
         Some(3),
         "the status is the child's own, not one this function invented"
     );
+}
+
+/// A `Running` over a child that has already finished, with `lines` waiting to
+/// be read.
+///
+/// The point is `last_words`, which needs a channel and a `Child` and nothing
+/// else: the plugin it nominally describes never runs.
+fn already_finished(lines: &[&str]) -> Running {
+    let child = Command::new("cmd")
+        .args(["/c", "exit", "0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cmd.exe is on every Windows installation");
+
+    let (sender, reports) = mpsc::channel();
+    for line in lines {
+        sender
+            .send((*line).to_owned())
+            .expect("the receiver is alive");
+    }
+    Running { child, reports }
+}
+
+#[test]
+fn what_a_hung_plugin_last_said_reaches_the_failure_message() {
+    // The whole value of the timeout is the sentence it fails with, and a
+    // plugin that printed a `problem` on its way out has already said why. That
+    // line used to be discarded.
+    let running = already_finished(&[
+        r#"{"report":"alive"}"#,
+        r#"{"report":"problem","message":"the port was taken"}"#,
+    ]);
+
+    let said = running.last_words();
+
+    assert!(said.contains("the port was taken"), "{said}");
+    assert!(
+        said.contains("alive"),
+        "everything unread is reported, not only the last line: a heartbeat before the problem \
+         is how long it kept going: {said}"
+    );
+}
+
+#[test]
+fn a_plugin_that_said_nothing_is_reported_as_having_said_nothing() {
+    // Not an empty string. "It printed nothing" rules out the plugin's own
+    // error path, which is a different fault from "it printed a problem", and a
+    // message that trailed off after a colon would say neither.
+    let said = already_finished(&[]).last_words();
+
+    assert!(
+        said.contains("nothing"),
+        "an empty channel has to be reported in words: {said}"
+    );
+    assert!(!said.trim().is_empty());
 }
