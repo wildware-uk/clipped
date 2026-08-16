@@ -45,8 +45,8 @@ use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
 use crate::library::{
     EmptyTrash, FavouriteMark, LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage,
-    LibrarySessions, LibraryTrash, RestoreFromTrash, RestoredItem, SetFavourite, TrashEmptied,
-    TrashListing,
+    LibrarySessions, LibraryTrash, LockMark, RestoreFromTrash, RestoredItem, SetFavourite, SetLock,
+    TrashEmptied, TrashListing,
 };
 use crate::message::Request;
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
@@ -102,6 +102,8 @@ pub enum Command {
     EmptyTrash(EmptyTrash),
     /// Mark one thing a favourite, or clear the mark.
     SetFavourite(SetFavourite),
+    /// Lock one thing against automatic cleanup, or unlock it.
+    SetLock(SetLock),
 
     /// What plugins are installed, what each declares, and what will start.
     Plugins,
@@ -148,6 +150,7 @@ impl Command {
             Self::RestoreFromTrash(_) => "restore_from_trash",
             Self::EmptyTrash(_) => "empty_trash",
             Self::SetFavourite(_) => "set_favourite",
+            Self::SetLock(_) => "set_lock",
             Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
             Self::GetHotkeys => "get_hotkeys",
@@ -180,6 +183,7 @@ impl Command {
             "restore_from_trash" => Ok(Self::RestoreFromTrash(parse_params(request)?)),
             "empty_trash" => Ok(Self::EmptyTrash(parse_params(request)?)),
             "set_favourite" => Ok(Self::SetFavourite(parse_params(request)?)),
+            "set_lock" => Ok(Self::SetLock(parse_params(request)?)),
             "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
@@ -216,6 +220,7 @@ impl Command {
             Self::RestoreFromTrash(request) => serde_json::to_value(request),
             Self::EmptyTrash(request) => serde_json::to_value(request),
             Self::SetFavourite(request) => serde_json::to_value(request),
+            Self::SetLock(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
@@ -707,6 +712,12 @@ pub enum Reply {
     Favourited {
         /// Which thing, and what its mark is now.
         mark: FavouriteMark,
+    },
+    /// A lock was set or cleared.
+    Locked {
+        /// Which thing, what its lock is now, and whether cleanup will leave
+        /// it alone.
+        lock: LockMark,
     },
     /// What the library holds per game.
     LibraryGames {

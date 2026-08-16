@@ -62,7 +62,10 @@ fn stamp(database: &Database, recording: i64) -> Option<String> {
 fn a_lock_persists_and_can_be_read_back() {
     let (directory, database) = library("persists");
 
-    for what in [Lockable::Session("sitting".to_owned()), Lockable::Recording(1)] {
+    for what in [
+        Lockable::Session("sitting".to_owned()),
+        Lockable::Recording(1),
+    ] {
         assert!(
             !is_locked(&database, &what).expect("it can be read"),
             "{what} starts unlocked"
@@ -71,9 +74,15 @@ fn a_lock_persists_and_can_be_read_back() {
             lock(&database, &what, at(1_000)).expect("it can be locked"),
             "{what} was not locked before"
         );
-        assert!(is_locked(&database, &what).expect("it can be read"), "{what}");
+        assert!(
+            is_locked(&database, &what).expect("it can be read"),
+            "{what}"
+        );
 
-        assert!(unlock(&database, &what).expect("it can be unlocked"), "{what}");
+        assert!(
+            unlock(&database, &what).expect("it can be unlocked"),
+            "{what}"
+        );
         assert!(
             !is_locked(&database, &what).expect("it can be read"),
             "{what} is unlocked again"
@@ -108,12 +117,18 @@ fn a_target_that_is_not_there_locks_nothing_and_is_not_an_error() {
     // it, which is not worth a failure.
     let (directory, database) = library("absent");
 
-    for what in [Lockable::Session("gone".to_owned()), Lockable::Recording(404)] {
+    for what in [
+        Lockable::Session("gone".to_owned()),
+        Lockable::Recording(404),
+    ] {
         assert!(
             !lock(&database, &what, at(1_000)).expect("it is not an error"),
             "{what} is not there, so nothing was locked"
         );
-        assert!(!is_locked(&database, &what).expect("it can be asked"), "{what}");
+        assert!(
+            !is_locked(&database, &what).expect("it can be asked"),
+            "{what}"
+        );
         assert!(
             !unlock(&database, &what).expect("it is not an error"),
             "{what} was not unlocked either"
@@ -129,7 +144,12 @@ fn locking_a_sitting_protects_the_recordings_in_it_without_marking_them() {
     // and it is a cascade of *protection* rather than of marks.
     let (directory, database) = library("cascade");
 
-    lock(&database, &Lockable::Session("sitting".to_owned()), at(1_000)).expect("it locks");
+    lock(
+        &database,
+        &Lockable::Session("sitting".to_owned()),
+        at(1_000),
+    )
+    .expect("it locks");
 
     for recording in [1, 2] {
         assert!(
@@ -164,7 +184,12 @@ fn automatic_cleanup_will_not_take_a_locked_recording_or_one_in_a_locked_sitting
     let (directory, database) = library("cleanup");
 
     lock(&database, &Lockable::Recording(1), at(1_000)).expect("it locks");
-    lock(&database, &Lockable::Session("sitting".to_owned()), at(1_000)).expect("it locks");
+    lock(
+        &database,
+        &Lockable::Session("sitting".to_owned()),
+        at(1_000),
+    )
+    .expect("it locks");
 
     let candidates = cleanup::candidates(&database).expect("they can be read");
     let reason = |id: i64| {
@@ -233,6 +258,32 @@ fn a_lock_outlives_a_trip_through_the_trash() {
         Some(before.as_str()),
         "and it is the same lock, from the same moment, rather than a new one"
     );
+
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn clearing_a_lock_that_was_never_set_changes_nothing_and_says_so() {
+    // `lock` has always guarded on the column as well as the key. `unlock` did
+    // not, and an `UPDATE` that writes NULL where NULL already is matches its
+    // row and reports one change — so "you unlocked that" was said about
+    // something that had never been locked.
+    let (directory, database) = library("idempotent-unlock");
+
+    for what in [
+        Lockable::Session("sitting".to_owned()),
+        Lockable::Recording(1),
+    ] {
+        assert!(
+            !unlock(&database, &what).expect("it is not an error"),
+            "{what} was not locked, so nothing changed"
+        );
+    }
+
+    // And a real unlock still reports one, or the guard above would be
+    // satisfied by a function that always answered `false`.
+    lock(&database, &Lockable::Recording(1), at(1_000)).expect("it locks");
+    assert!(unlock(&database, &Lockable::Recording(1)).expect("it unlocks"));
 
     let _ = std::fs::remove_dir_all(directory);
 }

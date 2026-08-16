@@ -55,6 +55,7 @@ import type {
   RestoredItem,
   TrashEmptied,
   FavouriteMark,
+  LockMark,
   TrashListing,
   TrashedItem,
   LibraryEventMark,
@@ -163,6 +164,19 @@ function optionalNumberField(source: JsonObject, name: string, what: string): nu
 function booleanField(source: JsonObject, name: string, what: string): boolean {
   const value = source[name];
   return typeof value === 'boolean' ? value : unreadable(`${what} has no \`${name}\` boolean`);
+}
+
+/**
+ * A boolean a build older than the field simply does not send.
+ *
+ * Absent is not the same as `false` to a reader, but it is the same to a
+ * caller: a recorder with no lock column has nothing locked. Spread into the
+ * object so the field stays absent rather than becoming an explicit
+ * `undefined`, which `exactOptionalPropertyTypes` refuses.
+ */
+function optionalBoolean(source: JsonObject, name: string): { [key: string]: boolean } {
+  const value = source[name];
+  return typeof value === 'boolean' ? { [name]: value } : {};
 }
 
 function optionalStringField(source: JsonObject, name: string, what: string): string | undefined {
@@ -369,6 +383,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'trash_emptied', emptied: readTrashEmptied(reply['emptied']) };
     case 'favourited':
       return { reply: 'favourited', mark: readFavouriteMark(reply['mark']) };
+    case 'locked':
+      return { reply: 'locked', lock: readLockMark(reply['lock']) };
     case 'plugins':
       return {
         reply: 'plugins',
@@ -587,6 +603,7 @@ function readLibrarySession(value: JsonValue | undefined): LibrarySession {
     ...(endedAt === undefined ? {} : { ended_at: endedAt }),
     ...(endReason === undefined ? {} : { end_reason: endReason }),
     favourite: booleanField(session, 'favourite', what),
+    ...optionalBoolean(session, 'locked'),
     recordings: arrayField(session['recordings'], what, readLibraryRecording),
     clips: arrayField(session['clips'], what, readLibraryClip),
   };
@@ -619,6 +636,8 @@ function readLibraryRecording(value: JsonValue | undefined): LibraryRecording {
     // present means the screen has to say it has gone.
     ...(missing === undefined ? {} : { missing_since: missing }),
     favourite: booleanField(recording, 'favourite', what),
+    ...optionalBoolean(recording, 'locked'),
+    ...optionalBoolean(recording, 'protected'),
     tags: stringArrayField(recording, 'tags', what),
   };
 }
@@ -761,6 +780,20 @@ function readFavouriteMark(value: JsonValue | undefined): FavouriteMark {
     id: numberField(mark, 'id', what),
     favourite: booleanField(mark, 'favourite', what),
     changed: booleanField(mark, 'changed', what),
+  };
+}
+
+/** What a lock is now, and whether cleanup will leave the thing alone. */
+function readLockMark(value: JsonValue | undefined): LockMark {
+  const lock = object(value, 'a lock');
+  const what = 'a lock';
+  return {
+    kind: stringField(lock, 'kind', what),
+    session_id: stringField(lock, 'session_id', what),
+    id: numberField(lock, 'id', what),
+    locked: booleanField(lock, 'locked', what),
+    protected: booleanField(lock, 'protected', what),
+    changed: booleanField(lock, 'changed', what),
   };
 }
 

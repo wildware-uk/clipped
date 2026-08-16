@@ -609,6 +609,12 @@ impl CommandHandler for RecorderService {
             Command::SetFavourite(request) => Ok(Reply::Favourited {
                 mark: self.library.set_favourite(&request, SystemTime::now())?,
             }),
+            // The same again: one `UPDATE` against a primary key, and one read
+            // back to answer with what is true rather than with what was asked
+            // for (`clipped_library::locks`).
+            Command::SetLock(request) => Ok(Reply::Locked {
+                lock: self.library.set_lock(&request, SystemTime::now())?,
+            }),
             // Also on the connection thread: reading a handful of manifests and
             // one settings file is bounded local work that shares nothing with
             // a recording, which is the same argument the library reads above

@@ -68,6 +68,13 @@ export interface CommandAnswers {
    * asked, which is the whole thing issue #58 was missing.
    */
   readonly setFavourite?: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * What `set_lock` answers, given the target and the state asked for.
+   *
+   * A rejection by default, like the rest: a padlock that filled itself in
+   * while the recorder was never asked is exactly what issue #472 is about.
+   */
+  readonly setLock?: (args: Record<string, unknown>) => Promise<unknown>;
   /** What `record_target` answers: the process the button would record. */
   readonly recordTarget?: () => unknown;
   /**
@@ -225,6 +232,9 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'set_favourite') {
         return commands.setFavourite?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
+      }
+      if (command === 'set_lock') {
+        return commands.setLock?.(args) ?? Promise.reject(NO_LIBRARY_STUBBED);
       }
       if (command === 'record_target') {
         return Promise.resolve(commands.recordTarget?.() ?? null);

@@ -561,6 +561,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
                 Command::SetFavourite(_) => Some("set_favourite".to_owned()),
+                Command::SetLock(_) => Some("set_lock".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
@@ -585,6 +586,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::RestoreFromTrash(_) => Some("reply.restored".to_owned()),
                 Command::EmptyTrash(_) => Some("reply.trash_emptied".to_owned()),
                 Command::SetFavourite(_) => Some("reply.favourited".to_owned()),
+                Command::SetLock(_) => Some("reply.locked".to_owned()),
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
@@ -944,6 +946,25 @@ fn samples() -> Vec<Sample> {
                         session_id: "counter-strike-2-20260814-201500".to_owned(),
                         id: 0,
                         favourite: true,
+                        changed: true,
+                    },
+                }),
+            }),
+        ),
+        (
+            "a recording locked against automatic cleanup, and nothing else",
+            ServerMessage::Response(Response {
+                id: 18,
+                outcome: Outcome::Ok(Reply::Locked {
+                    lock: crate::library::LockMark {
+                        kind: "recording".to_owned(),
+                        session_id: String::new(),
+                        id: 1,
+                        // Its own lock, so both are true. The pair exists for
+                        // the other case: a recording inside a locked sitting
+                        // is protected without having one.
+                        locked: true,
+                        protected: true,
                         changed: true,
                     },
                 }),
@@ -1372,6 +1393,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
         Reply::LibraryTrash { .. } => "library_trash".to_owned(),
         Reply::Favourited { .. } => "favourited".to_owned(),
+        Reply::Locked { .. } => "locked".to_owned(),
         Reply::Restored { .. } => "restored".to_owned(),
         Reply::TrashEmptied { .. } => "trash_emptied".to_owned(),
         Reply::Plugins { .. } => "plugins".to_owned(),
@@ -1711,6 +1733,7 @@ fn exemplar_library_session() -> LibrarySession {
         ended_at: Some("2026-08-11T22:03:00+01:00".to_owned()),
         end_reason: Some("game-exited".to_owned()),
         favourite: true,
+        locked: true,
         recordings: vec![exemplar_library_recording()],
         clips: vec![exemplar_library_clip()],
     }
@@ -1736,6 +1759,11 @@ fn exemplar_library_recording() -> LibraryRecording {
         size_bytes: Some(9_812_009_112),
         missing_since: Some("2026-08-12T09:00:00+01:00".to_owned()),
         favourite: false,
+        // Not locked itself, and protected anyway: the exemplar carries the
+        // case that separates the two fields, because a pair that always
+        // agreed would not need to be a pair.
+        locked: false,
+        protected: true,
         tags: vec!["clutch".to_owned()],
     }
 }
@@ -1929,6 +1957,12 @@ fn every_built_command() -> Vec<Command> {
             id: 1,
             favourite: true,
         }),
+        Command::SetLock(crate::library::SetLock {
+            kind: "recording".to_owned(),
+            session_id: String::new(),
+            id: 1,
+            locked: true,
+        }),
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
         Command::GetHotkeys,
@@ -1950,6 +1984,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::RestoreFromTrash(_)
             | Command::EmptyTrash(_)
             | Command::SetFavourite(_)
+            | Command::SetLock(_)
             | Command::Plugins
             | Command::ExportRecording(_)
             | Command::GetHotkeys
@@ -2187,6 +2222,16 @@ fn every_reply() -> Vec<Reply> {
                 changed: true,
             },
         },
+        Reply::Locked {
+            lock: crate::library::LockMark {
+                kind: "recording".to_owned(),
+                session_id: String::new(),
+                id: 1,
+                locked: true,
+                protected: true,
+                changed: true,
+            },
+        },
         Reply::Plugins {
             installed: vec![exemplar_plugin()],
             refused: vec![crate::plugins::RefusedPlugin {
@@ -2211,6 +2256,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Restored { .. }
             | Reply::TrashEmptied { .. }
             | Reply::Favourited { .. }
+            | Reply::Locked { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::RecordingExported { .. }

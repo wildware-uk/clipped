@@ -108,15 +108,10 @@ impl core::fmt::Display for Lockable {
 /// Whatever SQLite reported. A target that is not in the database is **not** an
 /// error and locks nothing — the row may have gone between a screen drawing it
 /// and somebody clicking it, and that is not worth a failure.
-pub fn lock(
-    database: &Database,
-    what: &Lockable,
-    at: SystemTime,
-) -> Result<bool, rusqlite::Error> {
+pub fn lock(database: &Database, what: &Lockable, at: SystemTime) -> Result<bool, rusqlite::Error> {
     let (table, id_column) = what.table();
-    let statement = format!(
-        "UPDATE {table} SET locked_at = ?1 WHERE {id_column} = ?2 AND locked_at IS NULL"
-    );
+    let statement =
+        format!("UPDATE {table} SET locked_at = ?1 WHERE {id_column} = ?2 AND locked_at IS NULL");
     let stamp = rfc3339(at);
 
     let changed = match what {
@@ -132,12 +127,21 @@ pub fn lock(
 
 /// Unlocks `what`.
 ///
+/// Answers whether this call is what changed it, which means the `WHERE` has to
+/// test the column and not only the key: an `UPDATE` that sets `NULL` where it
+/// is already `NULL` matches its row and reports one change, and a caller told
+/// "you unlocked that" about something that was never locked has been told
+/// something untrue.
+///
 /// # Errors
 ///
 /// Whatever SQLite reported.
 pub fn unlock(database: &Database, what: &Lockable) -> Result<bool, rusqlite::Error> {
     let (table, id_column) = what.table();
-    let statement = format!("UPDATE {table} SET locked_at = NULL WHERE {id_column} = ?1");
+    let statement = format!(
+        "UPDATE {table} SET locked_at = NULL \
+         WHERE {id_column} = ?1 AND locked_at IS NOT NULL"
+    );
 
     let changed = match what {
         Lockable::Session(id) => database.connection().execute(&statement, params![id])?,

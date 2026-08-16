@@ -1050,4 +1050,134 @@ describe('the Library screen', () => {
     );
     expect(star).toHaveAttribute('aria-pressed', 'false');
   });
+
+  /*
+   * Keeping a recording out of automatic cleanup's reach (issue #472).
+   *
+   * The column existed nowhere before this: `cleanup::Protection` named locked
+   * recordings among the things it would not take, and there was no lock. These
+   * are the tests that the padlock reaches the recorder, and that it tells
+   * "you locked this" from "cleanup will not take this" — which are different
+   * for every recording inside a locked sitting.
+   */
+  it('protects a recording from automatic cleanup, and says so as a pressed control', async () => {
+    const user = userEvent.setup();
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          locked: args['locked'],
+          protected: args['locked'],
+          changed: true,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    expect(padlock).toHaveAttribute('aria-pressed', 'false');
+    await user.click(padlock);
+
+    await waitFor(() => {
+      expect(runtime.invocations.filter((invocation) => invocation.command === 'set_lock')).toEqual(
+        [{ command: 'set_lock', args: { kind: 'recording', sessionId: '', id: 12, locked: true } }],
+      );
+    });
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'Stop protecting cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('says a recording inside a protected sitting is protected by it, and offers no control', async () => {
+    // The case that separates `locked` from `protected`. A padlock drawn from
+    // `locked` alone would show this recording as one cleanup may take, and
+    // cleanup would not take it. A *control* drawn from `protected` would offer
+    // to unlock something that has no lock to release.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () =>
+        Promise.resolve(
+          page([
+            {
+              ...session(),
+              locked: true,
+              recordings: [{ ...session().recordings[0]!, locked: false, protected: true }],
+            },
+          ]),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const bySitting = await screen.findByRole('button', {
+      name: 'cs2-20260811-201400-1.mkv, Counter-Strike 2 is protected from automatic cleanup because its sitting is',
+    });
+    expect(bySitting).toBeDisabled();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Stop protecting cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('draws the lock the library holds rather than the one that was asked for', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: (args) =>
+        Promise.resolve({
+          kind: args['kind'],
+          session_id: args['sessionId'],
+          id: args['id'],
+          locked: false,
+          protected: false,
+          changed: false,
+        }),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    await user.click(padlock);
+
+    await waitFor(() => {
+      expect(padlock).toHaveAttribute('aria-pressed', 'false');
+    });
+  });
+
+  it('says a lock that would not go on did not, rather than drawing it anyway', async () => {
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([session()])),
+      setLock: () =>
+        Promise.reject(
+          Object.assign(new Error('the library could not be written'), {
+            code: 'library_unavailable',
+            message: 'the recording library could not be opened: the drive is not there',
+          }),
+        ),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    const padlock = await screen.findByRole('button', {
+      name: 'Protect cs2-20260811-201400-1.mkv, Counter-Strike 2 from automatic cleanup',
+    });
+    await user.click(padlock);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'That could not be kept from cleanup. the recording library could not be opened: the drive is not there Nothing was changed.',
+    );
+    expect(padlock).toHaveAttribute('aria-pressed', 'false');
+  });
 });

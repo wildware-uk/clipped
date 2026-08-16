@@ -17,6 +17,7 @@ import {
   useRecordingActions,
 } from './recordingActions';
 import { describeFavouriteProblem, useFavourites } from './favourites';
+import { describeLockProblem, useLocks } from './locks';
 import { SessionList } from './SessionList';
 import { WaitingOn, type Waiting } from './WaitingOn';
 
@@ -307,6 +308,7 @@ export function LibraryScreen(): ReactNode {
   const { read, hasMore, loadingMore, loadMore } = useSessions(query, PAGE);
   const actions = useRecordingActions();
   const favourites = useFavourites();
+  const locks = useLocks();
 
   return (
     <>
@@ -391,6 +393,7 @@ export function LibraryScreen(): ReactNode {
             label="Sessions"
             actions={actions}
             favourites={favourites}
+            locks={locks}
           />
           {/*
            * One region for the outcome of the last thing somebody asked for,
@@ -402,6 +405,8 @@ export function LibraryScreen(): ReactNode {
           <p role="status" className="clipped-panel__body">
             {favourites.outcome.state === 'failed' &&
               `That could not be kept. ${describeFavouriteProblem(favourites.outcome.problem)}`}
+            {locks.outcome.state === 'failed' &&
+              `That could not be kept from cleanup. ${describeLockProblem(locks.outcome.problem)}`}
             {favourites.outcome.state === 'idle' &&
               actions.outcome.state === 'working' &&
               `${actions.outcome.what} ${fileName(actions.outcome.path)}…`}

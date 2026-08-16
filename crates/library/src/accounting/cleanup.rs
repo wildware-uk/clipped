@@ -114,9 +114,7 @@ impl core::fmt::Display for Protection {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Locked => formatter.write_str("it is locked"),
-            Self::LockedSession => {
-                formatter.write_str("the sitting it belongs to is locked")
-            }
+            Self::LockedSession => formatter.write_str("the sitting it belongs to is locked"),
             Self::Favourite => formatter.write_str("it is a favourite"),
             Self::FavouriteSession => {
                 formatter.write_str("the sitting it belongs to is a favourite")
