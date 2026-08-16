@@ -154,10 +154,7 @@ impl Lineage {
     }
 
     /// The rows that claim descent from a member and are not members already.
-    fn candidates<'rows>(
-        &self,
-        rows: &'rows [ProcessTableEntry],
-    ) -> Vec<&'rows ProcessTableEntry> {
+    fn candidates<'rows>(&self, rows: &'rows [ProcessTableEntry]) -> Vec<&'rows ProcessTableEntry> {
         rows.iter()
             .filter(|row| self.contains(row.parent_pid()) && !self.contains(row.pid()))
             .collect()
