@@ -34,9 +34,10 @@ features = [
 [lints]
 workspace = true
 
-[dev-dependencies]
-# `src/source.rs`'s own tests need a real file to stat, and this is the
-# workspace's one place that knows how to make a temporary directory that
-# deletes itself, rather than a third copy of that (tests/media,
-# docs/testing.md).
-clipped-media-validation.workspace = true
+# No dev-dependencies on purpose. `src/source.rs`'s tests need a real file to
+# stat, and the workspace's temporary-directory helper lives in
+# `clipped-media-validation` — which is also layer 0, and
+# `tests/integration/tests/workspace_layering.rs` requires every dependency,
+# dev-dependencies included, to point at a strictly lower layer. A test-only
+# edge still couples two crates that are meant to be independent, so the twelve
+# lines are in the test module instead.

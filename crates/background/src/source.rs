@@ -217,6 +217,44 @@ mod tests {
         assert_ne!(key, identity(r"C:\videos\other.mkv", 1, 1).cache_key());
     }
 
+    /// A directory of this test's own, removed when it is dropped.
+    ///
+    /// `clipped-media-validation` has one of these and this is deliberately not
+    /// it: that crate is layer 0, this crate is layer 0, and
+    /// `tests/integration/tests/workspace_layering.rs` requires every
+    /// dependency — **including a dev-dependency** — to point at a strictly
+    /// lower layer. A test-only edge still couples two crates that are supposed
+    /// to be independent, and the rule is right to count it.
+    ///
+    /// So this is a dozen lines rather than a dependency. It is not a third
+    /// general-purpose temporary directory: it makes one directory, in the
+    /// system temporary directory, named for the process and the test, and
+    /// removes it on drop.
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "clipped-background-{name}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("a temporary directory can be created");
+            Self(path)
+        }
+
+        fn file(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn a_time_before_the_epoch_is_negative_rather_than_enormous() {
         let before = UNIX_EPOCH - core::time::Duration::from_secs(1);
@@ -226,7 +264,7 @@ mod tests {
 
     #[test]
     fn the_identity_of_a_real_file_is_its_length_and_its_time() {
-        let directory = clipped_media_validation::TemporaryDirectory::new("background-identity");
+        let directory = TestDirectory::new("identity");
         let path = directory.file("recording.bin");
         std::fs::write(&path, b"0123456789").expect("the file can be written");
 
@@ -241,7 +279,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_has_no_identity() {
-        let directory = clipped_media_validation::TemporaryDirectory::new("background-identity");
+        let directory = TestDirectory::new("identity");
         assert!(SourceIdentity::of(directory.file("absent.mkv")).is_err());
     }
 
