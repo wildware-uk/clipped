@@ -338,10 +338,23 @@ fn consider(entry: &Entry, candidate: &ProcessCandidate<'_>) -> Option<Verdict> 
         // An entry with no recorded identifier says nothing about *which* game
         // the launcher started, so matching on the launcher alone would make
         // every Steam game the same game.
+        //
+        // `not_the_game` is the one exception, and it exists because a launcher
+        // claims a *directory*: every process under it carries the game's
+        // identity, including the ones that are not the game. League's client
+        // sits beside League and runs for as long as somebody has the shop
+        // open — including while they are playing something else — so an entry
+        // may name the processes in its directory that are not it
+        // ([issue #514](https://github.com/wildware-uk/clipped/issues/514)).
+        //
+        // Only this rung is affected. A named process still reaches the name
+        // and path rungs below, which is what keeps this from being a way to
+        // make a game undetectable by accident.
         if launcher.kind() == kind
             && launcher
                 .app_id()
                 .is_some_and(|recorded| recorded.eq_ignore_ascii_case(app_id))
+            && !launcher.is_not_the_game(candidate.executable_name())
         {
             return Some(claimed(entry, MatchStrength::LauncherIdentity));
         }
@@ -458,6 +471,114 @@ mod tests {
     use crate::catalogue::entry::EntrySource;
     use crate::catalogue::Catalogue;
     use std::path::PathBuf;
+
+    /// A game whose launcher claims a directory holding two processes that are
+    /// not it.
+    fn with_a_client() -> Catalogue {
+        seed(
+            r#"
+[[game]]
+game_id = "shop-game"
+name = "Shop Game"
+[[game.executables]]
+name = "shop-game.exe"
+[game.launcher]
+kind = "riot"
+app_id = "shop_game"
+not_the_game = ["ShopClient.exe", "ShopCrashHandler.exe"]
+"#,
+        )
+    }
+
+    #[test]
+    fn a_process_the_entry_says_is_not_the_game_does_not_reach_the_launcher_rung() {
+        // The case #514 is about. A launcher claims a *directory*, so the shop
+        // client sitting beside the game carries the game's identity — and it
+        // runs for as long as somebody has it open, including while they are
+        // playing something else. Without this it would start a recording of a
+        // game nobody launched.
+        let catalogue = with_a_client();
+
+        for name in ["ShopClient.exe", "ShopCrashHandler.exe"] {
+            let outcome = catalogue.match_process(
+                &ProcessCandidate::new(name).from_launcher(LauncherKind::Riot, "shop_game"),
+            );
+            assert_eq!(outcome, Match::None, "{name} is not the game");
+        }
+    }
+
+    #[test]
+    fn the_exclusion_is_case_insensitive_because_windows_is() {
+        let catalogue = with_a_client();
+
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("shopclient.EXE").from_launcher(LauncherKind::Riot, "shop_game"),
+        );
+
+        assert_eq!(outcome, Match::None);
+    }
+
+    #[test]
+    fn everything_else_in_the_directory_is_still_the_game() {
+        // The half that matters most: the rung exists to identify a game whose
+        // executable name the catalogue does not know, and excluding two named
+        // processes must not cost that. An anti-cheat service nobody has ever
+        // written down is still Shop Game.
+        let catalogue = with_a_client();
+
+        for name in ["shop-game.exe", "some-anticheat.exe"] {
+            let outcome = catalogue.match_process(
+                &ProcessCandidate::new(name).from_launcher(LauncherKind::Riot, "shop_game"),
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    Match::One {
+                        strength: MatchStrength::LauncherIdentity,
+                        ..
+                    }
+                ),
+                "{name} should still be the game: {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_excluded_process_can_still_match_by_name() {
+        // The exclusion is a statement about the *launcher* rung only. If
+        // somebody writes an entry for the client itself — a launcher is a
+        // thing people record — the name rung still finds it, which is what
+        // stops this being a way to make a process undetectable by accident.
+        let catalogue = seed(
+            r#"
+[[game]]
+game_id = "shop-game"
+name = "Shop Game"
+[[game.executables]]
+name = "shop-game.exe"
+[game.launcher]
+kind = "riot"
+app_id = "shop_game"
+not_the_game = ["ShopClient.exe"]
+
+[[game]]
+game_id = "the-client"
+name = "The Client Itself"
+[[game.executables]]
+name = "ShopClient.exe"
+"#,
+        );
+
+        let outcome = catalogue.match_process(
+            &ProcessCandidate::new("ShopClient.exe").from_launcher(LauncherKind::Riot, "shop_game"),
+        );
+
+        assert_eq!(
+            outcome.entry().map(|entry| entry.game_id().as_str()),
+            Some("the-client"),
+            "the launcher rung refused it; the name rung should not have"
+        );
+    }
 
     /// Parses catalogue text as though it were the shipped seed data.
     fn seed(body: &str) -> Catalogue {

@@ -596,6 +596,43 @@ name = "a-game.exe"
     }
 
     #[test]
+    fn a_not_the_game_entry_with_a_directory_in_it_is_refused() {
+        // The same rule the executables and the child processes follow: a bare
+        // file name, because that is what a process reports itself as. A path
+        // here would silently match nothing, and an exclusion that silently
+        // matches nothing is a shop client that starts recording again.
+        let error = rejected(
+            r#"
+[[game]]
+game_id = "a-game"
+name = "A Game"
+[[game.executables]]
+name = "a-game.exe"
+[game.launcher]
+kind = "riot"
+app_id = "a_game"
+not_the_game = ["C:/Games/A Game/client.exe"]
+"#,
+        );
+
+        let message = error.to_string();
+        assert!(
+            matches!(
+                error,
+                CatalogueError::InvalidEntry {
+                    problem: EntryProblem::LauncherNotTheGameInvalid { .. },
+                    ..
+                }
+            ),
+            "expected a path to be refused, got {error:?}"
+        );
+        assert!(
+            message.contains("not_the_game"),
+            "the message should name the key: {message}"
+        );
+    }
+
+    #[test]
     fn an_executable_name_with_a_directory_in_it_is_refused_with_the_fix() {
         let error = rejected(
             r#"

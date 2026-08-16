@@ -24,6 +24,8 @@
 #   kind = "steam"                       # steam, epic, xbox, battle-net, ea,
 #                                        # ubisoft, riot, gog or other
 #   app_id = "12345"                     # optional, the launcher's own id
+#   not_the_game = ["helper.exe"]        # optional, processes in this game's
+#                                        # install directory that are not it
 #
 #   [game.capture]                       # optional, defaults to "unknown"
 #   compatibility = "unknown"            # unknown, graphics-capture,
@@ -167,6 +169,21 @@ name = "League of Legends.exe"
 
 [game.launcher]
 kind = "riot"
+# The product identifier without the patchline: `live` and `pbe` are the same
+# game and both answer this. Read from a real installation's metadata rather
+# than guessed — Riot's own name for League is not "league".
+app_id = "league_of_legends"
+# Riot claims a *directory*, and these four live in League's. The client is the
+# shop and the lobby: it runs for as long as somebody has it open, including
+# while they are playing something else entirely, so without this line opening
+# the shop would start a recording of League (issue #514). The game itself is
+# `League of Legends.exe`, in `Game\` below them.
+not_the_game = [
+    "LeagueClient.exe",
+    "LeagueClientUx.exe",
+    "LeagueClientUxRender.exe",
+    "LeagueCrashHandler64.exe",
+]
 
 [game.capture]
 compatibility = "unknown"
