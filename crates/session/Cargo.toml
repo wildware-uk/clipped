@@ -75,6 +75,14 @@ clipped-plugins.workspace = true
 # recorder's job, not the desktop's, which links `clipped-ipc` and nothing else
 # (ADR 0002). Nothing in generation opens a database, a file or a socket.
 clipped-library.workspace = true
+# The database handle `clipped-library`'s accounting and trash take. `sweep`
+# (`src/cleanup.rs`) hands one to `cleanup::candidates` and `cleanup::apply`,
+# and naming the type is the only reason this is here: nothing in this crate
+# opens a database, prepares a statement or writes a row. `clipped-library`
+# does not re-export it and a wrapper here would be a second name for the same
+# thing (AGENTS.md section 55). Layer 0, and already linked by anything that
+# links the library.
+clipped-storage.workspace = true
 # The vocabulary a clip's range is written in: `RecordingId` and `SourceSpan`.
 # A virtual clip is an edit document, so naming one means naming the document
 # model's types; `clipped-library` does not re-export them and a wrapper here

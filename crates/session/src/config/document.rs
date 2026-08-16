@@ -179,12 +179,29 @@ pub(crate) fn parse(
         Section::Document,
     )?);
 
+    // Refused rather than kept, unlike the section above, and for the opposite
+    // reason: a limit outside `clipped-library`'s bounds is a limit the user
+    // meant and would not get, and a library they believe is capped and is not
+    // is worse than a file that will not load (AGENTS.md section 27).
+    let storage = super::storage::read(take_object(
+        path,
+        &mut document,
+        "storage",
+        Section::Document,
+    )?)
+    .map_err(|(key, source)| ConfigurationError::InvalidStorageLimit {
+        path: path.to_path_buf(),
+        key,
+        source,
+    })?;
+
     // Whatever is left is a key from a newer build, or the version, which is
     // rewritten rather than kept.
     document.remove("version");
     let unknown = document.into_iter().collect();
 
-    let configuration = Configuration::from_parts(global, games, hotkeys, plugins, unknown);
+    let configuration =
+        Configuration::from_parts(global, games, hotkeys, plugins, storage, unknown);
     let loaded = if version == SCHEMA_VERSION {
         Loaded::AsWritten
     } else {
@@ -219,6 +236,12 @@ pub(crate) fn render(configuration: &Configuration) -> String {
         "plugins".to_owned(),
         Value::Object(super::plugins::write(configuration.plugins())),
     );
+    // Written only when something is set, so that a file nobody has given a
+    // storage limit does not grow an empty section explaining that it has none.
+    let storage = super::storage::write(configuration.storage());
+    if !storage.is_empty() {
+        document.insert("storage".to_owned(), Value::Object(storage));
+    }
 
     for (key, value) in configuration.unrecognised() {
         document.insert(key.clone(), value.clone());

@@ -95,6 +95,7 @@ mod game;
 mod hotkeys;
 mod plugins;
 mod preferences;
+mod storage;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -111,6 +112,7 @@ pub use preferences::{
     MAXIMUM_DEVICE_NAME, MAXIMUM_DIMENSION, MAXIMUM_FRAMERATE, MINIMUM_DIMENSION,
     MINIMUM_FRAMERATE,
 };
+pub use storage::{trash_beside, StorageProblem, StorageSettings, TrashPathError};
 pub use store::ConfigurationStore;
 pub use value::{Resolved, Scope, SettingKey, SettingSource};
 
@@ -136,6 +138,9 @@ pub struct Configuration {
     games: BTreeMap<GameKey, Preferences>,
     hotkeys: HotkeyOverrides,
     plugins: PluginConsents,
+    /// What the library is allowed to occupy. Global only, and a section of its
+    /// own for the reason `storage` gives.
+    storage: StorageSettings,
     /// Top-level keys from a newer build, kept and written back (AGENTS.md
     /// section 56).
     unknown: BTreeMap<String, serde_json::Value>,
@@ -257,6 +262,7 @@ impl Configuration {
         games: BTreeMap<GameKey, Preferences>,
         hotkeys: HotkeyOverrides,
         plugins: PluginConsents,
+        storage: StorageSettings,
         unknown: BTreeMap<String, serde_json::Value>,
     ) -> Self {
         Self {
@@ -264,8 +270,30 @@ impl Configuration {
             games,
             hotkeys,
             plugins,
+            storage,
             unknown,
         }
+    }
+
+    /// What the library is allowed to occupy.
+    ///
+    /// Global, and deliberately not resolvable per game: a library is one thing
+    /// however many games are in it.
+    #[must_use]
+    pub const fn storage(&self) -> &StorageSettings {
+        &self.storage
+    }
+
+    /// Replaces what the library is allowed to occupy.
+    pub fn set_storage(&mut self, storage: StorageSettings) {
+        self.storage = storage;
+    }
+
+    /// The limits automatic cleanup enforces, which is unlimited unless the
+    /// user has set one.
+    #[must_use]
+    pub fn storage_limits(&self) -> clipped_library::accounting::StorageLimits {
+        self.storage.limits()
     }
 
     /// Which plugins the user enabled, and what they agreed to.

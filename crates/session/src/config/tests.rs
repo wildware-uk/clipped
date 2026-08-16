@@ -897,7 +897,8 @@ fn a_setting_this_build_has_never_heard_of_survives_being_read_and_saved() {
   "global": { "framerate": 60, "hdr": true },
   "games": { "counter-strike-2": { "bitrate_kbps": 40000 } },
   "hotkeys": { "open_clip_editor": "Ctrl+F7" },
-  "storage": { "keep_days": 30 }
+  "storage": { "maximum_usage_bytes": 500000000000, "keep_days": 30 },
+  "telemetry": { "enabled": false }
 }"#,
     )
     .expect("the file can be written");
@@ -914,7 +915,8 @@ fn a_setting_this_build_has_never_heard_of_survives_being_read_and_saved() {
     );
     assert_eq!(
         store.current().unrecognised_keys().collect::<Vec<_>>(),
-        vec!["storage"]
+        vec!["telemetry"],
+        "`storage` is a section this build reads; `telemetry` is the one it has never heard of"
     );
     assert_eq!(
         store
