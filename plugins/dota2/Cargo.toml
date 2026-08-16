@@ -26,6 +26,12 @@ name = "clipped-dota2-plugin"
 path = "src/main.rs"
 
 [dependencies]
+# The command-line parser every executable in this workspace uses, so that
+# `--help` looks the same wherever a contributor meets it. Here because
+# installing the Game State Integration file is a thing a person asks for
+# rather than something that happens to them when a session starts, which means
+# subcommands (issue #382). Dual MIT/Apache-2.0.
+clap = { workspace = true }
 # The event vocabulary this plugin reports in (issue #68). Dota's own words —
 # `roshan`, `radiant`, `kill_streak` — never leave this crate except inside an
 # event payload, which nothing above the plugin interprets.
