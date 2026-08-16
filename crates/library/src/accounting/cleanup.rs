@@ -41,12 +41,21 @@
 //!
 //! The issue's scope named a fourth — a recording that is **being edited** — and
 //! it is still absent, because nothing records that an edit document is open.
-//! That is not an oversight deferred indefinitely: `clipped-edit` is a document
-//! model whose only consumer is `clipped-export`, so there is no editor holding
-//! a document open for this to protect. A lock file held for the lifetime of an
-//! edit is the mechanism chosen for it
-//! ([issue #472](https://github.com/wildware-uk/clipped/issues/472)), and it
-//! waits on there being an editor to hold one.
+//!
+//! The mechanism for it is settled: a lock file held for the lifetime of the
+//! edit, released by the operating system whether the editor exits or dies
+//! ([issue #472](https://github.com/wildware-uk/clipped/issues/472)). A flag in
+//! this database would survive a crash and protect a recording for ever, which
+//! fails silently in the direction of a full disk.
+//!
+//! What it waits on is a document being **open**, which is
+//! [issue #306](https://github.com/wildware-uk/clipped/issues/306) rather than
+//! anything here. The Editor screen exists and is routed
+//! (`apps/desktop/src/editor/EditorScreen.tsx`), and there is no command that
+//! serves a clip's edit document to it, so nothing has ever opened one. Until
+//! something does there is no interval for a lock file to span, and a mechanism
+//! guarding a state that cannot occur is worse than an absent one — it reads as
+//! a protection that is working.
 //!
 //! It is not silently ignored: [`Protection`] is the whole vocabulary, and a
 //! recording with no [`Protection`] against it is one this may take.
