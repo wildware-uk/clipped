@@ -13,6 +13,9 @@
 //!   anything at all is launched.
 //! - **What will it do with the network?** [`NetworkAccess`], which the user
 //!   sees and consents to before the plugin is ever started (`crate::network`).
+//! - **What will it do with the filesystem, beyond its own directory?**
+//!   [`FilesystemAccess`], the same shape as `NetworkAccess` and consented to
+//!   alongside it (`crate::filesystem`).
 //!
 //! # Why a manifest this build does not fully understand is refused
 //!
@@ -37,7 +40,8 @@ use serde_json::Value;
 
 use clipped_events::{EventSource, InvalidSource};
 
-use crate::network::{NetworkAccess, NetworkDeclarationError};
+use crate::filesystem::{FilesystemAccess, FilesystemDeclarationError};
+use crate::network::{ConsentToken, NetworkAccess, NetworkDeclarationError};
 
 /// The contract version this build speaks.
 ///
@@ -48,7 +52,13 @@ use crate::network::{NetworkAccess, NetworkDeclarationError};
 /// running plugin is negotiated with once, at start-up. Tying the two together
 /// would mean a plugin that added a wire message forcing a migration of every
 /// event in a user's library.
-pub const CONTRACT: ContractVersion = ContractVersion(1);
+///
+/// Contract 2 added [`filesystem`](PluginManifest::filesystem): what a plugin
+/// declares about the filesystem, beyond `network`. A manifest that never uses
+/// the field does not need to say so — see
+/// [`ContractVersion::is_supported`] — so this bump costs nothing to a
+/// manifest that has not touched it.
+pub const CONTRACT: ContractVersion = ContractVersion(2);
 
 /// The most a manifest's human-readable fields may carry.
 const MAX_NAME_BYTES: usize = 64;
@@ -77,12 +87,19 @@ impl ContractVersion {
 
     /// Whether this build speaks it.
     ///
-    /// One version today, so this is an equality test. It is a method rather
-    /// than a comparison at every call site because the day there are two, the
-    /// rule about which of them a host still accepts is written once.
+    /// A version *at most* this build's own, not only an exact match: the
+    /// contract only ever grows a manifest's vocabulary — a version bump adds
+    /// a field, and never removes or repurposes one a manifest already relied
+    /// on — so a build that speaks contract 2 has never forgotten anything a
+    /// contract 1 manifest could say. A plugin whose manifest has not been
+    /// touched since contract 1 therefore keeps declaring `"contract": 1`
+    /// forever and is read exactly as it always was; only a manifest that
+    /// starts *using* a later field has any reason to say so. It is a method
+    /// rather than a comparison at every call site because the rule about
+    /// which versions a host still accepts is written once.
     #[must_use]
     pub const fn is_supported(self) -> bool {
-        self.0 == CONTRACT.0
+        self.0 <= CONTRACT.0
     }
 }
 
@@ -290,7 +307,7 @@ impl Supports {
 ///
 /// ```json
 /// {
-///   "contract": 1,
+///   "contract": 2,
 ///   "id": "counter-strike-2",
 ///   "name": "Counter-Strike 2",
 ///   "version": "0.1.0",
@@ -303,6 +320,13 @@ impl Supports {
 ///       "direction": "listen",
 ///       "endpoint": "127.0.0.1:3212",
 ///       "purpose": "receives Counter-Strike 2 game state"
+///     }
+///   ],
+///   "filesystem": [
+///     {
+///       "scope": "game-installation",
+///       "access": "write",
+///       "purpose": "writes the Game State Integration configuration Counter-Strike 2 reads at start-up"
 ///     }
 ///   ]
 /// }
@@ -331,6 +355,11 @@ pub struct PluginManifest {
     /// permitted (`docs/privacy.md`).
     #[serde(default)]
     network: NetworkAccess,
+    /// What it will do with the filesystem, beyond running its own executable
+    /// from its own directory. Absent means none, which means none is
+    /// permitted, the same rule `network` follows (`crate::filesystem`).
+    #[serde(default)]
+    filesystem: FilesystemAccess,
 }
 
 impl PluginManifest {
@@ -415,6 +444,25 @@ impl PluginManifest {
         &self.network
     }
 
+    /// What it will do with the filesystem, beyond running its own executable
+    /// from its own directory.
+    #[must_use]
+    pub const fn filesystem(&self) -> &FilesystemAccess {
+        &self.filesystem
+    }
+
+    /// The token that records consent to exactly this manifest — what it is
+    /// enabled with, and what a later reading of it is compared against.
+    ///
+    /// Covers both `network` and `filesystem`, so a change to either one
+    /// lapses consent the same way (`docs/privacy.md`). See
+    /// [`ConsentToken::of`] for why a plugin that never declares filesystem
+    /// access keeps the exact token it always had.
+    #[must_use]
+    pub fn consent_token(&self) -> ConsentToken {
+        ConsentToken::of(&self.network, &self.filesystem)
+    }
+
     fn validate(&self) -> Result<(), ManifestError> {
         check_line("name", &self.name, MAX_NAME_BYTES, true)?;
         check_line("version", &self.version, MAX_VERSION_BYTES, true)?;
@@ -428,7 +476,10 @@ impl PluginManifest {
         self.supports.validate()?;
         self.network
             .validate()
-            .map_err(|source| ManifestError::Network { source })
+            .map_err(|source| ManifestError::Network { source })?;
+        self.filesystem
+            .validate()
+            .map_err(|source| ManifestError::Filesystem { source })
     }
 
     /// A plugin runs its own file, from its own directory.
@@ -520,6 +571,11 @@ pub enum ManifestError {
         /// Which rule.
         source: NetworkDeclarationError,
     },
+    /// Its filesystem declaration breaks `docs/privacy.md`.
+    Filesystem {
+        /// Which rule.
+        source: FilesystemDeclarationError,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -574,6 +630,10 @@ impl fmt::Display for ManifestError {
                 formatter,
                 "plugin.json's network declaration was refused: {source}"
             ),
+            Self::Filesystem { source } => write!(
+                formatter,
+                "plugin.json's filesystem declaration was refused: {source}"
+            ),
         }
     }
 }
@@ -583,6 +643,7 @@ impl core::error::Error for ManifestError {
         match self {
             Self::Malformed { source } => Some(source),
             Self::Network { source } => Some(source),
+            Self::Filesystem { source } => Some(source),
             _ => None,
         }
     }
@@ -646,21 +707,101 @@ pub(crate) mod tests {
     fn a_newer_contract_is_reported_as_a_newer_contract() {
         // And not as the unknown field a newer manifest is likely to carry:
         // the two failures have different answers, and only one of them is the
-        // user's to fix.
-        let newer = r#"{"contract": 2, "id": "acme", "name": "Acme", "version": "1",
+        // user's to fix. Contract 3 stands in for "a version that does not
+        // exist yet", the same way contract 2 did before this change added it.
+        let newer = r#"{"contract": 3, "id": "acme", "name": "Acme", "version": "1",
                         "executable": "acme.exe", "supports": {"executables": ["a.exe"]},
                         "reads_replays": true}"#;
-        let refusal = PluginManifest::parse(newer).expect_err("contract 2 is not spoken here");
+        let refusal = PluginManifest::parse(newer).expect_err("contract 3 is not spoken here");
         assert!(
             matches!(
                 refusal,
-                ManifestError::UnsupportedContract { contract } if contract.number() == 2
+                ManifestError::UnsupportedContract { contract } if contract.number() == 3
             ),
             "expected an unsupported contract, got {refusal}"
         );
         assert!(
             refusal.to_string().contains("newer Clipped"),
             "the message should say what to do: {refusal}"
+        );
+    }
+
+    #[test]
+    fn an_older_contract_that_uses_none_of_the_later_fields_still_reads() {
+        // `ContractVersion::is_supported` is `<=`, not `==`: a manifest that
+        // has never touched `filesystem` keeps saying `"contract": 1` forever,
+        // and this build must still read it exactly as it always did.
+        let manifest = PluginManifest::parse(EXAMPLE).expect("EXAMPLE still says contract 1");
+        assert_eq!(manifest.contract().number(), 1);
+        assert!(manifest.filesystem().is_empty());
+    }
+
+    #[test]
+    fn a_manifest_can_declare_filesystem_access() {
+        let manifest = PluginManifest::parse(&example_with(
+            "filesystem",
+            r#"[{"scope":"game-installation","access":"write",
+                 "purpose":"writes the Game State Integration configuration"}]"#,
+        ))
+        .expect("a filesystem declaration is well formed");
+        assert_eq!(
+            manifest.filesystem().summary(),
+            vec![
+                "Writes to the game's own installation directory — writes the Game State \
+                 Integration configuration"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_declares_no_filesystem_access_declares_none() {
+        let manifest = PluginManifest::parse(EXAMPLE).expect("the example is well formed");
+        assert!(manifest.filesystem().is_empty());
+    }
+
+    #[test]
+    fn a_filesystem_declaration_the_privacy_policy_refuses_refuses_the_manifest() {
+        let refusal = PluginManifest::parse(&example_with(
+            "filesystem",
+            r#"[{"scope":"game-installation","access":"write","purpose":""}]"#,
+        ))
+        .expect_err("an empty purpose is refused");
+        assert!(
+            matches!(refusal, ManifestError::Filesystem { .. }),
+            "expected a filesystem refusal, got {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_no_filesystem_field_keeps_the_consent_token_it_always_had() {
+        // The property this whole design leans on: adding the vocabulary must
+        // not, by itself, ask every already-enabled plugin to be agreed to
+        // again. A manifest that never mentions `filesystem` is exactly what
+        // every manifest looked like before this change, and its token must
+        // not have moved.
+        let manifest = PluginManifest::parse(EXAMPLE).expect("the example is well formed");
+        assert_eq!(
+            manifest.consent_token(),
+            manifest.network().consent_token(),
+            "declaring no filesystem access changed the consent token"
+        );
+    }
+
+    #[test]
+    fn declaring_filesystem_access_changes_the_consent_token() {
+        let before = PluginManifest::parse(EXAMPLE)
+            .expect("the example is well formed")
+            .consent_token();
+        let after = PluginManifest::parse(&example_with(
+            "filesystem",
+            r#"[{"scope":"game-installation","access":"write",
+                 "purpose":"writes the Game State Integration configuration"}]"#,
+        ))
+        .expect("a filesystem declaration is well formed")
+        .consent_token();
+        assert_ne!(
+            before, after,
+            "a plugin that starts declaring filesystem access must need consent again"
         );
     }
 
