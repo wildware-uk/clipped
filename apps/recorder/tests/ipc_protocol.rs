@@ -1740,3 +1740,253 @@ fn assert_still_serving(recorder: &ServedRecorder) {
         "the recorder should still be serving after refusing a connection"
     );
 }
+
+/// The frequency each sound track of the playback fixture carries.
+///
+/// The same three AGENTS.md section 26 uses, so that "which track is this" is
+/// answered by listening to the file rather than by trusting its metadata.
+const PLAYBACK_MIX: f64 = 440.0;
+const PLAYBACK_GAME: f64 = 880.0;
+const PLAYBACK_MICROPHONE: f64 = 1320.0;
+
+/// Builds a recording shaped like a Clipped one — a picture and three named
+/// sound tracks, the first of them flagged as the default — and returns it.
+///
+/// Built with the pinned build's own `ffmpeg` for the reason
+/// [`recording_to_export`] is, and with **uncompressed** sound for the same
+/// reason: that is what Clipped writes, and it is the half that would go
+/// untested if the fixture were convenient instead.
+fn recording_with_three_sound_tracks(ffmpeg: &std::path::Path, into: &std::path::Path) {
+    let output = Command::new(ffmpeg)
+        .arg("-nostdin")
+        .args([
+            "-hide_banner",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=30",
+        ])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=1320:sample_rate=48000"])
+        .args(["-t", EXPORT_FIXTURE_SECONDS])
+        .args(["-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a"])
+        .args(["-c:v", "mpeg4", "-c:a", "pcm_s16le"])
+        .args(["-metadata:s:a:0", "title=Compatibility Mix"])
+        .args(["-metadata:s:a:1", "title=Game"])
+        .args(["-metadata:s:a:2", "title=Microphone"])
+        .args(["-disposition:a:0", "default"])
+        .args(["-disposition:a:1", "0"])
+        .args(["-disposition:a:2", "0"])
+        .arg(into)
+        .output()
+        .expect("the pinned ffmpeg can be run");
+
+    assert!(
+        output.status.success(),
+        "the recording to play could not be built: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Sends `open_playback` and returns what the recorder answered with.
+fn open_playback(
+    client: &mut Client,
+    source: &std::path::Path,
+    audio_track: Option<usize>,
+) -> clipped_ipc::PlaybackStream {
+    match client
+        .call(&IpcCommand::OpenPlayback(clipped_ipc::OpenPlayback {
+            source: source.to_string_lossy().into_owned(),
+            audio_track,
+        }))
+        .unwrap_or_else(|error| panic!("playback was refused: {error}"))
+    {
+        Reply::PlaybackOpened { playback } => playback,
+        other => panic!("expected a playback stream, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_recording_opened_for_playback_is_served_whole_and_costs_nothing_to_open() {
+    // Issue #304's first criterion, from the recorder's side: what the window
+    // is told to play is the recording itself, because a WebView2 plays it
+    // (`docs/adr/0010-what-the-webview-plays.md`). A regression that started
+    // remuxing every recording somebody watched would leave the player working
+    // and cost a pass over the file every time, so `prepared` is asserted as
+    // hard as the path is.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-playback");
+    let source = directory.file("match.mkv");
+    recording_with_three_sound_tracks(tools.ffmpeg(), &source);
+    let recording_before = std::fs::read(&source).expect("the recording can be read");
+
+    let recorder = ServedRecorder::start("playback");
+    let mut client = recorder.client();
+
+    let playback = open_playback(&mut client, &source, None);
+
+    assert_eq!(
+        playback.path,
+        source.to_string_lossy(),
+        "the recording itself is what plays when nothing has to be prepared"
+    );
+    assert!(
+        !playback.prepared,
+        "opening a recording on its own default track must not copy it: {playback:?}"
+    );
+    // Stream 1: the picture is stream 0, and the index is the container's own
+    // rather than an ordinal among the sound tracks.
+    assert_eq!(playback.audio_track, Some(1));
+
+    let names: Vec<Option<&str>> = playback
+        .audio_tracks
+        .iter()
+        .map(|track| track.name.as_deref())
+        .collect();
+    assert_eq!(
+        names,
+        vec![Some("Compatibility Mix"), Some("Game"), Some("Microphone")],
+        "the window needs the recording's own track names to draw a selector"
+    );
+    assert_eq!(
+        playback
+            .audio_tracks
+            .iter()
+            .map(|track| track.index)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        playback
+            .audio_tracks
+            .iter()
+            .map(|track| track.default)
+            .collect::<Vec<_>>(),
+        vec![true, false, false]
+    );
+
+    assert!(
+        std::fs::read(&source).expect("the recording can be read again") == recording_before,
+        "opening a recording for playback changed it"
+    );
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_track_chosen_for_playback_is_the_one_that_can_be_heard_in_what_is_served() {
+    // Issue #304's second criterion, and the reason any of this exists: a media
+    // element cannot choose an audio track, so choosing one means being handed a
+    // file that holds it. The assertion is on what is *audible* in that file — a
+    // selection that took the wrong stream would still produce a one-track MP4
+    // of the right length with the right codec.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-playback-track");
+    let source = directory.file("match.mkv");
+    recording_with_three_sound_tracks(tools.ffmpeg(), &source);
+
+    let recorder = ServedRecorder::start("playback-track");
+    let mut client = recorder.client();
+
+    for (stream, tone, others) in [
+        (2, PLAYBACK_GAME, [PLAYBACK_MIX, PLAYBACK_MICROPHONE]),
+        (3, PLAYBACK_MICROPHONE, [PLAYBACK_MIX, PLAYBACK_GAME]),
+    ] {
+        let playback = open_playback(&mut client, &source, Some(stream));
+
+        assert_eq!(playback.audio_track, Some(stream));
+        assert!(
+            playback.prepared,
+            "a track a media element cannot reach has to be prepared: {playback:?}"
+        );
+        assert_ne!(
+            playback.path,
+            source.to_string_lossy(),
+            "a prepared copy must never be the recording itself"
+        );
+        assert_eq!(
+            playback.audio_tracks.len(),
+            3,
+            "the tracks offered are the recording's, not the copy's: {playback:?}"
+        );
+
+        clipped_media_validation::Media::open(std::path::Path::new(&playback.path))
+            .unwrap_or_else(|error| panic!("what was served does not open: {error}"))
+            .validate()
+            .audio_stream_count(1)
+            .audio_tone(
+                0,
+                clipped_media_validation::Tone::at(tone)
+                    .isolated_from(others[0])
+                    .isolated_from(others[1]),
+            )
+            .video_stream_count(1)
+            .assert_valid();
+    }
+
+    // And asking for a track the recording has not got says so, rather than
+    // quietly playing the default: a window that asked for the microphone and
+    // was handed the mix would look exactly as though it had worked.
+    let error = client
+        .call(&IpcCommand::OpenPlayback(clipped_ipc::OpenPlayback {
+            source: source.to_string_lossy().into_owned(),
+            audio_track: Some(9),
+        }))
+        .expect_err("a track that is not there is refused");
+    match error {
+        ClientError::Refused(refusal) => {
+            assert_eq!(refusal.code, ErrorCode::PlaybackFailed);
+            assert!(
+                refusal.message.contains('9'),
+                "the refusal should name the track: {}",
+                refusal.message
+            );
+        }
+        other => panic!("expected a refusal, got {other}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
+fn a_recording_whose_file_has_gone_is_refused_with_something_a_person_can_act_on() {
+    // Issue #304's fourth criterion. The window draws this sentence instead of a
+    // player, so it has to name the file and say what probably happened to it
+    // rather than being "playback failed" (AGENTS.md sections 15, 27 and 45).
+    let recorder = ServedRecorder::start("playback-missing");
+    let mut client = recorder.client();
+
+    let error = client
+        .call(&IpcCommand::OpenPlayback(clipped_ipc::OpenPlayback {
+            source: r"D:\clips\a recording nobody has\match.mkv".to_owned(),
+            audio_track: None,
+        }))
+        .expect_err("a recording that is not there cannot be played");
+
+    match error {
+        ClientError::Refused(refusal) => {
+            assert_eq!(refusal.code, ErrorCode::PlaybackFailed);
+            assert!(
+                refusal.message.contains("match.mkv")
+                    && refusal.message.contains("not there any more"),
+                "the refusal should name the file and say it has gone: {}",
+                refusal.message
+            );
+        }
+        other => panic!("expected a refusal, got {other}"),
+    }
+
+    drop(client);
+    recorder.stop();
+}

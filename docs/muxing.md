@@ -24,6 +24,8 @@ that implements it, and [ffmpeg.md](ffmpeg.md) how to build against it.
 - H.264, HEVC and AV1 video; PCM, AAC and Opus audio.
 - `remux_to_mp4` — copies a finished recording into MP4 without decoding it, and
   `Mp4Plan::inspect`, which says what that copy would cost before it is made.
+- `remux_to_mp4_carrying` — the same copy taking **one** of the recording's sound
+  tracks. See [A copy that carries one sound track](#a-copy-that-carries-one-sound-track).
 
 The recorder writes video and audio through this crate
 ([issue #180](https://github.com/wildware-uk/clipped/issues/180)). What is here
@@ -40,6 +42,44 @@ in this crate's own wording ([ipc.md](ipc.md), [desktop-ui.md](desktop-ui.md),
 not wired is the *automatic* one — the setting that offers it (SPEC.md section
 15, "Allow automatic remux") and the retention policy for the MKV it was made
 from belong to the session and library work, and are not in this crate.
+
+`remux_to_mp4_carrying` is reached the same way, from `open_playback`
+([issue #304](https://github.com/wildware-uk/clipped/issues/304)), and only when
+somebody chooses a sound track other than the one a media element would play by
+itself.
+
+## A copy that carries one sound track
+
+`remux_to_mp4_carrying(source, destination, AudioTracks::Only(index))` copies the
+picture and one named sound track, and leaves the rest out. Everything else is
+`remux_to_mp4`: the packets are copied rather than decoded, the source is opened
+for reading only, and a destination that already exists is refused.
+
+It exists because of something a browser cannot do.
+`HTMLMediaElement.audioTracks` is not implemented in Chromium, which WebView2 is,
+so a `<video>` handed a recording with four sound tracks plays whichever one its
+demuxer reaches first — the **first** the container declares, ignoring Matroska's
+default-track flag — and offers no way off it. A window that lets somebody hear
+the microphone track on its own therefore has to be handed a file that holds the
+microphone track and nothing else. The selection happens here, on the way out,
+rather than in the element ([ADR 0010](adr/0010-what-the-webview-plays.md),
+[desktop-ui.md](desktop-ui.md)).
+
+Two things about the result are worth stating:
+
+- **A track left out is `Carriage::NotChosen`, not a loss.** It does not make the
+  copy refuse — which is what `Carriage::CodecUnsupported` does — and the plan
+  still lists every track of the source, so a caller can say what it made rather
+  than having to remember what it asked for. `Mp4Plan::is_lossless` is false, as
+  it should be: the MP4 does not hold everything the recording does.
+- **An index that is not a sound track of the source is refused**
+  (`RemuxError::NoSuchAudioTrack`), before the destination is opened. A copy made
+  anyway would be silent, and a silent file is indistinguishable from a recording
+  that never had sound.
+
+No encoder is involved, here or anywhere on the playback path: PCM is carried
+into MP4 as `ipcm`, which the pinned FFmpeg 8 build writes and a WebView2 plays
+(ADR 0010).
 
 ## Writing a recording
 

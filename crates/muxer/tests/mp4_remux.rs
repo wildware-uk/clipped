@@ -24,9 +24,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clipped_media_validation::{
-    require_media_tools, AudioStream, Media, Stream, TemporaryDirectory, VideoStream,
+    require_media_tools, AudioStream, Media, Stream, TemporaryDirectory, Tone, VideoStream,
 };
-use clipped_muxer::{remux_to_mp4, Carriage, Mp4Plan, RemuxError, TrackKind};
+use clipped_muxer::{
+    remux_to_mp4, remux_to_mp4_carrying, AudioTracks, Carriage, Mp4Plan, RemuxError, TrackKind,
+};
 use support::{build_fixture_with_ffmpeg, run_synthetic_recording};
 
 /// How long a recording these tests write.
@@ -667,4 +669,131 @@ fn a_recording_that_cannot_be_read_is_reported_rather_than_half_copied() {
         !destination.exists(),
         "a remux of a recording that does not exist created an MP4"
     );
+}
+
+// The copy that carries one sound track, which is what a player is served
+// (issue #304). The tones are the ones `examples/synthetic_recording.rs`
+// produces, and they are the whole point of these two tests: a selection that
+// took the wrong stream would still produce a one-audio-track MP4 of the right
+// length with the right codec, and only what is *audible* on it says which
+// track was taken.
+
+/// The frequency each source's track carries, as AGENTS.md section 26 sets them.
+const GAME: f64 = 440.0;
+const OTHER_SYSTEM_AUDIO: f64 = 880.0;
+const MICROPHONE: f64 = 1320.0;
+
+#[test]
+fn every_sound_track_can_be_chosen_and_the_copy_carries_the_one_that_was() {
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-remux-one-track");
+    // Video, then the compatibility mix, the game, other system audio and the
+    // microphone: the model's order, which is the order the container declares
+    // (`clipped_muxer::AudioSource`).
+    let source = record(&directory, "recording.mkv", &["--audio-tracks", "4"]);
+    let recorded = Media::open(&source).expect("a finished recording opens");
+    let recording_before = std::fs::read(&source).expect("the recording can be read");
+
+    for (stream, title, tone, other_tones) in [
+        (2, "Game", GAME, [OTHER_SYSTEM_AUDIO, MICROPHONE]),
+        (
+            3,
+            "Other System Audio",
+            OTHER_SYSTEM_AUDIO,
+            [GAME, MICROPHONE],
+        ),
+        (4, "Microphone", MICROPHONE, [GAME, OTHER_SYSTEM_AUDIO]),
+    ] {
+        let destination = directory.file(&format!("track-{stream}.mp4"));
+        let summary = remux_to_mp4_carrying(&source, &destination, AudioTracks::Only(stream))
+            .unwrap_or_else(|error| panic!("stream {stream} could not be carried: {error}"));
+
+        // What was made, said by the plan rather than remembered by the caller:
+        // one track copied, the other three named as tracks nobody asked for,
+        // and the picture carried whichever sound was chosen.
+        let carried: Vec<usize> = summary
+            .plan()
+            .tracks()
+            .iter()
+            .filter(|track| track.carriage() == Carriage::Copied)
+            .map(clipped_muxer::PlannedTrack::index)
+            .collect();
+        assert_eq!(
+            carried,
+            vec![0, stream],
+            "the plan for stream {stream} carried the wrong tracks"
+        );
+        assert!(
+            !summary.plan().is_lossless(),
+            "a copy holding one of four sound tracks claimed to hold everything"
+        );
+
+        let copy = Media::open(&destination).expect("the copy opens");
+        copy.validate()
+            .stream_count(2)
+            .audio_stream_count(1)
+            .video(
+                VideoStream::codec("h264")
+                    .decoded_frames((SECONDS * FRAME_RATE) as u64)
+                    .resolution(640, 360),
+            )
+            .audio(
+                0,
+                AudioStream::codec("pcm_s16le")
+                    .sample_rate(48_000)
+                    .channels(2)
+                    .title(title)
+                    .packets((SECONDS * AUDIO_PACKETS_PER_SECOND) as u64),
+            )
+            // The assertion the feature exists for. Anything else on this track
+            // — the mix, or the neighbouring source — fails here.
+            .audio_tone(
+                0,
+                Tone::at(tone)
+                    .isolated_from(other_tones[0])
+                    .isolated_from(other_tones[1]),
+            )
+            .duration_seconds(
+                recorded
+                    .duration_seconds()
+                    .expect("the recording declares a duration"),
+                0.05,
+            )
+            .monotonic_timestamps()
+            .assert_valid();
+    }
+
+    assert!(
+        std::fs::read(&source).expect("the recording can be read again") == recording_before,
+        "carrying one track changed the recording it was taken from"
+    );
+}
+
+#[test]
+fn a_sound_track_the_recording_has_not_got_is_refused_rather_than_copied_silent() {
+    let Some(_tools) = require_media_tools() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("muxer-remux-no-such-track");
+    let source = record(&directory, "recording.mkv", &["--audio-tracks", "2"]);
+
+    // Stream 0 is the picture and stream 9 is past the end. Both would produce
+    // a file with no sound in it, which is indistinguishable from a recording
+    // that never had any — so both are refused before anything is created.
+    for stream in [0, 9] {
+        let destination = directory.file(&format!("silent-{stream}.mp4"));
+        let error = remux_to_mp4_carrying(&source, &destination, AudioTracks::Only(stream))
+            .expect_err("a stream that is not a sound track is refused");
+
+        assert!(
+            matches!(error, RemuxError::NoSuchAudioTrack { index, .. } if index == stream),
+            "the wrong failure for stream {stream}: {error}"
+        );
+        assert!(
+            !destination.exists(),
+            "a refused copy of stream {stream} left an MP4 behind"
+        );
+    }
 }

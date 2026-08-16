@@ -831,3 +831,50 @@ code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/*
+ * The playback screen's player, and the buttons that choose which sound track
+ * it carries (issue #304).
+ *
+ * The element draws its own transport — `controls` — so what is here is the
+ * frame around it and nothing else. A width in percent rather than a token,
+ * because a picture is a proportion of the space it is given; the height is the
+ * recording's own aspect ratio, and stating one here would letterbox somebody's
+ * footage to a number written in a stylesheet.
+ *
+ * `--color-neutral-900` is the ground behind it, so that a recording narrower
+ * than the space it is in sits on ink rather than on the window's paper — the
+ * convention every player follows, and the reason a black bar beside a video
+ * does not read as a fault.
+ */
+.clipped-player {
+  display: block;
+  width: 100%;
+  max-width: var(--measure);
+  margin-bottom: var(--space-3);
+  background: var(--color-neutral-900);
+}
+
+/*
+ * A group rather than a list: the tracks are alternatives, one of which is
+ * playing, and `aria-pressed` on each button is what says which. A `<select>`
+ * was the other option and is worse here — it hides the alternatives behind a
+ * press, and there are two or three of them.
+ */
+.clipped-tracks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  max-width: var(--measure);
+  margin: 0;
+  border: none;
+  padding: 0;
+}
+
+.clipped-tracks legend {
+  font-family: var(--font-heading);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}

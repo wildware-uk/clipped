@@ -48,6 +48,7 @@ use crate::library::{
     LibraryTrash, RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing,
 };
 use crate::message::Request;
+use crate::playback::{OpenPlayback, PlaybackStream};
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
 use crate::status::{
     BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
@@ -104,6 +105,13 @@ pub enum Command {
     Plugins,
     /// Copy a finished recording into MP4, without re-encoding it.
     ExportRecording(ExportRecording),
+    /// Open a finished recording so that the desktop window can play it, with
+    /// one of its sound tracks.
+    ///
+    /// Asked of the recorder rather than done in the window for two reasons
+    /// that are both hard: the window links no demuxer, and a media element
+    /// cannot choose an audio track (`crate::playback`, issue #304).
+    OpenPlayback(OpenPlayback),
     /// What every global hotkey is bound to, and whether it works.
     ///
     /// Asked rather than pushed because registration happens when the recorder
@@ -146,6 +154,7 @@ impl Command {
             Self::EmptyTrash(_) => "empty_trash",
             Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
+            Self::OpenPlayback(_) => "open_playback",
             Self::GetHotkeys => "get_hotkeys",
             Self::Shutdown(_) => "shutdown",
             Self::Unbuilt(command) => command.name(),
@@ -177,6 +186,7 @@ impl Command {
             "empty_trash" => Ok(Self::EmptyTrash(parse_params(request)?)),
             "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
+            "open_playback" => Ok(Self::OpenPlayback(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => match UnbuiltCommand::from_name(name) {
@@ -216,6 +226,7 @@ impl Command {
             Self::TakeScreenshot(screenshot) => serde_json::to_value(screenshot),
             Self::SaveReplay(replay) => serde_json::to_value(replay),
             Self::ExportRecording(export) => serde_json::to_value(export),
+            Self::OpenPlayback(playback) => serde_json::to_value(playback),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
             Self::Unbuilt(_) => Ok(serde_json::Value::Null),
         }
@@ -712,6 +723,16 @@ pub enum Reply {
         /// The copy, and what it turned out to hold.
         export: ExportSummary,
     },
+    /// A recording is ready to be played, and here is what to play.
+    ///
+    /// Sent after any copy it needed has been finished, for the reason
+    /// [`Self::RecordingExported`] is: a window pointed at a file that is still
+    /// being written would draw a player over a truncated recording.
+    PlaybackOpened {
+        /// The file to play, the track it carries, and the tracks that could be
+        /// chosen instead.
+        playback: PlaybackStream,
+    },
     /// Every action a global hotkey can perform, and where each one stands.
     Hotkeys {
         /// One row per action, in the order a configuration screen lists them.
@@ -1101,6 +1122,63 @@ mod tests {
 
         assert_eq!(parsed.source, r"D:\clips\cs2-20260811-201400-1.mkv");
         assert_eq!(parsed.destination, r"E:\share\ace on mirage.mp4");
+    }
+
+    #[test]
+    fn a_playback_request_carries_the_track_it_asked_for_and_not_only_the_recording() {
+        // The field that is easy to drop and impossible to notice: a window
+        // that asked for the microphone and was answered with the compatibility
+        // mix would play *something*, with sound, and look like it worked. So
+        // the track is asserted on the far side of a real serialise-and-parse
+        // rather than on the value that was constructed.
+        let open = Command::OpenPlayback(crate::playback::OpenPlayback {
+            source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+            audio_track: Some(3),
+        });
+
+        let request = open.to_request(13).expect("it can be represented");
+        assert_eq!(request.command, "open_playback");
+
+        let json = serde_json::to_string(&request).expect("it serialises");
+        let back: Request = serde_json::from_str(&json).expect("and deserialises");
+        let Command::OpenPlayback(parsed) = Command::from_request(&back).expect("it parses") else {
+            panic!("an open_playback request parsed as something else");
+        };
+
+        assert_eq!(parsed.source, r"D:\clips\cs2-20260811-201400-1.mkv");
+        assert_eq!(parsed.audio_track, Some(3));
+    }
+
+    #[test]
+    fn a_playback_request_that_names_no_track_asks_for_the_default_rather_than_track_zero() {
+        // Absent means "whichever track a player should choose on its own",
+        // which is the recorder's answer to make. A `serde` default of `0`
+        // would silently make it stream zero — the picture, in a Clipped
+        // recording — and the difference between the two is invisible in a
+        // request that omits the field.
+        let parsed = Command::from_request(&request(
+            "open_playback",
+            serde_json::json!({"source": r"D:\clips\match.mkv"}),
+        ))
+        .expect("a playback request may leave the track out");
+
+        let Command::OpenPlayback(open) = parsed else {
+            panic!("an open_playback request parsed as something else");
+        };
+        assert_eq!(open.audio_track, None);
+    }
+
+    #[test]
+    fn a_playback_request_that_names_no_recording_is_refused_naming_the_field() {
+        let error = Command::from_request(&request("open_playback", serde_json::Value::Null))
+            .expect_err("a playback request has to say what to play");
+
+        assert_eq!(error.code, ErrorCode::InvalidParameters);
+        assert!(
+            error.message.contains("open_playback") && error.message.contains("source"),
+            "the refusal should name the command and the field: {}",
+            error.message
+        );
     }
 
     #[test]

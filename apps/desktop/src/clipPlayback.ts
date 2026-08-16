@@ -1,25 +1,32 @@
+import type { LibraryRecording } from '@clipped/shared';
+
 import type { InterruptedRecording, RecorderLinkView } from './useRecorderLink';
 
 /**
- * What the clip playback screen (issue #52) can say about a recording, and why
- * it cannot say much.
+ * What the clip playback screen (issue #52) can say about a recording, and
+ * which file it plays.
  *
  * Everything here is a pure function of what the window has been told, so that
  * the wording is testable without a window and every case has exactly one
  * rendering rather than a chain of conditions inside a component — the same
  * arrangement `gameDetection.ts` uses for the Games screen.
  *
- * # Why there is no player
+ * # Where the player came from
  *
- * A recording is Matroska with uncompressed audio, and this window has no way
- * to load a file from the disk at all. Four separate facts stand in the way,
- * each of them enough on its own; they are in {@link PLAYBACK_BLOCKERS}, with
- * the evidence for each, and `docs/desktop-ui.md` ("Playing a recording") has
- * the design that follows from them. Issue #304 builds it.
+ * There was none until issue #304, and the reasons filled a table on this
+ * screen. Three of the four turned out to be wrong: a WebView2 plays a Clipped
+ * recording — Matroska, AV1 picture, uncompressed PCM sound — as it is, which
+ * `docs/adr/0010-what-the-webview-plays.md` records with the measurement behind
+ * it. What was true, and still is, is that this window cannot reach a file on
+ * its own and that a media element cannot choose an audio track. So the
+ * recorder opens the recording and says what to play (`playback.ts`), and the
+ * Tauri host serves that one file over a scheme of its own
+ * (`src-tauri/src/playback.rs`).
  *
- * Drawing a transport with nothing behind it would be the control AGENTS.md
- * section 27 forbids, and drawing a poster frame Clipped never generated would
- * be the invented data of the same section.
+ * What is still not drawn is in {@link MISSING}, and each row names the work
+ * that supplies it. Nothing here is drawn over an answer nobody gave: the
+ * duration, the position and the picture size are the media element's own
+ * measurements of the file it was handed (AGENTS.md section 27).
  */
 
 /** The route this screen is mounted at, with `:recordingId` for the recording. */
@@ -152,7 +159,7 @@ export function describeClip(resolution: ClipResolution): ClipDescription {
       return {
         state: 'Being recorded now',
         detail:
-          'The recorder is still writing this file. It can be played when the recording has ended and Clipped can serve it — issue #304.',
+          'The recorder is still writing this file. It can be played as soon as the recording has ended.',
       };
     case 'interrupted':
       return {
@@ -194,49 +201,61 @@ export function formatElapsed(milliseconds: number): string {
     : `${String(hours)}:${pad(minutes)}:${pad(seconds)}`;
 }
 
-/** One reason a `<video>` in this window cannot play a Clipped recording. */
-export interface Blocker {
-  /** The fact, in a few words. */
-  readonly fact: string;
-  /** Where it can be checked, rather than taken on trust. */
-  readonly evidence: string;
-}
+/** A recording somebody opened this screen from, as the library listed it. */
+export type HandedRecording = Pick<LibraryRecording, 'path' | 'missing_since'>;
 
 /**
- * Everything that stands between this window and a playing recording.
+ * What the screen has to point a `<video>` at, or why it has nothing.
  *
- * Each of the four is enough on its own, which is why they are a list and not a
- * chain: fixing any one of them changes nothing. The fourth is the one that
- * decides the design, because it rules out every arrangement that hands a whole
- * file to a media element, whatever the container is.
- *
- * `playbackReach.test.ts` reads the Tauri configuration and asserts the first,
- * so the day somebody enables the asset protocol or widens the policy, that
- * test fails and brings them here rather than leaving this paragraph quietly
- * wrong.
+ * Three sources, in this order, and the order is the point: a recording handed
+ * over by the screen somebody came from is what they asked to watch, and the
+ * link's own two recordings are what this window can name by itself.
  */
-export const PLAYBACK_BLOCKERS: readonly Blocker[] = [
-  {
-    fact: 'This window cannot load a file from the disk',
-    evidence:
-      "src-tauri/tauri.conf.json does not enable the asset protocol, capabilities/default.json grants three core: permissions and none reaches the file system, and the content-security policy declares no media-src, so it falls back to default-src 'self' — the bundle Vite built, and nothing else.",
-  },
-  {
-    fact: 'A recording is Matroska, and WebView2 does not demux it',
-    evidence:
-      'ADR 0001 writes recordings into MKV so that a killed recorder still leaves a playable file. WebView2 is Chromium, whose Matroska support is WebM: a strict subset restricted to Opus or Vorbis audio and VP8, VP9 or AV1 video.',
-  },
-  {
-    fact: 'The audio is uncompressed PCM, and nothing in Clipped encodes audio',
-    evidence:
-      'docs/muxing.md: every track is 16-bit PCM because no crate in the workspace encodes audio (issue #28). No browser decodes PCM in MP4, so issue #92’s remux — which copies streams rather than re-encoding them — would carry the video across and leave the sound behind.',
-  },
-  {
-    fact: 'A media element cannot choose an audio track',
-    evidence:
-      'HTMLMediaElement.audioTracks is not implemented in Chromium, so a multi-track file gives whichever track the demuxer lands on and no way off it. Issue #52 asks for a track selector, so the track has to be chosen on the way out of the recorder rather than in the element.',
-  },
-];
+export type PlaybackSource =
+  /** Play this file. */
+  | { readonly file: string; readonly why: null }
+  /** There is nothing to play, and this is what to say instead. */
+  | { readonly file: null; readonly why: string };
+
+/**
+ * Which file this screen plays, given what it was told.
+ *
+ * A recording still being written is deliberately **not** played: its container
+ * has no trailer yet, so a player would have no duration to seek in and would
+ * be reading a file another process is appending to. Saying so beats a player
+ * that behaves strangely for reasons nobody on screen can see.
+ */
+export function playbackSource(
+  resolution: ClipResolution,
+  handed: HandedRecording | null,
+): PlaybackSource {
+  if (handed !== null) {
+    // The library already knows this file has gone, and it looked at the disk
+    // to find that out. Saying so here costs no round trip and is the same
+    // answer the recorder would give (`docs/library.md`, issue #56).
+    return handed.missing_since === undefined
+      ? { file: handed.path, why: null }
+      : {
+          file: null,
+          why: 'The library could not find this file the last time it looked. It may have been moved or deleted, or the drive it is on may not be connected.',
+        };
+  }
+
+  switch (resolution.found) {
+    case 'in-progress':
+      return {
+        file: null,
+        why: 'The recorder is still writing this file, so there is nothing finished to play. It can be played as soon as the recording has ended.',
+      };
+    case 'interrupted':
+      return { file: resolution.recording.output, why: null };
+    case 'unindexed':
+      return {
+        file: null,
+        why: 'This window has not been told which file this recording is, so there is nothing to point a player at.',
+      };
+  }
+}
 
 /** One thing this screen will show, and the work that has to land before it can. */
 export interface Missing {
@@ -247,42 +266,32 @@ export interface Missing {
 }
 
 /**
- * Everything issue #52 asks of this screen, against what each part waits for.
+ * What issue #52 asks of this screen and it does not yet do.
  *
- * The alternative was a transport bar, a scrubber and a track selector drawn
- * over a black rectangle. That is the interface AGENTS.md section 27 forbids
- * twice over — controls that do nothing, above a picture Clipped never made.
+ * Shorter than it was, because playing a recording and choosing its sound track
+ * are on the screen now (issue #304). What is left is what would otherwise be
+ * drawn over nothing: a poster frame Clipped has never produced on a real
+ * machine, and a waveform that is a file this window has no route to.
  */
 export const MISSING: readonly Missing[] = [
   {
-    shows: 'Play a recording at all, with sound',
+    shows: 'A recording opened here directly, rather than from the screen you came from',
     needs:
-      'The recorder serving its media: a stream remuxed to fragmented MP4, with the audio encoded, answering byte ranges. Issue #304',
+      'The address carries the library’s own identifier and the row is handed over by whatever opened this screen, so a reload has nothing to look up. Looking one up cold is issue #52',
   },
   {
-    shows: 'Play the compatibility mix by default, and let another track be chosen',
+    shows: 'Frame-accurate seeking, and keyboard shortcuts of Clipped’s own',
     needs:
-      'The same stream, taking a track — because a media element cannot choose one. The mix already leads the file and carries Matroska’s default flag (docs/muxing.md). Issue #304',
-  },
-  {
-    shows:
-      'Open a recording somebody picked, rather than one this window happened to be told about',
-    needs:
-      'The library index reaches the window since issue #301, and the Library screen lists it. What is left is looking one recording up by the identifier in the address bar. Issue #52',
-  },
-  {
-    shows: 'Say that a recording’s file has gone, rather than drawing a player that does nothing',
-    needs:
-      'missing_since is on the wire since issue #301 and the Library screen says it. This screen looks up no recording to say it about. Issue #52',
+      'What is drawn is the media element’s own transport, which seeks to a keyframe. SPEC.md section 42 asks for more, and it is issue #52',
   },
   {
     shows: 'A poster frame before playback starts',
     needs:
-      'Thumbnails are generated, cached and tested (issue #57) and nothing has ever drawn one: the cache is a file beside the recording, and this window has no file-system permission. Issue #301 carried rows, not bytes',
+      'Thumbnails are generated, cached and tested (issue #57) and nothing has ever drawn one: the cache is a file beside the recording, and the scheme this screen plays through serves recordings the recorder opened rather than pictures beside them',
   },
   {
     shows: 'A waveform under the transport, and bookmarks and events on it',
     needs:
-      'Waveforms are issue #66 and are files too, so they need the same transport a thumbnail does; bookmarks are written beside the recording already (issue #64) and issue #65 draws a timeline.',
+      'Waveforms are issue #66 and are files too, so they need the same route a thumbnail does; bookmarks are written beside the recording already (issue #64) and issue #65 draws a timeline.',
   },
 ];

@@ -78,6 +78,7 @@ use crate::message::{
     features, ClientMessage, ConnectionRole, Event, EventStream, Hello, Outcome, PeerIdentity,
     Request, Response, ServerMessage, Welcome, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
+use crate::playback::{OpenPlayback, PlaybackStream, PlaybackTrack};
 use crate::server::MAX_CONCURRENT_CONNECTIONS;
 use crate::status::{ActiveRecording, EndReason, ExportSummary, RecorderStatus, RecordingSummary};
 
@@ -496,6 +497,18 @@ fn structures() -> BTreeMap<String, Structure> {
             "export_summary".to_owned(),
             structure_of(&exemplar_export(), &[]),
         ),
+        (
+            "open_playback".to_owned(),
+            structure_of(&exemplar_open_playback(), &[]),
+        ),
+        (
+            "playback_stream".to_owned(),
+            structure_of(&exemplar_playback(), &[]),
+        ),
+        (
+            "playback_track".to_owned(),
+            structure_of(&exemplar_playback_track(), &[]),
+        ),
     ]);
 
     for outcome in every_outcome() {
@@ -561,6 +574,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
+                Command::OpenPlayback(_) => Some("open_playback".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
                 | Command::GetStatus
@@ -585,6 +599,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::EmptyTrash(_) => Some("reply.trash_emptied".to_owned()),
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
+                Command::OpenPlayback(_) => Some("reply.playback_opened".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
                 Command::Unbuilt(_) => None,
@@ -672,6 +687,15 @@ fn samples() -> Vec<Sample> {
                 command: "export_recording".to_owned(),
                 params: serde_json::to_value(exemplar_export_recording())
                     .expect("the export options serialise"),
+            }),
+        ),
+        (
+            "asking for a recording to be opened for playback, on one of its tracks",
+            ClientMessage::Request(Request {
+                id: 13,
+                command: "open_playback".to_owned(),
+                params: serde_json::to_value(exemplar_open_playback())
+                    .expect("the playback options serialise"),
             }),
         ),
         (
@@ -1007,6 +1031,40 @@ fn samples() -> Vec<Sample> {
                 outcome: Outcome::Ok(Reply::RecordingExported {
                     export: exemplar_export(),
                 }),
+            }),
+        ),
+        (
+            "a recording opened for playback on the track a player would have taken anyway",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::PlaybackOpened {
+                    playback: PlaybackStream {
+                        path: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+                        audio_track: Some(1),
+                        prepared: false,
+                        ..exemplar_playback()
+                    },
+                }),
+            }),
+        ),
+        (
+            "a recording opened for playback on a track that needed a copy of its own",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Ok(Reply::PlaybackOpened {
+                    playback: exemplar_playback(),
+                }),
+            }),
+        ),
+        (
+            "playback refused because the recording's file has gone",
+            ServerMessage::Response(Response {
+                id: 13,
+                outcome: Outcome::Error(ProtocolError::new(
+                    ErrorCode::PlaybackFailed,
+                    "cs2-20260811-201400-1.mkv is not there any more. It may have been moved or \
+                     deleted, or the drive it is on may not be connected",
+                )),
             }),
         ),
         (
@@ -1354,6 +1412,18 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::Restored { .. } => "restored".to_owned(),
         Reply::TrashEmptied { .. } => "trash_emptied".to_owned(),
         Reply::Plugins { .. } => "plugins".to_owned(),
+        // Whether a copy had to be made is part of the path: it is the
+        // difference between an answer that cost nothing and one that read the
+        // whole recording, and a mirror that dropped `prepared` would otherwise
+        // reach the same discriminant for both.
+        Reply::PlaybackOpened { playback } => format!(
+            "playback_opened.{}",
+            if playback.prepared {
+                "prepared"
+            } else {
+                "as_recorded"
+            }
+        ),
         // Whether the page ends the library is part of the path, for the reason
         // `shutting_down`'s finalising is: a mirror that dropped the cursor
         // would otherwise reach the same discriminant for a page that continues
@@ -1758,6 +1828,35 @@ fn exemplar_export_recording() -> ExportRecording {
     }
 }
 
+/// Every `open_playback` parameter at once.
+fn exemplar_open_playback() -> OpenPlayback {
+    OpenPlayback {
+        source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        audio_track: Some(3),
+    }
+}
+
+/// A recording opened for playback, with every optional field present so the
+/// schema sees them.
+fn exemplar_playback() -> PlaybackStream {
+    PlaybackStream {
+        path: r"C:\Users\sam\AppData\Local\Clipped\playback\cs2-20260811-201400-1-3.mp4".to_owned(),
+        audio_track: Some(3),
+        audio_tracks: vec![exemplar_playback_track()],
+        prepared: true,
+    }
+}
+
+/// One sound track a window can offer, with every optional field present.
+fn exemplar_playback_track() -> PlaybackTrack {
+    PlaybackTrack {
+        index: 3,
+        name: Some("Microphone".to_owned()),
+        language: Some("eng".to_owned()),
+        default: false,
+    }
+}
+
 /// A finished export, with every optional field present so the schema sees
 /// them.
 fn exemplar_export() -> ExportSummary {
@@ -1904,6 +2003,7 @@ fn every_built_command() -> Vec<Command> {
         }),
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
+        Command::OpenPlayback(exemplar_open_playback()),
         Command::GetHotkeys,
         Command::Shutdown(Shutdown::default()),
     ];
@@ -1924,6 +2024,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::EmptyTrash(_)
             | Command::Plugins
             | Command::ExportRecording(_)
+            | Command::OpenPlayback(_)
             | Command::GetHotkeys
             | Command::Shutdown(_)
             | Command::Unbuilt(_) => {}
@@ -1950,6 +2051,7 @@ fn every_error_code() -> Vec<ErrorCode> {
         ErrorCode::ShuttingDown,
         ErrorCode::DestinationExists,
         ErrorCode::ExportFailed,
+        ErrorCode::PlaybackFailed,
         ErrorCode::LibraryUnavailable,
         ErrorCode::Internal,
     ];
@@ -1970,6 +2072,7 @@ fn every_error_code() -> Vec<ErrorCode> {
             | ErrorCode::ShuttingDown
             | ErrorCode::DestinationExists
             | ErrorCode::ExportFailed
+            | ErrorCode::PlaybackFailed
             | ErrorCode::LibraryUnavailable
             | ErrorCode::Internal
             | ErrorCode::Other(_) => {}
@@ -2088,6 +2191,9 @@ fn every_reply() -> Vec<Reply> {
         Reply::RecordingExported {
             export: exemplar_export(),
         },
+        Reply::PlaybackOpened {
+            playback: exemplar_playback(),
+        },
         Reply::Hotkeys {
             hotkeys: every_hotkey_state()
                 .into_iter()
@@ -2176,6 +2282,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::RecordingExported { .. }
+            | Reply::PlaybackOpened { .. }
             | Reply::ShuttingDown { .. } => {}
         }
     }

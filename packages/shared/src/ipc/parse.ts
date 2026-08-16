@@ -57,6 +57,8 @@ import type {
   TrashListing,
   TrashedItem,
   LibraryEventMark,
+  PlaybackStream,
+  PlaybackTrack,
   PluginDeclaration,
   PluginState,
   RefusedPlugin,
@@ -162,6 +164,14 @@ function optionalNumberField(source: JsonObject, name: string, what: string): nu
 function booleanField(source: JsonObject, name: string, what: string): boolean {
   const value = source[name];
   return typeof value === 'boolean' ? value : unreadable(`${what} has no \`${name}\` boolean`);
+}
+
+function optionalBooleanField(source: JsonObject, name: string, what: string): boolean | undefined {
+  const value = source[name];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return typeof value === 'boolean' ? value : unreadable(`${what}'s \`${name}\` is not a boolean`);
 }
 
 function optionalStringField(source: JsonObject, name: string, what: string): string | undefined {
@@ -374,6 +384,8 @@ function readReply(value: JsonValue | undefined): Reply {
       };
     case 'recording_exported':
       return { reply: 'recording_exported', export: readExport(reply['export']) };
+    case 'playback_opened':
+      return { reply: 'playback_opened', playback: readPlayback(reply['playback']) };
     case 'hotkeys':
       return {
         reply: 'hotkeys',
@@ -556,6 +568,41 @@ function readExport(value: JsonValue | undefined): ExportSummary {
     // Absent is "nothing was lost", which is an answer rather than a gap: the
     // recorder skips the field entirely when the copy holds everything.
     ...(losses === undefined ? {} : { losses }),
+  };
+}
+
+function readPlayback(value: JsonValue | undefined): PlaybackStream {
+  const playback = object(value, 'a playback stream');
+  const what = 'a playback stream';
+  const track = optionalNumberField(playback, 'audio_track', what);
+  const tracks = playback['audio_tracks'];
+  const prepared = optionalBooleanField(playback, 'prepared', what);
+  return {
+    path: stringField(playback, 'path', what),
+    // Absent is "this recording has no sound", which is an answer rather than a
+    // gap - and one a window says out loud, because a silent player somebody
+    // was not warned about reads as a broken one.
+    ...(track === undefined ? {} : { audio_track: track }),
+    ...(tracks === undefined || tracks === null
+      ? {}
+      : { audio_tracks: arrayField(tracks, 'a playback track list', readPlaybackTrack) }),
+    ...(prepared === undefined ? {} : { prepared }),
+  };
+}
+
+function readPlaybackTrack(value: JsonValue | undefined): PlaybackTrack {
+  const track = object(value, 'a playback track');
+  const what = 'a playback track';
+  const name = optionalStringField(track, 'name', what);
+  const language = optionalStringField(track, 'language', what);
+  const chosen = optionalBooleanField(track, 'default', what);
+  return {
+    index: numberField(track, 'index', what),
+    // A track a recording did not name is shown by its position rather than
+    // given one here (`clipPlayback.ts`).
+    ...(name === undefined ? {} : { name }),
+    ...(language === undefined ? {} : { language }),
+    ...(chosen === undefined ? {} : { default: chosen }),
   };
 }
 

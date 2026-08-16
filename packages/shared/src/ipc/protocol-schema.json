@@ -48,6 +48,7 @@
         "empty_trash",
         "plugins",
         "export_recording",
+        "open_playback",
         "get_hotkeys",
         "shutdown",
         "apply_settings"
@@ -86,6 +87,7 @@
         "shutting_down",
         "destination_exists",
         "export_failed",
+        "playback_failed",
         "library_unavailable",
         "internal"
       ],
@@ -122,6 +124,7 @@
         "shutdown",
         "library",
         "export",
+        "playback",
         "hotkeys",
         "replay"
       ],
@@ -161,6 +164,7 @@
         "library_sessions",
         "library_games",
         "recording_exported",
+        "playback_opened",
         "hotkeys",
         "shutting_down",
         "library_events",
@@ -395,6 +399,14 @@
         "query"
       ]
     },
+    "open_playback": {
+      "required": [
+        "source"
+      ],
+      "optional": [
+        "audio_track"
+      ]
+    },
     "outcome.error": {
       "required": [
         "error"
@@ -413,6 +425,26 @@
         "version"
       ],
       "optional": []
+    },
+    "playback_stream": {
+      "required": [
+        "path"
+      ],
+      "optional": [
+        "audio_track",
+        "audio_tracks",
+        "prepared"
+      ]
+    },
+    "playback_track": {
+      "required": [
+        "index"
+      ],
+      "optional": [
+        "default",
+        "language",
+        "name"
+      ]
     },
     "protocol_error": {
       "required": [
@@ -512,6 +544,13 @@
       "required": [
         "reply",
         "trash"
+      ],
+      "optional": []
+    },
+    "reply.playback_opened": {
+      "required": [
+        "playback",
+        "reply"
       ],
       "optional": []
     },
@@ -774,6 +813,12 @@
       "available_in_this_build": true
     },
     {
+      "name": "open_playback",
+      "params": "open_playback",
+      "reply": "reply.playback_opened",
+      "available_in_this_build": true
+    },
+    {
       "name": "get_hotkeys",
       "params": null,
       "reply": "reply.hotkeys",
@@ -909,6 +954,21 @@
       "discriminant": "request.export_recording"
     },
     {
+      "name": "asking for a recording to be opened for playback, on one of its tracks",
+      "direction": "client",
+      "frame": {
+        "command": "open_playback",
+        "id": 13,
+        "params": {
+          "audio_track": 3,
+          "source": "D:\\clips\\cs2-20260811-201400-1.mkv"
+        },
+        "type": "request"
+      },
+      "parses": true,
+      "discriminant": "request.open_playback"
+    },
+    {
       "name": "asking the recorder to exit",
       "direction": "client",
       "frame": {
@@ -948,6 +1008,7 @@
           "shutdown",
           "library",
           "export",
+          "playback",
           "hotkeys",
           "replay"
         ],
@@ -1560,6 +1621,78 @@
       },
       "parses": true,
       "discriminant": "response.ok.recording_exported.lossy"
+    },
+    {
+      "name": "a recording opened for playback on the track a player would have taken anyway",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "playback": {
+              "audio_track": 1,
+              "audio_tracks": [
+                {
+                  "default": false,
+                  "index": 3,
+                  "language": "eng",
+                  "name": "Microphone"
+                }
+              ],
+              "path": "D:\\clips\\cs2-20260811-201400-1.mkv",
+              "prepared": false
+            },
+            "reply": "playback_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.playback_opened.as_recorded"
+    },
+    {
+      "name": "a recording opened for playback on a track that needed a copy of its own",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "ok": {
+            "playback": {
+              "audio_track": 3,
+              "audio_tracks": [
+                {
+                  "default": false,
+                  "index": 3,
+                  "language": "eng",
+                  "name": "Microphone"
+                }
+              ],
+              "path": "C:\\Users\\sam\\AppData\\Local\\Clipped\\playback\\cs2-20260811-201400-1-3.mp4",
+              "prepared": true
+            },
+            "reply": "playback_opened"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.playback_opened.prepared"
+    },
+    {
+      "name": "playback refused because the recording's file has gone",
+      "direction": "server",
+      "frame": {
+        "id": 13,
+        "outcome": {
+          "error": {
+            "code": "playback_failed",
+            "message": "cs2-20260811-201400-1.mkv is not there any more. It may have been moved or deleted, or the drive it is on may not be connected"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.error.playback_failed"
     },
     {
       "name": "an export refused because the file it would write already exists",

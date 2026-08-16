@@ -51,6 +51,7 @@ pub mod hotkeys;
 pub mod library;
 pub mod list_windows;
 pub mod options;
+pub mod playback;
 pub mod plugins;
 pub mod record;
 pub mod recover;

@@ -26,15 +26,16 @@
 //!
 //! # What the window can ask this process to do
 //!
-//! Eleven `#[tauri::command]`s, and no other way in. Two are about this
-//! process — [`recorder_link_state`] and [`startup_notice`]; two read the
-//! recording library through the recorder — [`library_sessions`] and
-//! [`library_games`] (issue #301); four are the record control —
-//! [`record_target`] says what would be recorded, [`recorder_status`] asks the
-//! recorder what it is doing, and [`start_recording`] and [`stop_recording`] do
-//! the two things the button does (issue #389); and three act on a recording
-//! the library listed — [`export_recording`], [`open_recording`] and
-//! [`reveal_recording`] (issue #399).
+//! `#[tauri::command]`s, and no other way in. Two are about this process —
+//! [`recorder_link_state`] and [`startup_notice`]; two read the recording
+//! library through the recorder — [`library_sessions`] and [`library_games`]
+//! (issue #301); four are the record control — [`record_target`] says what
+//! would be recorded, [`recorder_status`] asks the recorder what it is doing,
+//! and [`start_recording`] and [`stop_recording`] do the two things the button
+//! does (issue #389); three act on a recording the library listed —
+//! [`export_recording`], [`open_recording`] and [`reveal_recording`]
+//! (issue #399); and [`open_playback`] is what puts a recording on the screen
+//! (issue #304).
 //!
 //! All but `record_target`, `open_recording` and `reveal_recording` are a round
 //! trip over the control protocol, and each returns either the recorder's own
@@ -46,9 +47,13 @@
 //!
 //! # Why opening and revealing are commands rather than a permission
 //!
-//! `capabilities/default.json` is the whole of the window's privilege, and it
-//! grows by exactly one line for this ticket: `dialog:allow-save`, so that the
-//! interface can ask the operating system where an export should go.
+//! `capabilities/default.json` is the whole of the window's privilege, and
+//! playing a recording adds **nothing** to it: the `clip` URI scheme is
+//! registered by this process rather than granted to the interface, and it
+//! serves only what the recorder has already answered `open_playback` with
+//! ([`playback`], issue #304). The one line the export added is
+//! `dialog:allow-save`, so that the interface can ask the operating system
+//! where an export should go.
 //!
 //! Opening a recording and revealing it in Explorer could have been the same
 //! shape — `tauri-plugin-opener` has commands the interface can call — and are
@@ -97,6 +102,7 @@
 mod foreground;
 mod notification_policy;
 mod notifications;
+mod playback;
 mod this_application;
 mod toast;
 mod tray;
@@ -197,9 +203,27 @@ fn main() {
             start_recording,
             stop_recording,
             export_recording,
+            open_playback,
             open_recording,
             reveal_recording
         ])
+        // The one thing this window may receive bytes over, and it serves
+        // nothing until the recorder has answered `open_playback` for a
+        // recording (`playback`). Asynchronous because reading four mebibytes
+        // off a disk may not happen on the thread drawing the window, and
+        // because a media element has several of these in flight at once.
+        .register_asynchronous_uri_scheme_protocol(
+            playback::SCHEME,
+            |_context, request, responder| {
+                std::thread::Builder::new()
+                    .name("clipped-playback".to_owned())
+                    .spawn(move || responder.respond(playback::handle(&request)))
+                    .map_or_else(
+                        |error| eprintln!("a recording could not be served to the window: {error}"),
+                        |_| (),
+                    );
+            },
+        )
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -715,6 +739,64 @@ fn export_recording(
     }
 }
 
+/// A recording the recorder has opened for playback, as the window needs it.
+///
+/// The **address** rather than the path: what the recorder answered with is
+/// registered with the `clip` scheme and the window is handed a number that
+/// stands for it, so the interface never holds a file name it could ask for
+/// something else with (`playback`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct OpenedPlayback {
+    /// Where to point a `<video>`.
+    url: String,
+    /// The source stream index whose sound is in it, if it has any.
+    audio_track: Option<usize>,
+    /// Every sound track of the recording, for the selector.
+    audio_tracks: Vec<clipped_ipc::PlaybackTrack>,
+    /// Whether a copy had to be made to carry the chosen track.
+    prepared: bool,
+}
+
+/// Opens a recording for playback, and registers what came back.
+///
+/// Two things happen here and both matter. The **recorder** decides what may be
+/// played: it opens the recording, lists its sound tracks and answers with a
+/// file — the recording itself when a media element would already play the
+/// chosen track, and a copy carrying that track alone when it would not, which
+/// is the whole reason this is a round trip rather than a path the window
+/// already has (`clipped_ipc::playback`, issue #304). Then **this process**
+/// registers that file with the `clip` scheme and hands back an address.
+///
+/// The window is never given a path and can never name one: a number nothing
+/// has registered is a 404, so the reach it gains is exactly the recordings the
+/// recorder has vouched for in this session (`playback`).
+///
+/// `async` for the reason [`export_recording`] is: preparing a track is a pass
+/// over the recording, and the thread drawing the window may not wait on one.
+#[tauri::command(async)]
+fn open_playback(
+    link: tauri::State<'_, RecorderLink>,
+    source: String,
+    audio_track: Option<usize>,
+) -> Result<OpenedPlayback, RecorderProblem> {
+    let reply = link.call(&clipped_ipc::Command::OpenPlayback(
+        clipped_ipc::OpenPlayback {
+            source,
+            audio_track,
+        },
+    ))?;
+
+    match reply {
+        clipped_ipc::Reply::PlaybackOpened { playback } => Ok(OpenedPlayback {
+            url: playback::url_for(std::path::Path::new(&playback.path)),
+            audio_track: playback.audio_track,
+            audio_tracks: playback.audio_tracks,
+            prepared: playback.prepared,
+        }),
+        _ => Err(wrong_reply("open_playback")),
+    }
+}
+
 /// Something this process was asked to do with a file, and could not.
 ///
 /// A shape of its own rather than a [`RecorderProblem`], because no recorder was
@@ -767,13 +849,12 @@ fn still_there(path: &str) -> Result<PathBuf, FileProblem> {
 
 /// Opens a recording in whatever application the user opens video with.
 ///
-/// The honest answer to "let me watch it" until Clipped can play one itself:
-/// playing a recording *inside* the window is
-/// [issue #304](https://github.com/wildware-uk/clipped/issues/304) and is
-/// blocked on four separate things, including that WebView2 cannot decode the
-/// uncompressed sound the archival file carries
-/// ([issue #392](https://github.com/wildware-uk/clipped/issues/392)). Handing
-/// the file to the player somebody already has works today and loses nothing.
+/// Still here now that the window plays a recording itself
+/// ([`open_playback`], issue #304), and deliberately: the window plays one
+/// track at a time and offers no scrubbing beyond what a `<video>` gives, and
+/// somebody who wants their own player, frame stepping or a second monitor
+/// should have the file. Watching in Clipped and watching in VLC are different
+/// requests.
 ///
 /// No default application is named, so this is whatever the user chose for
 /// `.mkv`. A machine with nothing associated is Windows's "how do you want to

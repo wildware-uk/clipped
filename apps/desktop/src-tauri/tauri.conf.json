@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; img-src 'self' data:; media-src 'self' http://clip.localhost; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {

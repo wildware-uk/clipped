@@ -142,6 +142,10 @@ fn features_of_this_build() -> Vec<String> {
         // before issue #232 — which registered nothing at all — is told apart
         // from a machine on which every combination registered cleanly. The two
         // are opposite answers and the second is what an empty list looks like.
+        // And for this before it draws a player, so that a recorder built
+        // before issue #304 — which has no `open_playback` and would refuse the
+        // request — is told apart from a recording that will not play.
+        features::PLAYBACK.to_owned(),
         features::HOTKEYS.to_owned(),
         // And for this before it offers "Save Replay": a recorder built before
         // issue #38 parses `save_replay` and always refuses it, so the feature
@@ -624,6 +628,15 @@ impl CommandHandler for RecorderService {
             // the one thing that must never wait.
             Command::ExportRecording(request) => Ok(Reply::RecordingExported {
                 export: crate::export::export(&request)?,
+            }),
+            // A read of the recording, and at most one copy of it: the same
+            // shape as an export and on the same thread, for the same reasons
+            // (`crate::playback`). Ordinarily it writes nothing at all — the
+            // window plays the recording itself — and only choosing a sound
+            // track other than the one a media element would reach costs a
+            // pass over the file (issue #304).
+            Command::OpenPlayback(request) => Ok(Reply::PlaybackOpened {
+                playback: crate::playback::open(&request)?,
             }),
             // Answered from what registration produced when this process
             // started, which is a clone of a small `Vec` and touches nothing a

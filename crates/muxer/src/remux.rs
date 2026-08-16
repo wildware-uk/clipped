@@ -63,6 +63,23 @@
 //! caller can warn somebody before they wait for a copy that is going to be
 //! refused, or before they accept one that will not be complete.
 //!
+//! # A copy that carries one sound track
+//!
+//! [`remux_to_mp4_carrying`] is the same copy with one of the recording's audio
+//! tracks named, and every other one left out. It is here because of something
+//! a browser cannot do: `HTMLMediaElement.audioTracks` is not implemented in
+//! Chromium, so a `<video>` handed a multi-track file plays whichever track its
+//! demuxer reaches first and offers no way off it. A window that lets somebody
+//! hear the microphone track on its own therefore has to be handed a file that
+//! holds the microphone track and nothing else — the selection happens on the
+//! way out of the recorder rather than in the element
+//! ([issue #304](https://github.com/wildware-uk/clipped/issues/304),
+//! `docs/desktop-ui.md`).
+//!
+//! A track left out that way is [`Carriage::NotChosen`] rather than a loss: it
+//! does not make the copy refuse, and it is what was asked for. The plan still
+//! lists every track of the source, so the caller can say what it made.
+//!
 //! # The source is never touched
 //!
 //! `avformat_open_input` opens for reading and nothing here ever opens the
@@ -167,6 +184,14 @@ impl fmt::Display for TrackKind {
 pub enum Carriage {
     /// The coded packets are copied into the MP4 unchanged.
     Copied,
+    /// The caller asked for a copy carrying one audio track, and this is not it.
+    ///
+    /// Different from [`Self::CodecUnsupported`] in the one way that matters:
+    /// nothing is wrong. The track could have been carried and was not asked
+    /// for, so it is a track left out rather than a recording that cannot be
+    /// stored, and it does not make [`remux_to_mp4_carrying`] refuse. See
+    /// [`AudioTracks`].
+    NotChosen,
     /// MP4 has no registered mapping for this codec in the linked FFmpeg build,
     /// so the track cannot be stored at all.
     CodecUnsupported,
@@ -177,6 +202,47 @@ impl Carriage {
     #[must_use]
     pub const fn is_copied(self) -> bool {
         matches!(self, Self::Copied)
+    }
+}
+
+/// Which of a recording's sound tracks a copy is to carry.
+///
+/// The whole reason this is a choice: **a media element cannot select an audio
+/// track.** `HTMLMediaElement.audioTracks` is not implemented in Chromium, so a
+/// multi-track file handed to a `<video>` plays whichever track its demuxer
+/// reaches first and offers no way off it. A player that lets somebody hear the
+/// microphone track on its own therefore has to be given a file that holds that
+/// track and no other — the choice happens here, on the way out, rather than in
+/// the element ([issue #304](https://github.com/wildware-uk/clipped/issues/304),
+/// `docs/desktop-ui.md`).
+///
+/// Picture is never affected: the video track is carried either way, and it is
+/// copied rather than re-encoded in both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AudioTracks {
+    /// Every sound track the source holds, which is what an export wants.
+    #[default]
+    All,
+    /// One source stream, named by the index the container declares it at.
+    ///
+    /// It must be a sound track of that source, or the copy is refused with
+    /// [`RemuxError::NoSuchAudioTrack`] — an index that turned out to be the
+    /// video track, or one past the end, would otherwise produce a silent file
+    /// that looks exactly like a recording which never had sound.
+    Only(usize),
+}
+
+impl AudioTracks {
+    /// Whether a source stream at this index is to be carried.
+    ///
+    /// Only sound tracks are ever excluded. A subtitle or an attached font is
+    /// governed by what MP4 can store, exactly as it is for an export.
+    const fn carries(self, index: usize, kind: TrackKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(chosen) => !matches!(kind, TrackKind::Audio) || chosen == index,
+        }
     }
 }
 
@@ -239,6 +305,19 @@ impl PlannedTrack {
     pub const fn carriage(&self) -> Carriage {
         self.carriage
     }
+
+    /// What this track's absence costs, in a sentence, where it is absent.
+    ///
+    /// [`None`] for a track that is carried. The two absences are worded
+    /// differently on purpose: one is something the container cannot do, and
+    /// the other is what the caller asked for.
+    fn loss(&self) -> Option<String> {
+        match self.carriage {
+            Carriage::Copied => None,
+            Carriage::NotChosen => Some(format!("{self} was not the track asked for")),
+            Carriage::CodecUnsupported => Some(format!("{self} cannot be stored in MP4")),
+        }
+    }
 }
 
 impl fmt::Display for PlannedTrack {
@@ -292,17 +371,30 @@ impl Mp4Plan {
     /// Unicode.
     pub fn inspect(source: &Path) -> Result<Self, RemuxError> {
         let input = open_source(source)?;
-        Self::read(&input, source)
+        Self::read(&input, source, AudioTracks::All)
     }
 
-    /// The plan for an already-open source.
-    fn read(input: &InputContext, source: &Path) -> Result<Self, RemuxError> {
+    /// The plan for an already-open source, carrying the sound the caller asked
+    /// for.
+    fn read(input: &InputContext, source: &Path, audio: AudioTracks) -> Result<Self, RemuxError> {
         let mut tracks = Vec::with_capacity(input.stream_count());
         for index in 0..input.stream_count() {
             let Some(stream) = input.stream(index) else {
                 break;
             };
-            tracks.push(describe(index, stream));
+            tracks.push(describe(index, stream, audio));
+        }
+
+        if let AudioTracks::Only(chosen) = audio {
+            let is_audio = tracks
+                .iter()
+                .any(|track| track.index == chosen && matches!(track.kind, TrackKind::Audio));
+            if !is_audio {
+                return Err(RemuxError::NoSuchAudioTrack {
+                    source: source.to_path_buf(),
+                    index: chosen,
+                });
+            }
         }
 
         if tracks.is_empty() {
@@ -342,11 +434,16 @@ impl Mp4Plan {
     /// While this is not empty, [`remux_to_mp4`] refuses: an MP4 missing one of
     /// a recording's audio tracks is indistinguishable from one that never had
     /// it.
+    ///
+    /// A track the caller *chose* to leave out ([`Carriage::NotChosen`]) is not
+    /// in here, and that is the distinction the two variants exist for: an
+    /// export that would silently drop sound is refused, and a player's copy of
+    /// one named track is exactly what was asked for.
     #[must_use]
     pub fn blocking(&self) -> Vec<&PlannedTrack> {
         self.tracks
             .iter()
-            .filter(|track| track.kind.is_media() && !track.carriage.is_copied())
+            .filter(|track| track.kind.is_media() && track.carriage == Carriage::CodecUnsupported)
             .collect()
     }
 
@@ -364,11 +461,27 @@ impl Mp4Plan {
     /// asked wants one list rather than two.
     #[must_use]
     pub fn losses(&self) -> Vec<String> {
+        self.losses_where(|_| true)
+    }
+
+    /// The losses nobody asked for.
+    ///
+    /// What [`Self::losses`] holds, minus the tracks the caller chose to leave
+    /// out. That is what belongs in the log: a warning per unchosen track would
+    /// mean three lines every time somebody played a recording, saying that the
+    /// tracks they did not select are not in the copy made because they did not
+    /// select them.
+    fn unasked_losses(&self) -> Vec<String> {
+        self.losses_where(|track| track.carriage != Carriage::NotChosen)
+    }
+
+    /// The losses of the tracks a predicate admits, and the chapters.
+    fn losses_where(&self, admit: impl Fn(&PlannedTrack) -> bool) -> Vec<String> {
         let mut losses: Vec<String> = self
             .tracks
             .iter()
-            .filter(|track| !track.carriage.is_copied())
-            .map(|track| format!("{track} cannot be stored in MP4"))
+            .filter(|track| admit(track))
+            .filter_map(PlannedTrack::loss)
             .collect();
         if self.chapters > 0 {
             losses.push(format!(
@@ -537,10 +650,40 @@ impl fmt::Display for RemuxSummary {
 /// # }
 /// ```
 pub fn remux_to_mp4(source: &Path, destination: &Path) -> Result<RemuxSummary, RemuxError> {
+    remux_to_mp4_carrying(source, destination, AudioTracks::All)
+}
+
+/// Copies `source` into `destination` as an MP4, carrying the sound named.
+///
+/// Everything [`remux_to_mp4`] does — the packets are copied rather than
+/// decoded, the source is opened for reading only, a destination that exists is
+/// refused — with one difference: [`AudioTracks::Only`] leaves every other sound
+/// track out.
+///
+/// That exists for the player and not for the export. A `<video>` cannot choose
+/// an audio track, so hearing one track of a recording on its own means being
+/// handed a file that holds one track
+/// ([issue #304](https://github.com/wildware-uk/clipped/issues/304)). The
+/// returned [`Mp4Plan`] still describes **every** track of the source, with the
+/// ones left out marked [`Carriage::NotChosen`], so a caller can say what it
+/// made rather than having to remember what it asked for.
+///
+/// # Errors
+///
+/// Everything [`remux_to_mp4`] returns, and one more:
+/// [`RemuxError::NoSuchAudioTrack`] when the chosen index is not a sound track
+/// of the source. Nothing is created — the check happens before the destination
+/// is opened, because the alternative is a file with no sound in it that looks
+/// exactly like a recording which never had any.
+pub fn remux_to_mp4_carrying(
+    source: &Path,
+    destination: &Path,
+    audio: AudioTracks,
+) -> Result<RemuxSummary, RemuxError> {
     let started = Instant::now();
 
     let input = open_source(source)?;
-    let plan = Mp4Plan::read(&input, source)?;
+    let plan = Mp4Plan::read(&input, source, audio)?;
 
     let blocking = plan.blocking();
     if !blocking.is_empty() {
@@ -554,7 +697,7 @@ pub fn remux_to_mp4(source: &Path, destination: &Path) -> Result<RemuxSummary, R
     // diagnostic log explains a short MP4 without anyone having to reproduce it.
     // A static message with the detail in a field, which is the habit
     // docs/logging.md sets.
-    for loss in plan.losses() {
+    for loss in plan.unasked_losses() {
         warn!(
             source = %RedactedPath::new(source),
             loss = %loss,
@@ -611,7 +754,7 @@ fn open_source(source: &Path) -> Result<InputContext, RemuxError> {
 }
 
 /// Reads one source stream into the plan's description of it.
-fn describe(index: usize, stream: *mut ffi::AVStream) -> PlannedTrack {
+fn describe(index: usize, stream: *mut ffi::AVStream, audio: AudioTracks) -> PlannedTrack {
     // SAFETY: `stream` came from the input context's own array and points at a
     // stream that context owns and outlives this call. `codecpar` is allocated
     // with the stream and is never null, and `disposition` is a plain integer.
@@ -624,14 +767,22 @@ fn describe(index: usize, stream: *mut ffi::AVStream) -> PlannedTrack {
         )
     };
 
+    let kind = TrackKind::from_media_type(media_type);
+
     PlannedTrack {
         index,
-        kind: TrackKind::from_media_type(media_type),
+        kind,
         codec: codec_name(codec_id),
         name: metadata(stream, c"title"),
         language: metadata(stream, c"language"),
         default,
-        carriage: if mp4_can_carry(codec_id) {
+        // What the container can hold is asked first, so that a track which is
+        // both unchosen and unstorable is reported as unchosen: it is the
+        // answer that is true of this copy, and the one that does not send
+        // somebody looking for a codec problem in a file they never asked for.
+        carriage: if !audio.carries(index, kind) {
+            Carriage::NotChosen
+        } else if mp4_can_carry(codec_id) {
             Carriage::Copied
         } else {
             Carriage::CodecUnsupported
@@ -1224,6 +1375,18 @@ pub enum RemuxError {
         tracks: Vec<PlannedTrack>,
     },
 
+    /// The sound track a copy was asked to carry is not one the recording has.
+    ///
+    /// Nothing was created. A copy made anyway would be silent, and a silent
+    /// file is indistinguishable from a recording that never had sound — so the
+    /// index is named instead ([`AudioTracks::Only`]).
+    NoSuchAudioTrack {
+        /// The recording that was being read.
+        source: PathBuf,
+        /// The stream index that was asked for.
+        index: usize,
+    },
+
     /// The MP4 could not be written.
     Output {
         /// Where the MP4 was going.
@@ -1267,6 +1430,12 @@ impl fmt::Display for RemuxError {
                      is",
                 )
             }
+            Self::NoSuchAudioTrack { source, index } => write!(
+                formatter,
+                "{} has no sound track at index {index}, so a copy carrying that track alone \
+                 would have no sound at all. Nothing was written",
+                RedactedPath::new(source)
+            ),
             Self::Output {
                 destination,
                 source,
@@ -1284,7 +1453,9 @@ impl Error for RemuxError {
         match self {
             Self::SourceUnreadable { error, .. } => Some(error),
             Self::Output { source, .. } => Some(source),
-            Self::SourceNotRepresentable { .. } | Self::MediaNotCarried { .. } => None,
+            Self::SourceNotRepresentable { .. }
+            | Self::MediaNotCarried { .. }
+            | Self::NoSuchAudioTrack { .. } => None,
         }
     }
 }
