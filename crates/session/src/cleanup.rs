@@ -100,6 +100,83 @@ pub enum Skipped {
     Candidates(String),
 }
 
+/// What a library measures, and what a sweep would do about it.
+///
+/// [`preview`] produces one and changes nothing. [`sweep`] produces the same one
+/// and acts on it, which is what makes the two impossible to disagree: the dry
+/// run is not a second implementation of the decision, it is the decision
+/// without the last step (AGENTS.md section 55).
+#[derive(Debug, Clone)]
+pub struct Measurement {
+    /// What the library occupies, across every category measured.
+    pub usage_bytes: u64,
+    /// What each category occupies.
+    pub by_category: std::collections::BTreeMap<StorageCategory, u64>,
+    /// What is free on the volume the recordings are on.
+    pub free_bytes: u64,
+    /// The limits in force, which may be unlimited.
+    pub limits: clipped_library::accounting::StorageLimits,
+    /// What a sweep would delete, and what it would keep.
+    pub plan: cleanup::CleanupPlan,
+    /// Every recording the index knows about, largest first.
+    ///
+    /// The other half of #111's scope: somebody who can see what is filling
+    /// their drive can act before automatic cleanup does, which is the whole
+    /// argument for a limit being something you set having looked.
+    pub largest: Vec<cleanup::Candidate>,
+    /// Where the trash is, or would be.
+    pub trash: PathBuf,
+}
+
+/// Measures the library and works out what a sweep would do, without doing it.
+///
+/// Unlike [`sweep`] this **does** measure a library with no limit configured:
+/// "you have 400 GB of recordings and no limit" is the most useful thing this
+/// can say to somebody deciding whether to set one. Nothing is deleted, nothing
+/// is written, and the database is only read.
+///
+/// # Errors
+///
+/// [`Skipped`] for a measurement that could not be taken. A limit that is not
+/// configured is not one of them.
+pub fn preview(
+    configuration: &Configuration,
+    recordings: &Path,
+    database: &Database,
+    now: SystemTime,
+) -> Result<Measurement, Skipped> {
+    let limits = configuration.storage_limits();
+    let trash = trash_directory(configuration, recordings);
+
+    let roots = StorageRoots::new()
+        .with(StorageCategory::Recordings, recordings.to_path_buf())
+        .and_then(|roots| roots.with(StorageCategory::Trash, trash.clone()))
+        .map_err(|error| Skipped::Roots(error.to_string()))?;
+
+    let free = capacity_of(recordings)
+        .map_err(|error| Skipped::Volume(error.to_string()))?
+        .free_bytes();
+
+    let inventory = scan(&roots, &ScanOptions::new()).into_inventory();
+    let usage = inventory.total_bytes();
+
+    let candidates =
+        cleanup::candidates(database).map_err(|error| Skipped::Candidates(error.to_string()))?;
+
+    let mut largest = candidates.clone();
+    largest.sort_by_key(|candidate| core::cmp::Reverse(candidate.size_bytes));
+
+    Ok(Measurement {
+        usage_bytes: usage,
+        by_category: inventory.bytes_by_category(),
+        free_bytes: free,
+        limits,
+        plan: cleanup::plan(&limits, candidates, usage, free, now),
+        largest,
+        trash,
+    })
+}
+
 /// Sweeps the library if a limit says to.
 ///
 /// `recordings` is where this recorder writes, which is the root storage
@@ -122,54 +199,24 @@ pub fn sweep(
         return SweepReport::skipped(Skipped::NoLimit);
     }
 
-    let trash_directory = trash_directory(configuration, recordings);
-    let roots = match StorageRoots::new()
-        .with(StorageCategory::Recordings, recordings.to_path_buf())
-        .and_then(|roots| roots.with(StorageCategory::Trash, trash_directory.clone()))
-    {
-        Ok(roots) => roots,
-        Err(error) => {
+    // The same measurement the dry run takes, so that what `storage` printed is
+    // what this acts on rather than a second opinion about it.
+    let measured = match preview(configuration, recordings, database, now) {
+        Ok(measured) => measured,
+        Err(reason) => {
             tracing::warn!(
-                %error,
-                "the storage limits cannot be enforced because the directories they are about \
-                 could not be declared; nothing was deleted"
+                ?reason,
+                "the storage limits could not be enforced; nothing was deleted"
             );
-            return SweepReport::skipped(Skipped::Roots(error.to_string()));
+            return SweepReport::skipped(reason);
         }
     };
 
-    let free = match capacity_of(recordings) {
-        Ok(capacity) => capacity.free_bytes(),
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "how much of the drive is free could not be measured, so no storage limit was \
-                 enforced; nothing was deleted"
-            );
-            return SweepReport::skipped(Skipped::Volume(error.to_string()));
-        }
-    };
-
-    let inventory = scan(&roots, &ScanOptions::new()).into_inventory();
-    let usage = inventory.total_bytes();
-
-    let candidates = match cleanup::candidates(database) {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "the library index could not be read, so no recording was considered for \
-                 automatic cleanup"
-            );
-            return SweepReport::skipped(Skipped::Candidates(error.to_string()));
-        }
-    };
-
-    let plan = cleanup::plan(&limits, candidates, usage, free, now);
+    let plan = measured.plan;
     if plan.deletions.is_empty() {
         tracing::debug!(
-            usage_bytes = usage,
-            free_bytes = free,
+            usage_bytes = measured.usage_bytes,
+            free_bytes = measured.free_bytes,
             "the library is inside its storage limits"
         );
         return SweepReport {
@@ -182,7 +229,7 @@ pub fn sweep(
 
     // `apply` logs each deletion with its reason and each refusal with the
     // item it was about, which is the third acceptance criterion of #111.
-    let trash = Trash::new(trash_directory);
+    let trash = Trash::new(measured.trash);
     let outcome = match cleanup::apply(&plan, &trash, database, now) {
         Ok(outcome) => outcome,
         Err(error) => {
