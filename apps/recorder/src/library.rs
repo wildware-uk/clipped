@@ -499,6 +499,15 @@ struct Indexer {
     /// directory at all.
     path: Option<PathBuf>,
     settings: IndexSettings,
+    /// The recording folders, kept because the storage sweep needs one and
+    /// `IndexSettings` does not hand them back.
+    roots: Vec<PathBuf>,
+    /// What the library is allowed to occupy, as the user configured it.
+    ///
+    /// Handed in rather than read here, and empty unless a caller says
+    /// otherwise, so that a test's answer does not depend on the settings file
+    /// of whoever is running it (AGENTS.md section 25).
+    storage: clipped_session::config::StorageSettings,
     control: IndexControl,
     state: Mutex<IndexerState>,
     woken: Condvar,
@@ -572,7 +581,9 @@ impl LibraryIndexer {
         Self {
             shared: Arc::new(Indexer {
                 path,
-                settings: IndexSettings::new(roots),
+                settings: IndexSettings::new(roots.clone()),
+                roots,
+                storage: clipped_session::config::StorageSettings::none(),
                 control: IndexControl::new(),
                 state: Mutex::new(IndexerState::default()),
                 woken: Condvar::new(),
@@ -581,6 +592,20 @@ impl LibraryIndexer {
             }),
             thread: Mutex::new(None),
         }
+    }
+
+    /// The same indexer, enforcing these storage limits after each run.
+    ///
+    /// Without it nothing is ever deleted, which is what Clipped ships with:
+    /// [`StorageSettings::none`](clipped_session::config::StorageSettings::none)
+    /// is unlimited and `sweep` stops before it reads a directory
+    /// ([issue #111](https://github.com/wildware-uk/clipped/issues/111)).
+    #[must_use]
+    pub fn with_storage(mut self, storage: clipped_session::config::StorageSettings) -> Self {
+        if let Some(shared) = Arc::get_mut(&mut self.shared) {
+            shared.storage = storage;
+        }
+        self
     }
 
     /// Starts the thread, and asks it for the run that catches up on everything
@@ -768,6 +793,7 @@ impl Indexer {
             Ok(report) => {
                 report_unindexed(&report);
                 self.picture_what_was_indexed(open);
+                self.enforce_storage_limits(open);
             }
             Err(error) => {
                 // The connection is dropped rather than kept: a database that
@@ -786,6 +812,57 @@ impl Indexer {
 }
 
 impl Indexer {
+    /// Enforces the configured storage limits, if there are any.
+    ///
+    /// After the reconciliation and on the same thread, which is the whole
+    /// reason it is here rather than at the end of a recording: the sweep walks
+    /// directories, and a recording that had to wait for one before it could
+    /// report itself finished would be a recording that looks like it hung. The
+    /// indexer already runs off the recording path and is already asked for a
+    /// run when a recording ends.
+    ///
+    /// Nothing here fails a reconciliation. A library that could not be swept is
+    /// a library that is over its limit, which is a smaller problem than an
+    /// index that did not update — and every reason it could not is logged by
+    /// `sweep` against the thing that caused it (AGENTS.md section 17).
+    fn enforce_storage_limits(&self, database: &mut Database) {
+        // The first root is where this recorder writes. A library spread over
+        // several folders is issue #272's question, and so is which of them a
+        // sweep should measure; this measures the one Clipped records into,
+        // which is the one that grows.
+        let Some(recordings) = self.roots.first() else {
+            return;
+        };
+
+        let mut configuration = clipped_session::config::Configuration::defaults();
+        configuration.set_storage(self.storage.clone());
+
+        let report = clipped_session::cleanup::sweep(
+            &configuration,
+            recordings,
+            database,
+            SystemTime::now(),
+        );
+
+        match &report.skipped {
+            // The ordinary case on a machine nobody has set a limit on, and it
+            // is `debug` rather than `info` because it happens after every run
+            // and says that nothing happened.
+            Some(clipped_session::cleanup::Skipped::NoLimit) => {}
+            Some(reason) => tracing::warn!(
+                ?reason,
+                "the configured storage limits could not be enforced this run"
+            ),
+            None if report.deleted > 0 => tracing::info!(
+                deleted = report.deleted,
+                reclaimed_bytes = report.reclaimed_bytes,
+                refused = report.refused,
+                "automatic cleanup moved recordings to the trash to stay inside the storage limits"
+            ),
+            None => {}
+        }
+    }
+
     /// Asks for a picture and a waveform of every recording the index holds.
     ///
     /// After the reconciliation rather than during it, and by

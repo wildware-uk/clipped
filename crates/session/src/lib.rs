@@ -229,6 +229,7 @@
 
 pub mod automatic;
 pub mod bookmarks;
+pub mod cleanup;
 pub mod config;
 pub mod disk;
 pub mod failure;

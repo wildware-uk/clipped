@@ -136,6 +136,34 @@ does nothing (AGENTS.md section 27).
 | `system_audio` | text | `default` | `default`, `none`, or a device name of 1–256 characters |
 | `replay_window_seconds` | number | `300` | 30–1800, whole seconds |
 
+Storage limits are **not** in that table, and not per game: they live in a
+`storage` section of their own, because a library is one thing however many
+games are in it. Nothing is limited unless one is set, which is what Clipped
+ships with and why automatic cleanup deletes nothing on a machine nobody has
+configured ([#111]).
+
+| Key in `storage` | Type | Default | Accepted |
+| --- | --- | --- | --- |
+| `maximum_usage_bytes` | number | none | a gigabyte or more |
+| `minimum_free_space_bytes` | number | none | any number of bytes |
+| `maximum_age_days` | number | none | one day or more, whole days |
+| `trash_directory` | text | beside the recordings | an absolute path, on the recordings' volume and not inside them |
+
+A limit outside those bounds is **refused**, and the file does not load: a quota
+under a gigabyte can only be satisfied by a library with nothing in it, and a
+maximum age under a day deletes footage recorded this afternoon. Both floors are
+`clipped-library`'s own constants and the refusal is its own message. A key
+inside `storage` that this build does not understand is kept and written back,
+like every other unknown key.
+
+`trash_directory` defaults to the recordings folder's path with `.trash`
+appended — `D:\Clips` becomes `D:\Clips.trash`. Beside rather than inside,
+because deletion is a rename and so must stay on the volume, and because a trash
+*inside* the recordings root would be counted as recordings by storage
+accounting — which `StorageRoots` refuses outright.
+
+[#111]: https://github.com/wildware-uk/clipped/issues/111
+
 The vocabulary is the command line's, deliberately: `--codec hevc` and
 `"codec": "hevc"` mean the same thing, because a settings file and a command
 line that disagreed about what an encoder is called would be two answers to one

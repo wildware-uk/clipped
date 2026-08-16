@@ -383,7 +383,16 @@ impl RecorderService {
         Self::over(
             events,
             LibraryReader::for_this_user(),
-            LibraryIndexer::for_this_user(),
+            // The storage limits come from the same settings file the recording
+            // settings do, read once here. Without them the indexer sweeps
+            // nothing, which is what an unconfigured machine gets (issue #111).
+            LibraryIndexer::for_this_user().with_storage(
+                crate::watch::load_configuration(
+                    clipped_session::config::ConfigurationStore::default_path().as_deref(),
+                )
+                .storage()
+                .clone(),
+            ),
             // The same file `watch` reads, through the same function, so that
             // "what does this record at" has one answer whichever subcommand is
             // asking (AGENTS.md sections 30 and 55). Read once, here: a

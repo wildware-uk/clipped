@@ -200,6 +200,20 @@ pub enum ConfigurationError {
         /// Which value, and what it should have been.
         source: SettingError,
     },
+    /// A `storage` limit is outside the bounds `clipped-library` sets.
+    ///
+    /// Separate from [`Self::Invalid`] because the bounds are not this crate's:
+    /// a quota below a gigabyte and a maximum age below a day are refused where
+    /// they are defined, and this carries that refusal rather than restating it
+    /// ([issue #111](https://github.com/wildware-uk/clipped/issues/111)).
+    InvalidStorageLimit {
+        /// The file.
+        path: PathBuf,
+        /// Which key carried it.
+        key: &'static str,
+        /// What the library said about the value.
+        source: super::storage::StorageProblem,
+    },
     /// Saving would have replaced a settings file this build cannot read.
     ///
     /// Refusing to read such a file is only half of preserving it. The other
@@ -265,6 +279,11 @@ impl fmt::Display for ConfigurationError {
                 "{} cannot be used: in {section}, {source}",
                 path.display()
             ),
+            Self::InvalidStorageLimit { path, key, source } => write!(
+                formatter,
+                "{} cannot be used: `storage.{key}` is not a limit Clipped will act on: {source}",
+                path.display()
+            ),
             // The path is not repeated here: `source` names it, and this
             // message is already the longest one in the enum.
             Self::WouldOverwrite { source, .. } => write!(
@@ -282,6 +301,7 @@ impl std::error::Error for ConfigurationError {
         match self {
             Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
             Self::Invalid { source, .. } => Some(source),
+            Self::InvalidStorageLimit { source, .. } => Some(source),
             Self::WouldOverwrite { source, .. } => Some(source),
             Self::Syntax { .. } | Self::UnsupportedVersion { .. } | Self::Malformed { .. } => None,
         }
