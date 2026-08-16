@@ -976,6 +976,55 @@ fn a_word_the_schema_does_not_know_costs_a_column_and_not_the_session() {
     );
 }
 
+/// The two words `clipped-recorder recover` writes are not "the schema does
+/// not know" words, unlike the one above. `crates/storage/migrations/
+/// 0006_recovered_recording_outcomes.sql` widened the same CHECK constraint
+/// `RECORDING_OUTCOMES` (`crates/library/src/index/ingest.rs`) lists, so a
+/// recovered fragment's outcome has to survive being reconciled -- not merely
+/// be accepted by the Rust-side list while the database still refuses the
+/// word underneath it (issue #451). Both directions are asserted: no
+/// `IndexProblem`, and the column actually holds the word rather than having
+/// degraded to `NULL`.
+#[test]
+fn a_recovered_recordings_outcome_is_indexed_without_a_problem() {
+    for outcome in ["interrupted", "discarded"] {
+        let library = Library::new(&format!("recovered-outcome-{outcome}"));
+        let path = library.root.join("clipped-cs2.session.json");
+        fs::write(library.file("one.mkv"), [0u8; 32]).expect("a recording");
+        let session = json!({
+            "schema_version": 1,
+            "session_id": "cs2-20260811-143205",
+            "game": { "kind": "known", "game_id": "cs2", "name": "Counter-Strike 2" },
+            "started_at": "2026-08-11T14:32:05+01:00",
+            "ended_at": "2026-08-11T14:40:00+01:00",
+            "recordings": [{
+                "index": 1,
+                "output": library.file("one.mkv").display().to_string(),
+                "started_at": "2026-08-11T14:32:05+01:00",
+                "ended_at": "2026-08-11T14:40:00+01:00",
+                "outcome": outcome,
+            }],
+            "events": [{ "at": "2026-08-11T14:40:00+01:00", "event": "recording-ended",
+                         "index": 1, "outcome": outcome }],
+        });
+        fs::write(&path, session.to_string()).expect("the sidecar can be written");
+        let mut database = library.open();
+
+        let report = library.run(&mut database, observed_at());
+
+        assert!(
+            report.problems.is_empty(),
+            "{outcome} should be a known word: {:?}",
+            report.problems
+        );
+        assert_eq!(
+            column_of_recording(&database, &library.file("one.mkv"), "outcome").as_deref(),
+            Some(outcome),
+            "the word should round-trip into the index rather than degrade to NULL"
+        );
+    }
+}
+
 /// Cancelling has to be prompt and has to be safe: what was committed stays
 /// committed, and the next run carries on rather than starting again.
 #[test]

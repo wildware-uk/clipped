@@ -200,13 +200,12 @@ pub struct RecoverArgs {
     /// Move one recording's file to the trash and record that you did.
     /// [default: off]
     ///
-    /// The file is moved rather than deleted, so it is recoverable — but not
-    /// yet through the trash screen or its retention, because a recovered
-    /// fragment has no library row for those to key off.
-    /// `docs/recorder-cli.md` and `docs/storage-management.md` say exactly
-    /// what that costs. Requires `--session`: even a recoverable action on
-    /// footage is refused in bulk, so it always names the one recording it
-    /// moves (AGENTS.md section 56).
+    /// The recording is indexed first, so it goes into the trash the same
+    /// way a deletion from the library does: listed there, restorable, and
+    /// under the same retention as everything else deleted — not merely
+    /// moved with nothing left pointing at it. Requires `--session`: even a
+    /// recoverable action on footage is refused in bulk, so it always names
+    /// the one recording it moves (AGENTS.md section 56).
     #[arg(long, requires = "session")]
     pub discard: bool,
 }

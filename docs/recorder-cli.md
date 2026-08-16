@@ -525,27 +525,28 @@ to give it back the index a normal recording ends with — that is
 [#283](https://github.com/wildware-uk/clipped/issues/283) — so the footage
 still plays from the start and seeks by scanning.
 
-**`--discard` moves the file into `clipped-library`'s trash rather than
-deleting it** ([#451](https://github.com/wildware-uk/clipped/issues/451)); the
-session record gets an end time and the `discarded` outcome, the same as
-`--adopt`, because the record that a recording existed and was thrown away is
-worth more than a gap. What `--discard` prints names where the file went:
+**`--discard` moves the file into `clipped-library`'s real trash rather than
+deleting it** ([#451](https://github.com/wildware-uk/clipped/issues/451)). It
+indexes the recording first — the recording has no library row until this
+point, because the library only indexes one once its session record exists —
+and only then sends that row to the trash, the same call a deletion made from
+the library uses. The session record gets an end time and the `discarded`
+outcome, the same shape as `--adopt`'s, because the record that a recording
+existed and was thrown away is worth more than a gap. What `--discard` prints
+names where the file went:
 
 ```text
-Discarded D:\clips\clipped-cs2-20260811-143205.mkv: moved to the trash at D:\clips.trash\20260811-090000\clipped-cs2-20260811-143205.mkv. It does not yet show on the trash screen -- open the folder to restore it or remove it for good; it will not expire on its own.
+Discarded D:\clips\clipped-cs2-20260811-143205.mkv: moved to the trash at D:\clips.trash\20260811-090000\clipped-cs2-20260811-143205.mkv, and listed there -- restorable until the trash is emptied or its retention expires it.
 ```
 
-That caveat is real and worth reading twice. A recovered fragment has no
-library row yet — indexing it is what `--adopt` or `--discard` themselves are
-doing — so there is nothing for the trash's own row-based bookkeeping to
-attach to. The file is genuinely moved into the trash directory, byte for
-byte, on the same terms [storage-management.md](storage-management.md#the-trash)
-describes for everything else deleted from the library: a rename rather than a
-copy, refused rather than silently copied across a volume with no trash of its
-own. What it does not yet do is appear on the trash screen, count towards the
-figures shown there, or expire under the configured retention — nothing has
-told the trash's index that this file exists. Recovering it into that index is
-future work, not silently promised here.
+That is not a courtesy — it is the same trash [storage-management.md](storage-management.md#the-trash)
+describes for everything else deleted from the library: listed on the trash
+screen, counted towards what emptying it would reclaim, restorable, and swept
+by whatever retention is configured. `storage-management.md`'s
+["Getting a row before there is one"](storage-management.md#getting-a-row-before-there-is-one-clipped-recorder-recover---discard)
+has the ordering that makes this safe — which of indexing, moving and closing
+the sidecar record runs first, and what a failure between two of them leaves
+behind.
 
 **`--discard` always requires `--session`.** Even though the choice is
 recoverable now, a bulk action nobody chose item by item is still refused
@@ -961,11 +962,14 @@ noticed, so continuing would be a recorder that quietly records nothing.
 
 `recover` exits 2 for `--discard` with no `--session`, and for a `--session`
 that names nothing waiting to be recovered — both are the command line to
-blame, not the recordings directory. It exits 1 for everything else that can go
-wrong: the directory could not be read, a session record could not be
-rewritten, or a file could not be moved into the trash. Every one of those
-leaves the footage exactly where it was; none of them is the file being lost,
-only the record of it being stuck open.
+blame, not the recordings directory. It exits 1 for everything else that can
+go wrong: the directory could not be read, the library index could not be
+opened or indexed, a recording could not be moved into the trash, or a
+session record could not be rewritten. None of those is the footage being
+lost — for every one but the last, nothing has moved and the sidecar is
+still open, so the next `recover` offers exactly what this one did; for the
+last, the recording is already safely in the trash and only its sidecar
+still says otherwise.
 
 `start-at-login` exits 0 for all three actions, including `disable` when nothing
 was configured: that is the state being asked for, and treating it as a failure

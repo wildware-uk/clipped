@@ -581,31 +581,45 @@ Four interlocks, each in one place so that each can be reviewed:
   two filesystem failures in a row, so the file could not be put back either — is
   reported as an error naming both paths rather than logged and forgotten.
 
-### A file with no row: `clipped-recorder recover --discard`
+### Getting a row before there is one: `clipped-recorder recover --discard`
 
 Everything above assumes a row to key off — that is what lets an item be
 listed, restored and swept by retention. `recover --discard`
 ([issue #451](https://github.com/wildware-uk/clipped/issues/451)) hands the
-trash a fragment an interrupted recorder left, and that has no row: the library
-only indexes a recording once its session record says it is finished, which is
-the thing discarding is in the middle of doing. Giving it one purely so it
-could be trashed would mean a delete command doing the library's indexing —
-not this crate's job, and not free, since the sidecar outcome recovery writes
-is not yet a word the indexer recognises
-([issue #278](https://github.com/wildware-uk/clipped/issues/278)) — a separate
-gap this does not paper over.
+trash a fragment an interrupted recorder left, and an interrupted fragment has
+no row yet: the library only indexes a recording once its session record
+exists, and `recover` is what writes that record. So `--discard` indexes the
+recordings directory first — the ordinary reconciliation
+([`index::reconcile`](../crates/library/src/index/mod.rs)), not a shortcut of
+its own — and only then calls [`Trash::send`] on the row that gives it, the
+same call a deletion from the library makes. Nothing here is a second way into
+the trash: by the time `Trash::send` runs, the fragment is an ordinary
+recording with an ordinary row.
 
-So `Trash::stow_untracked` does only the physical half: the same rename, into
-the same trash directory, under the same cross-volume refusal as an ordinary
-delete. What it does not do is give the file a row, and that is a real cost
-stated plainly rather than hidden — it will not appear on the trash screen, is
-not counted towards what emptying the trash would reclaim, and is not swept by
-retention, because there is no `deleted_at` for retention to be judged from.
-The file is on disk, in the trash directory, byte for byte, which is the one
-guarantee that makes a mistaken `--discard` recoverable at all; getting the
-rest of the bookkeeping is future work, not something this quietly promises.
-[recorder-cli.md](recorder-cli.md#recover) is what a person running the command
-is told about the difference.
+That ordering is also what keeps a failure partway through from stranding
+anything. Indexing runs before the file moves, so a failure there leaves every
+sidecar open and every file untouched — the next `recover` offers exactly what
+this one did. Closing the sidecar's record runs *after* `Trash::send`, so a
+failure there leaves a recording that is already genuinely in the trash —
+listed, restorable, under retention — with a session record that still calls
+it open; recovering the same directory again offers it, and discarding it a
+second time finishes the one step that did not complete rather than moving
+the file twice. `docs/recorder-cli.md`'s `recover` section has the exit codes
+and the full account of what each step's failure means for someone reading a
+message on a screen.
+
+The one thing this adds to `recover`'s reach that is worth naming: two words
+recovery writes into a session's outcome — `interrupted` and `discarded` —
+are now in `recordings.outcome`'s own vocabulary
+(`crates/storage/migrations/0006_recovered_recording_outcomes.sql`), so that
+a recording closed this way survives being reconciled again rather than
+degrading to `NULL` with a logged `IndexProblem`
+([issue #278](https://github.com/wildware-uk/clipped/issues/278) is the
+tracker for the two words this did not touch — `disk-space-low` and
+`output-unavailable`, on `end_reason` rather than `outcome`, and unrelated to
+`recover`).
+
+[`Trash::send`]: ../crates/library/src/trash/mod.rs
 
 ### Where the trash runs
 

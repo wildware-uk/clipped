@@ -753,15 +753,16 @@ container, which `clipped-muxer` cannot do yet
 is that the footage is *known* — named, sized, attributed, and indexed like any
 other recording rather than looking like one still being written.
 
-Discarding moves the file into `clipped-library`'s trash and writes the
-`discarded` outcome — not `remove_file`, since [issue #451] found that a
-delete a user has not necessarily watched yet was the wrong default once a
-trash existed to catch it. It names one session, always: even a recoverable
-choice is refused in bulk, so there is deliberately no way to move everything
-at once (AGENTS.md section 56). The entry stays either way, because the
-record that a recording existed and was discarded is worth more than a gap.
-[recorder-cli.md](recorder-cli.md#recover) has what moving it to the trash
-means in practice, including the one thing it does not yet do.
+Discarding indexes the recording, moves it into `clipped-library`'s trash and
+writes the `discarded` outcome — not `remove_file`, since [issue #451] found
+that a delete a user has not necessarily watched yet was the wrong default
+once a trash existed to catch it. It names one session, always: even a
+recoverable choice is refused in bulk, so there is deliberately no way to
+move everything at once (AGENTS.md section 56). The entry stays either way,
+because the record that a recording existed and was discarded is worth more
+than a gap. [recorder-cli.md](recorder-cli.md#recover) has what moving it to
+the trash means in practice, and the order that keeps a failure partway
+through from stranding it.
 
 [issue #451]: https://github.com/wildware-uk/clipped/issues/451
 
@@ -779,11 +780,16 @@ into the sidecar and into logs:
 | `recordings[].end_reason` | `disk-space-low` | Stopped deliberately at the reserve; the file is complete |
 | `recordings[].end_reason` | `output-unavailable` | The output drive stopped answering |
 | `recordings[].outcome` | `interrupted` | The recorder was killed; the footage was adopted afterwards |
-| `recordings[].outcome` | `discarded` | The same, and the file was deliberately deleted |
+| `recordings[].outcome` | `discarded` | The same, and the file was sent to the trash |
 
-`clipped-library`'s indexer does not know these four yet. It degrades gracefully
-— an unknown word becomes `NULL` and a reported `IndexProblem` — and teaching it
-is [#278](https://github.com/wildware-uk/clipped/issues/278). The IPC protocol
+`clipped-library`'s indexer knows the two `outcome` words: `recover --discard`
+indexes a recording before it moves it (issue #451), so the row it writes has
+to survive a later reconciliation of the same, now-closed, sidecar, and
+`crates/storage/migrations/0006_recovered_recording_outcomes.sql` widened
+`recordings.outcome`'s vocabulary to match. The two `end_reason` words are the
+gap that is left: it degrades gracefully — an unknown word becomes `NULL` and a
+reported `IndexProblem` — and teaching it the rest is
+[#278](https://github.com/wildware-uk/clipped/issues/278). The IPC protocol
 carries the two end reasons as `EndReason::Other` for the same reason, and
 [#284](https://github.com/wildware-uk/clipped/issues/284) promotes them.
 

@@ -139,7 +139,7 @@ use tracing::{info, warn};
 
 pub use entry::{
     EmptyTrash, ExpiryFailure, ExpiryReport, FileOutcome, ItemKind, Removal, RestoreOutcome,
-    TrashEntry, TrashItem, UntrackedStow,
+    TrashEntry, TrashItem,
 };
 pub use error::TrashError;
 pub use retention::Retention;
@@ -267,61 +267,6 @@ impl Trash {
             size_bytes: row.size_bytes,
             dependent_clips,
         })
-    }
-
-    /// Moves a file into the trash with no row to track it by.
-    ///
-    /// Every other operation here is keyed to a row in `recordings` or
-    /// `clips` — that is what lets an item be listed, restored by
-    /// [`Self::restore`] and swept by [`Self::expire`]. Some callers have a
-    /// file to get rid of and no such row to give it: `clipped-recorder
-    /// recover --discard` (issue #451) hands back a fragment an interrupted
-    /// recorder left, which the library has deliberately not indexed —
-    /// `clipped_session::automatic::recovery` only writes a sidecar entry a
-    /// recording is finished, and indexing it here purely so it could be
-    /// trashed would make a delete action responsible for ingestion, which is
-    /// not this crate's job and is not free: it would run head-first into
-    /// `crate::index::ingest`'s `RECORDING_OUTCOMES` not yet recognising the
-    /// outcome recovery writes, which is a real gap and a separate ticket, not
-    /// something to paper over here (AGENTS.md section 55).
-    ///
-    /// So this does only the half it owns: the same rename, into the same
-    /// trash directory, under the same cross-volume refusal as [`Self::send`].
-    /// What it does **not** do is the whole reason it has a different name,
-    /// and a caller has to be told plainly:
-    ///
-    /// - The file will not appear in [`Self::list`], is not counted towards
-    ///   [`Self::empty`]'s confirmation, and [`Self::expire`] will never reach
-    ///   it — there is no `deleted_at` for retention to be judged from.
-    /// - It is undone by moving the file out of the trash directory by hand,
-    ///   not by [`Self::restore`].
-    ///
-    /// It is real trash in the one sense that has to be true for a delete
-    /// command to reach for it at all: the file is on disk, inside the trash
-    /// directory, byte for byte — which is what makes a mistaken `--discard`
-    /// recoverable, even without a database row saying so.
-    ///
-    /// # Errors
-    ///
-    /// [`TrashError::DifferentVolume`] if the file cannot be renamed into the
-    /// trash — refused rather than silently copied, for the reason
-    /// [`Self::send`] is. [`TrashError::CreateDirectory`] or
-    /// [`TrashError::Move`] if the move itself failed; the file is still where
-    /// it was in every one of those.
-    pub fn stow_untracked(&self, file: &Path, at: SystemTime) -> Result<UntrackedStow, TrashError> {
-        let stowed = vault::stow(&self.directory, file, at)?;
-        let path = match stowed {
-            vault::Stowed::Moved(path) => Some(path),
-            vault::Stowed::NoFile => None,
-        };
-        if let Some(path) = &path {
-            info!(
-                from = %RedactedPath::new(file),
-                to = %RedactedPath::new(path),
-                "a file with no library row was moved to the trash"
-            );
-        }
-        Ok(UntrackedStow { path })
     }
 
     /// Restores `item` from the trash: moves its file back and clears its marks.

@@ -29,7 +29,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use clipped_library::trash::{Trash, TrashError};
+use clipped_library::index::{reconcile, IndexControl, IndexError, IndexPace, IndexSettings};
+use clipped_library::trash::{Trash, TrashError, TrashItem};
 use clipped_logging::RedactedPath;
 use clipped_session::automatic::recovery::{
     adopt, interrupted_recordings, record_discarded, InterruptedRecording,
@@ -37,6 +38,8 @@ use clipped_session::automatic::recovery::{
 use clipped_session::cleanup;
 use clipped_session::config::ConfigurationStore;
 use clipped_session::disk::describe_bytes;
+use clipped_storage::rusqlite::{params, OptionalExtension};
+use clipped_storage::{Database, StorageError};
 
 use crate::cli::{RecoverAction, RecoverArgs};
 
@@ -67,6 +70,37 @@ pub enum RecoverError {
     },
     /// `--discard` was asked for without naming exactly one session.
     DiscardNeedsASession,
+    /// This machine describes no per-user directory, so there is no library
+    /// to index a discarded recording into.
+    NoLibrary,
+    /// The library index could not be opened.
+    DatabaseUnavailable {
+        /// What the filesystem or the index said.
+        ///
+        /// Boxed: `StorageError` carries a `PathBuf` and a `rusqlite::Error`
+        /// per variant, which is large enough on its own to make every
+        /// `Result<_, RecoverError>` pay for the biggest error this type can
+        /// hold (`clippy::result_large_err`).
+        source: Box<StorageError>,
+    },
+    /// The recordings directory could not be indexed, so the recording named
+    /// by `--session` still has no row and nothing was moved.
+    NotIndexed {
+        /// Which session.
+        session: String,
+        /// What the index refused. Boxed for the same reason
+        /// [`Self::DatabaseUnavailable`]'s is: `IndexError` wraps a
+        /// `StorageError`.
+        source: Box<IndexError>,
+    },
+    /// Indexing finished but the library still has no row for this recording.
+    /// This should not happen — a sidecar `interrupted_recordings` just read
+    /// names every recording it lists — and is answered rather than
+    /// unwrapped.
+    NotFoundAfterIndexing {
+        /// Which session.
+        session: String,
+    },
     /// A recording could not be moved into the trash. Nothing was touched:
     /// every way this fails leaves the file exactly where it was.
     NotTrashed {
@@ -113,6 +147,25 @@ impl fmt::Display for RecoverError {
                  with the identifier from `clipped-recorder recover`. It is recoverable, but \
                  never as a choice nobody made item by item",
             ),
+            Self::NoLibrary => formatter.write_str(
+                "this account has no application data directory, so Clipped has no library to \
+                 index a discarded recording into; nothing was touched",
+            ),
+            Self::DatabaseUnavailable { source } => write!(
+                formatter,
+                "the library index could not be opened, so a recording cannot be moved to the \
+                 trash: {source}. Nothing was touched"
+            ),
+            Self::NotIndexed { session, source } => write!(
+                formatter,
+                "the recordings directory could not be indexed, so session {session} still has \
+                 no library row and nothing was moved: {source}"
+            ),
+            Self::NotFoundAfterIndexing { session } => write!(
+                formatter,
+                "session {session} was indexed but the library still has no row for it, so \
+                 nothing could be moved to the trash; the footage itself is untouched"
+            ),
             Self::NotTrashed { session, source } => write!(
                 formatter,
                 "the recording of session {session} could not be moved to the trash: {source}. \
@@ -124,8 +177,9 @@ impl fmt::Display for RecoverError {
                 source,
             } => write!(
                 formatter,
-                "session {session}'s file was moved to the trash, at {}, but its record could \
-                 not be updated to say so: {source}. The footage is safe there",
+                "session {session}'s file was moved to the trash, at {}, and is now listed \
+                 there — but its session record could not be updated to say so: {source}. \
+                 Recovering the same directory will offer it again",
                 trash_path.display()
             ),
         }
@@ -138,8 +192,14 @@ impl Error for RecoverError {
             Self::Unreadable { source, .. }
             | Self::NotClosed { source, .. }
             | Self::RecordNotUpdated { source, .. } => Some(source),
+            Self::DatabaseUnavailable { source } => Some(source),
+            Self::NotIndexed { source, .. } => Some(source),
             Self::NotTrashed { source, .. } => Some(source),
-            Self::NoDirectory | Self::NoSuchRecording { .. } | Self::DiscardNeedsASession => None,
+            Self::NoDirectory
+            | Self::NoSuchRecording { .. }
+            | Self::DiscardNeedsASession
+            | Self::NoLibrary
+            | Self::NotFoundAfterIndexing { .. } => None,
         }
     }
 }
@@ -152,13 +212,14 @@ impl Error for RecoverError {
 ///
 /// # Errors
 ///
-/// [`RecoverError`], which names what could not be read or rewritten. Nothing
-/// here can lose a recording: the only path that moves one is `--discard`, it
-/// names a single session, and what it moves to is `clipped_library`'s trash
-/// directory rather than deletion (issue #451). That makes it recoverable —
-/// the file is on disk, untouched — though not yet under the same retention
-/// and restore screen as everything else deleted from the library; see
-/// [`discard_all`] for exactly what that costs.
+/// [`RecoverError`], which names what could not be read, indexed or
+/// rewritten. Nothing here can lose a recording: the only path that moves one
+/// is `--discard`, it names a single session, and what it moves to is
+/// `clipped_library`'s real trash rather than deletion (issue #451) — the
+/// same listing, restore and retention as anything else deleted from the
+/// library, because `--discard` indexes the fragment before it sends it
+/// there. See [`discard_all`] for the order that makes a failure partway
+/// through safe rather than a fragment stuck in limbo.
 pub fn run(args: &RecoverArgs) -> Result<(), RecoverError> {
     let directory = match &args.directory {
         Some(named) => named.clone(),
@@ -194,12 +255,28 @@ pub fn run(args: &RecoverArgs) -> Result<(), RecoverError> {
         RecoverAction::Adopt => adopt_all(&chosen),
         RecoverAction::Discard => {
             // Resolved here, once, and only for the branch that needs it: a
-            // settings file read is wasted work on every `recover` call that
-            // is only listing or adopting.
+            // settings file read and a database open are wasted work on every
+            // `recover` call that is only listing or adopting.
             let configuration =
                 crate::watch::load_configuration(ConfigurationStore::default_path().as_deref());
             let trash = Trash::new(cleanup::trash_directory(&configuration, &directory));
-            discard_all(&chosen, args.session.as_deref(), &trash)
+
+            let library_path = clipped_logging::application_directory()
+                .map(|home| home.join(crate::library::LIBRARY_FILE))
+                .ok_or(RecoverError::NoLibrary)?;
+            let mut database = Database::open(&library_path).map_err(|source| {
+                RecoverError::DatabaseUnavailable {
+                    source: Box::new(source),
+                }
+            })?;
+
+            discard_all(
+                &chosen,
+                args.session.as_deref(),
+                &directory,
+                &mut database,
+                &trash,
+            )
         }
     }
 }
@@ -300,78 +377,151 @@ fn adopt_all(chosen: &[&InterruptedRecording]) -> Result<(), RecoverError> {
     Ok(())
 }
 
-/// Moves the one chosen recording to the trash.
+/// Indexes, then moves, the chosen recordings to the trash.
 ///
-/// Two steps, in this order and not the other: the file goes into `trash`
-/// first, and the session record is only rewritten once that has actually
-/// happened. A rewrite that failed before the move would risk a sidecar
-/// saying "discarded" about a file that was still sitting in the library; a
-/// move that fails leaves the sidecar saying the recording is still open,
-/// which is the truth and offers it again rather than losing track of it.
+/// # The order, and why a failure between two steps is always safe
 ///
-/// # Where the file goes, and what that does not include
+/// Three things happen per recording, in this order and not another, because
+/// the order is what decides which state a failure between two of them
+/// leaves behind — and none of them is a fragment stuck in limbo:
 ///
-/// `trash` is `clipped_library`'s real trash directory — the same one a
-/// deletion from the library uses — but the row that usually comes with a
-/// trashed item does not exist here: an interrupted recording has no library
-/// row until it is closed off, and closing it off with the `discarded`
-/// outcome is exactly what this function is doing. So the file is genuinely
-/// recoverable — it is sitting on disk, untouched, inside the trash directory
-/// — but it will not appear on a trash screen or be swept by retention until
-/// something adopts it into the index (`Trash::stow_untracked`'s own
-/// documentation says why, and `docs/recorder-cli.md` says it to the person
-/// running the command).
+/// 1. **Index the recordings directory** (once, for every recording chosen).
+///    A recovered fragment has no library row until this runs: the library
+///    only indexes a recording once its session record exists, and the
+///    sidecar is still open at this point — [`record_discarded`] has not run
+///    yet. If indexing fails, nothing else has happened at all: no file has
+///    moved and every sidecar is still open, so the next `recover` run offers
+///    exactly what this one did.
+/// 2. **[`Trash::send`] the row indexing just gave it.** The same path a
+///    deletion from the library takes: a rename into the trash, the row
+///    marked `deleted_at`. If this fails, the row exists but is not marked
+///    deleted, the file is still where it was, and the sidecar is still
+///    open — also fully retryable.
+/// 3. **Close the sidecar record** with the `discarded` outcome. If *this*
+///    fails, the recording is already genuinely in the trash — listed,
+///    restorable, swept by retention — but its sidecar still says it is
+///    open. Recovering the same directory offers it again; discarding it a
+///    second time re-indexes the same row (already marked deleted, so
+///    ingestion keeps its trashed path rather than the sidecar's stale one —
+///    `crate::index::ingest`'s own rule for a row already in the trash) and
+///    [`Trash::send`] answers [`TrashError::AlreadyInTrash`] rather than
+///    moving anything twice; only the record-closing step is retried.
+///
+/// So a failure anywhere in this list leaves the footage exactly as
+/// recoverable as it was the moment before — never less, and from step 2
+/// onward, strictly more, because the trash's own bookkeeping now knows about
+/// it.
 fn discard_all(
     chosen: &[&InterruptedRecording],
     session: Option<&str>,
+    directory: &Path,
+    database: &mut Database,
     trash: &Trash,
 ) -> Result<(), RecoverError> {
     // Never in bulk. This is the only path in the recorder that moves
     // somebody's footage into the trash, and it is reached by naming the
     // recording it moves (AGENTS.md section 56).
-    if session.is_none() {
+    let Some(session_id) = session else {
         return Err(RecoverError::DiscardNeedsASession);
-    }
+    };
     let now = SystemTime::now();
 
+    let mut settings = IndexSettings::new([directory.to_path_buf()]);
+    settings.pace = IndexPace::foreground();
+    reconcile(database, &settings, &IndexControl::new(), now).map_err(|source| {
+        RecoverError::NotIndexed {
+            session: session_id.to_owned(),
+            source: Box::new(source),
+        }
+    })?;
+
     for recording in chosen {
-        let stowed = trash
-            .stow_untracked(recording.output(), now)
-            .map_err(|source| RecoverError::NotTrashed {
-                session: recording.session_id().to_owned(),
-                source,
+        let item =
+            indexed_item(database, recording.session_id(), recording.index()).ok_or_else(|| {
+                RecoverError::NotFoundAfterIndexing {
+                    session: recording.session_id().to_owned(),
+                }
             })?;
+
+        let entry = match trash.send(database, item, now) {
+            Ok(entry) => entry,
+            // A previous `--discard` on this session moved the file and
+            // marked the row, then failed at step 3 below before it could
+            // close the sidecar. Re-indexing just now kept the row's already
+            // -trashed path rather than the sidecar's stale one
+            // (`crate::index::ingest`'s rule for a row already in the
+            // trash), so this is that retry finishing the one step that did
+            // not complete — not a second move, and not an error to report.
+            Err(TrashError::AlreadyInTrash { .. }) => trash
+                .entry(database, item)
+                .map_err(|source| RecoverError::NotTrashed {
+                    session: recording.session_id().to_owned(),
+                    source,
+                })?
+                .ok_or(TrashError::NotInTrash { item })
+                .map_err(|source| RecoverError::NotTrashed {
+                    session: recording.session_id().to_owned(),
+                    source,
+                })?,
+            Err(source) => {
+                return Err(RecoverError::NotTrashed {
+                    session: recording.session_id().to_owned(),
+                    source,
+                })
+            }
+        };
 
         record_discarded(recording, now).map_err(|source| RecoverError::RecordNotUpdated {
             session: recording.session_id().to_owned(),
-            trash_path: stowed
-                .path
-                .clone()
-                .unwrap_or_else(|| recording.output().to_path_buf()),
+            trash_path: entry.path.clone(),
             source,
         })?;
 
+        // `send` leaves `path` equal to `original_path` in exactly the one
+        // case where there was nothing to move (`TrashEntry`'s own
+        // documentation) — the same "no footage" case `bytes() == None`
+        // reports before anything is indexed.
+        let moved = entry.path != entry.original_path;
         tracing::info!(
             session = recording.session_id(),
             index = recording.index(),
-            moved = stowed.path.is_some(),
+            moved,
             "an interrupted recording was discarded"
         );
-        match &stowed.path {
-            Some(path) => eprintln!(
-                "Discarded {}: moved to the trash at {}. It does not yet show on the trash \
-                 screen -- open the folder to restore it or remove it for good; it will not \
-                 expire on its own.",
+        if moved {
+            eprintln!(
+                "Discarded {}: moved to the trash at {}, and listed there — restorable until \
+                 the trash is emptied or its retention expires it.",
                 recording.output().display(),
-                path.display()
-            ),
-            None => eprintln!(
+                entry.path.display()
+            );
+        } else {
+            eprintln!(
                 "Closed the record of {}: there was no file to move.",
                 recording.session_id()
-            ),
+            );
         }
     }
     Ok(())
+}
+
+/// The row indexing just wrote — or already held — for one recording.
+///
+/// [`None`] only if indexing could not read this particular session's sidecar
+/// a moment after `interrupted_recordings` did — a race with something else
+/// touching the directory, not the ordinary case.
+fn indexed_item(database: &Database, session_id: &str, index: u32) -> Option<TrashItem> {
+    database
+        .connection()
+        .query_row(
+            "SELECT recording_id FROM recordings WHERE session_id = ?1 AND session_index = ?2",
+            params![session_id, index],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .map(TrashItem::recording)
 }
 
 #[cfg(test)]
@@ -408,11 +558,15 @@ mod tests {
     fn discarding_without_naming_a_session_is_refused_rather_than_applied_to_everything() {
         // The failure this rules out is somebody typing `recover --discard`,
         // meaning "throw away that one", and losing every interrupted
-        // recording on the machine.
-        // The trash is never even resolved: the refusal has to come before
-        // anything about where a file might go is asked.
-        let trash = Trash::new(PathBuf::from("unused"));
-        let error = discard_all(&[], None, &trash).expect_err("a bulk discard must be refused");
+        // recording on the machine. Nothing is indexed and the trash is never
+        // even resolved: the refusal has to come before anything about where
+        // a file might go is asked.
+        let directory = TemporaryDirectory::new("bulk-refused");
+        let mut database = directory.database();
+        let trash = Trash::new(directory.path().join("Trash"));
+
+        let error = discard_all(&[], None, directory.path(), &mut database, &trash)
+            .expect_err("a bulk discard must be refused");
 
         assert!(matches!(error, RecoverError::DiscardNeedsASession));
         assert!(
@@ -470,6 +624,11 @@ mod tests {
         fn path(&self) -> &Path {
             &self.0
         }
+
+        /// A fresh library index, in this same temporary directory.
+        fn database(&self) -> Database {
+            Database::open(self.0.join("library.db")).expect("a library index can be opened")
+        }
     }
 
     impl Drop for TemporaryDirectory {
@@ -516,21 +675,30 @@ mod tests {
     }
 
     #[test]
-    fn discarding_moves_the_file_into_the_trash_rather_than_deleting_it() {
+    fn discarding_indexes_the_recording_and_moves_it_into_the_real_trash() {
         // The acceptance criterion (issue #451), proved end to end rather than
         // by inspecting what `discard_all` calls: the bytes exist somewhere on
-        // disk afterwards, and recovering the same directory again does not
-        // offer the recording a second time.
+        // disk afterwards, the library has a real row for them (listed,
+        // restorable, under retention — not the second-class "moved with no
+        // row" this started as), and recovering the same directory again does
+        // not offer the recording a second time.
         let directory = TemporaryDirectory::new("discard-e2e");
         interrupted_session(directory.path(), "cs2-20260811-143205", 4096);
         let found = interrupted_recordings(directory.path()).expect("the directory can be listed");
         let chosen: Vec<&InterruptedRecording> = found.iter().collect();
         let original = chosen[0].output().to_path_buf();
+        let mut database = directory.database();
         let trash_directory = directory.path().join("Trash");
         let trash = Trash::new(&trash_directory);
 
-        discard_all(&chosen, Some("cs2-20260811-143205"), &trash)
-            .expect("the recording is discarded");
+        discard_all(
+            &chosen,
+            Some("cs2-20260811-143205"),
+            directory.path(),
+            &mut database,
+            &trash,
+        )
+        .expect("the recording is discarded");
 
         assert!(
             !original.exists(),
@@ -547,6 +715,21 @@ mod tests {
             "the recording's file could not be found anywhere in the trash"
         );
 
+        // The part that is new: a real row, not a file with nothing pointing
+        // at it. `Trash::list` is what the trash screen and `Trash::empty`'s
+        // confirmation are built from, so this is the same proof they get.
+        let listed = trash.list(&database).expect("the trash can be listed");
+        assert_eq!(
+            listed.len(),
+            1,
+            "the discarded recording should have a row in the trash: {listed:?}"
+        );
+        assert!(
+            listed[0].path.starts_with(&trash_directory),
+            "the listed row should point at the file inside the trash: {:?}",
+            listed[0].path
+        );
+
         assert!(
             interrupted_recordings(directory.path())
                 .expect("listed")
@@ -556,26 +739,97 @@ mod tests {
     }
 
     #[test]
-    fn discarding_a_recording_with_no_footage_closes_the_record_without_touching_the_trash() {
+    fn discarding_a_recording_with_no_footage_closes_the_record_and_still_gets_a_row() {
         // A recorder killed before the encoder wrote a first packet leaves a
         // sidecar entry and no file (issue #283). There is nothing to move,
-        // and that must not be treated as a failure.
+        // and that must not be treated as a failure — but the row still has
+        // to exist, marked deleted, so the entry is not silently dropped from
+        // the trash's own bookkeeping.
         let directory = TemporaryDirectory::new("discard-no-footage");
         interrupted_session(directory.path(), "cs2-20260811-143205", 0);
         let found = interrupted_recordings(directory.path()).expect("the directory can be listed");
         std::fs::remove_file(found[0].output()).expect("the file can be removed");
         let found = interrupted_recordings(directory.path()).expect("the directory can be listed");
         let chosen: Vec<&InterruptedRecording> = found.iter().collect();
+        let mut database = directory.database();
         let trash = Trash::new(directory.path().join("Trash"));
 
-        discard_all(&chosen, Some("cs2-20260811-143205"), &trash)
-            .expect("discarding with no footage is not a failure");
+        discard_all(
+            &chosen,
+            Some("cs2-20260811-143205"),
+            directory.path(),
+            &mut database,
+            &trash,
+        )
+        .expect("discarding with no footage is not a failure");
 
         assert!(
             interrupted_recordings(directory.path())
                 .expect("listed")
                 .is_empty(),
             "the record must still be closed even with nothing to move"
+        );
+        let listed = trash.list(&database).expect("the trash can be listed");
+        assert_eq!(
+            listed.len(),
+            1,
+            "the entry should still be tracked: {listed:?}"
+        );
+    }
+
+    #[test]
+    fn discarding_after_the_sidecar_rewrite_previously_failed_finishes_without_moving_twice() {
+        // Simulates the one partial-failure state `discard_all`'s own
+        // documentation names: the file already moved and the row already
+        // marked deleted, but the sidecar still says the recording is open —
+        // exactly what a failure at step 3 (closing the record) would leave
+        // behind. A second `--discard` on the same session has to finish the
+        // job rather than trying to move the file a second time or failing
+        // again with nothing changed.
+        let directory = TemporaryDirectory::new("discard-retry");
+        interrupted_session(directory.path(), "cs2-20260811-143205", 4096);
+        let mut database = directory.database();
+        let trash = Trash::new(directory.path().join("Trash"));
+        let now = SystemTime::UNIX_EPOCH + core::time::Duration::from_secs(1_786_459_085);
+
+        // The partial run: index and send, but never close the sidecar — the
+        // state a failed `record_discarded` would leave.
+        let mut settings = IndexSettings::new([directory.path().to_path_buf()]);
+        settings.pace = IndexPace::foreground();
+        reconcile(&mut database, &settings, &IndexControl::new(), now).expect("indexed");
+        let item = indexed_item(&database, "cs2-20260811-143205", 1).expect("indexing wrote a row");
+        let first_send = trash.send(&mut database, item, now).expect("moved once");
+
+        // The sidecar is untouched, so `recover` still offers it — the same
+        // "still open" state a failed rewrite leaves.
+        let found = interrupted_recordings(directory.path()).expect("listed");
+        assert_eq!(
+            found.len(),
+            1,
+            "the partial run should not have closed the sidecar"
+        );
+        let chosen: Vec<&InterruptedRecording> = found.iter().collect();
+
+        discard_all(
+            &chosen,
+            Some("cs2-20260811-143205"),
+            directory.path(),
+            &mut database,
+            &trash,
+        )
+        .expect("a retry should finish the job rather than failing again");
+
+        assert!(
+            first_send.path.exists(),
+            "the file should not have been moved a second time"
+        );
+        let listed = trash.list(&database).expect("the trash can be listed");
+        assert_eq!(listed.len(), 1, "there must still be exactly one entry");
+        assert!(
+            interrupted_recordings(directory.path())
+                .expect("listed")
+                .is_empty(),
+            "the retry should finally close the sidecar record"
         );
     }
 }
