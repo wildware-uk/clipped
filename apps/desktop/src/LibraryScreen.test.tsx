@@ -323,7 +323,6 @@ describe('the Library screen', () => {
     ['thumbnails and waveforms', /^a thumbnail against each recording/i, [57, 66, 301]],
     ['playing in this window', /^playing a recording inside this window/i, [392, 304]],
     ['playing a clip', /^playing a clip/i, [52]],
-    ['restoring something deleted', /^restoring something deleted/i, [94]],
   ];
 
   it('names each part it still owes, and the issue that lands it', async () => {
@@ -651,6 +650,25 @@ describe('the Library screen', () => {
     return { items: [], total_items: 0, total_bytes: 0, directory: 'D:/Clips.trash' };
   }
 
+  function fullTrash() {
+    return {
+      items: [
+        {
+          kind: 'recording',
+          id: 1,
+          path: 'D:/Clips.trash/clipped-cs2.mkv',
+          original_path: 'D:/Clips/clipped-cs2.mkv',
+          deleted_at: '2026-08-15T09:00:00+01:00',
+          size_bytes: 2_000_000_000,
+          dependent_clips: 2,
+        },
+      ],
+      total_items: 1,
+      total_bytes: 2_000_000_000,
+      directory: 'D:/Clips.trash',
+    };
+  }
+
   it('has a heading for each of its parts', async () => {
     stubRecorderLinkRuntime(ATTACHED, null, {
       sessions: () => Promise.resolve(page([])),
@@ -664,6 +682,123 @@ describe('the Library screen', () => {
         screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
       ).toEqual(['Nothing recorded yet', 'Trash', 'What this screen will show']);
     });
+  });
+
+  it('puts one thing back, and says where it went', async () => {
+    // The second acceptance criterion. Restoring is the whole reason a trash
+    // exists, and until this it could only be done from `cargo`.
+    const user = userEvent.setup();
+    const restored = vi.fn(() =>
+      Promise.resolve({
+        kind: 'recording',
+        id: 1,
+        path: 'D:/Clips/clipped-cs2.mkv',
+        file_restored: true,
+        renamed: false,
+      }),
+    );
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(fullTrash()),
+      restoreFromTrash: restored,
+    });
+    render(<LibraryScreen />);
+
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+
+    expect(restored).toHaveBeenCalledWith({ kind: 'recording', id: 1 });
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Put D:/Clips/clipped-cs2.mkv back',
+    );
+  });
+
+  it('says a restored recording whose file had already gone will show as missing', async () => {
+    // Not a failure: the row comes back and reports itself missing, which is
+    // the truth rather than a row with no explanation.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(fullTrash()),
+      restoreFromTrash: () =>
+        Promise.resolve({
+          kind: 'recording',
+          id: 1,
+          path: 'D:/Clips/clipped-cs2.mkv',
+          file_restored: false,
+          renamed: false,
+        }),
+    });
+    render(<LibraryScreen />);
+
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('will show as missing');
+  });
+
+  it('asks before emptying the trash, and sends the counts it showed', async () => {
+    // The third acceptance criterion, both halves: emptying takes two presses,
+    // and what it confirms is the listing the user was looking at.
+    const user = userEvent.setup();
+    const emptied = vi.fn(() =>
+      Promise.resolve({ removed: 1, reclaimed_bytes: 2_000_000_000, refused: [] }),
+    );
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(fullTrash()),
+      emptyTrash: emptied,
+    });
+    render(<LibraryScreen />);
+
+    await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
+    expect(emptied).not.toHaveBeenCalled();
+    expect(screen.getByRole('region', { name: 'Trash' })).toHaveTextContent('cannot be undone');
+
+    await user.click(screen.getByRole('button', { name: 'Empty the trash' }));
+
+    expect(emptied).toHaveBeenCalledWith({ items: 1, bytes: 2_000_000_000 });
+    expect(await screen.findByRole('status')).toHaveTextContent('Removed 1 thing(s)');
+  });
+
+  it('keeps them when the confirmation is declined', async () => {
+    const user = userEvent.setup();
+    const emptied = vi.fn(() => Promise.resolve({ removed: 0, reclaimed_bytes: 0, refused: [] }));
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(fullTrash()),
+      emptyTrash: emptied,
+    });
+    render(<LibraryScreen />);
+
+    await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
+    await user.click(screen.getByRole('button', { name: 'Keep them' }));
+
+    expect(emptied).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Empty the trash…' })).toBeInTheDocument();
+  });
+
+  it('says when a trash that changed underneath was refused rather than emptied', async () => {
+    // The property `EmptyTrash::for_listing` exists for, surviving the round
+    // trip: a trash that gained something between the listing and the button is
+    // refused, and the user is told what changed rather than losing something
+    // they never saw.
+    const user = userEvent.setup();
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(fullTrash()),
+      emptyTrash: () =>
+        Promise.reject(
+          Object.assign(new Error('refused'), {
+            code: 'invalid_parameters',
+            message: 'the trash holds 2 things (3.0 GB) and 1 (2.0 GB) was confirmed',
+          }),
+        ),
+    });
+    render(<LibraryScreen />);
+
+    await user.click(await screen.findByRole('button', { name: 'Empty the trash…' }));
+    await user.click(screen.getByRole('button', { name: 'Empty the trash' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('the trash holds 2 things');
   });
 
   it('says what is in the trash, and where the files went', async () => {

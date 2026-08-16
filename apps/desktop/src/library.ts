@@ -3,6 +3,8 @@ import type {
   LibraryGame,
   LibrarySession,
   LibrarySessionPage,
+  RestoredItem,
+  TrashEmptied,
   TrashListing,
 } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
@@ -95,8 +97,9 @@ export async function readTrash(): Promise<TrashListing> {
  * What is in the trash, kept as a read so that "could not be asked" and "there
  * is nothing in it" are different states on screen.
  */
-export function useTrash(): LibraryRead<TrashListing> {
+export function useTrash(): TrashView {
   const [read, setRead] = useState<LibraryRead<TrashListing>>({ state: 'reading' });
+  const [asked, setAsked] = useState(0);
 
   useEffect(() => {
     let current = true;
@@ -114,9 +117,41 @@ export function useTrash(): LibraryRead<TrashListing> {
     return () => {
       current = false;
     };
+  }, [asked]);
+
+  // Restoring and emptying change what is in the trash, so the screen has to
+  // read it again afterwards — a listing that still showed a restored recording
+  // would be a screen contradicting what the user just did.
+  const again = useCallback(() => {
+    setAsked((count) => count + 1);
   }, []);
 
-  return read;
+  return { read, again };
+}
+
+/** What is in the trash, and how to ask again after changing it. */
+export interface TrashView {
+  /** The listing. */
+  readonly read: LibraryRead<TrashListing>;
+  /** Reads it again. */
+  readonly again: () => void;
+}
+
+/** Puts one thing back where it was. */
+export async function restoreFromTrash(kind: string, id: number): Promise<RestoredItem> {
+  return invoke<RestoredItem>('restore_from_trash', { kind, id });
+}
+
+/**
+ * Destroys everything in the trash.
+ *
+ * Both numbers are the listing the user was shown. The recorder refuses if the
+ * trash has gained anything since, which is why this takes them rather than
+ * nothing: emptying something somebody has not seen is the failure the
+ * confirmation exists to prevent (issue #450).
+ */
+export async function emptyTrash(items: number, bytes: number): Promise<TrashEmptied> {
+  return invoke<TrashEmptied>('empty_trash', { items, bytes });
 }
 
 /**

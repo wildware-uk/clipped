@@ -593,6 +593,16 @@ impl CommandHandler for RecorderService {
             Command::LibraryTrash(_) => Ok(Reply::LibraryTrash {
                 trash: self.library.trash()?,
             }),
+            // These two write, and are still answered here: the trash's every
+            // statement is its own transaction and a rename is a filesystem
+            // call, so neither holds the database's one writer for longer than
+            // a row update (`clipped_library::trash`).
+            Command::RestoreFromTrash(request) => Ok(Reply::Restored {
+                restored: self.library.restore(&request)?,
+            }),
+            Command::EmptyTrash(request) => Ok(Reply::TrashEmptied {
+                emptied: self.library.empty(&request)?,
+            }),
             // Also on the connection thread: reading a handful of manifests and
             // one settings file is bounded local work that shares nothing with
             // a recording, which is the same argument the library reads above

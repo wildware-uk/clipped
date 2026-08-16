@@ -526,3 +526,66 @@ pub struct TrashListing {
     /// went rather than only that they went.
     pub directory: String,
 }
+
+/// Putting one thing back where it was.
+///
+/// Named by kind and identifier, which is what a listing gave the window. A
+/// path would be the wrong key: the file inside the trash is not the thing the
+/// index knows about, and two recordings can have had the same name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreFromTrash {
+    /// `recording` or `clip`, as [`TrashedItem::kind`] gave it.
+    pub kind: String,
+    /// The library's own identifier for it.
+    pub id: i64,
+}
+
+/// What came back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoredItem {
+    /// Which one it was.
+    pub kind: String,
+    /// Its identifier.
+    pub id: i64,
+    /// Where the file is now, which is where the index now points.
+    pub path: String,
+    /// Whether there was a file to move back.
+    ///
+    /// `false` for something whose media had already gone before it was
+    /// deleted: the row returns to the library and reports itself missing,
+    /// which is the truth rather than a row with no explanation.
+    pub file_restored: bool,
+    /// Whether it had to go somewhere other than where it came from, because
+    /// something else was there.
+    pub renamed: bool,
+}
+
+/// Emptying the trash, confirmed against the listing it was shown.
+///
+/// **Both numbers are required and both are checked.** They are the listing the
+/// user was looking at when they pressed the button: if the trash has gained an
+/// item since, the recorder refuses rather than deleting something nobody saw
+/// (`clipped_library::trash::EmptyTrash`). That is why this is not a boolean.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmptyTrash {
+    /// How many things the listing held.
+    pub items: u64,
+    /// What the listing said they occupied.
+    pub bytes: u64,
+}
+
+/// What emptying the trash destroyed, and what it could not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashEmptied {
+    /// How many things were destroyed.
+    pub removed: u64,
+    /// What the volume got back.
+    pub reclaimed_bytes: u64,
+    /// What could not be destroyed, each saying why.
+    ///
+    /// Always sent. A file a virus scanner had open is a real outcome, and the
+    /// next sweep tries it again; a window that showed only the count would say
+    /// the trash is empty when it is not.
+    pub refused: Vec<String>,
+}

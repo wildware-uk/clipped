@@ -492,6 +492,8 @@ when a command's parameters are all optional.
 | `library_games` | none | `library_games` | yes |
 | `library_events` | `recording` | `library_events` | yes |
 | `library_trash` | none | `library_trash` | yes |
+| `restore_from_trash` | `kind`, `id` | `restored` | yes |
+| `empty_trash` | `items`, `bytes` | `trash_emptied` | yes |
 | `plugins` | none | `plugins` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
@@ -825,6 +827,60 @@ the other half of [issue #450](https://github.com/wildware-uk/clipped/issues/450
 retention period yet, and a date computed from a policy nobody set would be a
 screen promising a deletion it cannot keep. The field is on the wire so that it
 does not have to be added later.
+
+### `restore_from_trash`
+
+Puts one thing back where it was.
+
+```json
+{"type":"request","id":15,"command":"restore_from_trash",
+ "params":{"kind":"recording","id":1}}
+```
+
+```json
+{"type":"response","id":15,"outcome":{"ok":{
+  "reply":"restored",
+  "restored":{"kind":"recording","id":1,
+    "path":"D:\\Clips\\clipped-cs2-20260814-201500.mkv",
+    "file_restored":true,"renamed":false}}}}
+```
+
+Named by kind and identifier, which is what a listing gave. A path would be the
+wrong key: the file inside the trash is not the thing the index knows about.
+
+`file_restored` is `false` for something whose media had already gone before it
+was deleted — the row comes back and reports itself missing, which is the truth
+rather than a row with no explanation. `renamed` is `true` when something was
+occupying the original location, so the file went somewhere else rather than
+over the top of it.
+
+### `empty_trash`
+
+Destroys everything in the trash, **confirmed against the listing that was
+shown**.
+
+```json
+{"type":"request","id":16,"command":"empty_trash",
+ "params":{"items":1,"bytes":2147483648}}
+```
+
+```json
+{"type":"response","id":16,"outcome":{"ok":{
+  "reply":"trash_emptied",
+  "emptied":{"removed":1,"reclaimed_bytes":2147483648,"refused":[]}}}}
+```
+
+**Both numbers are checked, and that is the point of them.** They are the
+listing the user was looking at when they pressed the button. If the trash has
+gained an item since, the recorder refuses with `invalid_parameters` naming both
+counts, and the window shows the new listing — because the alternative is
+destroying something nobody saw. It is why this takes two numbers rather than a
+boolean.
+
+`refused` is always present and names each thing that would not go, with the
+reason: a file another program had open is a real outcome, the next sweep tries
+it again, and a reply carrying only a count would say the trash is empty when it
+is not.
 
 ### `library_events`
 

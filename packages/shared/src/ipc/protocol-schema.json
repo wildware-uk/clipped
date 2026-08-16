@@ -44,6 +44,8 @@
         "library_games",
         "library_events",
         "library_trash",
+        "restore_from_trash",
+        "empty_trash",
         "plugins",
         "export_recording",
         "get_hotkeys",
@@ -163,6 +165,8 @@
         "shutting_down",
         "library_events",
         "library_trash",
+        "restored",
+        "trash_emptied",
         "plugins"
       ],
       "tolerates_unrecognised": false
@@ -554,6 +558,13 @@
       ],
       "optional": []
     },
+    "reply.restored": {
+      "required": [
+        "reply",
+        "restored"
+      ],
+      "optional": []
+    },
     "reply.screenshot_taken": {
       "required": [
         "reply",
@@ -573,6 +584,13 @@
       "required": [
         "reply",
         "status"
+      ],
+      "optional": []
+    },
+    "reply.trash_emptied": {
+      "required": [
+        "emptied",
+        "reply"
       ],
       "optional": []
     },
@@ -729,6 +747,18 @@
       "name": "library_trash",
       "params": "library_trash",
       "reply": "reply.library_trash",
+      "available_in_this_build": true
+    },
+    {
+      "name": "restore_from_trash",
+      "params": "restore_from_trash",
+      "reply": "reply.restored",
+      "available_in_this_build": true
+    },
+    {
+      "name": "empty_trash",
+      "params": "empty_trash",
+      "reply": "reply.trash_emptied",
       "available_in_this_build": true
     },
     {
@@ -1352,6 +1382,50 @@
       },
       "parses": true,
       "discriminant": "response.ok.library_trash"
+    },
+    {
+      "name": "one recording put back where it was",
+      "direction": "server",
+      "frame": {
+        "id": 15,
+        "outcome": {
+          "ok": {
+            "reply": "restored",
+            "restored": {
+              "file_restored": true,
+              "id": 1,
+              "kind": "recording",
+              "path": "D:\\\\Clips\\\\clipped-cs2-20260814-201500.mkv",
+              "renamed": false
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.restored"
+    },
+    {
+      "name": "the trash emptied, with one file that would not go",
+      "direction": "server",
+      "frame": {
+        "id": 16,
+        "outcome": {
+          "ok": {
+            "emptied": {
+              "reclaimed_bytes": 2147483648,
+              "refused": [
+                "D:\\\\Clips.trash\\\\locked.mkv: the file is open in another program"
+              ],
+              "removed": 1
+            },
+            "reply": "trash_emptied"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.trash_emptied"
     },
     {
       "name": "what is installed, and what each plugin asks for",

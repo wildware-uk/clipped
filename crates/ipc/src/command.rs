@@ -44,8 +44,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
 use crate::library::{
-    LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage, LibrarySessions,
-    LibraryTrash, TrashListing,
+    EmptyTrash, LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage, LibrarySessions,
+    LibraryTrash, RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing,
 };
 use crate::message::Request;
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
@@ -86,6 +86,19 @@ pub enum Command {
     /// the listing it was shown
     /// ([issue #450](https://github.com/wildware-uk/clipped/issues/450)).
     LibraryTrash(LibraryTrash),
+    /// Put one thing back where it was.
+    ///
+    /// Separate from listing because it changes something, and named by kind
+    /// and identifier because that is what a listing gave the window.
+    RestoreFromTrash(RestoreFromTrash),
+    /// Destroy everything in the trash, confirmed against the listing that was
+    /// shown.
+    ///
+    /// Both numbers are checked. A trash that has gained an item since the
+    /// listing is refused rather than emptied, because the alternative is
+    /// deleting something the user never saw
+    /// ([issue #450](https://github.com/wildware-uk/clipped/issues/450)).
+    EmptyTrash(EmptyTrash),
 
     /// What plugins are installed, what each declares, and what will start.
     Plugins,
@@ -129,6 +142,8 @@ impl Command {
             Self::LibraryGames => "library_games",
             Self::LibraryEvents(_) => "library_events",
             Self::LibraryTrash(_) => "library_trash",
+            Self::RestoreFromTrash(_) => "restore_from_trash",
+            Self::EmptyTrash(_) => "empty_trash",
             Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
             Self::GetHotkeys => "get_hotkeys",
@@ -158,6 +173,8 @@ impl Command {
             "library_games" => Ok(Self::LibraryGames),
             "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
             "library_trash" => Ok(Self::LibraryTrash(parse_params(request)?)),
+            "restore_from_trash" => Ok(Self::RestoreFromTrash(parse_params(request)?)),
+            "empty_trash" => Ok(Self::EmptyTrash(parse_params(request)?)),
             "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
@@ -191,6 +208,8 @@ impl Command {
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
             Self::LibraryTrash(request) => serde_json::to_value(request),
+            Self::RestoreFromTrash(request) => serde_json::to_value(request),
+            Self::EmptyTrash(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
@@ -667,6 +686,16 @@ pub enum Reply {
         /// Always sent, so that an empty trash and a question nobody answered
         /// are told apart by whether the reply arrived.
         trash: TrashListing,
+    },
+    /// One thing was put back where it was.
+    Restored {
+        /// What came back, and whether its file did.
+        restored: RestoredItem,
+    },
+    /// The trash was emptied.
+    TrashEmptied {
+        /// What was destroyed, and what would not go.
+        emptied: TrashEmptied,
     },
     /// What the library holds per game.
     LibraryGames {
