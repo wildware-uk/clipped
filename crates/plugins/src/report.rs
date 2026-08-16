@@ -558,9 +558,14 @@ mod tests {
             attach
         );
 
+        // Built from `CONTRACT` rather than written out, so that a contract
+        // bump does not leave this asserting the previous version's wire.
         assert_eq!(
             write_report(&hello()),
-            "{\"report\":\"hello\",\"contract\":1}\n"
+            format!(
+                "{{\"report\":\"hello\",\"contract\":{}}}\n",
+                crate::manifest::CONTRACT.number()
+            )
         );
         assert_eq!(
             read_report(r#"{"report":"alive"}"#).expect("it reads"),

@@ -687,7 +687,12 @@ pub(crate) mod tests {
     #[test]
     fn a_manifest_says_who_what_and_where() {
         let manifest = PluginManifest::parse(EXAMPLE).expect("the example is well formed");
-        assert_eq!(manifest.contract(), CONTRACT);
+        // What the manifest itself declares, not what this build's `CONTRACT`
+        // happens to be. `EXAMPLE` says 1 and always will: it is the fixture
+        // that keeps an older manifest readable, and asserting it equals the
+        // current version made this test fail the moment the contract moved to
+        // 2 — which is the opposite of what a compatibility fixture is for.
+        assert_eq!(manifest.contract().number(), 1);
         assert_eq!(manifest.id().as_str(), "counter-strike-2");
         assert_eq!(manifest.name(), "Counter-Strike 2");
         assert_eq!(manifest.executable(), "clipped-cs2-plugin.exe");
