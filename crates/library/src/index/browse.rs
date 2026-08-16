@@ -37,20 +37,31 @@
 //! the library is concerned, and the trash has a screen of its own
 //! ([issue #94](https://github.com/wildware-uk/clipped/issues/94)).
 //!
-//! # Search runs the matcher rather than a compiler
+//! # Search is compiled to SQL, and checked against the matcher
 //!
-//! A [`Query`](crate::search::Query) is applied by building the
-//! [`Row`](crate::search::Row) a session projects and asking
-//! [`Query::matches`](crate::search::Query::matches). The alternative —
-//! compiling the query into SQL, which `crate::search` documents how to do — is
-//! a second implementation of what a match means, and the two disagreeing would
-//! be a bug nobody could see. The matcher stays the definition; this is the
-//! caller of it.
+//! A [`Query`](crate::search::Query) becomes a `WHERE` fragment
+//! (`crate::search::sql`) and the database answers it. That was not the first
+//! design: this used to build the [`Row`](crate::search::Row) each session
+//! projects and ask [`Query::matches`](crate::search::Query::matches), which
+//! meant four further statements per session — its recordings, its clips, their
+//! tags and its events — for every session in the library until a page was full,
+//! most of them discarded. `docs/library.md` measured 316 ms over ten thousand
+//! sittings when nothing matched, which is the worst case and the one a search
+//! box hits on every keystroke
+//! ([issue #449](https://github.com/wildware-uk/clipped/issues/449)).
 //!
-//! What that costs is a walk of the sessions rather than an index lookup, and
-//! `docs/library.md` measures it. It is bounded work over local data with no
-//! allocation in the match itself, and the moment it stops being fast enough the
-//! answer is a compiler checked against this matcher, not instead of it.
+//! The reason not to compile was that it is a second implementation of what a
+//! match means, and two of those disagreeing is a bug nobody can see. That
+//! reason has not gone away; it is answered rather than dismissed. The matcher
+//! is still the definition, [`row_of`] still builds the row it is defined over,
+//! and `the_database_and_the_matcher_select_the_same_sessions` runs both over
+//! the same library and fails if they ever part company. The projection is not
+//! dead code kept for a test — it is the specification the test holds the SQL
+//! to.
+//!
+//! Folding is not duplicated either: the compiled SQL calls
+//! [`fold`](crate::search::fold) itself, registered on the connection, rather
+//! than SQLite's ASCII-only `lower()`.
 //!
 //! # What a query means for a *session*
 //!
@@ -73,12 +84,19 @@
 
 use std::collections::HashMap;
 
+use crate::search::{sql, Query};
+use clipped_storage::rusqlite::types::Value;
 use clipped_storage::rusqlite::{params, params_from_iter, Connection, Row as SqlRow};
 use clipped_storage::Database;
-use time::format_description::well_known::Rfc3339;
-use time::{Duration as TimeDuration, OffsetDateTime};
 
-use crate::search::{Date, Query, Row};
+// The searchable projection is built only by the differential test now; see
+// [`row_of`] for why it is kept.
+#[cfg(test)]
+use crate::search::{Date, Row};
+#[cfg(test)]
+use time::format_description::well_known::Rfc3339;
+#[cfg(test)]
+use time::{Duration as TimeDuration, OffsetDateTime};
 
 use super::error::IndexError;
 
@@ -99,12 +117,6 @@ pub const DEFAULT_PAGE_LIMIT: usize = 50;
 /// `apps/recorder/src/library.rs` does against `clipped_ipc::MAX_FRAME_BYTES`.
 /// This crate knows nothing about frames.
 pub const MAX_PAGE_LIMIT: usize = 200;
-
-/// How many sessions a search reads per statement.
-///
-/// Most of them will be discarded, so reading one at a time would be a round
-/// trip per rejected session.
-const SEARCH_BATCH: usize = 256;
 
 /// Which page of the library to read, and which part of it.
 #[derive(Debug, Clone, Default)]
@@ -243,61 +255,26 @@ pub fn list_sessions(
     listing: &SessionListing<'_>,
 ) -> Result<SessionPage, IndexError> {
     let limit = page_limit(listing.limit);
-    let batch = batch_size(limit, listing.query);
     let connection = database.connection();
+    let after = cursor_parts(listing.after.as_deref());
 
-    let mut sessions = Vec::with_capacity(limit);
-    let mut next = None;
-    let mut after = cursor_parts(listing.after.as_deref());
+    // One row past the page, so that `next` is offered only when a further
+    // session really exists: a cursor handed out at the end of the library would
+    // cost the caller a request to discover the page was empty.
+    let mut headers = session_headers(connection, after.as_ref(), listing.query, limit + 1)?;
 
-    // A batch at a time rather than the whole library: an unfiltered listing
-    // reads one batch and stops, and a search walks as many as it has to
-    // without ever holding more than one batch in memory.
-    'walk: loop {
-        let headers = session_headers(connection, after.as_ref(), batch)?;
-        let exhausted = headers.len() < batch;
-        if headers.is_empty() {
-            break;
-        }
-        after = headers
-            .last()
-            .map(|header| (header.started_at.clone(), header.session_id.clone()));
+    // The cursor names the last session *on* the page, not the one past it, or
+    // the session that proved there was more would be the one the next page
+    // skipped.
+    let more = headers.len() > limit;
+    headers.truncate(limit);
 
-        // One statement for the batch rather than one per session: a query
-        // that mentions no event still has to be told the session has none, and
-        // asking 256 times to find that out is 256 round trips.
-        let kinds = match listing.query {
-            Some(_) => event_kinds_of(connection, &headers)?,
-            None => HashMap::new(),
-        };
-
-        for header in headers {
-            let events = kinds.get(&header.session_id).cloned().unwrap_or_default();
-            let session = hydrate(connection, header)?;
-            if listing
-                .query
-                .is_some_and(|query| !query.matches(&row_of(&session, &events)))
-            {
-                continue;
-            }
-            // The walk looks one session past the page, so that `next` is
-            // offered only when a further session really exists — a cursor
-            // handed out at the end of the library would cost the caller a
-            // request to discover the page was empty. The cursor names the last
-            // session *on* the page, not the one past it, or the session that
-            // proved there was more would be the one the next page skipped.
-            if sessions.len() == limit {
-                next = sessions.last().map(cursor_of);
-                break 'walk;
-            }
-            sessions.push(session);
-        }
-
-        if exhausted {
-            break;
-        }
+    let mut sessions = Vec::with_capacity(headers.len());
+    for header in headers {
+        sessions.push(hydrate(connection, header)?);
     }
 
+    let next = more.then(|| sessions.last().map(cursor_of)).flatten();
     Ok(SessionPage { sessions, next })
 }
 
@@ -306,17 +283,6 @@ fn page_limit(asked: usize) -> usize {
     match asked {
         0 => DEFAULT_PAGE_LIMIT,
         asked => asked.min(MAX_PAGE_LIMIT),
-    }
-}
-
-/// How many session rows to read at a time.
-///
-/// Without a query, one past the page is all that will ever be looked at.
-fn batch_size(limit: usize, query: Option<&Query>) -> usize {
-    if query.is_some() {
-        SEARCH_BATCH.max(limit + 1)
-    } else {
-        limit + 1
     }
 }
 
@@ -361,31 +327,58 @@ struct SessionHeader {
     favourite: bool,
 }
 
-/// The next `limit` session rows after the cursor, newest first.
+/// The next `limit` session rows after the cursor that `query` selects, newest
+/// first.
+///
+/// This is the whole of what a search costs now: the query is a predicate in
+/// this statement rather than a filter applied to hydrated sessions, so the
+/// sessions this reads are the ones being returned rather than every session in
+/// the library.
 fn session_headers(
     connection: &Connection,
     after: Option<&(String, String)>,
+    query: Option<&Query>,
     limit: usize,
 ) -> Result<Vec<SessionHeader>, IndexError> {
-    // Row values — `(a, b) < (?, ?)` — are what make this one comparison rather
-    // than the three-way `a < ? OR (a = ? AND b < ?)`, and SQLite uses the
-    // `sessions_started_at` index for it either way.
-    let mut statement = connection.prepare(
-        "SELECT sessions.session_id, sessions.game_id, games.name, \
-                sessions.started_at, sessions.ended_at, sessions.end_reason, \
-                sessions.favourited_at \
-         FROM sessions LEFT JOIN games ON games.game_id = sessions.game_id \
-         WHERE (?1 IS NULL) \
-            OR ((sessions.started_at, sessions.session_id) < (?1, ?2)) \
-         ORDER BY sessions.started_at DESC, sessions.session_id DESC \
+    // The folding the compiled predicate calls. Registered before every search
+    // rather than once at open: it is a map insert, and it makes it impossible
+    // for a search to reach a connection that cannot fold — which would
+    // otherwise fail a long way from its cause.
+    let filter = match query {
+        Some(query) => {
+            sql::install(connection)?;
+            // From 4: the cursor takes 1 and 2, the limit takes 3.
+            sql::compile(query, 4)
+        }
+        None => sql::compile(&Query::everything(), 4),
+    };
+
+    // Row values — `(a, b) < (?, ?)` — are what make the cursor one comparison
+    // rather than the three-way `a < ? OR (a = ? AND b < ?)`, and SQLite uses
+    // the `sessions_started_at` index for it either way.
+    let mut statement = connection.prepare(&format!(
+        "SELECT s.session_id, s.game_id, catalogue.name, \
+                s.started_at, s.ended_at, s.end_reason, s.favourited_at \
+         FROM sessions s LEFT JOIN games catalogue ON catalogue.game_id = s.game_id \
+         WHERE ((?1 IS NULL) OR ((s.started_at, s.session_id) < (?1, ?2))) \
+           AND ({}) \
+         ORDER BY s.started_at DESC, s.session_id DESC \
          LIMIT ?3",
-    )?;
+        filter.predicate
+    ))?;
 
     let (at, id) = match after {
-        Some((at, id)) => (Some(at.as_str()), Some(id.as_str())),
-        None => (None, None),
+        Some((at, id)) => (Value::Text(at.clone()), Value::Text(id.clone())),
+        None => (Value::Null, Value::Null),
     };
-    let mut rows = statement.query(params![at, id, i64::try_from(limit).unwrap_or(i64::MAX)])?;
+    let mut bound = vec![
+        at,
+        id,
+        Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)),
+    ];
+    bound.extend(filter.params);
+
+    let mut rows = statement.query(params_from_iter(bound))?;
 
     let mut headers = Vec::new();
     while let Some(row) = rows.next()? {
@@ -508,6 +501,11 @@ fn clips_of(connection: &Connection, session_id: &str) -> Result<Vec<IndexedClip
 /// kinds rather than the events: a search asks whether a session has an event
 /// *of a kind*, so reading the moments and the details as well would be reading
 /// a timeline to answer a yes-or-no question.
+///
+/// Only the differential test reads this now. Listing does not, because the
+/// database applies the query without a row being built at all; this is half of
+/// building the row the SQL is checked against.
+#[cfg(test)]
 fn event_kinds_of(
     connection: &Connection,
     headers: &[SessionHeader],
@@ -584,6 +582,15 @@ fn tags_for(
 /// duration is the footage the sitting produced rather than the wall-clock span
 /// from its first frame to its last: a session left open across a dinner break
 /// did not record the dinner, and `duration:>2h` should not select it.
+///
+/// **This is the definition of what a session is searchable by**, and the SQL in
+/// `crate::search::sql` is checked against it rather than trusted beside it.
+/// Listing no longer calls it — the database applies the query — so the only
+/// caller is `the_database_and_the_matcher_select_the_same_sessions`. That is
+/// deliberate: a specification with one consumer is still a specification, and
+/// deleting it would leave the compiled SQL as the only statement of what a
+/// match means, which is exactly what the module documentation says not to do.
+#[cfg(test)]
 fn row_of(session: &IndexedSession, events: &[String]) -> Row {
     let mut row = Row::new().with_session(&session.session_id);
 
@@ -642,7 +649,10 @@ fn row_of(session: &IndexedSession, events: &[String]) -> Row {
 ///
 /// The offset is the one the recorder wrote, which is the user's own: a session
 /// recorded at 00:30 on the eleventh belongs to the eleventh on their calendar,
-/// whatever UTC calls it (`crate::search::date`).
+/// whatever UTC calls it (`crate::search::date`). The compiled SQL takes the
+/// same ten characters out of the same string, which is why the two agree about
+/// a session recorded either side of midnight.
+#[cfg(test)]
 fn day_of(timestamp: &str) -> Option<Date> {
     OffsetDateTime::parse(timestamp, &Rfc3339)
         .ok()
@@ -1118,5 +1128,358 @@ mod tests {
             );
         }
         assert!(found(&database, "event:death").is_empty());
+    }
+
+    /// Every session the **matcher** selects, by identifier, newest first.
+    ///
+    /// This is what `list_sessions` used to do, written out: hydrate each
+    /// session, build the row it projects, and ask the query. It is the
+    /// reference answer that the compiled SQL is checked against.
+    fn matched(database: &Database, text: &str) -> Vec<String> {
+        let query: Query = text.parse().expect("a query parses");
+        let connection = database.connection();
+        let headers =
+            session_headers(connection, None, None, 10_000).expect("every session is readable");
+        let kinds = event_kinds_of(connection, &headers).expect("the events are readable");
+
+        let mut selected = Vec::new();
+        for header in headers {
+            let events = kinds.get(&header.session_id).cloned().unwrap_or_default();
+            let session = hydrate(connection, header).expect("a session hydrates");
+            if query.matches(&row_of(&session, &events)) {
+                selected.push(session.session_id);
+            }
+        }
+        selected
+    }
+
+    /// A library with one of everything a query can ask about, and several
+    /// things it should *not* find.
+    fn varied_library(name: &str) -> Database {
+        let database = library(name);
+        let connection = database.connection();
+
+        // Cyrillic, so that a folding that only handles ASCII fails here rather
+        // than in a user's library.
+        // The last two are on the far side of 2026-08-20, which is what makes
+        // the documented `date:>=` query select anything here.
+        let sessions = [
+            (11, Some(("cs2", "Counter-Strike 2"))),
+            (12, Some(("tanks", "Мир танков"))),
+            (13, Some(("elden", "Elden Ring"))),
+            (14, None),
+            (15, Some(("cs2", "Counter-Strike 2"))),
+            (21, Some(("minecraft", "Minecraft"))),
+            (22, Some(("elden", "Elden Ring"))),
+        ];
+        let mut ids = Vec::new();
+        for (day, game) in sessions {
+            let started_at = format!("2026-08-{day}T12:00:00+01:00");
+            if let Some((id, name)) = game {
+                connection
+                    .execute(
+                        "INSERT OR IGNORE INTO games (game_id, name, first_seen_at) \
+                         VALUES (?1, ?2, ?3)",
+                        params![id, name, started_at],
+                    )
+                    .expect("a game inserts");
+            }
+            let session_id = format!("session-{day}");
+            connection
+                .execute(
+                    "INSERT INTO sessions (session_id, game_id, started_at) VALUES (?1, ?2, ?3)",
+                    params![session_id, game.map(|(id, _)| id), started_at],
+                )
+                .expect("a session inserts");
+            ids.push(session_id);
+        }
+
+        // A recording each, except the fourth, which recorded nothing: it is
+        // what `duration:` has to be absent for rather than zero. The lengths
+        // straddle five minutes, so `duration:>5m` divides the library rather
+        // than selecting all of it or none.
+        for (index, seconds) in [60.0, 120.0, 180.0, 0.0, 300.0, 400.0, 600.0]
+            .into_iter()
+            .enumerate()
+        {
+            if seconds == 0.0 {
+                continue;
+            }
+            let session = &ids[index];
+            connection
+                .execute(
+                    "INSERT INTO recordings \
+                        (session_id, session_index, path, started_at, duration_seconds) \
+                     VALUES (?1, 1, ?2, ?3, ?4)",
+                    params![
+                        session,
+                        format!(r"D:\clips\{session}.mkv"),
+                        "2026-08-11T12:00:00+01:00",
+                        seconds,
+                    ],
+                )
+                .expect("a recording inserts");
+        }
+
+        // A deleted recording on the first sitting, carrying a duration, a
+        // favourite and a tag none of which may be found: `deleted_at` is the
+        // trash, and the trash is not the library.
+        connection
+            .execute(
+                "INSERT INTO recordings \
+                    (session_id, session_index, path, started_at, duration_seconds, \
+                     favourited_at, deleted_at) \
+                 VALUES (?1, 9, ?2, ?3, 9999.0, ?3, ?3)",
+                params![ids[0], r"D:\clips\deleted.mkv", "2026-08-11T12:00:00+01:00"],
+            )
+            .expect("a deleted recording inserts");
+
+        // The fourth has no title at all, which is what makes `-title:` a real
+        // question: the matcher selects a sitting whose clip has no title, and
+        // SQL would only agree if the comparison is inside an `EXISTS`.
+        for (name, session, title, deleted) in [
+            ("Ace on Mirage", 0, true, false),
+            ("Clutch on Inferno", 0, true, false),
+            ("Тащу катку", 1, true, false),
+            ("Deleted highlight", 2, true, true),
+            ("Untitled", 4, false, false),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO clips (session_id, path, title, created_at, duration_seconds, \
+                                        deleted_at) \
+                     VALUES (?1, ?2, ?3, ?4, 30.0, ?5)",
+                    params![
+                        ids[session],
+                        format!(r"D:\clips\{name}.mkv"),
+                        title.then_some(name),
+                        "2026-08-11T12:30:00+01:00",
+                        deleted.then_some("2026-08-13T00:00:00+01:00"),
+                    ],
+                )
+                .expect("a clip inserts");
+        }
+
+        // Tags on both sides of the join, including one only a deleted clip
+        // carries.
+        for tag in ["clutch", "ЛУЧШЕЕ", "spoiler"] {
+            connection
+                .execute("INSERT INTO tags (name) VALUES (?1)", params![tag])
+                .expect("a tag inserts");
+        }
+        connection
+            .execute(
+                "INSERT INTO recording_tags (recording_id, tag_id) \
+                 SELECT r.recording_id, t.tag_id FROM recordings r, tags t \
+                 WHERE r.session_id = ?1 AND r.deleted_at IS NULL AND t.name = 'clutch'",
+                params![ids[1]],
+            )
+            .expect("a recording tag applies");
+        connection
+            .execute(
+                "INSERT INTO clip_tags (clip_id, tag_id) \
+                 SELECT c.clip_id, t.tag_id FROM clips c, tags t \
+                 WHERE c.title = 'Ace on Mirage' AND t.name = 'ЛУЧШЕЕ'",
+                [],
+            )
+            .expect("a clip tag applies");
+        connection
+            .execute(
+                "INSERT INTO clip_tags (clip_id, tag_id) \
+                 SELECT c.clip_id, t.tag_id FROM clips c, tags t \
+                 WHERE c.title = 'Deleted highlight' AND t.name = 'spoiler'",
+                [],
+            )
+            .expect("a tag on a deleted clip applies");
+
+        // A favourite at each of the three levels the projection reads: the
+        // sitting itself, a recording in it, and a clip cut from it.
+        connection
+            .execute(
+                "UPDATE sessions SET favourited_at = ?2 WHERE session_id = ?1",
+                params![ids[2], "2026-08-13T09:00:00+01:00"],
+            )
+            .expect("a session is favourited");
+        connection
+            .execute(
+                "UPDATE recordings SET favourited_at = ?2 \
+                 WHERE session_id = ?1 AND deleted_at IS NULL",
+                params![ids[0], "2026-08-13T09:00:00+01:00"],
+            )
+            .expect("a recording is favourited");
+        connection
+            .execute(
+                "UPDATE clips SET favourited_at = ?1 WHERE title = 'Тащу катку'",
+                params!["2026-08-13T09:00:00+01:00"],
+            )
+            .expect("a clip is favourited");
+
+        for (session, kind) in [
+            (0, "kill"),
+            (0, "round_win"),
+            (1, "УБИЙСТВО"),
+            (5, "kill"),
+            (6, "kill"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO session_events (session_id, at, kind) VALUES (?1, ?2, ?3)",
+                    params![ids[session], "2026-08-11T12:10:00+01:00", kind],
+                )
+                .expect("an event inserts");
+        }
+
+        database
+    }
+
+    /// The queries the two are compared over.
+    ///
+    /// Every field, every comparison, both connectives, negation, brackets,
+    /// non-ASCII text on both sides, and the three states that are null in the
+    /// database — no game, no recordings, no clip title.
+    const CASES: &[&str] = &[
+        "",
+        "mirage",
+        "MIRAGE",
+        "тащу",
+        "ТАЩУ",
+        "танков",
+        "game:counter",
+        "game:мир",
+        "session:15",
+        "title:inferno",
+        "title:deleted",
+        "tag:clutch",
+        "tag:лучшее",
+        "tag:spoiler",
+        "event:kill",
+        "event:убийство",
+        "favourite",
+        "favourite:false",
+        "-favourite",
+        "-title:mirage",
+        "-tag:clutch",
+        "-event:kill",
+        "-session:15",
+        "date:2026-08-11",
+        "date:>2026-08-12",
+        "date:<=2026-08-12",
+        "-date:>2026-08-12",
+        "duration:>60s",
+        "duration:<1h",
+        "-duration:<1h",
+        "duration:>=90s",
+        "game:cs OR tag:clutch",
+        "game:counter kill",
+        "(tag:clutch OR event:kill) -game:elden",
+        "-game:counter -game:elden",
+        "nothing-in-this-library",
+    ];
+
+    /// The queries `docs/search.md` measures the matcher over, verbatim.
+    ///
+    /// Issue #449 asks for these specifically — "the results are identical to
+    /// the in-memory executor's for every query in `docs/search.md`'s table,
+    /// including the accent-folding cases" — so they are named here rather than
+    /// paraphrased into [`CASES`], and the fixture above is shaped so that each
+    /// of them selects something.
+    const DOCUMENTED: &[&str] = &[
+        "",
+        "mirage",
+        "game:counter kill favourite",
+        "тан",
+        r#"game:"Elden Ring" duration:>5m -favourite"#,
+        "date:>=2026-08-20 (tag:clutch OR event:kill) -game:minecraft",
+    ];
+
+    /// Asserts the two agree about `queries`, and that they agreed about
+    /// something.
+    fn agree_about(database: &Database, queries: &[&str], allowed_empty: usize) {
+        let mut selected_something = 0_usize;
+        for text in queries {
+            let expected = matched(database, text);
+            assert_eq!(
+                found(database, text),
+                expected,
+                "`{text}` is answered differently by the database and by the matcher"
+            );
+            if !expected.is_empty() {
+                selected_something += 1;
+            }
+        }
+
+        // A differential test where both sides return nothing agrees about
+        // nothing. Most of these have to actually select sittings for the
+        // comparison above to have been a comparison at all.
+        assert!(
+            selected_something + allowed_empty >= queries.len(),
+            "only {selected_something} of {} queries selected anything; the fixture is not \
+             exercising the language",
+            queries.len()
+        );
+    }
+
+    #[test]
+    fn the_database_and_the_matcher_select_the_same_sessions() {
+        // The whole correctness argument for answering a search in SQL. The
+        // matcher is the definition of the language; this asserts the compiler
+        // is a translation of it and not a second opinion.
+        //
+        // Four may select nothing: `tag:spoiler` and `title:deleted` name what
+        // is in the trash, `-duration:<1h` names a sitting longer than an hour,
+        // and `nothing-in-this-library` says so.
+        agree_about(&varied_library("search-differential"), CASES, 4);
+    }
+
+    #[test]
+    fn the_two_agree_about_every_query_the_language_is_documented_by() {
+        // Note that `тан` does *not* exercise the folding, here or in the
+        // documented table: `Мир танков` is already lower-case where the needle
+        // matches it, so SQLite's ASCII `lower()` would answer this one
+        // correctly too. The queries that actually divide the two are in
+        // [`CASES`] — `ТАЩУ`, `game:мир`, `tag:лучшее`, `event:убийство` — each
+        // of which asks about text whose case the fold has to change.
+        agree_about(&varied_library("search-documented"), DOCUMENTED, 0);
+    }
+
+    #[test]
+    fn what_is_in_the_trash_is_not_found_by_what_it_carries() {
+        // The one place the compiled SQL could plausibly disagree with the
+        // projection without any query looking odd: `browse` reads recordings
+        // and clips with `deleted_at IS NULL`, so a deleted row's title, tag,
+        // duration and favourite are not the sitting's.
+        let database = varied_library("search-trash");
+
+        assert!(
+            found(&database, "title:deleted").is_empty(),
+            "a deleted clip's title is not the sitting's"
+        );
+        assert!(
+            found(&database, "tag:spoiler").is_empty(),
+            "a tag only a deleted clip carries is not the sitting's"
+        );
+        assert!(
+            found(&database, "duration:>2h").is_empty(),
+            "the 9999 seconds on the deleted recording are not counted"
+        );
+        // And the sitting that holds them is still findable by what it does
+        // have, so the assertions above are not passing because the fixture is
+        // empty.
+        assert_eq!(found(&database, "title:mirage"), vec!["session-11"]);
+    }
+
+    #[test]
+    fn a_sitting_that_recorded_nothing_has_no_duration_rather_than_a_duration_of_zero() {
+        // `IFNULL(SUM(...), 0)` makes the sum a number; the `> 0` guard beside
+        // it is what stops that number being an answer. Without the guard this
+        // sitting would be selected by every `duration:<` in the language.
+        let database = varied_library("search-no-duration");
+
+        let short = found(&database, "duration:<1h");
+        assert!(
+            !short.contains(&"session-14".to_owned()),
+            "a sitting with no recordings has no duration: {short:?}"
+        );
+        assert!(!short.is_empty(), "other sittings are shorter than an hour");
     }
 }

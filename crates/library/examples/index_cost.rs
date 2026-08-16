@@ -145,10 +145,13 @@ fn main() {
         )
     });
 
-    // A search, which is a walk of the sessions rather than an index lookup:
-    // the matcher is the definition of what a query means, and running it is
-    // what keeps one definition (`index::browse`). This is the figure that says
-    // whether that stays defensible.
+    // A search. Both of these used to be a walk of the whole library — the
+    // query was applied by hydrating each session and running the matcher over
+    // it — and these two lines are the figures that said it had stopped being
+    // defensible (issue #449). The query is a predicate in the statement now,
+    // and the pair still bound the cost from both sides: one that finds a full
+    // page stops as soon as it has one, and one that finds nothing is the
+    // whole library.
     let query: Query = "game:\"game 7\"".parse().expect("a query parses");
     read(
         &database,

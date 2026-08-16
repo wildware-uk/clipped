@@ -270,38 +270,47 @@ is what lets the language be finished and tested before the schema exists.
 
 ### Running a query against a database
 
-A SQLite-backed executor consumes the same `Query` this module produces, and
-walks the tree instead of calling `Query::matches`:
+`search::sql` consumes the same `Query` this module produces and walks the tree
+into a `WHERE` fragment instead of calling `Query::matches`. `index::browse`
+pastes that fragment into the statement that reads a page, so a search is one
+query plan rather than a walk of the library (issue #449).
 
 - `Expr::All`, `Expr::Any` and `Expr::Not` become `AND`, `OR` and `NOT` around
   bracketed fragments. Precedence is already resolved into the tree, so nothing
   downstream re-decides how `a b OR c` groups.
-- `Term::Text` becomes `LIKE '%' || ? || '%'` against a **folded** column, with
-  `FoldedText::folded` as the bound parameter. It must not use SQLite's
-  `COLLATE NOCASE`, which folds ASCII only and would answer differently from
-  this module for every non-ASCII game, tag and title. `search::fold` is public
-  for exactly this: the indexer writes the folded column with the same function,
-  so the two agree by construction rather than by review.
-- `Term::Favourite` is a boolean column, and `Term::Date` and `Term::Duration`
-  are comparisons against columns worth indexing.
-- `TextField::Anywhere` is the one that shapes the schema: either an `OR` across
-  every text column, or one denormalised folded column holding all of them.
-  Either satisfies the definition here.
+- `Term::Text` becomes `instr(clipped_fold(<column>), ?) > 0`, with
+  `FoldedText::folded` as the bound parameter. **The folding is this module's
+  own `fold`, registered on the connection as a SQLite scalar function.** It is
+  not `COLLATE NOCASE` and not `lower()`: both fold ASCII and nothing else, and
+  would answer differently from the matcher for every non-ASCII game, tag and
+  title — which is to say on exactly the searches the folding exists for.
+- `Term::Favourite` reads `favourited_at IS NOT NULL` on the sitting and on
+  anything still inside it. `Term::Date` compares the first ten characters of
+  `started_at`, in the offset the recorder wrote. `Term::Duration` sums the
+  recordings and the clips.
+- `TextField::Anywhere` is an `OR` across every text a session carries.
 
-- **Every leaf has to be `IFNULL(<condition>, 0)`.** A row with no date does not
-  satisfy `date:>2026-08-01`, and *is* selected by `-date:>2026-08-01`, which is
-  what `Expr::Not` means here. SQL disagrees: `NOT (NULL > x)` is `NULL`, which
-  is not true, so a session with no recording whose duration is known would be
-  dropped by a negation that should keep it. It is the one place the two
-  languages differ by default, and it is invisible until somebody searches for
-  what they have *not* recorded.
+A stored folded column beside each text would be faster, and was tried and
+dropped. Every writer would have had to remember the second copy, and one that
+forgot would not fail — it would quietly stop returning matches for whatever it
+wrote. A scalar function that is not registered is a loud error on the next
+search, and folding a name while scanning it costs about what scanning it costs.
 
-`Query::matches` stays the reference answer. Where a database executor disagrees
-with it, the executor is wrong — the tests in `matcher.rs` are what "matching"
-means. Note that what a *session* is searchable by is the projection
-`crate::index::browse` builds, not this module: it is what decides that `title:`
-looks at every clip's title and that `event:` looks at the kinds a sitting's
-plugins reported (issue #520).
+**Negation is where SQL's three-valued logic could have broken this.** `NOT NULL`
+is `NULL`, which is not true, so a leaf that evaluated to `NULL` would be dropped
+by a negation that should have kept it, and nothing would look wrong. No leaf
+can: every nullable column is read inside an `EXISTS`, which is true or false and
+never `NULL`, and `started_at` is `NOT NULL`. The one that needed work is
+duration, and not because of nulls — a sum over no recordings is zero, and a
+separate `> 0` test is what tells "recorded nothing" from "recorded no seconds".
+
+`Query::matches` stays the reference answer. Where the SQL disagrees with it, the
+SQL is wrong, and
+`index::browse::tests::the_database_and_the_matcher_select_the_same_sessions`
+runs both over one library and fails if they ever part company. Note that what a
+*session* is searchable by is the projection `crate::index::browse` builds, not
+this module: it is what decides that `title:` looks at every clip's title and
+that `event:` looks at the kinds a sitting's plugins reported (issue #520).
 
 ## Measured cost
 
@@ -345,5 +354,30 @@ a regression — anything an order of magnitude slower than this fails it on any
 machine — rather than a slow afternoon. The numbers above are what the
 measurement is *for*, and the test prints them on every run.
 
-What is **not** measured, because it does not exist yet: search over a library
-on disk. That is issues #55 and #56, and it will need its own numbers.
+### And from disk
+
+The table above measures the matcher over rows already in memory. What a user
+waits for is a search of `library.db`, which is a different number and is
+measured separately, by `crates/library/examples/index_cost.rs` over the
+10,000-session library `docs/library.md` documents. Same machine, release build,
+a page of 25:
+
+| Read | 2,000 sessions | 10,000 sessions |
+| --- | ---: | ---: |
+| A page with no search at all | 1.2 ms | 4.6 ms |
+| A search matching one game in twenty | **1.0 ms** | **4.3 ms** |
+| A search matching nothing at all | **0.5 ms** | **3.8 ms** |
+
+The row that matters is the first one against the other two: **a search costs
+what browsing costs.** Before the query was compiled (issue #449) the same two
+searches were 23 ms and 37 ms at two thousand sessions and 188 ms and 316 ms at
+ten thousand, because a search that matched nothing hydrated every session in
+the library in order to reject it. A search matching nothing is now the cheapest
+of the three, because it is the one that carries no sessions back.
+
+These are not comparable to the in-memory table and are not meant to be: that one
+is 100,000 rows already loaded and this one is 10,000 sittings on disk, each of
+which is several rows across five tables. They answer two different questions —
+what matching costs, and what a search costs — and both are worth knowing,
+because a compiled query slower than the matcher over the same data would be an
+index that earned nothing.
