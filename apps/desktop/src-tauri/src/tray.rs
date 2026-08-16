@@ -40,8 +40,7 @@ use std::sync::{Arc, Mutex};
 
 use clipped_ipc::supervisor::{wait_for_recorder_to_exit, RecorderCallError, ShutdownOutcome};
 use clipped_ipc::{
-    AddBookmark, Command, RecorderLink, RecorderLinkState, Reply, SaveReplay, StartRecording,
-    StopRecording,
+    AddBookmark, Command, RecorderLink, RecorderLinkState, Reply, SaveReplay, StopRecording,
 };
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -408,11 +407,12 @@ fn record(app: &AppHandle) {
 }
 
 /// Asks the recorder to record the process the menu named.
+///
+/// The request is [`crate::recording_request`], which is the same one the
+/// window's Record button sends — including the replay buffer, so that Save
+/// Replay below is live against a recording this menu started (issue #427).
 fn start_recording(link: &RecorderLink, process_id: u32) -> Result<(), String> {
-    let command = Command::StartRecording(StartRecording {
-        pid: Some(process_id),
-        ..StartRecording::default()
-    });
+    let command = Command::StartRecording(crate::recording_request(process_id));
 
     match link.call(&command) {
         // Where the file is, is the one thing worth knowing and the one thing
@@ -724,6 +724,41 @@ mod tests {
         // "somebody added an item and forgot" rather than "the line that never
         // does anything".
         assert_eq!(action_for(ids::STATUS), MenuAction::Inert);
+    }
+
+    #[test]
+    fn the_tray_starts_a_recording_it_will_be_able_to_save_a_replay_from() {
+        // The other half of issue #427, and the half no model test can see. The
+        // three refusals below are a *function of the recording*, so a Start
+        // Recording that did not ask for a replay buffer leaves Save Replay
+        // permanently disabled with "this recording is not keeping a replay
+        // buffer" — an honest label on a control nobody can ever reach, which
+        // is what this menu drew for months while every test in this file
+        // passed.
+        //
+        // Driven over a real pipe rather than by reading the request back,
+        // because "the tray builds the right struct" is not the claim: the
+        // claim is that the recorder is asked for a buffer when somebody clicks
+        // Start Recording in this menu.
+        let recorder = crate::tests::FakeRecorder::listening(
+            "tray-record-start",
+            crate::tests::AskedRecorder::default(),
+        );
+        let app = recorder.window();
+
+        start_recording(app.state::<RecorderLink>().inner(), 4_242)
+            .expect("the recorder answered the start");
+
+        assert_eq!(
+            recorder.handler.asked(),
+            vec![Command::StartRecording(clipped_ipc::StartRecording {
+                pid: Some(4_242),
+                replay: true,
+                ..clipped_ipc::StartRecording::default()
+            })],
+            "Start Recording has to ask for the process the menu named and for a replay buffer, \
+             or Save Replay below it can never be enabled"
+        );
     }
 
     #[test]

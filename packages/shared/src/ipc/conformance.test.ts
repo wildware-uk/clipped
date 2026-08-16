@@ -277,6 +277,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     microphone: 'optional',
     system_audio: 'optional',
     replay_seconds: 'optional',
+    replay: 'optional',
   }),
   stop_recording: fields<StopRecordingParams>({ recording_id: 'optional' }),
   add_bookmark: fields<AddBookmarkParams>({

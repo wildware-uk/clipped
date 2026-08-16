@@ -780,6 +780,42 @@ impl Running {
         self
     }
 
+    /// The same recording, keeping whatever [`replay_asked`] said it should.
+    ///
+    /// This is where a `replay` that named no length becomes a duration, and it
+    /// is here rather than beside the rest of the request because *here* is the
+    /// first moment the length exists: [`ManualSession::start`] has asked the
+    /// catalogue what game the window is and folded that game's settings over
+    /// the global ones, so `replay_window_seconds` has the answer that applies
+    /// to this recording rather than the one that applies to nothing in
+    /// particular (AGENTS.md section 30, `docs/configuration.md`).
+    ///
+    /// # Errors
+    ///
+    /// Only for a configured window `clipped-replay` will not take, which a
+    /// `Configuration` built through its own API cannot hold — every way of
+    /// setting `replay_window_seconds` checks the same bounds. It is a
+    /// `Result` so that a settings file which somehow carries one is refused
+    /// with the buffer's own sentence rather than silently recorded without a
+    /// buffer, which is the failure this whole issue was.
+    fn with_replay_asked(self, asked: ReplayAsked) -> Result<Self, ProtocolError> {
+        let replay = match asked {
+            ReplayAsked::Nothing => None,
+            ReplayAsked::Named(replay) => Some(replay),
+            ReplayAsked::Configured => {
+                let window = *self.resolved_settings().replay_window().value();
+                tracing::info!(
+                    window_seconds = window.as_secs_f64(),
+                    "this recording keeps the replay window the settings ask for, because the \
+                     request asked for a buffer without naming a length"
+                );
+                Some(replay_of(window)?)
+            }
+        };
+
+        Ok(self.with_replay(replay))
+    }
+
     /// The session this recording is the whole of, while it is still running.
     ///
     /// # Panics
@@ -910,8 +946,10 @@ impl RecordingState {
         // Before the window is resolved and before anything is created: a
         // duration no buffer can hold is a parameter to fix, and finding that
         // out after a capture session has opened would be finding it out late
-        // (AGENTS.md section 45).
-        let replay = replay_for(request)?;
+        // (AGENTS.md section 45). A `replay` that named no length is only
+        // *recognised* here — the length it means is the one the session
+        // resolves, below.
+        let asked_replay = replay_asked(request)?;
         let window = resolve_window(&config.target).map_err(unrecordable_target)?;
         let asked_for = settings_for(&config, &window);
 
@@ -951,7 +989,10 @@ impl RecordingState {
                 &window,
                 SystemTime::now(),
             )
-            .with_replay(replay);
+            // After the session, because the length of a buffer nobody named is
+            // `replay_window_seconds` folded for the game the catalogue just
+            // made of this window (issue #427).
+            .with_replay_asked(asked_replay)?;
 
         // What the request asked for, then what the user configured laid over
         // it — `apply_configured_to` and not `apply_to`, for the reason `watch`
@@ -1177,7 +1218,8 @@ impl RecordingState {
             let Some(replay) = running.replay.clone() else {
                 return Err(ProtocolError::new(
                     ErrorCode::NotRecording,
-                    "this recording is not keeping a replay buffer; start one with                      `replay_seconds` to be able to save from it",
+                    "this recording is not keeping a replay buffer; start one with `replay`, or \
+                     with `replay_seconds` to choose the length, to be able to save from it",
                 ));
             };
             (running.id.clone(), replay, Arc::clone(running.session()))
@@ -1593,19 +1635,56 @@ fn nothing_to_stop() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotRecording, "nothing is being recorded")
 }
 
-/// The replay buffer a `start_recording` asked for, if it asked for one.
+/// What a `start_recording` asked its recording to keep.
 ///
-/// The bound is `clipped-replay`'s own and the message is its own, so that the
-/// duration a window may ask for over the protocol and the one
-/// `replay --duration` accepts are the same range with the same explanation
-/// (AGENTS.md section 55).
-fn replay_for(request: &StartRecording) -> Result<Option<Arc<ReplayRecording>>, ProtocolError> {
-    let Some(seconds) = request.replay_seconds else {
-        return Ok(None);
-    };
+/// Two of the three answers are settled by the request alone; the third is not,
+/// which is the whole reason this is an enum rather than an
+/// `Option<Arc<ReplayRecording>>`. A request that asks for a buffer without
+/// naming a length is asking for `replay_window_seconds`, and that setting
+/// inherits per game — so its answer does not exist until the session has asked
+/// the catalogue what game the window is ([`Running::with_replay_asked`]).
+#[derive(Debug, Clone)]
+enum ReplayAsked {
+    /// No buffer. The request named no length and asked for none.
+    Nothing,
+    /// A buffer at the length this recorder has configured for this game.
+    Configured,
+    /// A buffer at the length the request named, already checked.
+    Named(Arc<ReplayRecording>),
+}
 
-    ReplayRecording::new(std::time::Duration::from_secs(u64::from(seconds)))
-        .map(|replay| Some(Arc::new(replay)))
+/// What a `start_recording` asks its recording to keep, checked as a parameter.
+///
+/// Called before the window is resolved and before anything is created, so that
+/// a duration no buffer can hold is a parameter to fix rather than something
+/// found out after a capture session has opened (AGENTS.md section 45). What it
+/// cannot check here is the *configured* window, which no request carries and
+/// which the session resolves — hence [`ReplayAsked::Configured`].
+///
+/// A named length wins over `replay`, because a caller that sent a number has
+/// already answered the question `replay` asks the recorder.
+fn replay_asked(request: &StartRecording) -> Result<ReplayAsked, ProtocolError> {
+    if let Some(seconds) = request.replay_seconds {
+        let named = replay_of(std::time::Duration::from_secs(u64::from(seconds)))?;
+        return Ok(ReplayAsked::Named(named));
+    }
+
+    Ok(if request.replay {
+        ReplayAsked::Configured
+    } else {
+        ReplayAsked::Nothing
+    })
+}
+
+/// A replay buffer of `window`, refused in `clipped-replay`'s own words.
+///
+/// The bound is that crate's own and the message is its own, so that the
+/// duration a window may ask for over the protocol, the one a settings file may
+/// carry and the one `replay --duration` accepts are the same range with the
+/// same explanation (AGENTS.md section 55).
+fn replay_of(window: std::time::Duration) -> Result<Arc<ReplayRecording>, ProtocolError> {
+    ReplayRecording::new(window)
+        .map(Arc::new)
         .map_err(|error| ProtocolError::new(ErrorCode::InvalidParameters, error.to_string()))
 }
 
@@ -2063,10 +2142,23 @@ mod tests {
 
     /// The same, over a catalogue the caller chose.
     fn state_over(directory: &Path, catalogue: Catalogue) -> Arc<RecordingState> {
+        state_configured(directory, catalogue, Configuration::defaults())
+    }
+
+    /// The same again, over settings the caller chose.
+    ///
+    /// Never the user's own file: `ConfigurationStore::default_path` is
+    /// whoever is running the tests, and a test that read it would pass or fail
+    /// on their settings (AGENTS.md section 25).
+    fn state_configured(
+        directory: &Path,
+        catalogue: Catalogue,
+        configuration: Configuration,
+    ) -> Arc<RecordingState> {
         Arc::new(RecordingState::new(
             EventPublisher::new(),
             Arc::new(indexer_over(directory)),
-            Configuration::defaults(),
+            configuration,
             catalogue,
             // Not the machine's: a test that asked what is installed here would
             // answer differently on another machine (AGENTS.md section 25).
@@ -2294,19 +2386,24 @@ mod tests {
         // `replay --duration` accepts are the same range with the same
         // explanation, because both come from `clipped-replay` (AGENTS.md
         // section 55).
-        assert!(replay_for(&StartRecording::default())
-            .expect("no buffer asked for")
-            .is_none());
+        assert!(
+            matches!(
+                replay_asked(&StartRecording::default()).expect("no buffer asked for"),
+                ReplayAsked::Nothing
+            ),
+            "a request that says nothing about a replay asks for no buffer"
+        );
 
-        let asked = replay_for(&StartRecording {
+        let ReplayAsked::Named(asked) = replay_asked(&StartRecording {
             replay_seconds: Some(60),
             ..StartRecording::default()
         })
-        .expect("a minute is in range")
-        .expect("a buffer was asked for");
+        .expect("a minute is in range") else {
+            panic!("a length that was named is a length this recording keeps");
+        };
         assert_eq!(asked.window(), Duration::from_secs(60));
 
-        let error = replay_for(&StartRecording {
+        let error = replay_asked(&StartRecording {
             replay_seconds: Some(4 * 3600),
             ..StartRecording::default()
         })
@@ -2317,6 +2414,137 @@ mod tests {
             "the refusal has to name the bounds: {}",
             error.message
         );
+
+        // Both at once is a caller that has already answered the question
+        // `replay` asks, and the number it sent is the one it gets.
+        let ReplayAsked::Named(both) = replay_asked(&StartRecording {
+            replay: true,
+            replay_seconds: Some(90),
+            ..StartRecording::default()
+        })
+        .expect("ninety seconds is in range") else {
+            panic!("a length that was named wins over the configured one");
+        };
+        assert_eq!(both.window(), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn a_start_that_asks_for_a_buffer_without_a_length_keeps_the_one_the_settings_chose() {
+        // Issue #427's first criterion, from the settings file to the buffer.
+        // The desktop window cannot read a setting — it may link `clipped-ipc`
+        // and nothing else of this workspace
+        // (`tests/integration/tests/workspace_layering.rs`) — so it asks for a
+        // buffer without naming a length, and this is the recorder answering
+        // with `replay_window_seconds`. A `with_replay_asked` that invented a
+        // constant, or that read the global layer instead of the recording's,
+        // would give every recording five minutes however the user had set it,
+        // and the tray's Save Replay would look exactly as correct as it does
+        // now.
+        let directory = scratch("configured-window");
+        let output = directory.join("clipped-20260813-120000.mkv");
+
+        let mut configuration = Configuration::defaults();
+        let mut global = clipped_session::config::Preferences::default();
+        global
+            .set_replay_window(Some(Duration::from_secs(90)))
+            .expect("ninety seconds is a window a buffer will take");
+        configuration.set_global(global);
+
+        let state = state_configured(&directory, Catalogue::default(), configuration);
+        let running = state
+            .begin(
+                "r-1".to_owned(),
+                output.clone(),
+                "process cs2.exe".to_owned(),
+                &window_of(4_242, "cs2.exe"),
+                moment(),
+            )
+            .with_replay_asked(ReplayAsked::Configured)
+            .expect("the configured window is one a buffer will take");
+
+        assert_eq!(
+            running
+                .replay
+                .as_ref()
+                .expect("a recording that asked for a buffer has one")
+                .window(),
+            Duration::from_secs(90),
+            "the buffer keeps what the settings file said, not what this file said"
+        );
+
+        // And the same recording with nothing asked for keeps nothing, so the
+        // configured window is applied because it was asked for rather than
+        // because it exists — the protocol's promise to every other client
+        // (`StartRecording::replay_seconds`).
+        let ordinary = state
+            .begin(
+                "r-2".to_owned(),
+                output,
+                "process cs2.exe".to_owned(),
+                &window_of(4_242, "cs2.exe"),
+                moment(),
+            )
+            .with_replay_asked(ReplayAsked::Nothing)
+            .expect("nothing asked for is not a failure");
+        assert!(
+            ordinary.replay.is_none(),
+            "a recording nobody asked to keep a buffer keeps none, however the settings read"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_buffer_a_recording_keeps_is_the_one_configured_for_the_game_it_is_of() {
+        // The half above cannot see: `replay_window_seconds` inherits per game
+        // (AGENTS.md section 30), so the length has to come from the fold the
+        // *session* resolved rather than from `resolve_global`. The catalogue
+        // claims this test's own process, so the recording is of a known game
+        // and that game's layer is the one that must win.
+        let directory = scratch("per-game-window");
+        let output = directory.join("clipped-20260813-120000.mkv");
+
+        let mut configuration = Configuration::defaults();
+        let mut global = clipped_session::config::Preferences::default();
+        global
+            .set_replay_window(Some(Duration::from_secs(600)))
+            .expect("ten minutes is a window a buffer will take");
+        configuration.set_global(global);
+
+        let mut for_the_game = clipped_session::config::Preferences::default();
+        for_the_game
+            .set_replay_window(Some(Duration::from_secs(45)))
+            .expect("forty-five seconds is a window a buffer will take");
+        configuration.set_game(
+            clipped_session::config::GameKey::parse("a-test-game")
+                .expect("the catalogue's identifier is a settings key"),
+            for_the_game,
+        );
+
+        let state = state_configured(&directory, catalogue_claiming_this_process(), configuration);
+        let running = state
+            .begin(
+                "r-1".to_owned(),
+                output,
+                format!("process {}", this_executable_name()),
+                &window_of(std::process::id(), &this_executable_name()),
+                moment(),
+            )
+            .with_replay_asked(ReplayAsked::Configured)
+            .expect("the configured window is one a buffer will take");
+
+        assert_eq!(
+            running
+                .replay
+                .as_ref()
+                .expect("a recording that asked for a buffer has one")
+                .window(),
+            Duration::from_secs(45),
+            "the game's own replay window has to beat the global one, or per-game settings stop \
+             at the buffer"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

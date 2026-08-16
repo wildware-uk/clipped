@@ -551,12 +551,13 @@ exactly what was asked for:
   `complete: false` and `shortfall_seconds` — which is a clip worth having and
   worth labelling, not a failure.
 
-**Which recordings can be saved from.** A buffer costs memory in proportion to
-its duration, so one is kept only when `start_recording` asked for it with
-`replay_seconds`. `active_recording.replay_seconds` says whether the recording
-that is running has one and how much it keeps, which is what a window reads
-before offering the control; the `replay` feature says only that the build has
-the command.
+**Which recordings can be saved from.** A buffer costs a recording a spill
+directory and the newest few seconds in memory, so one is kept only when
+`start_recording` asked for it — either by naming a length with `replay_seconds`
+or by asking for the configured one with `replay`.
+`active_recording.replay_seconds` says whether the recording that is running has
+one and how much it keeps, which is what a window reads before offering the
+control; the `replay` feature says only that the build has the command.
 
 Refusals: `not_recording` when nothing is being recorded, when a named recording
 is not the one running, or when the recording that is running keeps no buffer —
@@ -588,6 +589,26 @@ the same default the command line has. The reply names the recording:
   "reply":"recording_started","recording_id":"r-1",
   "output":"D:\\clips\\session.mkv"}}}
 ```
+
+**Asking for a replay buffer.** Two parameters, and they are the two halves of
+`clipped-recorder replay`: `replay` asks for a buffer, and `replay_seconds`
+names how long it keeps — exactly as the subcommand asks for one and
+`--duration` overrides the configured window.
+
+| Sent | What the recording keeps |
+| --- | --- |
+| neither | no buffer |
+| `"replay": true` | the configured window: `replay_window_seconds`, resolved for the game this recording turns out to be of |
+| `"replay_seconds": 120` | 120 seconds |
+| both | the length that was named |
+
+Neither, meaning no buffer, is what every client that predates `replay` sends
+and what an ordinary recording is. `replay` exists because the length is a
+*setting*, and a caller cannot resolve it: `replay_window_seconds` inherits per
+game (`docs/configuration.md`), and which game a `pid` is, is what the recorder
+asks its catalogue once the window is resolved. The desktop window sends
+`replay` for exactly that reason — it may link `clipped-ipc` and nothing else
+of the workspace, so a length it named would be one nobody chose.
 
 A `recording_id` is unique for the life of the recorder process. It exists so
 that a stop meant for a recording that has already ended by itself cannot stop

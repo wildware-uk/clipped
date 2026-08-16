@@ -970,7 +970,7 @@ only watch ([issue #50](https://github.com/wildware-uk/clipped/issues/50)).
 ```text
   Recording process `cs2.exe`          the status, not a control
   ─────────────────────────────
-  Save Replay — this recording is not keeping a replay buffer   disabled
+  Save Replay
   Add Bookmark
   Stop Recording
   ─────────────────────────────
@@ -1090,16 +1090,24 @@ explanation" is the failure AGENTS.md section 27 names.
   which is a fact about when the recording started and not about anything going
   wrong.
 
-  A recording started **from this window** still keeps no buffer, so in practice
-  the reason is usually the third. The window cannot ask for one at a length
-  somebody chose: the duration lives in `replay_window_seconds`, and this window
-  has no way to read a setting — `apply_settings` is unbuilt (#108) and
+  A recording started **from this window** keeps a buffer, so in practice the
+  item is live whenever this application is the thing recording
+  ([#427](https://github.com/wildware-uk/clipped/issues/427)). Both controls
+  that start one — the Record button and Start Recording below — send the same
+  request, and it carries `replay` without a length: how long a buffer keeps is
+  `replay_window_seconds`, and this window has no way to read a setting.
   `workspace_layering.rs` allows the Tauri host exactly one crate of the
   workspace, `clipped-ipc`, so reading `settings.json` here would be a second
-  implementation of the settings file. `clipped-recorder replay --duration`
-  starts a recording that does have one, and against that recording the item is
-  live and works ([#427](https://github.com/wildware-uk/clipped/issues/427) for
-  the rest).
+  implementation of the settings file — and it would be the wrong answer anyway,
+  because that setting inherits per game and the game is what the *recorder*
+  makes of the process identifier this request names. So the window asks, the
+  recorder resolves, and the length is one somebody chose rather than one
+  invented here.
+
+  The third reason is therefore now a fact about a recording somebody else
+  started: `clipped-recorder record`, or another client of the protocol, which
+  asked for no buffer. `clipped-recorder replay --duration` starts one that has
+  a buffer too, and against that recording the item is equally live.
 - **Add Bookmark** is what that looked like the first time. Issue #64 built
   the bookmark store and the `add_bookmark` command, the refusal it quoted
   stopped existing, and the item became a control: live while something is being
@@ -1137,7 +1145,15 @@ because somebody may want to record one.
 
 The record button on the Home screen reads the same answer, through
 `record_target`, so both controls name the same application and neither can name
-something the other would not (issue #389).
+something the other would not (issue #389). They send the same *request*, too —
+`recording_request` in `main.rs` — which is a process identifier and `replay`,
+and nothing else. Every other parameter is the recorder's own setting, and so is
+the length the buffer keeps: a resolution or a replay window resolved in this
+window would be a second place those are decided (AGENTS.md sections 30 and 55).
+One function because two controls that build their own requests drift, and issue
+#427 is what drift here looks like — the tray's Save Replay item was correct,
+enabled exactly when the running recording had a buffer, and dark for ever,
+because neither control had ever asked for one.
 
 #### Clipped is more than one process
 
