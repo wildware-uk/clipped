@@ -491,6 +491,7 @@ when a command's parameters are all optional.
 | `library_sessions` | all optional, below | `library_sessions` | yes |
 | `library_games` | none | `library_games` | yes |
 | `library_events` | `recording` | `library_events` | yes |
+| `library_trash` | none | `library_trash` | yes |
 | `plugins` | none | `plugins` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
@@ -783,6 +784,47 @@ nothing — the space it is not occupying is not being used — and is counted i
 `missing` instead. Anything in the trash contributes to neither.
 
 Refused with `library_unavailable` on the same terms as `library_sessions`.
+
+### `library_trash`
+
+What is waiting in the trash: everything deleted and not yet emptied.
+
+```json
+{"type":"request","id":14,"command":"library_trash","params":{}}
+```
+
+```json
+{"type":"response","id":14,"outcome":{"ok":{
+  "reply":"library_trash",
+  "trash":{"items":[
+    {"kind":"recording","id":1,
+     "path":"D:\Clips.trash\clipped-cs2-20260814-201500.mkv",
+     "original_path":"D:\Clips\clipped-cs2-20260814-201500.mkv",
+     "deleted_at":"2026-08-15T09:00:00+01:00",
+     "expires_at":"2026-09-14T09:00:00+01:00",
+     "size_bytes":2147483648,"dependent_clips":2}],
+   "total_items":1,"total_bytes":2147483648,"directory":"D:\Clips.trash"}}}}
+```
+
+**No paging.** The trash is what somebody deleted and has not emptied, bounded
+by the retention period rather than by the size of the library, so a cursor
+would be machinery for a case that does not arise. If that turns out to be
+wrong it gains one the way `library_sessions` has one.
+
+**`original_path` is the one a person recognises.** A file inside the trash is
+named for the trash; asking somebody to identify their own recording by a name
+they have never seen is not showing it to them.
+
+**`total_items` and `total_bytes` travel together** because emptying takes them
+back: a window that showed "3 recordings, 12 GB" and then emptied a trash that
+had gained a fourth is refused rather than deleting something nobody saw
+(`clipped_library::trash::EmptyTrash`). The commands that restore and empty are
+the other half of [issue #450](https://github.com/wildware-uk/clipped/issues/450).
+
+**`expires_at` is absent from this build's replies.** Nothing configures the
+retention period yet, and a date computed from a policy nobody set would be a
+screen promising a deletion it cannot keep. The field is on the wire so that it
+does not have to be added later.
 
 ### `library_events`
 

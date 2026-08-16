@@ -646,15 +646,95 @@ describe('the Library screen', () => {
    * heading structure is the subject: a screen whose only heading was its title
    * gives a screen-reader user nothing to navigate between.
    */
+  /** A trash with nothing in it, which is what most machines have. */
+  function emptyTrash() {
+    return { items: [], total_items: 0, total_bytes: 0, directory: 'D:/Clips.trash' };
+  }
+
   it('has a heading for each of its parts', async () => {
-    stubRecorderLinkRuntime(ATTACHED, null, { sessions: () => Promise.resolve(page([])) });
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(emptyTrash()),
+    });
     render(<LibraryScreen />);
 
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Library');
     await waitFor(() => {
       expect(
         screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
-      ).toEqual(['Nothing recorded yet', 'What this screen will show']);
+      ).toEqual(['Nothing recorded yet', 'Trash', 'What this screen will show']);
     });
+  });
+
+  it('says what is in the trash, and where the files went', async () => {
+    // The half of issue #450 that is a read. A user who deleted something can
+    // see that it is recoverable and where it is, which is what a trash is for.
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () =>
+        Promise.resolve({
+          items: [
+            {
+              kind: 'recording',
+              id: 1,
+              path: 'D:/Clips.trash/clipped-cs2.mkv',
+              original_path: 'D:/Clips/clipped-cs2.mkv',
+              deleted_at: '2026-08-15T09:00:00+01:00',
+              size_bytes: 2_000_000_000,
+              dependent_clips: 2,
+            },
+          ],
+          total_items: 1,
+          total_bytes: 2_000_000_000,
+          directory: 'D:/Clips.trash',
+        }),
+    });
+    render(<LibraryScreen />);
+
+    const trash = await screen.findByRole('region', { name: 'Trash' });
+    // The path it *had*: a file inside the trash is named for the trash, and
+    // nobody recognises their own recording by a name they have never seen.
+    expect(trash).toHaveTextContent('D:/Clips/clipped-cs2.mkv');
+    expect(trash).toHaveTextContent('2.0 GB');
+    expect(trash).toHaveTextContent('2026-08-15');
+    // The clips cut from it stop being recoverable when the trash is emptied,
+    // so the screen says so before anybody does that.
+    expect(trash).toHaveTextContent('2 clip(s) were cut from this');
+  });
+
+  it('tells an empty trash from a trash it could not read', async () => {
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () => Promise.resolve(emptyTrash()),
+    });
+    render(<LibraryScreen />);
+
+    const trash = await screen.findByRole('region', { name: 'Trash' });
+    expect(trash).toHaveTextContent('Nothing has been deleted');
+    expect(
+      screen.queryByRole('heading', { name: 'The trash could not be read' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('says when the trash could not be read, rather than showing it as empty', async () => {
+    // A trash on a drive that is not there, or a recorder too old to have the
+    // command. Either way "nothing has been deleted" would be a claim nobody
+    // measured (issue #450's fourth acceptance criterion).
+    stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page([])),
+      trash: () =>
+        Promise.reject(
+          Object.assign(new Error('the trash could not be read'), {
+            code: 'library_unavailable',
+            message: 'the trash could not be read: the drive is not there',
+          }),
+        ),
+    });
+    render(<LibraryScreen />);
+
+    expect(
+      await screen.findByRole('heading', { name: 'The trash could not be read' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Nothing has been deleted.')).not.toBeInTheDocument();
   });
 });

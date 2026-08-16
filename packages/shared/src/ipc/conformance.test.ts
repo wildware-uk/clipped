@@ -63,6 +63,7 @@ import type {
   LibraryClip,
   LibraryGame,
   LibraryEventsReply,
+  LibraryTrashReply,
   PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
@@ -458,6 +459,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     lane: 'required',
   }),
+  'reply.library_trash': fields<LibraryTrashReply>({
+    reply: 'required',
+    trash: 'required',
+  }),
   'reply.plugins': fields<PluginsReply>({
     reply: 'required',
     installed: 'required',
@@ -583,6 +588,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'library_trash',
+    params: 'library_trash',
+    reply: 'reply.library_trash',
+    available_in_this_build: true,
+  },
+  {
     name: 'plugins',
     params: null,
     reply: 'reply.plugins',
@@ -654,6 +665,10 @@ function replyDiscriminant(reply: Reply): string {
       // different shape, it is the same shape carrying nothing. What tells
       // "none" from "not asked" is that `marks` is always present.
       return 'library_events';
+    case 'library_trash':
+      // One discriminant, for the same reason: an empty trash is the same
+      // shape carrying nothing, and there is no paging to lose.
+      return 'library_trash';
     case 'hotkeys':
       return 'hotkeys';
     case 'recording_exported':

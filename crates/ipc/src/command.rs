@@ -45,6 +45,7 @@ use crate::error::{ErrorCode, ProtocolError};
 use crate::hotkeys::HotkeyBinding;
 use crate::library::{
     LibraryEventLane, LibraryEvents, LibraryGame, LibrarySessionPage, LibrarySessions,
+    LibraryTrash, TrashListing,
 };
 use crate::message::Request;
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
@@ -78,6 +79,13 @@ pub enum Command {
 
     /// The game events of one recording, placed in its file.
     LibraryEvents(LibraryEvents),
+    /// What is in the trash: everything deleted and not yet emptied.
+    ///
+    /// A read, like the three above it. Restoring and emptying are separate
+    /// commands because they change something, and because emptying takes back
+    /// the listing it was shown
+    /// ([issue #450](https://github.com/wildware-uk/clipped/issues/450)).
+    LibraryTrash(LibraryTrash),
 
     /// What plugins are installed, what each declares, and what will start.
     Plugins,
@@ -120,6 +128,7 @@ impl Command {
             Self::LibrarySessions(_) => "library_sessions",
             Self::LibraryGames => "library_games",
             Self::LibraryEvents(_) => "library_events",
+            Self::LibraryTrash(_) => "library_trash",
             Self::Plugins => "plugins",
             Self::ExportRecording(_) => "export_recording",
             Self::GetHotkeys => "get_hotkeys",
@@ -148,6 +157,7 @@ impl Command {
             "library_sessions" => Ok(Self::LibrarySessions(parse_params(request)?)),
             "library_games" => Ok(Self::LibraryGames),
             "library_events" => Ok(Self::LibraryEvents(parse_params(request)?)),
+            "library_trash" => Ok(Self::LibraryTrash(parse_params(request)?)),
             "plugins" => Ok(Self::Plugins),
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
@@ -180,6 +190,7 @@ impl Command {
             | Self::GetHotkeys => Ok(serde_json::Value::Null),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
+            Self::LibraryTrash(request) => serde_json::to_value(request),
             Self::StartRecording(start) => serde_json::to_value(start),
             Self::StopRecording(stop) => serde_json::to_value(stop),
             Self::AddBookmark(bookmark) => serde_json::to_value(bookmark),
@@ -648,6 +659,14 @@ pub enum Reply {
         /// Always sent, so that "none" and "not asked" are told apart by
         /// whether the reply arrived rather than by guessing at an empty field.
         lane: LibraryEventLane,
+    },
+    /// What is waiting in the trash.
+    LibraryTrash {
+        /// Everything in it, what it occupies, and where it is.
+        ///
+        /// Always sent, so that an empty trash and a question nobody answered
+        /// are told apart by whether the reply arrived.
+        trash: TrashListing,
     },
     /// What the library holds per game.
     LibraryGames {

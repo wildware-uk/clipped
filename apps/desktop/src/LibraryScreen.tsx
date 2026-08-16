@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from 'react';
 
-import { describeProblem, headlineProblem, useSessions } from './library';
+import { describeProblem, headlineProblem, useSessions, useTrash } from './library';
 import {
   describeActionProblem,
   fileName,
@@ -79,10 +79,114 @@ const WAITING: readonly Waiting[] = [
     needs: 'The playback screen. Issue #52',
   },
   {
-    shows: 'Restoring something deleted by mistake',
-    needs: 'The trash, with its retention and restore. Issue #94',
+    shows: 'Restoring something deleted by mistake, and emptying the trash',
+    needs:
+      'The two commands that change it. The trash itself is built (#94) and listing it is on this screen now (#450); `restore_from_trash` and `empty_trash` are the other half, and emptying has to take back the listing it was shown, so a trash that changed in between is refused rather than emptied',
   },
 ];
+
+/** How a size is shown, in the unit a person reads. */
+function size(bytes: number | undefined): string {
+  if (bytes === undefined) {
+    // Never measured, which is not the same as empty. A screen that showed
+    // `0 B` for a file nobody weighed would be inventing a measurement.
+    return 'size unknown';
+  }
+  if (bytes >= 1_000_000_000) {
+    return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  }
+  if (bytes >= 1_000_000) {
+    return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  }
+  return `${bytes} B`;
+}
+
+/**
+ * What is in the trash, and what it would cost to keep or free.
+ *
+ * The half of issue #450 that is a read. Restoring and emptying change
+ * something and are separate commands; until they land this says what is there
+ * rather than pretending the feature is absent — a user who deleted something
+ * can at least see that it is recoverable, and where the file went.
+ */
+function Trash(): ReactNode {
+  const read = useTrash();
+
+  return (
+    <section className="clipped-panel" aria-label="Trash">
+      <h2 className="clipped-panel__heading">Trash</h2>
+
+      {read.state === 'reading' && <p className="clipped-panel__body">Reading the trash…</p>}
+
+      {read.state === 'unread' && (
+        <>
+          {/*
+           * Its own headline rather than `headlineProblem`'s: the sessions
+           * panel above says "Your library could not be read", and two panels
+           * saying the same sentence about different reads would leave somebody
+           * unable to tell which one failed.
+           */}
+          <h3 className="clipped-panel__heading">The trash could not be read</h3>
+          <p className="clipped-panel__body">{describeProblem(read.problem)}</p>
+        </>
+      )}
+
+      {read.state === 'read' && read.value.items.length === 0 && (
+        <p className="clipped-panel__body">
+          Nothing has been deleted. Anything you delete waits here before it goes for good.
+        </p>
+      )}
+
+      {read.state === 'read' && read.value.items.length > 0 && (
+        <>
+          <p className="clipped-panel__body">
+            {read.value.total_items} thing(s), {size(read.value.total_bytes)}, in{' '}
+            <code className="clipped-code">{read.value.directory}</code>.
+          </p>
+          <table className="clipped-table">
+            <thead>
+              <tr>
+                <th scope="col">What</th>
+                <th scope="col">Deleted</th>
+                <th scope="col">Size</th>
+                <th scope="col">Where it was</th>
+              </tr>
+            </thead>
+            <tbody>
+              {read.value.items.map((item) => (
+                <tr key={`${item.kind}-${String(item.id)}`}>
+                  <th scope="row">{item.kind}</th>
+                  <td>{item.deleted_at.slice(0, 10)}</td>
+                  <td>{size(item.size_bytes)}</td>
+                  {/*
+                   * The path it had, not the one it has: a file inside the
+                   * trash is named for the trash, and asking somebody to
+                   * recognise their own recording by a name they have never
+                   * seen is not showing them anything.
+                   */}
+                  <td>
+                    <code className="clipped-code">{item.original_path}</code>
+                    {item.dependent_clips > 0 && (
+                      <span className="clipped-muted">
+                        {' '}
+                        — {item.dependent_clips} clip(s) were cut from this
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="clipped-panel__body clipped-muted">
+            Restoring puts a file back where it was, byte for byte, and is the other half of this
+            screen (issue #450). Deleting the file from the folder above does the same job and
+            breaks nothing.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
 
 /** The Library screen. */
 export function LibraryScreen(): ReactNode {
@@ -206,6 +310,8 @@ export function LibraryScreen(): ReactNode {
           )}
         </section>
       )}
+
+      <Trash />
 
       <h2 className="clipped-screen__heading">What this screen will show</h2>
       <p className="clipped-screen__lead clipped-muted">

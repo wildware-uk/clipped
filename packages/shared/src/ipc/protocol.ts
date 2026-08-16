@@ -143,6 +143,7 @@ export const COMMANDS = [
   'library_sessions',
   'library_games',
   'library_events',
+  'library_trash',
   'plugins',
   'export_recording',
   'get_hotkeys',
@@ -225,6 +226,7 @@ export const REPLIES = [
   'library_sessions',
   'library_games',
   'library_events',
+  'library_trash',
   'plugins',
   'recording_exported',
   'hotkeys',
@@ -838,6 +840,58 @@ export interface LibraryEventLane {
   readonly marks: readonly LibraryEventMark[];
 }
 
+/**
+ * One thing waiting in the trash.
+ *
+ * The window may not link `clipped-library`, so this is the projection a screen
+ * needs: what it was, when it went, when it expires, and what keeping or
+ * freeing it costs ([issue #450](https://github.com/wildware-uk/clipped/issues/450)).
+ */
+export interface TrashedItem {
+  /** `recording` or `clip`. */
+  readonly kind: string;
+  /** The library's own identifier for it. */
+  readonly id: number;
+  /** Where the file is now, inside the trash. */
+  readonly path: string;
+  /**
+   * Where it was, and where restoring puts it back.
+   *
+   * The one a person recognises. A screen that showed only the trash's own copy
+   * would be asking them to identify a recording by a name they have never
+   * seen.
+   */
+  readonly original_path: string;
+  /** When it was deleted, RFC 3339 with an offset. */
+  readonly deleted_at: string;
+  /** When it will be removed for good, where the recorder knows. */
+  readonly expires_at?: string;
+  /** What it occupied when the index last saw it. */
+  readonly size_bytes?: number;
+  /** How many clips were cut from this recording and now point at it. */
+  readonly dependent_clips: number;
+}
+
+/** What is in the trash, and what emptying it would take. */
+export interface TrashListing {
+  /** Everything in it, newest deletion first. */
+  readonly items: readonly TrashedItem[];
+  /** How many there are, which is half of what emptying confirms. */
+  readonly total_items: number;
+  /** What they occupy, which is the other half. */
+  readonly total_bytes: number;
+  /** Where the trash directory is. */
+  readonly directory: string;
+}
+
+/** What is waiting in the trash. */
+export interface LibraryTrashReply {
+  /** The tag. */
+  readonly reply: 'library_trash';
+  /** Everything in it, what it occupies, and where it is. */
+  readonly trash: TrashListing;
+}
+
 /** The marks on one recording's timeline. */
 export interface LibraryEventsReply {
   /** The tag. */
@@ -1025,6 +1079,7 @@ export type Reply =
   | LibrarySessionsReply
   | LibraryGamesReply
   | LibraryEventsReply
+  | LibraryTrashReply
   | PluginsReply
   | RecordingExportedReply
   | HotkeysReply

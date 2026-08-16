@@ -188,6 +188,7 @@ fn main() {
             library_sessions,
             library_events,
             library_games,
+            library_trash,
             record_target,
             recorder_status,
             recorder_hotkeys,
@@ -404,6 +405,25 @@ fn library_sessions(
     match reply {
         clipped_ipc::Reply::LibrarySessions { page } => Ok(page),
         _ => Err(wrong_reply("library_sessions")),
+    }
+}
+
+/// What is waiting in the trash (SPEC.md section 19, issue #450).
+///
+/// The whole trash rather than a page: it is what somebody deleted and has not
+/// emptied, bounded by the retention period rather than by the size of the
+/// library.
+///
+/// `async` for the reason [`library_sessions`] is.
+#[tauri::command(async)]
+fn library_trash(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<clipped_ipc::TrashListing, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::LibraryTrash(
+        clipped_ipc::LibraryTrash {},
+    ))? {
+        clipped_ipc::Reply::LibraryTrash { trash } => Ok(trash),
+        _ => Err(wrong_reply("library_trash")),
     }
 }
 

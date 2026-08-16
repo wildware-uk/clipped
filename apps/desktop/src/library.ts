@@ -3,6 +3,7 @@ import type {
   LibraryGame,
   LibrarySession,
   LibrarySessionPage,
+  TrashListing,
 } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { useCallback, useEffect, useState } from 'react';
@@ -77,6 +78,45 @@ export async function readSessions(request: SessionsRequest): Promise<LibrarySes
 /** Reads what the library holds per game. */
 export async function readGames(): Promise<readonly LibraryGame[]> {
   return invoke<LibraryGame[]>('library_games');
+}
+
+/**
+ * Reads what is waiting in the trash.
+ *
+ * The whole of it rather than a page: the trash is what somebody deleted and
+ * has not emptied, bounded by the retention period rather than by the size of
+ * the library (issue #450).
+ */
+export async function readTrash(): Promise<TrashListing> {
+  return invoke<TrashListing>('library_trash');
+}
+
+/**
+ * What is in the trash, kept as a read so that "could not be asked" and "there
+ * is nothing in it" are different states on screen.
+ */
+export function useTrash(): LibraryRead<TrashListing> {
+  const [read, setRead] = useState<LibraryRead<TrashListing>>({ state: 'reading' });
+
+  useEffect(() => {
+    let current = true;
+    readTrash()
+      .then((trash) => {
+        if (current) {
+          setRead({ state: 'read', value: trash });
+        }
+      })
+      .catch((thrown: unknown) => {
+        if (current) {
+          setRead({ state: 'unread', problem: asProblem(thrown) });
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
+
+  return read;
 }
 
 /**
