@@ -559,7 +559,6 @@ fn a_recording_with_both_sources_has_a_named_track_for_each_and_the_right_sound_
     }
 }
 
-#[test]
 /// The critical feature, measured rather than asserted: three sources, three
 /// tracks, and each track carrying its own sound and none of the others.
 ///
@@ -754,6 +753,7 @@ fn the_compatibility_mix_carries_the_game_the_rest_of_the_machine_and_the_microp
         .assert_valid();
 }
 
+#[test]
 fn a_recording_with_no_audio_sources_is_a_video_only_file() {
     // `--microphone none --system-audio none`. No device is opened, no thread is
     // started and — the part a container makes visible — no audio track is
