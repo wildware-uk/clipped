@@ -304,6 +304,26 @@ impl From<ProbeError> for SessionError {
     }
 }
 
+impl From<FallbackError> for SessionError {
+    /// Keeps the two failures that already had a name, and gives the third one.
+    ///
+    /// `Selection` and `Unrecoverable` are the same facts this crate already
+    /// reported before `CaptureFallback` was wired in (issue #285), so they keep
+    /// the variants and the messages they had; only "every candidate was tried"
+    /// is new, and it is new because nothing used to try a second one.
+    fn from(error: FallbackError) -> Self {
+        match error {
+            FallbackError::Selection(error) => Self::NoCaptureBackend(error),
+            FallbackError::Unrecoverable(error) => Self::Capture(error),
+            // `FallbackError` is `#[non_exhaustive]`. A variant added later is
+            // still "the fallback could not keep the capture going", and this
+            // arm carries the whole error, so its own message is what reaches
+            // the user rather than a guess made here.
+            other => Self::CaptureExhausted(other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,25 +415,5 @@ mod tests {
             },
         ));
         assert!(error.to_string().contains("still plays"), "{error}");
-    }
-}
-
-impl From<FallbackError> for SessionError {
-    /// Keeps the two failures that already had a name, and gives the third one.
-    ///
-    /// `Selection` and `Unrecoverable` are the same facts this crate already
-    /// reported before `CaptureFallback` was wired in (issue #285), so they keep
-    /// the variants and the messages they had; only "every candidate was tried"
-    /// is new, and it is new because nothing used to try a second one.
-    fn from(error: FallbackError) -> Self {
-        match error {
-            FallbackError::Selection(error) => Self::NoCaptureBackend(error),
-            FallbackError::Unrecoverable(error) => Self::Capture(error),
-            // `FallbackError` is `#[non_exhaustive]`. A variant added later is
-            // still "the fallback could not keep the capture going", and this
-            // arm carries the whole error, so its own message is what reaches
-            // the user rather than a guess made here.
-            other => Self::CaptureExhausted(other),
-        }
     }
 }
