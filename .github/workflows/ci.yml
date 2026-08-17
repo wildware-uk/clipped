@@ -404,7 +404,7 @@ jobs:
       # its own, which is the point, but the tool interpreting deny.toml should
       # not change underneath a pull request as well.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
         with:
           tool: cargo-deny@0.20.2
 
