@@ -365,6 +365,7 @@ pub struct RecordingReport {
     pub(crate) frames_dropped_writer_behind: u64,
     pub(crate) frames_missed_by_source: u64,
     pub(crate) times_target_minimised: u64,
+    pub(crate) longest_source_silence: Duration,
     pub(crate) packets_written: u64,
     pub(crate) timestamps_corrected: u64,
     pub(crate) duration: Duration,
@@ -475,6 +476,33 @@ impl RecordingReport {
         self.times_target_minimised
     }
 
+    /// The longest unbroken stretch in which capture produced no frame at all.
+    ///
+    /// Zero for the ordinary recording, and small for one of a mostly-still
+    /// screen: a source produces a frame only when its content changes, so a
+    /// paused game or a static menu legitimately goes quiet and this is not a
+    /// fault. What it answers is the question a duration that does not match the
+    /// wall clock provokes — where did the time go — and, in particular, the one
+    /// case where the source was not idle at all: a display the operating system
+    /// has powered down delivers nothing through Desktop Duplication while
+    /// reporting itself attached and awake
+    /// ([issue #461](https://github.com/wildware-uk/clipped/issues/461),
+    /// ADR 0015).
+    ///
+    /// The longest stretch rather than the total, because the two say different
+    /// things: four minutes lost in one go is a hole somebody will notice, and
+    /// four minutes lost a tenth of a second at a time across an afternoon is a
+    /// screen that was not changing much.
+    ///
+    /// A minimised window is *not* counted here. It has its own count in
+    /// [`times_target_minimised`](Self::times_target_minimised), because
+    /// "nothing new to show" and "nothing to show until somebody acts" are
+    /// different facts about a recording.
+    #[must_use]
+    pub const fn longest_source_silence(&self) -> Duration {
+        self.longest_source_silence
+    }
+
     /// Packets the muxer wrote.
     #[must_use]
     pub const fn packets_written(&self) -> u64 {
@@ -573,6 +601,22 @@ impl fmt::Display for RecordingReport {
                 },
             )?;
         }
+
+        // Said for the same reason and under the same rule as the sentence
+        // above, and with the same threshold the log line uses: a still screen
+        // produces short stretches of this constantly and mentioning them would
+        // make the sentence meaningless. Half a minute of nothing is worth a
+        // word, because the recording genuinely has nothing in it for that time
+        // and a powered-down display is one of the things that causes it
+        // (issue #461).
+        if self.longest_source_silence >= crate::recording::SILENT_SOURCE_THRESHOLD {
+            write!(
+                formatter,
+                " The source produced no frames for {seconds} seconds at a stretch, and the \
+                 recording has nothing in it for that time.",
+                seconds = self.longest_source_silence.as_secs(),
+            )?;
+        }
         Ok(())
     }
 }
@@ -596,6 +640,7 @@ mod tests {
             frames_dropped_writer_behind: 0,
             frames_missed_by_source: 2,
             times_target_minimised: 0,
+            longest_source_silence: Duration::ZERO,
             packets_written: 181,
             timestamps_corrected: 0,
             duration: Duration::from_millis(6_000),
@@ -740,6 +785,37 @@ mod tests {
 
         report.times_target_minimised = 3;
         assert!(report.to_string().contains("minimised 3 times"), "{report}");
+    }
+
+    #[test]
+    fn a_recording_whose_source_went_quiet_for_a_long_stretch_says_so_in_the_same_line() {
+        // The other way a recording can turn out to have nothing in it, and the
+        // one with no visible cause at all: no window was minimised, no error
+        // was reported, and the frame counts are simply lower. A display the
+        // computer powered down does this while telling every Windows API that
+        // it is attached and active (issue #461).
+        let mut report = report();
+
+        report.longest_source_silence = crate::recording::SILENT_SOURCE_THRESHOLD
+            .checked_sub(Duration::from_millis(100))
+            .expect("the threshold is longer than one acquisition");
+        let quiet = report.to_string();
+        assert!(
+            !quiet.contains("produced no frames"),
+            "a still screen goes quiet for seconds constantly, and saying so every time would \
+             make the sentence worthless: {quiet}"
+        );
+
+        report.longest_source_silence = Duration::from_secs(245);
+        let dark = report.to_string();
+        assert!(
+            dark.contains("The source produced no frames for 245 seconds at a stretch"),
+            "{dark}"
+        );
+        assert!(
+            dark.contains("the recording has nothing in it for that time"),
+            "saying it happened without saying what it cost is half an answer: {dark}"
+        );
     }
 
     #[test]

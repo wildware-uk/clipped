@@ -752,6 +752,54 @@ the displays are off**, which is what the earlier draft of
 `tests/capture/README.md` said; the reliable tell is the frame count itself,
 because the 4 Hz state is an order of magnitude, not a few percent.
 
+#### Desktop Duplication does not degrade in that state. It stops.
+
+Windows Graphics Capture at 4 Hz is a ten-fold loss. Desktop Duplication is a
+total one, and it was found by
+[issue #461](https://github.com/wildware-uk/clipped/issues/461) rather than
+inferred. Measured on 2026-08-17 with
+`cargo run -p clipped-capture --example duplication_probe`, which drives raw DXGI
+and takes this crate out of the path. Three seconds per pass per output; the two
+runs are about a minute apart and the only thing that changed between them is one
+synthetic mouse-move event, which is the only thing that turns a powered-down
+display back on:
+
+| Output | Pass | Displays off | Displays on |
+| --- | --- | ---: | ---: |
+| `\\.\DISPLAY2` | idle desktop | 0 frames, 12 timeouts | 496 frames, 0 timeouts |
+| `\\.\DISPLAY2` | window repainting | **0 frames, 12 timeouts** | **542 frames, 0 timeouts** |
+| `\\.\DISPLAY1` | idle desktop | 0 frames, 12 timeouts | 3 frames, 12 timeouts |
+| `\\.\DISPLAY1` | window repainting | **0 frames, 12 timeouts** | **541 frames, 0 timeouts** |
+
+The idle-desktop row for `DISPLAY1` with the displays *on* is the ordinary
+behaviour none of this must be confused with: a screen where nothing is changing
+produces timeouts, and that is correct. The rows that carry the finding are the
+repainting ones, because a window drawing in alternating colours is a real
+present rather than a redraw of the same pixels — 0 with the display off and 541
+with it on, from the same binary on the same machine within the minute.
+
+Nothing in the API says so. Throughout the dark pass `DuplicateOutput` succeeded,
+`DXGI_OUTPUT_DESC.AttachedToDesktop` was true, `WmiMonitorBasicDisplayParams`
+reported `Active=True`, and every `AcquireNextFrame` answered
+`DXGI_ERROR_WAIT_TIMEOUT` — the same value an idle desktop gives.
+
+**What the recorder does about it**, since
+[ADR 0015](adr/0015-capture-holds-the-display-awake.md): a capture holds the
+display on for exactly as long as it is open, through
+`clipped_capture::DisplayAwake` and
+`SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)`, taken on the
+thread that runs the capture loop. The state is per thread and Windows drops it
+when that thread ends, so `DisplayAwake` is deliberately not `Send`.
+`ES_SYSTEM_REQUIRED` is not set: keeping a computer out of sleep is a much larger
+decision than keeping a monitor lit.
+
+The hold prevents a capture going dark. It does **not** wake a display that is
+already off, and neither does anything else a background process can call, so a
+capture that starts into a dark screen stays dark — which is why the recording
+also reports how long its source produced nothing ("Silence is reported, not
+acted on", below) and why `SessionError::NoFrames` now names a powered-down
+display among the reasons a recording produced nothing at all.
+
 ### What is not covered
 
 - **HDR.** The pool is created as `B8G8R8A8UIntNormalized` and the backend always
@@ -1196,6 +1244,21 @@ change the fallback policy — a minimised window is still not a backend failure
 and is still not fallen back from — but it is what lets the layer above tell a
 paused game from an empty recording. See "A minimised window, from end to end"
 below.
+
+Since [issue #461](https://github.com/wildware-uk/clipped/issues/461) the
+*recording* keeps its own account of the rest, because `note_silence` is inside
+`CaptureFallback` and the session does not yet call anything on it beyond
+`start` (see [Automatic capture fallback](#automatic-capture-fallback) for where
+that boundary is). `clipped_session::recording` accumulates the acquisition
+timeout on every `Acquisition::Timeout`, keeps the longest unbroken stretch, says
+so once at `warn` past thirty seconds, and puts
+`RecordingReport::longest_source_silence` on the report and in the sentence the
+user reads. The threshold is the same thirty seconds `note_silence` uses, so the
+two cannot disagree about the same recording when the fallback is finally
+threaded through the loop.
+
+That number exists because of the case below, where the source is not idle at
+all.
 
 ### What the user and the diagnostics see
 
