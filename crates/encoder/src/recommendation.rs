@@ -28,15 +28,24 @@
 //!    time is the scarcest thing on the machine (AGENTS.md section 18). A
 //!    software encoder takes frames away from the thing being recorded.
 //! 3. **An adapter with video memory of its own before one without.** An
-//!    adapter that shares system memory with the CPU shares its bandwidth too,
-//!    and on a machine with both, the game is running on the other one — so
-//!    encoding there avoids copying every frame across the bus.
+//!    adapter that shares system memory with the CPU shares its bandwidth too.
 //! 4. **Then the most video memory.** The tie-break between two adapters that
 //!    both have some, and a measured number rather than a guess about which of
 //!    them is "the graphics card": an integrated GPU with a memory carve-out
 //!    and a card are indistinguishable to DXGI except by how much they have
 //!    (see [`AdapterKind`]).
 //! 5. **Then the order SPEC.md section 9 lists**: NVIDIA, AMD, Intel.
+//!
+//! Rules 3 to 5 do less than they look like they do, and [`reason_for`] says why
+//! at length: rule 1 leaves at most one encoder in a hardware class, so they can
+//! never order two encoders a recording could open. They describe that one
+//! encoder, and they order the ones below the line.
+//!
+//! Rule 3 used to carry a second sentence — "on a machine with both, the game is
+//! running on the other one, so encoding there avoids copying every frame across
+//! the bus" — and it is gone because it was never true of this pipeline.
+//! Encoding on an adapter the frames are not on needs exactly that copy, and no
+//! backend will do it ([#443](https://github.com/wildware-uk/clipped/issues/443)).
 //!
 //! Within an encoder, the codec is the most efficient one whose support was
 //! **measured**. An inferred claim never wins a codec: that is the whole point
@@ -323,6 +332,35 @@ fn best_codec(encoder: &EncoderReport) -> Option<(Codec, Evidence)> {
 }
 
 /// Which class an available encoder belongs to.
+///
+/// # At most one entry is ever a hardware class
+///
+/// Worth stating, because it is what the adapter rule did to the memory rules
+/// and it is not obvious from reading them in order. A machine has one capture
+/// adapter and that adapter has one vendor, so exactly one encoder family can
+/// avoid [`ChoiceReason::NotTheCaptureAdapter`] — and
+/// [`HardwareWithOwnMemory`](ChoiceReason::HardwareWithOwnMemory) and
+/// [`HardwareWithSharedMemory`](ChoiceReason::HardwareWithSharedMemory) can
+/// therefore never decide an ordering between two encoders a recording could
+/// open. There is only ever one of those.
+///
+/// That is not the memory rules going to waste. They still do two things:
+///
+/// - **They describe.** Which of the two classes the openable encoder carries is
+///   printed, and "hardware encoding on an adapter sharing system memory" is a
+///   true and useful thing to tell somebody recording on an integrated part.
+/// - **They still order, below the line.** Two encoders that are both on the
+///   wrong adapter share a rank, and the tie-break sorts them — which is the
+///   order `capabilities` lists them in and the order `crates/session` tries
+///   them in before falling through.
+///
+/// What they no longer do is what rules 3 and 4 were originally written for:
+/// "on a machine with both, the game is running on the other one — so encoding
+/// there avoids copying every frame across the bus". That was never reachable.
+/// Encoding on an adapter the frames are not on needs the cross-adapter copy the
+/// capture layer cannot express, which is why every backend refuses it, and the
+/// ranking was ordering encoders that could not have been opened
+/// ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
 fn reason_for(encoder: &EncoderReport, report: &CapabilityReport) -> ChoiceReason {
     // Asked before anything about the hardware, because it outranks all of it:
     // how good an adapter is at encoding decides nothing if this build cannot
@@ -428,10 +466,23 @@ mod tests {
     }
 
     #[test]
-    fn an_adapter_with_its_own_memory_outranks_one_that_shares() {
-        // The AMD part here shares system memory and the NVIDIA one does not,
-        // so the published NVIDIA-then-AMD order and the memory rule agree;
-        // the test that they are not the same rule is below.
+    fn the_capture_adapters_own_memory_is_what_the_hardware_reason_describes() {
+        // The machine this project is developed on: an RTX 4090 enumerated first
+        // and an integrated AMD part behind it.
+        //
+        // **This fixture used to separate own-memory from shared-memory across
+        // two encoders, and it no longer can.** With rule 1 in place only the
+        // capture adapter's vendor keeps a hardware reason at all, and a machine
+        // has exactly one capture adapter with exactly one vendor — so at most
+        // one entry in any ranking is ever `HardwareWithOwnMemory` or
+        // `HardwareWithSharedMemory` (`reason_for` says the same). What the two
+        // classes still decide is what that one entry *says*, and
+        // `the_hardware_reason_describes_the_adapters_memory_and_not_the_vendor`
+        // is where the other class is observed.
+        //
+        // The AMD entry is below the software fallback now, and that is the
+        // ranking being right rather than losing something: AMF here refuses the
+        // NVIDIA device capture would hand it, and the CPU records.
         let facts = SystemFacts::new(
             vec![nvidia_card(), integrated_amd()],
             EncoderObservations::none()
@@ -446,31 +497,36 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![EncoderKind::Nvenc, EncoderKind::Amf, EncoderKind::Software]
+            vec![EncoderKind::Nvenc, EncoderKind::Software, EncoderKind::Amf]
         );
         assert_eq!(
             recommendations[0].reason(),
-            ChoiceReason::HardwareWithOwnMemory
+            ChoiceReason::HardwareWithOwnMemory,
+            "the capture adapter has 24 GiB of its own"
         );
+        assert_eq!(recommendations[1].reason(), ChoiceReason::SoftwareFallback);
         assert_eq!(
-            recommendations[1].reason(),
-            ChoiceReason::HardwareWithSharedMemory
+            recommendations[2].reason(),
+            ChoiceReason::NotTheCaptureAdapter,
+            "the AMD encoder is real and can never be handed a frame from the NVIDIA adapter"
         );
     }
 
     #[test]
-    fn a_card_with_its_own_memory_wins_over_a_vendor_the_specification_lists_first() {
-        // An NVIDIA part reporting no dedicated video memory of its own — the
-        // shape DXGI reports for a virtualised adapter — beside an AMD card
-        // with 24 GiB. SPEC.md section 9 lists NVIDIA before AMD, so what this
-        // separates is the memory rule from the published order: the AMD entry
-        // has to come first, and for the right reason.
+    fn the_hardware_reason_describes_the_adapters_memory_and_not_the_vendor() {
+        // The other half of the pair above, and what stops
+        // `HardwareWithOwnMemory` from becoming a synonym for "NVIDIA": the
+        // capture adapter here is an NVIDIA part reporting no dedicated video
+        // memory of its own — the shape DXGI reports for a virtualised adapter —
+        // so NVENC has to carry `HardwareWithSharedMemory`.
         //
-        // It is that pair rather than the Intel one this test used to use,
-        // because with rule 1 in place an Intel entry's position no longer
-        // says anything about memory: it is last whatever adapter it is on.
-        // Both families here have a proven backend, so nothing but the memory
-        // rule decides the order.
+        // The AMD card beside it has 24 GiB, which under the old rules put AMF
+        // first, and that was what this test separated: the memory rule is not
+        // the published NVIDIA-then-AMD order of SPEC.md section 9. **That
+        // separation has moved**, because a 24 GiB card on an adapter the frames
+        // will never be on cannot come first — it cannot be opened at all.
+        // `between_two_adapters_with_their_own_memory_the_larger_one_wins` is
+        // where memory still orders two entries against the published order.
         let discrete_amd = Adapter::new(
             AdapterId::from_luid(5, 0),
             "AMD Radeon RX 7900 XTX",
@@ -495,15 +551,24 @@ mod tests {
         );
 
         let recommendations = recommend(&detect(&facts));
-        assert_eq!(recommendations[0].encoder(), EncoderKind::Amf);
+        let order: Vec<EncoderKind> = recommendations
+            .iter()
+            .map(Recommendation::encoder)
+            .collect();
+        assert_eq!(
+            order,
+            vec![EncoderKind::Nvenc, EncoderKind::Software, EncoderKind::Amf]
+        );
         assert_eq!(
             recommendations[0].reason(),
-            ChoiceReason::HardwareWithOwnMemory
+            ChoiceReason::HardwareWithSharedMemory,
+            "an NVIDIA adapter with no video memory of its own is a shared-memory adapter: \
+             the class describes the silicon, not the badge"
         );
-        assert_eq!(recommendations[1].encoder(), EncoderKind::Nvenc);
         assert_eq!(
-            recommendations[1].reason(),
-            ChoiceReason::HardwareWithSharedMemory
+            recommendations[2].reason(),
+            ChoiceReason::NotTheCaptureAdapter,
+            "24 GiB on an adapter the frames will never be on buys nothing"
         );
     }
 
@@ -672,11 +737,21 @@ mod tests {
     }
 
     #[test]
-    fn between_two_adapters_with_their_own_memory_the_larger_one_wins() {
-        // The case the machine this was written on produces: an NVIDIA card
-        // with 24 GiB and an integrated AMD part with a 2 GiB carve-out. DXGI
-        // cannot say which of them is a graphics card, so the ranking uses the
-        // number it can see rather than a word it would have to guess.
+    fn a_larger_card_does_not_outrank_the_adapter_the_frames_will_be_on() {
+        // The head-on collision between rule 1 and rule 4, split out of
+        // `between_two_adapters_with_their_own_memory_the_larger_one_wins`,
+        // which is where this fixture used to live. It was built to enumerate
+        // the **smaller** adapter first "so that a ranking that merely kept
+        // DXGI's order would fail here" — and with rule 1 in place, enumerating
+        // the smaller adapter first is precisely what puts capture on it. The
+        // fixture stopped testing order-independence and became a test of which
+        // rule wins, so it is now named for that.
+        //
+        // Rule 1 wins, and it has to. The 4090's encoder is the better one by
+        // every measure the memory rules can see, and it will be handed a
+        // texture belonging to the AMD device — which NVENC refuses. A ranking
+        // that put it first would recommend an encoder that cannot open, which
+        // is the failure the whole of `is_openable` exists to prevent.
         let carve_out = Adapter::new(
             AdapterId::from_luid(7, 0),
             "AMD Radeon(TM) Graphics",
@@ -686,20 +761,109 @@ mod tests {
             false,
         );
         let facts = SystemFacts::new(
-            // Enumerated with the smaller adapter first, so that a ranking that
-            // merely kept DXGI's order would fail here.
             vec![carve_out, nvidia_card()],
             EncoderObservations::none()
                 .with_runtime(loaded(EncoderKind::Amf, "amfrt64.dll"))
                 .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll")),
         );
 
-        let recommendations = recommend(&detect(&facts));
-        assert_eq!(recommendations[0].encoder(), EncoderKind::Nvenc);
-        assert_eq!(recommendations[1].encoder(), EncoderKind::Amf);
+        let report = detect(&facts);
+        let recommendations = recommend(&report);
+        let order: Vec<EncoderKind> = recommendations
+            .iter()
+            .map(Recommendation::encoder)
+            .collect();
+        assert_eq!(
+            order,
+            vec![EncoderKind::Amf, EncoderKind::Software, EncoderKind::Nvenc],
+            "the 2 GiB adapter is the one the frames are on, so its encoder is the choice"
+        );
         assert_eq!(
             recommendations[0].reason(),
-            ChoiceReason::HardwareWithOwnMemory
+            ChoiceReason::HardwareWithOwnMemory,
+            "a 2 GiB carve-out is still video memory of the adapter's own"
+        );
+        assert_eq!(
+            Recommendation::for_opening(&report).map(|chosen| chosen.encoder()),
+            Some(EncoderKind::Amf),
+            "the twelve-times-larger card is not an option: it cannot bind these textures"
+        );
+    }
+
+    #[test]
+    fn between_two_adapters_with_their_own_memory_the_larger_one_wins() {
+        // The original subject of this test, kept, and moved to the one place
+        // rules 4 and 5 can still order two entries against each other.
+        //
+        // Rule 1 leaves at most one encoder in a hardware class — a machine has
+        // one capture adapter and it has one vendor — so the memory tie-break
+        // can no longer decide between two *openable* hardware encoders. It can
+        // still decide between two that are not: this machine captures on an
+        // Intel part, so both the AMD and NVIDIA encoders are
+        // `NotTheCaptureAdapter`, and the order they are listed in is the order
+        // `capabilities` prints them under "Detected on this machine, and not
+        // available to choose" and the order `crates/session` tries them in.
+        //
+        // The published order of SPEC.md section 9 is NVIDIA before AMD, and
+        // memory agrees here — so the assertion below is checked the other way
+        // round too, with the sizes swapped, which is what makes it a test of
+        // memory rather than of the published list.
+        let integrated_intel = Adapter::new(
+            AdapterId::from_luid(8, 0),
+            "Intel(R) UHD Graphics 770",
+            Vendor::Intel,
+            0x4680,
+            0,
+            false,
+        );
+        let amd_with = |bytes: u64| {
+            Adapter::new(
+                AdapterId::from_luid(7, 0),
+                "AMD Radeon(TM) Graphics",
+                Vendor::Amd,
+                0x13C0,
+                bytes,
+                false,
+            )
+        };
+        let nvidia_with = |bytes: u64| {
+            Adapter::new(
+                AdapterId::from_luid(1, 0),
+                "NVIDIA GeForce RTX 4090",
+                Vendor::Nvidia,
+                0x2684,
+                bytes,
+                false,
+            )
+        };
+        let gigabytes = |count: u64| count * 1024 * 1024 * 1024;
+
+        let ranked = |amd: Adapter, nvidia: Adapter| -> Vec<EncoderKind> {
+            let facts = SystemFacts::new(
+                vec![integrated_intel.clone(), amd, nvidia],
+                EncoderObservations::none()
+                    .with_runtime(loaded(EncoderKind::Amf, "amfrt64.dll"))
+                    .with_runtime(loaded(EncoderKind::Nvenc, "nvEncodeAPI64.dll")),
+            );
+            recommend(&detect(&facts))
+                .into_iter()
+                .filter(|recommendation| {
+                    recommendation.reason() == ChoiceReason::NotTheCaptureAdapter
+                })
+                .map(|recommendation| recommendation.encoder())
+                .collect()
+        };
+
+        assert_eq!(
+            ranked(amd_with(gigabytes(2)), nvidia_with(gigabytes(24))),
+            vec![EncoderKind::Nvenc, EncoderKind::Amf],
+            "24 GiB before 2 GiB"
+        );
+        assert_eq!(
+            ranked(amd_with(gigabytes(24)), nvidia_with(gigabytes(2))),
+            vec![EncoderKind::Amf, EncoderKind::Nvenc],
+            "the sizes decide, not the vendor: SPEC.md section 9 lists NVIDIA first and the \
+             larger adapter is AMD's here"
         );
     }
 

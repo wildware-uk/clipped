@@ -324,6 +324,23 @@ choose a measured H.264 over an inferred AV1 every time.
 Within an encoder, the codec is the most efficient one whose support was
 measured, falling back to H.264.
 
+**Rules 3 to 5 do less than they look like they do**, and it is worth being
+plain about it. Rule 1 leaves at most one encoder in a hardware class — a
+machine has one capture adapter and that adapter has one vendor — so the memory
+rules can never order two encoders a recording could actually open. What they
+still do is describe that one encoder ("hardware encoding on an adapter sharing
+system memory" is a true and useful thing to tell somebody recording on an
+integrated part) and order the entries *below* the line, which is the order this
+report lists them in under "Detected on this machine, and not available to
+choose".
+
+Rule 3 used to carry a second sentence — "on a machine with both, the game is
+running on the other one, so encoding there avoids copying every frame across
+the bus" — and it has been removed because it was never true of this pipeline.
+Encoding on an adapter the frames are not on needs exactly that per-frame
+cross-adapter copy, and every backend refuses it. The ranking was ordering
+encoders that could not have been opened (#443).
+
 Rules 3 and 4 exist instead of "prefer the discrete GPU" because DXGI cannot
 tell you which adapter is discrete. It reports how much video memory an adapter
 has of its own, and an AMD APU with a BIOS carve-out reports gigabytes of it —
