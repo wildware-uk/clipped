@@ -8,7 +8,10 @@ import type {
   TrashListing,
 } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useState } from 'react';
+
+import { inTauriWindow } from './useRecorderLink';
 
 /**
  * Reading the recording library from the window.
@@ -225,6 +228,70 @@ export function headlineProblem(problem: LibraryProblem): string {
     : 'Your library could not be read';
 }
 
+/**
+ * The name the Rust side emits recorder link events under.
+ *
+ * The same event `useRecorderLink` and `recordingActions` follow. A third
+ * subscription rather than threading the link through two screens: they want
+ * different halves of it, and a subscription is a callback in a list.
+ */
+const LINK_EVENT = 'recorder-link';
+
+/** The one link event this file cares about. */
+interface SessionEndedEnvelope {
+  readonly event: 'session_ended';
+  readonly [key: string]: unknown;
+}
+
+/**
+ * How many sittings this window has been told have ended since it opened.
+ *
+ * The recorder announces a sitting the moment it closes one — a game exited, a
+ * recording somebody stopped — and asks for the index to be brought up to date
+ * as it does (`crates/ipc`'s `RecorderLinkEvent::SessionEnded`, issue #588).
+ * That announcement is the only thing this window ever gets that says the
+ * library has changed underneath it; without it a sitting somebody has just
+ * finished playing is missing from every screen until Clipped is restarted.
+ *
+ * A count rather than the sitting itself, because what the reads below need is
+ * a reason to ask again and nothing more. What the sitting *contains* comes
+ * back from the recorder's own index a moment later, which is the same answer
+ * every other row on the screen came from — rather than one row assembled from
+ * an event and the rest from a read, which would be two sources for one screen.
+ *
+ * Zero outside the Clipped window, where there is no Rust side to hear from.
+ */
+function useSittingsEnded(): number {
+  const [ended, setEnded] = useState(0);
+
+  useEffect(() => {
+    if (!inTauriWindow()) {
+      return;
+    }
+
+    let current = true;
+    const subscription = listen<SessionEndedEnvelope>(LINK_EVENT, ({ payload }) => {
+      if (current && payload.event === 'session_ended') {
+        setEnded((count) => count + 1);
+      }
+    });
+
+    return () => {
+      current = false;
+      subscription
+        // Wrapped rather than called bare: unsubscribing is a round trip to the
+        // Rust side and returns a promise, and a bare call leaves its rejection
+        // unhandled — which in a webview is a console error nobody reads.
+        .then((unlisten) => Promise.resolve<void>(unlisten()))
+        .catch(() => {
+          // Nothing to do: the listener is going away with the screen.
+        });
+    };
+  }, []);
+
+  return ended;
+}
+
 /** One page of sittings, and the paging around it. */
 export interface SessionsView {
   /** Where the first page stands. */
@@ -243,6 +310,21 @@ export interface SessionsView {
  * The query is part of the effect's dependencies, so typing in a search box
  * re-reads from the beginning rather than appending matches to the results of
  * the last one.
+ *
+ * # Why a sitting ending re-reads, when a favourite does not
+ *
+ * {@link useFavourites} and {@link useLocks} deliberately do *not* re-read: a
+ * star is clicked while somebody is reading the page, this hook accumulates
+ * pages, and re-reading would throw a reader who had scrolled through five of
+ * them back to the first because they marked a row.
+ *
+ * A sitting ending is the opposite situation on every count. It happens because
+ * the person stopped playing a game, not because they touched this screen; the
+ * row it adds is at the *top*, where no amount of paging will ever reveal it;
+ * and there is nothing else that would ever bring it in — until issue #588 a
+ * sitting somebody had just finished was absent from the Library until Clipped
+ * was restarted. Nothing blanks while the re-read is in flight, because the
+ * answer only changes when the new one arrives.
  */
 export function useSessions(query: string, pageSize: number): SessionsView {
   /**
@@ -253,6 +335,7 @@ export function useSessions(query: string, pageSize: number): SessionsView {
    * rule that says so is right): a stale answer is recognised by comparing the
    * two, not by clearing one.
    */
+  const ended = useSittingsEnded();
   const asked = `${String(pageSize)} ${query}`;
   const [answer, setAnswer] = useState<{
     readonly asked: string;
@@ -288,7 +371,7 @@ export function useSessions(query: string, pageSize: number): SessionsView {
     return (): void => {
       current = false;
     };
-  }, [asked, query, pageSize]);
+  }, [asked, query, pageSize, ended]);
 
   const fresh = answer.asked === asked;
   const read: LibraryRead<readonly LibrarySession[]> = fresh ? answer.read : { state: 'reading' };
@@ -326,8 +409,16 @@ export function useSessions(query: string, pageSize: number): SessionsView {
   return { read, hasMore: cursor !== undefined, loadingMore, loadMore };
 }
 
-/** What the library holds per game. */
+/**
+ * What the library holds per game.
+ *
+ * Read again when a sitting ends, for the reason {@link useSessions} is: the
+ * figures on the Games screen are how much has been recorded of each game, and
+ * a sitting somebody has just finished playing is exactly what changes one.
+ * There is no paging here to lose.
+ */
 export function useGames(): LibraryRead<readonly LibraryGame[]> {
+  const ended = useSittingsEnded();
   const [read, setRead] = useState<LibraryRead<readonly LibraryGame[]>>({ state: 'reading' });
 
   useEffect(() => {
@@ -346,7 +437,7 @@ export function useGames(): LibraryRead<readonly LibraryGame[]> {
     return (): void => {
       current = false;
     };
-  }, []);
+  }, [ended]);
 
   return read;
 }

@@ -203,6 +203,78 @@ describe('the Library screen', () => {
     ).not.toBeInTheDocument();
   });
 
+  /*
+   * Issue #588's second half, where it ends up. The recorder has announced the
+   * end of a sitting since issue #241 (PR #586) and `crates/ipc`'s link
+   * discarded the event, so a sitting somebody had just finished playing was
+   * missing from this screen until Clipped was restarted — which for a recorder
+   * that outlives every window (ADR 0002) is a screen that is wrong for as long
+   * as somebody keeps playing.
+   *
+   * Both directions, and the second is the one that matters: this screen must
+   * not re-read on *any* link event. The link publishes a state whenever
+   * anything about the recorder moves — a recording starting, a recording
+   * ending, a reconnection — and a screen that asked the index again each time
+   * would be paging back to the top of the Library while somebody was reading
+   * it, which is exactly why `useFavourites` and `useLocks` do not re-read at
+   * all.
+   */
+  it('brings the library up to date when a sitting ends, and not on any other event', async () => {
+    const user = userEvent.setup();
+    let recorded: readonly LibrarySession[] = [];
+    const runtime = stubRecorderLinkRuntime(ATTACHED, null, {
+      sessions: () => Promise.resolve(page(recorded)),
+    });
+    renderApp();
+    await openLibrary(user);
+
+    expect(
+      await screen.findByRole('heading', { name: 'Nothing recorded yet' }),
+    ).toBeInTheDocument();
+
+    const reads = (): number =>
+      runtime.invocations.filter((call) => call.command === 'library_sessions').length;
+    const before = reads();
+
+    // A state event: the recorder started recording. Something changed about
+    // the recorder and nothing changed about the library. Given a turn of the
+    // event loop to be acted on, so that "it did not re-read" is a reading
+    // rather than a race this test happened to win.
+    runtime.emit({
+      event: 'state',
+      ...ATTACHED,
+      status: {
+        state: 'recording',
+        recording_id: 'r-1',
+        output: 'D:\\clips\\cs2-20260811-201400-1.mkv',
+        target: 'process cs2.exe',
+        elapsed_ms: 4_200,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads()).toBe(before);
+    expect(screen.getByRole('heading', { name: 'Nothing recorded yet' })).toBeInTheDocument();
+
+    // And then the sitting itself ending, with the file it produced. The index
+    // has it by the time the screen asks, because the recorder asks for the
+    // indexing run as it closes the sitting.
+    recorded = [session()];
+    runtime.emit({
+      event: 'session_ended',
+      session_id: 'cs2-20260811-201400',
+      game_id: 'cs2',
+      game_name: 'Counter-Strike 2',
+      started_at: '2026-08-11T20:14:00+01:00',
+      ended_at: '2026-08-11T22:03:00+01:00',
+      end_reason: 'game-exited',
+      recordings: [{ session_index: 1, output: 'D:\\clips\\cs2-20260811-201400-1.mkv' }],
+    });
+
+    const table = await screen.findByRole('table', { name: 'Sessions' });
+    expect(within(table).getByText('Counter-Strike 2')).toBeVisible();
+    expect(reads()).toBe(before + 1);
+  });
+
   it('says why a library it could not read could not be read', async () => {
     const user = userEvent.setup();
     stubRecorderLinkRuntime(ATTACHED, null, {

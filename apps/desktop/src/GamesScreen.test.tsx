@@ -87,12 +87,27 @@ const STATES: readonly (readonly [string, RecorderLinkState | null, string, RegE
     /not attached to a recorder.*not beside this application/,
   ],
   [
-    'when a recorder is attached',
+    'when a recorder that does not record games by itself is attached',
     { link: 'attached', recorder_process_id: 7, features: [], status: { state: 'idle' } },
     'This recorder is not detecting games',
-    /clipped-recorder serve.*clipped-recorder watch/,
+    /did not say it records games by itself.*clipped-recorder watch/,
   ],
 ];
+
+/**
+ * A recorder that advertised `automatic`: one started with
+ * `--watch-for-games`, which is what the supervisor starts.
+ *
+ * Deliberately outside {@link STATES}. It is a sixth rendering rather than a
+ * variant of the fifth, and the cases below that walk `STATES` are about the
+ * five that share a sentence — this one does not share it, which is the point.
+ */
+const WATCHING: RecorderLinkState = {
+  link: 'attached',
+  recorder_process_id: 7,
+  features: ['automatic'],
+  status: { state: 'watching' },
+};
 
 describe('what the Games screen says about detection', () => {
   it.each(STATES)('is described %s', (_case, link, state, detail) => {
@@ -130,6 +145,42 @@ describe('what the Games screen says about detection', () => {
       expect(describeGameDetection(link).state).toMatch(/^(Not known|This recorder )/);
     },
   );
+
+  /*
+   * Issue #587, from the side that reads it. The two attached renderings differ
+   * by exactly one thing — whether the recorder advertised `automatic` — and
+   * until that issue no recorder advertised it, so this screen told everybody
+   * that the recorder it was attached to was not detecting games. Since issue
+   * #421 that is false of the recorder the desktop application itself starts:
+   * `SupervisorSettings::watch_for_games` passes `--watch-for-games`.
+   *
+   * Both directions, because a screen that said "watching" for every attached
+   * recorder would pass half of it and would be the same defect pointing the
+   * other way.
+   */
+  it('tells a recorder that records games by itself from one that never will', () => {
+    expect(describeGameDetection(WATCHING).state).toBe('This recorder is watching for games');
+    expect(describeGameDetection(WATCHING).detail).toMatch(/records games by itself/);
+
+    const asked: RecorderLinkState = { ...WATCHING, features: [] };
+    expect(describeGameDetection(asked).state).toBe('This recorder is not detecting games');
+  });
+
+  /*
+   * The rule issue #447 settled, applied to this capability: "cannot" and "not
+   * known yet" are different answers, and a link that has not attached has
+   * established neither. A screen that read the absent feature as "no" would
+   * say a recorder is not detecting games before it has found one.
+   */
+  it('never reads a link with no recorder as a recorder that cannot detect games', () => {
+    for (const link of [
+      null,
+      { link: 'connecting' } as const,
+      { link: 'unavailable', reason: 'no recorder' } as const,
+    ]) {
+      expect(describeGameDetection(link).state).toMatch(/^Not known/);
+    }
+  });
 
   /*
    * The reason a recorder could not be reached is the only part of that state a
@@ -250,6 +301,22 @@ describe('the Games screen', () => {
     expect(offer).toBeVisible();
     expect(offer).toHaveTextContent(/from a terminal/);
     expect(offer).toHaveTextContent(/issue #241/i);
+  });
+
+  /*
+   * And the sixth rendering, where that sentence would be wrong: telling
+   * somebody to start `clipped-recorder watch` beside a recorder that is
+   * already watching would have two watchers racing for the same game. The
+   * screen still has to offer something rather than only describe (AGENTS.md
+   * section 45), and what it offers is where the recordings went.
+   */
+  it('does not tell somebody to start a watcher beside a recorder that is watching', () => {
+    render(<GamesScreen link={WATCHING} />);
+
+    const panel = detectionPanel();
+    expect(within(panel).queryByText(/clipped-recorder watch records a game/)).toBeNull();
+    expect(within(panel).getByText(/records a game as it launches/)).toBeVisible();
+    expect(within(panel).getByText(/in the Library/)).toBeVisible();
   });
 
   it('announces a change of state rather than only drawing it', async () => {

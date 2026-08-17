@@ -49,7 +49,7 @@ use crate::command::{Command, Reply, Shutdown};
 use crate::error::ProtocolError;
 use crate::hotkeys::{HotkeyBinding, HotkeyState};
 use crate::message::{Event, EventStream};
-use crate::status::{ActiveRecording, ExportProgress, RecorderStatus};
+use crate::status::{ActiveRecording, ExportProgress, RecorderStatus, SessionSummary};
 
 /// How long a subscription is given to be accepted.
 ///
@@ -158,6 +158,30 @@ pub enum RecorderLinkEvent {
     /// This exists so that a UI can say the recording exists rather than leaving
     /// the user to find it, which is the whole of what recovery means here.
     RecordingInterrupted(ActiveRecording),
+    /// A sitting ended, and this is what it produced.
+    ///
+    /// The recorder leaving a sitting, forwarded whole from
+    /// [`Event::SessionEnded`](crate::Event::SessionEnded). It is **not** a
+    /// state: the link's state says whether there is a recorder and what it is
+    /// doing now, and a sitting that is over is neither — it is something that
+    /// happened, and it stays true afterwards, exactly as
+    /// [`Self::RecordingInterrupted`] does.
+    ///
+    /// It carries the sitting rather than its identifier because the files are
+    /// the point. A window is told at the moment it can offer to open what was
+    /// just recorded, and the library index is written by a run the recorder
+    /// asks for when the sitting closes — so the sitting is knowable here
+    /// before it is knowable from a `library_sessions` read, and a consumer
+    /// that only had an identifier would have nothing to show
+    /// (`docs/library.md`).
+    ///
+    /// Only a recorder advertising
+    /// [`features::AUTOMATIC`](crate::features::AUTOMATIC) makes sittings by
+    /// itself, but every recorder that records anything opens one — a
+    /// `start_recording` is the whole of a sitting of its own — so this is not
+    /// gated on the feature the way [`Self::ExportProgress`] is gated on a
+    /// stream that has to be subscribed to by name.
+    SessionEnded(SessionSummary),
     /// The recorder reported that a recording failed. The recorder itself is
     /// still running.
     RecordingFailed {
@@ -825,16 +849,20 @@ fn follow(
                     },
                 );
             }
-            // A sitting ended. Not forwarded, deliberately: this link exists to
-            // say whether there is a recorder and what it is doing, and a
-            // finished sitting is neither — it is something for a library screen
-            // to show, on a connection of the window's own. Nothing subscribes
-            // to a [`RecorderLinkEvent`] for that, and inventing a variant here
-            // for a recorder that cannot yet publish one would be a wire with no
-            // end (AGENTS.md section 27). Wiring it to a screen belongs with the
-            // recorder that produces it,
-            // [issue #421](https://github.com/wildware-uk/clipped/issues/421).
-            Ok(Event::SessionEnded { .. }) => {}
+            // A sitting ended. Forwarded whole, for the reason the event
+            // carries the sitting rather than its identifier: the files are the
+            // point, and the library has not necessarily indexed one of them
+            // yet (`docs/library.md`).
+            //
+            // It was **discarded** until
+            // [issue #588](https://github.com/wildware-uk/clipped/issues/588),
+            // on the grounds that no recorder could publish one — which stopped
+            // being true when issue #241 (PR #586) made
+            // `RecordingState::sitting_ended` a real producer. A recorder now
+            // announces the end of a sitting and this is where it stopped.
+            Ok(Event::SessionEnded { session }) => {
+                send(sender, RecorderLinkEvent::SessionEnded(session));
+            }
             // How far a running export has got. Forwarded as it arrived: this
             // link has no idea which window asked for the export, and the
             // event names the file it is writing, which is what a window
@@ -1082,6 +1110,22 @@ mod tests {
     /// link reported.
     #[cfg(windows)]
     fn what_the_link_reports(label: &str, hotkeys: Vec<HotkeyBinding>) -> Vec<RecorderLinkEvent> {
+        what_the_link_reports_after(label, hotkeys, None)
+    }
+
+    /// The same, with `announced` published by the recorder once the link has
+    /// attached.
+    ///
+    /// Published *after* the attachment rather than before it, because that is
+    /// the only moment there is a subscription to carry it: the link opens the
+    /// event connection as part of attaching, and anything a recorder says
+    /// before that reaches nobody (`docs/ipc.md`).
+    #[cfg(windows)]
+    fn what_the_link_reports_after(
+        label: &str,
+        hotkeys: Vec<HotkeyBinding>,
+        announced: Option<Event>,
+    ) -> Vec<RecorderLinkEvent> {
         let endpoint = crate::transport::Endpoint::named(&format!(
             "clipped-link-hotkeys-{label}.{}",
             std::process::id()
@@ -1119,25 +1163,23 @@ mod tests {
         // Everything the link says in the first moments of an attachment. The
         // hotkey question is asked once it is attached, so the state changes
         // arrive around it and the order is not this test's business.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut reported = Vec::new();
-        while Instant::now() < deadline {
-            match events.recv_timeout(Duration::from_millis(200)) {
-                Ok(event) => {
-                    let attached = matches!(
-                        event,
-                        RecorderLinkEvent::State(RecorderLinkState::Attached { .. })
-                    );
-                    reported.push(event);
-                    // Attached is published from the first status the
-                    // subscription delivers, which is after the hotkey question
-                    // has been asked and answered.
-                    if attached {
-                        break;
-                    }
-                }
-                Err(_) => continue,
-            }
+        //
+        // Attached is published from the first status the subscription
+        // delivers, which is after the hotkey question has been asked and
+        // answered.
+        let mut reported = collect_until(&events, |event| {
+            matches!(
+                event,
+                RecorderLinkEvent::State(RecorderLinkState::Attached { .. })
+            )
+        });
+
+        // And then what it makes of something the recorder says afterwards.
+        if let Some(event) = announced {
+            events_published.publish(&event);
+            reported.extend(collect_until(&events, |event| {
+                !matches!(event, RecorderLinkEvent::State(_))
+            }));
         }
 
         link.stop();
@@ -1162,6 +1204,157 @@ mod tests {
         events_published.close();
         let _ = serving.join();
         reported
+    }
+
+    /// Reads what the link reports until `enough` matches one, or until it
+    /// stops saying anything.
+    ///
+    /// Bounded rather than blocking: a link that never reports what the caller
+    /// is waiting for is the failure being tested, and it has to end in an
+    /// assertion rather than in a test that hangs.
+    #[cfg(windows)]
+    fn collect_until(
+        events: &Receiver<RecorderLinkEvent>,
+        enough: impl Fn(&RecorderLinkEvent) -> bool,
+    ) -> Vec<RecorderLinkEvent> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut reported = Vec::new();
+        while Instant::now() < deadline {
+            let Ok(event) = events.recv_timeout(Duration::from_millis(200)) else {
+                continue;
+            };
+            let done = enough(&event);
+            reported.push(event);
+            if done {
+                break;
+            }
+        }
+        reported
+    }
+
+    /// A sitting of a game the catalogue named, as a recorder reports one that
+    /// has just ended.
+    #[cfg(windows)]
+    fn a_finished_sitting() -> crate::status::SessionSummary {
+        crate::status::SessionSummary {
+            session_id: "cs2-20260816-201400".to_owned(),
+            game_id: Some("counter-strike-2".to_owned()),
+            game_name: Some("Counter-Strike 2".to_owned()),
+            started_at: "2026-08-16T20:14:00+01:00".to_owned(),
+            ended_at: Some("2026-08-16T21:02:11+01:00".to_owned()),
+            end_reason: Some("game-exited".to_owned()),
+            recordings: vec![crate::status::SessionRecording {
+                session_index: 1,
+                output: r"D:\clips\cs2-1.mkv".to_owned(),
+                outcome: Some("recorded".to_owned()),
+                duration_ms: Some(2_891_000),
+            }],
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_sitting_that_ended_reaches_the_window_with_the_files_it_produced() {
+        // Issue #588's second half. `Event::SessionEnded` was matched here and
+        // **discarded** — there was no `RecorderLinkEvent` for it, so nothing
+        // in the desktop application could hear a sitting end. That was
+        // defensible while no recorder published one; issue #241 (PR #586) made
+        // `RecordingState::sitting_ended` a real producer, and the event has
+        // been arriving and going nowhere since.
+        //
+        // The files are what is asserted rather than only the identifier,
+        // because they are the reason the event carries the sitting at all: the
+        // library index is written by a run the recorder asks for as the sitting
+        // closes, so this arrives first and an identifier alone would be an
+        // announcement with nothing behind it.
+        let reported = what_the_link_reports_after(
+            "sitting-ended",
+            Vec::new(),
+            Some(Event::SessionEnded {
+                session: a_finished_sitting(),
+            }),
+        );
+
+        let ended = reported
+            .iter()
+            .find_map(|event| match event {
+                RecorderLinkEvent::SessionEnded(session) => Some(session),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("the link never forwarded the sitting that ended: {reported:#?}")
+            });
+
+        assert_eq!(ended.session_id, "cs2-20260816-201400");
+        assert_eq!(ended.game_name.as_deref(), Some("Counter-Strike 2"));
+        assert_eq!(
+            ended.ended_at.as_deref(),
+            Some("2026-08-16T21:02:11+01:00"),
+            "what makes a sitting over is `ended_at`, and dropping it would leave a consumer \
+             unable to tell one that ended from one that is still open",
+        );
+        assert_eq!(
+            ended.recordings.len(),
+            1,
+            "the files are the point of this event: {:?}",
+            ended.recordings,
+        );
+        assert_eq!(ended.recordings[0].output, r"D:\clips\cs2-1.mkv");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_link_that_hears_nothing_end_says_nothing_ended() {
+        // The other direction, and what makes the test above mean anything: a
+        // link that announced a finished sitting on every attachment would pass
+        // it, and would have a window offering to open recordings of a sitting
+        // nobody had finished.
+        let reported = what_the_link_reports("no-sitting", Vec::new());
+
+        assert!(
+            !reported
+                .iter()
+                .any(|event| matches!(event, RecorderLinkEvent::SessionEnded(_))),
+            "no sitting ended, so nothing may say one did: {reported:#?}"
+        );
+    }
+
+    #[test]
+    fn a_sitting_that_ended_survives_the_journey_into_a_window() {
+        // The event crosses into a webview as JSON, where the TypeScript that
+        // reads it is written by hand rather than generated
+        // (`apps/desktop/src/useRecorderLink.ts`). Two things about the shape
+        // are load-bearing there and neither is visible from a round trip
+        // through serde alone: the tag is `session_ended`, and the sitting's
+        // own fields sit *beside* it rather than under a `session` key, because
+        // the variant is a newtype in an internally tagged enumeration. A
+        // window reading `payload.session_id` would find nothing if either
+        // changed.
+        let event = RecorderLinkEvent::SessionEnded(SessionSummary {
+            session_id: "cs2-1".to_owned(),
+            started_at: "2026-08-16T20:14:00+01:00".to_owned(),
+            ended_at: Some("2026-08-16T21:02:11+01:00".to_owned()),
+            ..SessionSummary::default()
+        });
+
+        let json = serde_json::to_string(&event).expect("it serialises");
+        assert!(json.contains(r#""event":"session_ended""#), "{json}");
+        assert!(json.contains(r#""session_id":"cs2-1""#), "{json}");
+        assert!(
+            !json.contains(r#""session":"#),
+            "the sitting is flattened beside the tag, not nested under a key the window does not \
+             read: {json}"
+        );
+        // `game_name` is `skip_serializing_if`, so a sitting the catalogue would
+        // not attribute is *absent* rather than empty — which is what lets a
+        // window fall back to something honest instead of drawing a blank name.
+        assert!(
+            !json.contains("game_name"),
+            "an unattributed sitting must carry no name at all: {json}"
+        );
+
+        let back: RecorderLinkEvent = serde_json::from_str(&json).expect("and comes back");
+        assert_eq!(back, event, "{json}");
     }
 
     #[cfg(windows)]

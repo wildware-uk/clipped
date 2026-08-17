@@ -293,11 +293,34 @@ export interface RecorderStatusText {
 }
 
 /**
+ * The game the recorder's sitting is of, when the catalogue named one.
+ *
+ * Asked of the whole status rather than of each state, because a sitting spans
+ * two of them: one being recorded is on `recording` and one waiting out its
+ * restart grace is on `watching`, and they are the same sitting a few seconds
+ * apart. `tray_model.rs` asks the protocol's own `RecorderStatus::session` for
+ * exactly this, on the Rust side of the same window.
+ *
+ * `undefined` for a sitting the catalogue would not attribute and for a
+ * recording that belongs to no sitting. Neither is a name to invent.
+ */
+function gameIn(status: RecorderStatus): string | undefined {
+  return status.state === 'idle' ? undefined : status.session?.game_name;
+}
+
+/**
  * What to show for a link state.
  *
  * A pure function so that the wording is testable without a window, and so that
  * every state has exactly one rendering rather than a chain of conditions inside
  * a component.
+ *
+ * The `attached` arm has one rendering per `RecorderStatus` for the same
+ * reason, and `watching` is one of them: a recorder that will record the next
+ * game to launch and one that will never record anything are different answers,
+ * and this block drew both as "Idle" until issue #588 — the same collapse issue
+ * #584 removed from the protocol, surviving in the one place a user sees it on
+ * every screen.
  */
 export function describeRecorderLink(link: RecorderLinkState | null): RecorderStatusText {
   if (link === null) {
@@ -312,15 +335,7 @@ export function describeRecorderLink(link: RecorderLinkState | null): RecorderSt
     case 'connecting':
       return { state: 'Connecting', detail: 'Looking for the recorder.' };
     case 'attached':
-      return link.status.state === 'recording'
-        ? {
-            state: 'Recording',
-            detail: `Recording ${link.status.target}.`,
-          }
-        : {
-            state: 'Idle',
-            detail: 'The recorder is running. Nothing is being recorded.',
-          };
+      return describeRecorderStatus(link.status);
     case 'reconnecting':
       return {
         state: 'Reconnecting',
@@ -328,6 +343,43 @@ export function describeRecorderLink(link: RecorderLinkState | null): RecorderSt
       };
     case 'unavailable':
       return { state: 'Not available', detail: link.reason };
+  }
+}
+
+/**
+ * The same two things, for what an attached recorder says it is doing.
+ *
+ * One arm per status and no default, so a fourth state added to the protocol
+ * has to be decided here rather than drawn as whichever arm happened to be
+ * last — `noImplicitReturns` is what enforces that.
+ */
+function describeRecorderStatus(status: RecorderStatus): RecorderStatusText {
+  switch (status.state) {
+    case 'recording':
+      return {
+        state: 'Recording',
+        // The game where the recording knows one. `target` is a capture
+        // selector — `process 4242` for a recording nobody asked for — and
+        // turning one into "Counter-Strike 2" needs the catalogue, which lives
+        // in the recorder; the sitting on the status is the recorder having
+        // already done it (issue #241).
+        detail: `Recording ${gameIn(status) ?? status.target}.`,
+      };
+    case 'watching': {
+      const game = gameIn(status);
+      return {
+        state: 'Watching',
+        detail:
+          game === undefined
+            ? 'The recorder is watching for a game to launch, and will record the next one.'
+            : `The recorder is in a ${game} sitting, and will record it again if it starts.`,
+      };
+    }
+    case 'idle':
+      return {
+        state: 'Idle',
+        detail: 'The recorder is running. Nothing is being recorded.',
+      };
   }
 }
 

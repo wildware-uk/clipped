@@ -354,6 +354,39 @@ to speaks protocol 2 and reports `idle` for ever, and a window that drew
 "Watching for games" from the version number alone would be saying something
 untrue about a recorder that will never record on its own.
 
+It is also the only name in the list that is a fact about **this recorder**
+rather than about the build. Since
+[issue #421](https://github.com/wildware-uk/clipped/issues/421) both kinds are
+one binary and the difference is one argument:
+
+| Recorder | Advertises `automatic` |
+| --- | --- |
+| `clipped-recorder serve --watch-for-games` | **Yes**, from the moment it has somewhere to record to and a thread to watch on — before the ready line, so a window connecting the instant it sees one is not told the wrong thing and corrected a moment later |
+| `clipped-recorder serve` | No. It will record what it is asked to and nothing else |
+| `serve --watch-for-games` whose detection could not be started | No, because it will not record anything either |
+
+The recorder answers it from the same claim
+[`RecorderStatus::Watching`](#get_status) is answered from — one field, one
+lock, `RecordingState::watches_for_games` — rather than from the flag it was
+started with, so a recorder cannot advertise the capability and then report a
+status denying it. A recorder that is *recording* still advertises it: what it
+is doing now is the status, and what it will do next is this.
+
+**What a window does with it.** It is the question in front of any screen that
+says whether games are being recorded without being asked. The desktop
+application's Games screen is the one that asks: with the feature it says "This
+recorder is watching for games" and points at the Library, and without it "This
+recorder is not detecting games" and names the terminal command that does
+(`describeGameDetection` in `apps/desktop/src/gameDetection.ts`,
+`docs/desktop-ui.md`). As with every other feature, the answer for a link that
+is *connecting* is neither: "cannot" is a claim about a recorder, and there is
+no recorder yet ([#447](https://github.com/wildware-uk/clipped/issues/447)).
+
+The supervisor starts a recorder with `--watch-for-games`
+(`SupervisorSettings::watch_for_games`), so the recorder the window starts for
+itself advertises it and one somebody started at a terminal without the argument
+does not.
+
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
 belongs to `clipped-ipc` (`crates/ipc/src/server.rs`). The others are the
@@ -2042,6 +2075,17 @@ there is one to give. Whether a sitting is over is therefore the presence of
 `ended_at` rather than a separate type, which is the answer `library_sessions`
 had already settled on for the same question.
 
+**What the desktop application does with it.** The supervisor's link forwards it
+whole as a `RecorderLinkEvent::SessionEnded`, the Tauri host emits it on the
+`recorder-link` event with everything else the link says, and the window reads
+it as the one thing that says the library has changed underneath it: the
+sittings and the per-game figures are read again, so a sitting somebody has just
+finished playing appears without restarting Clipped
+(`apps/desktop/src/library.ts`, `docs/desktop-ui.md`). It raises no
+notification — the person put the game down and knows they did — and it is not
+folded into the link's *state*, because a finished sitting is something that
+happened rather than where the connection stands.
+
 **`export_progress` is how far a running [`export_recording`](#export_recording)
 has got**, which the reply cannot say because it arrives when the MP4's index
 has been written — the moment there is nothing left to report
@@ -2315,7 +2359,7 @@ cargo run -p clipped-ipc --bin protocol-schema
 | --- | --- |
 | `crates/ipc/src/*.rs` unit tests | Message round trips, the frozen handshake shape, unknown versions, unknown fields, unknown codes, unknown error details, unknown events, framing including a hostile length prefix, dispatch, event routing |
 | `crates/ipc/src/transport/windows.rs` tests | A real pipe: a round trip, endpoint exclusivity, connecting to nothing, stopping a blocked listener |
-| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C, a recorder watching for games told apart from one that is not — including the bytes of the reply, since an absent sitting is what a parsed status cannot show — and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
+| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C, a recorder watching for games told apart from one that is not — including the bytes of the reply, since an absent sitting is what a parsed status cannot show — a recorder that records games by itself told apart from one that never will, by what each advertises in its welcome, and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
 | `apps/recorder/tests/supervision.rs` | Supervision against real processes that are really killed: a recorder outliving the process that started it, a second launch attaching rather than competing, a killed recorder reported and replaced, and a bounded restart policy |
 | `crates/ipc/src/schema.rs` tests | That the description of the protocol the TypeScript is checked against is derived rather than asserted — a tag is never reported as optional because a catch-all absorbed it, every sample records what the real deserialiser did with it — and that the committed schema is still what this build produces |
 | `apps/recorder/src/preview/tests.rs` | `open_preview` against thumbnail and waveform caches built for the test: that the picture is the picture of *that* recording, that "not made yet" and "there will not be one" stay apart, that a recording changed since its picture was made is not shown the old one, that peaks come back at the width the caller asked for, and what a page of twenty-five costs |

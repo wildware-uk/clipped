@@ -403,6 +403,15 @@ impl NotificationPolicy {
             // matched rather than fallen through so that the next event added
             // to this enumeration has to be thought about here.
             RecorderLinkEvent::ExportProgress(_) => None,
+            // Also deliberately no notification, and for a different reason. A
+            // sitting ending is the user putting a game down, which they are
+            // there for and do not need telling about; what it is worth is the
+            // library being up to date when they next look, and that happens
+            // without interrupting anybody (`apps/desktop/src/library.ts`,
+            // issue #588). A toast for it would also be a category of its own
+            // in `NotificationSettings`, because a notification nobody can
+            // switch off is one this product does not have (issue #252).
+            RecorderLinkEvent::SessionEnded(_) => None,
         }
     }
 

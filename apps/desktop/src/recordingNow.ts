@@ -135,19 +135,42 @@ function whatTheRecorderSaid(
 
   if (status.state === 'recording') {
     return {
-      state: `Recording ${status.target}`,
+      // The game where the recording knows one. `target` is the capture
+      // selector — `process 4242` for a recording nobody asked for — and only
+      // the recorder's catalogue can turn one into "Counter-Strike 2", which is
+      // why the sitting is on the status at all (issue #241).
+      state: `Recording ${status.session?.game_name ?? status.target}`,
       detail: 'The file below is being written now, and is playable as it grows.',
       elapsed: formatElapsed(status.elapsed_ms),
       output: status.output,
     };
   }
 
+  // Nothing is being recorded — and what happens next is the difference between
+  // these two. A recorder that is watching will record the next game to launch;
+  // an idle one will record nothing until it is asked. Drawing both as "not
+  // recording" is the collapse issue #584 took out of the protocol, and it
+  // survived here until issue #588.
+  if (status.state === 'watching') {
+    const game = status.session?.game_name;
+    return {
+      state: 'This recorder is watching for a game',
+      detail:
+        game === undefined
+          ? 'The recorder this window is attached to is not recording, and will record the next ' +
+            'game that launches.'
+          : `The recorder this window is attached to is in a ${game} sitting. Nothing is being ` +
+            'recorded, and it will record that game again if it starts.',
+    };
+  }
+
   return {
     state: 'This recorder is not recording',
     detail:
-      'The recorder this window is attached to is running and idle. A recorder started ' +
-      'elsewhere — clipped-recorder watch, from a terminal — serves no protocol and is ' +
-      'invisible here, so this says nothing about the rest of the machine.',
+      'The recorder this window is attached to is running and idle, and will record nothing ' +
+      'until it is asked. A recorder started elsewhere — clipped-recorder watch, from a ' +
+      'terminal — serves no protocol and is invisible here, so this says nothing about the rest ' +
+      'of the machine.',
   };
 }
 

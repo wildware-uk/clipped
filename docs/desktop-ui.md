@@ -41,8 +41,16 @@ application now drives it: at startup it claims a single-instance name, attaches
 to a recorder or starts one detached, and follows its status
 ([ADR 0006](adr/0006-recorder-lifetime-and-supervision.md)). The recorder status
 block in the sidebar shows what the link reports and nothing else — one wording
-for each of the link's four states, and one for "this is not the Clipped window",
-which is what `npm run dev:web` and the tests see.
+for each of the link's four states, one for "this is not the Clipped window",
+which is what `npm run dev:web` and the tests see, and one for each of the three
+things an attached recorder can be doing. **Watching is one of those three**: a
+recorder that will record the next game to launch and one that will never record
+anything are different answers, and this block drew both as "Idle" until
+[#588](https://github.com/wildware-uk/clipped/issues/588) — the collapse
+[#584](https://github.com/wildware-uk/clipped/issues/584) removed from the
+protocol, surviving in the one place a user sees on every screen. While
+recording it names the **game**, from the sitting the recording carries, and
+falls back to the capture selector where there is no game to name (issue #241).
 
 **Almost every control is in the notification area, not in the window** — see
 [The tray](#the-tray). No screen drives the recorder: one of the seven is not
@@ -179,6 +187,31 @@ the command with `unknown_command` and is told to restart. Those codes are
 outside the protocol's own vocabulary on purpose, so that "the recorder said no"
 and "there was no recorder" cannot be confused.
 
+### When a read happens again
+
+A library read is a round trip and the answer is a snapshot, so the interesting
+question is what makes the window ask a second time. There is exactly one thing,
+and it is not a timer: **a sitting ending**. The recorder announces one on the
+`status` stream the moment it closes a sitting, the supervisor's link forwards
+it as `RecorderLinkEvent::SessionEnded`, and `library.ts` reads the sittings and
+the per-game figures again — so a sitting somebody has just finished playing
+appears without restarting Clipped
+([#588](https://github.com/wildware-uk/clipped/issues/588), [ipc.md](ipc.md)).
+
+Nothing else re-reads, and that is deliberate. Starring a row and locking one do
+not: `useSessions` accumulates pages, so a re-read would throw somebody who had
+scrolled through five of them back to the first because they marked something,
+and what those controls keep instead is the recorder's own reply for the one row
+they changed. A sitting ending is the opposite on every count — it happens
+because the person stopped playing rather than because they touched the screen,
+and the row it adds is at the *top*, where no amount of paging would ever reveal
+it. Nothing blanks while the re-read is in flight: the answer only changes when
+the new one arrives.
+
+The link publishes a state whenever anything about the recorder moves — a
+recording starting, a recording ending, a reconnection — and none of those
+re-reads either. Only the sitting does.
+
 **One thing the index knows is still not on a real machine's screen**: nothing
 calls `reconcile`, so the database is empty until something does
 ([#385](https://github.com/wildware-uk/clipped/issues/385)). The window reports
@@ -292,11 +325,23 @@ asserts across every state rather than at the one place they could go wrong:
 
 - **A heading carries its own scope.** It is either "Not known…", which claims
   nothing; "This recorder…", which names what the claim is about; or
-  "Recording `<target>`", which asserts a recording that demonstrably exists.
+  "Recording `<what>`", which asserts a recording that demonstrably exists.
   The wording this rules out is "Nothing is being recorded" — a statement about
   the machine, when `clipped-recorder watch` serves no protocol and could be
   recording a game this link cannot see. The same trap the Games screen's
   detection state describes.
+- **`<what>` is the game where the recording knows one.** `target` is the
+  capture selector, which for a recording nobody asked for is `process 4242`;
+  turning it into "Counter-Strike 2" needs the catalogue, which lives in the
+  recorder, and the sitting on the status is the recorder having already done it
+  ([#241](https://github.com/wildware-uk/clipped/issues/241)). A recording with
+  no sitting, or one the catalogue would not attribute, shows the selector.
+- **Watching and idle are different headings.** A recorder that will record the
+  next game to launch and one that will record nothing until it is asked were
+  both "This recorder is not recording" until
+  [#588](https://github.com/wildware-uk/clipped/issues/588), with a sentence
+  underneath saying it was idle. Neither draws a file or a duration: nothing is
+  being recorded in either.
 - **The state is asked for, never assumed.** See below.
 - **The duration is the recorder's measurement, rendered.** `formatElapsed`
   turns `ActiveRecording::elapsed_ms` into `M:SS` or `H:MM:SS` and does nothing
@@ -463,7 +508,7 @@ them is about a game. Against that:
 | The list of games | `clipped-game-detection`'s catalogue: the compiled-in `games.toml` plus the user's overlay ([game-detection.md](game-detection.md)) | No protocol command lists it, and the window has no file-system permission to read it — `capabilities/default.json` grants three `core:` permissions and `dialog:allow-save`, and none of the four reaches a file. [Issue #245](https://github.com/wildware-uk/clipped/issues/245) |
 | Add an executable, rename, exclude, disable capture | The same overlay, written | Same. [#45](https://github.com/wildware-uk/clipped/issues/45) owns the behaviour, #245 the way to reach it |
 | Sessions, clips, favourites, storage per game | The library index | Reachable since [#301](https://github.com/wildware-uk/clipped/issues/301): `library_games` carries exactly these figures and Home draws them. Bringing them onto *this* screen, beside the catalogue entry each belongs to, needs the catalogue itself, which is #245 |
-| Which game is being recorded now | A `status` that can name a game | [#241](https://github.com/wildware-uk/clipped/issues/241): the protocol describes a recording by its capture target, `process 4242` |
+| Which game is being recorded now | A `status` that can name a game | Reachable since [#241](https://github.com/wildware-uk/clipped/issues/241): a recording carries the sitting it belongs to and the sitting names the game, which is what the tray's first line draws. Putting it on *this* screen means putting it beside that game's catalogue entry, which is #245 |
 
 Drawing the deck's table with nothing in it was the tempting alternative and is
 the one AGENTS.md section 27 rules out: an empty Game / Recording / Last played
@@ -474,17 +519,17 @@ naming the issue — the same contract the unbuilt screens keep.
 ### What it does show, and why that is real
 
 **Whether anything is detecting games at all.** `describeGameDetection` in
-`gameDetection.ts` has one rendering for each of the link's four states and one
-for "this is not the Clipped window", and the screen is a pure function of it,
-so it follows the recorder rather than restating a sentence.
+`gameDetection.ts` has one rendering for each of the link's four states — two
+for `attached` — and one for "this is not the Clipped window", and the screen is
+a pure function of it, so it follows the recorder rather than restating a
+sentence.
 
-One of those five says **"This recorder is not detecting games"** and the other
-four say **"Not known"**, and the split is the point. **The link sees exactly one
-thing: the recorder this window started or attached to.** `clipped-recorder
-watch` serves no protocol, so a watcher somebody started in a terminal is
-invisible to it — and the sentence directly beneath the state recommends
-starting exactly that. So no rendering may say that games are going undetected
-on this machine: the window has not looked, and cannot.
+Two of those six say something about detection and the other four say **"Not
+known"**, and the split is the point. **The link sees exactly one thing: the
+recorder this window started or attached to.** `clipped-recorder watch` serves
+no protocol, so a watcher somebody started in a terminal is invisible to it. So
+no rendering may say that games are going undetected on this machine: the window
+has not looked, and cannot.
 
 That includes the state for a recorder that could not be reached at all. It
 reads "Not known — this window is not attached to a recorder", not "not
@@ -492,23 +537,34 @@ detecting games". It previously read the latter, which was a claim about the
 machine that nothing here can make, and which contradicted its own next
 paragraph.
 
-The one rendering that says anything about detection names the recorder it is
-about, and it is an inference rather than a reading. It holds:
+The two that do say something name the recorder they are about, and each is a
+**reading** rather than an inference: the recorder says in its welcome whether
+it records games by itself, and `features::AUTOMATIC` is the name it says it
+under ([ipc.md](ipc.md)).
 
-- the supervisor starts, and can only attach to, `clipped-recorder serve`
-  (`SERVE` in `crates/ipc/src/supervisor.rs`), because `serve` is the only
-  subcommand that listens on the endpoint;
-- `serve` does not watch for games. `clipped-recorder watch` is a separate
-  subcommand that takes no `--endpoint`, which is exactly what #241's fourth
-  acceptance criterion is about.
+| The recorder | The screen says |
+| --- | --- |
+| Advertises `automatic` — a `serve --watch-for-games`, which is what this window starts | "This recorder is watching for games", and points at the Library for what it has recorded |
+| Does not | "This recorder is not detecting games", and names `clipped-recorder watch` as the thing that does |
 
-So a recorder this window can see is a recorder that is not detecting games —
-which is a statement about that recorder, and about nothing else on the machine.
+It was one rendering until
+[issue #587](https://github.com/wildware-uk/clipped/issues/587), and the reason
+is worth keeping: this screen used to *infer* the answer from the fact that the
+supervisor starts `clipped-recorder serve` and that `serve` does not watch for
+games. [Issue #421](https://github.com/wildware-uk/clipped/issues/421) put both
+halves in one binary — `SupervisorSettings::watch_for_games` passes
+`--watch-for-games`, so the recorder this window starts for itself *does* detect
+games — and the inference silently became false. Nothing about the screen
+changed, which is exactly how that sort of defect survives: the sentence was
+still there, still confident, and no longer true. Asking the recorder is what
+replaces it, and the feature exists so that there is something to ask.
 
 The screen then says the thing somebody can act on, because there is one
-(AGENTS.md section 45): automatic recording is built and running, from a
-terminal, as `clipped-recorder watch`. Making it something this window can start
-and follow is #241.
+(AGENTS.md section 45), and it depends on the same answer: against a recorder
+that is not watching, automatic recording is available from a terminal as
+`clipped-recorder watch`, and making it something this window can start is #241.
+Against one that already is, saying that would have two watchers racing for the
+same game, so the sentence is where the recordings went instead.
 
 ### No controls
 
@@ -1147,15 +1203,20 @@ screenshot:
 | State | Badge | Tooltip |
 | --- | --- | --- |
 | Attached, nothing recording | none — the brand mark alone | `Clipped — not recording` |
-| Recording | a filled disc, in the accent | ``Clipped — recording process `cs2.exe` `` |
+| Recording | a filled disc, in the accent | `Clipped — recording Counter-Strike 2`, or ``Clipped — recording process `cs2.exe` `` where the recording knows no game |
+| Watching for games | none — nothing is being recorded | `Clipped — watching for Counter-Strike 2`, or `Clipped — watching for a game` |
 | Connecting | a ring — the recording disc with its middle not filled in | `Clipped — looking for the recorder` |
 | Reconnecting | the same ring | `Clipped — reconnecting to the recorder, attempt 2 of 4` |
 | No recorder | a slash struck through the badge | `Clipped — no recorder. <reason>` |
 
-Five states and four marks: connecting and reconnecting are drawn the same,
+Six states and four marks: connecting and reconnecting are drawn the same,
 because they are the same thing to look at — nothing is attached and something
 is trying. The words are not the same, and that is the point of there being a
-tooltip: it is where "which attempt, out of how many" fits.
+tooltip: it is where "which attempt, out of how many" fits. Watching wears the
+idle mark for the same sort of reason in reverse — nothing is being recorded, so
+there is nothing for a badge to announce — and the *words* are what tell it from
+idle, which is the whole of what
+[#584](https://github.com/wildware-uk/clipped/issues/584) added.
 
 Idle carries no badge, because a badge means something is going on and at rest
 nothing is; a mark that is badged even when idle has nothing left to say when a
@@ -1201,6 +1262,47 @@ keeps a replay buffer is still a recording, and it says so by carrying
 be for the mode that keeps a buffer and records nothing, which no build has
 ([#423](https://github.com/wildware-uk/clipped/issues/423)), and a tray showing
 it today would be showing something nobody measured (AGENTS.md section 27).
+
+### The first line names the game, not the process
+
+The menu's first line is the status in words, and what it calls the thing being
+recorded is the game where the recorder knows one:
+
+| What the recorder says | The line |
+| --- | --- |
+| Recording, and the sitting names a game | `Recording Counter-Strike 2` |
+| The same, on the second file of that sitting | `Recording Counter-Strike 2, file 2 of this sitting` |
+| Recording, with no sitting or an unattributed one | ``Recording process `cs2.exe` `` |
+| Watching, with a sitting still open in its restart grace | `Watching — Counter-Strike 2` |
+| Watching for anything at all | `Watching for a game` |
+| Idle | `Not recording` |
+
+`target` is a **capture selector** — what the user or the watcher asked for,
+which for an automatic recording is `process 4242`. Turning one into
+"Counter-Strike 2" needs the catalogue, which lives in the recorder, so the
+recorder does it: `ActiveRecording::session` carries the sitting the recording
+belongs to and the sitting knows the game
+([#241](https://github.com/wildware-uk/clipped/issues/241), [ipc.md](ipc.md)).
+
+Until [#588](https://github.com/wildware-uk/clipped/issues/588) this line read
+the sitting while *watching* and the selector while *recording*, so it went from
+naming the game to naming a process identifier at the moment the recorder
+started recording that very game — backwards, and the exact sentence #241 exists
+to make possible. Both arms now ask `RecorderStatus::session`, which is the one
+place that knows a watcher's sitting and a recording's own are the same
+question.
+
+**The fallback is the selector rather than a name invented for it.** A sitting
+the catalogue would not attribute — it claimed nothing, or reported a tie — has
+no `game_name`, and a recording started against a window that is not a game has
+no sitting at all. Both show what was actually asked for, which is what this
+line said before.
+
+**"file 2 of this sitting" is said only when there is more than one.** A game
+restarted inside its restart grace keeps one sitting, and the file that follows
+would otherwise look like an unrelated recording of the same game;
+`SessionSummary::recordings` includes the one being written, so the count is the
+position.
 
 ### Nothing offered that would do nothing
 
