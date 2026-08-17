@@ -1050,7 +1050,7 @@ would write frames of one size into a track that declares another, and a player
 would show the difference as a stretched or torn picture in a file that looks
 finished. It is also the same answer the pipeline gives to a window resized
 mid-recording, and that is now a decision rather than a limitation:
-[ADR 0011](adr/0011-a-session-follows-a-resize-with-a-new-file.md) settled
+[ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md) settled
 [issue #184](https://github.com/wildware-uk/clipped/issues/184) as **finish this
 file and let the session start the next one**, and ruled out scaling in the
 capture path — a resample per frame on the path the game is paying for, recording

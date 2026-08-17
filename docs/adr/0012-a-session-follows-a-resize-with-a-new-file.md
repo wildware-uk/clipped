@@ -1,4 +1,4 @@
-# 0011. A session follows a mid-recording size change with a new file, and Clipped does not scale
+# 0012. A session follows a mid-recording size change with a new file, and Clipped does not scale
 
 - Status: Accepted
 - Date: 2026-08-17

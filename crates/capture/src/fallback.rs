@@ -36,7 +36,7 @@
 //!             }
 //!         }
 //!         Ok(Acquisition::Timeout) => fallback.note_silence(timeout),
-//!         Ok(Acquisition::SizeChanged(size)) => { /* finish the file; ADR 0011 */ }
+//!         Ok(Acquisition::SizeChanged(size)) => { /* finish the file; ADR 0012 */ }
 //!         Err(error) => backend = fallback.recover(backend, error)?.into_parts().0,
 //!     }
 //! }
@@ -58,13 +58,13 @@
 //! the recording ends where it is rather than continuing into a file whose track
 //! declares a size the frames do not have. That is the same answer the pipeline
 //! gives to a window resized mid-recording, and it is now a decision rather than
-//! a gap: [ADR 0011] settled that a session follows a size change by finishing
+//! a gap: [ADR 0012] settled that a session follows a size change by finishing
 //! the file and starting the next one, and that Clipped does not scale to keep a
 //! track's dimensions constant. So this rule stands as written for a replacement
 //! *within* one file, and relaxes only in that a caller which has followed a
 //! resize into a new file says so through [`CaptureFallback::resize`].
 //!
-//! [ADR 0011]: ../../../docs/adr/0011-a-session-follows-a-resize-with-a-new-file.md
+//! [ADR 0012]: ../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md
 //!
 //! **It will not treat silence as failure.** A capture that produces no frames
 //! is indistinguishable from a source that is producing none, and the commonest
@@ -738,7 +738,7 @@ impl<'candidates> CaptureFallback<'candidates> {
     /// Whatever the backend says. A backend that cannot resize is not recovered
     /// from here: a resize is already a decision point for the caller — the file
     /// it is recording ends there and the session starts the next one (ADR
-    /// 0011) — and taking it away from them would be this module deciding what
+    /// 0012) — and taking it away from them would be this module deciding what
     /// happens to the file.
     pub fn resize(
         &mut self,

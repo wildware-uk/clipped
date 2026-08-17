@@ -337,7 +337,7 @@ fn record_frames(
                 // **This is a seam, not the end of a sitting.** A session
                 // follows a size change with the next file in the same session,
                 // and does not scale to keep one file's dimensions constant:
-                // ADR 0011 has the decision, the alternatives it closes and what
+                // ADR 0012 has the decision, the alternatives it closes and what
                 // it costs. What this loop owes that decision is a file that is
                 // complete up to the change and a reason on the report the
                 // session can read, which is what the two lines below produce.
@@ -2301,7 +2301,7 @@ mod tests {
     fn a_window_resized_mid_recording_keeps_everything_captured_before_the_resize() {
         // Issue #184's half of the bargain, and the half that must never be
         // given up. A session follows a resize by finishing this file and
-        // starting the next one (ADR 0011), and that is only an honest
+        // starting the next one (ADR 0012), and that is only an honest
         // answer if the file it finishes holds the footage: everything up to the
         // resize, encoded, written and finalised, with a track that declares the
         // size the pictures in it actually are (AGENTS.md sections 22 and 56).

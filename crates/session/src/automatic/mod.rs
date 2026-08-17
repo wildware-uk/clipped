@@ -1200,7 +1200,7 @@ impl SessionManager {
 /// wait out.** The window did not go: it is on screen, drawing, at a new size,
 /// and the only reason the file ended is that a Matroska track's dimensions and
 /// an encoder session's resolution are both fixed for the length of one file
-/// ([ADR 0011](../../../docs/adr/0011-a-session-follows-a-resize-with-a-new-file.md),
+/// ([ADR 0012](../../../docs/adr/0012-a-session-follows-a-resize-with-a-new-file.md),
 /// [issue #184](https://github.com/wildware-uk/clipped/issues/184)). Waiting out
 /// the exit race there spends five seconds of a game somebody is still playing,
 /// every time they drag a window's edge or a game changes resolution — and the

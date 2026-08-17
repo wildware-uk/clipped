@@ -257,7 +257,7 @@ to put one in. An automatic session treats the change as a seam and starts the
 next recording of the same sitting immediately — a resize is proof that the
 window is still there, so it does not wait out the delay that exists for a game
 that may have quit. Two files, one sitting, joined by the session record
-([sessions.md](sessions.md), [ADR 0011](adr/0011-a-session-follows-a-resize-with-a-new-file.md)).
+([sessions.md](sessions.md), [ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
 
 Clipped does **not** scale the new size back to the old one to keep a single
 file. Doing so would put a resample on the frame path the game is paying for, and
