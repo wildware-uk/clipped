@@ -327,7 +327,18 @@ cargo test -p clipped-video-pattern --test wgc_video_pattern -- --ignored --noca
 cargo test -p clipped-fullscreen-dx11 --test wgc_fullscreen_dx11 -- --ignored --nocapture
 cargo test -p clipped-video-pattern --test av_sync -- --ignored --nocapture --test-threads=1
 cargo test -p clipped-video-pattern --test track_isolation -- --ignored --nocapture
+cargo test -p clipped-video-pattern --test odd_client_area -- --ignored --nocapture
+cargo test -p clipped-capture -- --ignored --nocapture --test-threads=1
 ```
+
+The last two are issue #561's, and the second of them is inside `clipped-capture`'s
+own unit tests rather than a test binary of its own. They are here for a reason
+worth stating: both were written running by default, passed on a developer's
+machine, and turned `main` red — the Graphics Capture one because
+`CreateCaptureItemForWindow` answers `0x80070057` for *any* window on a hosted
+runner, and the Desktop Duplication one because a runner paints no window whose
+pixels can be found. Neither assertion was wrong. Neither environment could
+satisfy it.
 
 `av_sync.rs` additionally needs an audio endpoint, runs for about ninety seconds
 by default, and takes `CLIPPED_AV_SYNC_SECONDS` for the long runs the drift
