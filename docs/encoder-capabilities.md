@@ -76,6 +76,51 @@ a machine has one card per vendor; a machine with two cards from one vendor and
 only one of them encoding is beyond what this can tell, and the report prints
 which adapter it picked rather than implying it knew.
 
+### An encoder present on the wrong adapter is not available
+
+The three questions above are about the encoder. There is a fourth, and it is
+about the *recording*: which adapter will the frames be on?
+
+A backend is handed the Direct3D 11 device the capture backend created, and it
+does not get to choose. Capture creates that device on the **default** adapter —
+`D3D11CreateDevice` with no adapter named, which Microsoft documents as "the
+first adapter that is enumerated by `IDXGIFactory1::EnumAdapters`" — and every
+vendor encode runtime refuses a device belonging to somebody else's silicon. AMF
+answers `AMF_INVALID_ARG` from `AMFContext::InitDX11`; Quick Sync and NVENC have
+refusals of their own. All three now say so in a sentence naming both vendors,
+through one shared function in `windows/dxgi.rs`.
+
+So on a machine with two vendors' adapters — the ordinary gaming laptop, a
+discrete card beside an integrated part — one of the two encoders is entirely
+real and entirely unusable. It was reported as **available** until
+[issue #443](https://github.com/wildware-uk/clipped/issues/443), which is exactly
+the promise-a-capability-the-recording-does-not-have failure the section above
+refuses to make about the media transforms.
+
+It is now reported as *present, and not usable for recording here*, naming the
+adapter the frames will be captured on. Deliberately a third answer rather than
+either of the two that existed:
+
+- **Not available.** `Automatic` will not choose it, and
+  `Recommendation::for_opening` cannot return it — there is no point spending a
+  recording's start-up on a refusal that was already known.
+- **Not unavailable either.** The hardware is here, and `--refresh` still opens
+  a session on it and measures its limits, because the capability probe creates
+  its *own* device on the encoder's adapter (`windows/device.rs`) rather than
+  borrowing capture's. Blanking the codec table would throw away a true answer
+  about the machine to make one sentence simpler.
+
+`Availability::is_present` is the question that separates the two, and
+`CapabilityReport::capture_adapter` is where the inference lives. It is an
+inference, not a measurement, and
+`the_device_capture_creates_lands_on_the_adapter_that_is_inferred_for_it` in
+`windows/dxgi.rs` checks it against the machine it runs on by creating that
+device and asking which adapter it landed on.
+
+What this does **not** do is make the other encoder work. Capturing on that
+adapter, or copying every frame across the bus to reach it, is the larger
+question issue #443 carries and neither is built.
+
 ## Asking the encoder itself
 
 Maximum resolution, the framerate ceiling, B-frame support and 10-bit (HDR)
@@ -265,6 +310,10 @@ choose a measured H.264 over an inferred AV1 every time.
    should be told — but nothing opens it, and `Recommendation::for_opening`
    cannot return it. See
    [encoder-pipeline.md](encoder-pipeline.md#choosing-an-encoder-to-open).
+
+   An encoder on an adapter the frames will not be captured on is unopenable for
+   a second, independent reason and ranks the same way, for the same trade
+   (`ChoiceReason::NotTheCaptureAdapter`, issue #443).
 2. Hardware before software. The recorder runs alongside a game and CPU time is
    the scarcest resource on the machine (AGENTS.md section 18).
 3. An adapter with video memory of its own before one that shares system memory.
@@ -274,6 +323,23 @@ choose a measured H.264 over an inferred AV1 every time.
 
 Within an encoder, the codec is the most efficient one whose support was
 measured, falling back to H.264.
+
+**Rules 3 to 5 do less than they look like they do**, and it is worth being
+plain about it. Rule 1 leaves at most one encoder in a hardware class — a
+machine has one capture adapter and that adapter has one vendor — so the memory
+rules can never order two encoders a recording could actually open. What they
+still do is describe that one encoder ("hardware encoding on an adapter sharing
+system memory" is a true and useful thing to tell somebody recording on an
+integrated part) and order the entries *below* the line, which is the order this
+report lists them in under "Detected on this machine, and not available to
+choose".
+
+Rule 3 used to carry a second sentence — "on a machine with both, the game is
+running on the other one, so encoding there avoids copying every frame across
+the bus" — and it has been removed because it was never true of this pipeline.
+Encoding on an adapter the frames are not on needs exactly that per-frame
+cross-adapter copy, and every backend refuses it. The ranking was ordering
+encoders that could not have been opened (#443).
 
 Rules 3 and 4 exist instead of "prefer the discrete GPU" because DXGI cannot
 tell you which adapter is discrete. It reports how much video memory an adapter
@@ -427,6 +493,12 @@ That is a deliberate limitation as well as a technique, and it is worth saying
 plainly: **the no-hardware path has been tested by injection, not on bare metal.**
 The machine this was developed on has an NVIDIA RTX 4090 and an integrated AMD
 part, and neither can be removed.
+
+The two-vendor machine is the one exception where the injected facts and the
+real machine happen to agree: the development machine *is* an RTX 4090 beside an
+integrated Radeon, so the adapter-mismatch rule is exercised both by injection —
+the same two adapters in both orders, which is what makes "the first DXGI
+enumerates" a rule a test can break — and by the real report.
 
 The half that cannot be tested by injection is the session probe, because its
 whole point is what a real driver says. Those tests live beside the backends —

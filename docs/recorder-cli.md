@@ -779,6 +779,25 @@ choose" — rather than as a numbered entry in the ranking, so that nothing list
 as something "Automatic would choose" is a thing it would not
 ([#175](https://github.com/wildware-uk/clipped/issues/175)).
 
+The same goes for an encoder that is on an adapter the frames will not be
+captured on. On a machine with two vendors' adapters — a discrete card beside an
+integrated part — capture creates its Direct3D device on the default adapter,
+and the other vendor's encoder refuses a device that is not its own. Such an
+encoder reads *present, and not usable for recording here*, with a line under it
+naming the card the frames will be captured on
+([#443](https://github.com/wildware-uk/clipped/issues/443)):
+
+```text
+  AMD AMF — present, and not usable for recording here: frames are captured on the NVIDIA adapter
+    on AMD Radeon(TM) Graphics
+    the capture adapter is NVIDIA GeForce RTX 4090
+    measured: ...
+```
+
+Its codec table is still printed, and `--refresh` still measures its limits: the
+hardware is real, and the capability probe opens its session on a device of its
+own rather than on capture's.
+
 | Option | Default | Notes |
 | --- | --- | --- |
 | `--refresh` | off | Ignore the cached report, ask the machine again — including the encoders themselves — and store the new answer |

@@ -261,6 +261,39 @@ pub(crate) fn encoding_adapter(adapters: &[Adapter], vendor: Vendor) -> Option<&
         .max_by_key(|adapter| adapter.dedicated_video_memory())
 }
 
+/// The adapter a recording's frames will be captured on.
+///
+/// **This is inferred, not measured, and the inference is documented rather than
+/// guessed.** `crates/capture/src/windows/device.rs` creates its Direct3D 11
+/// device by calling `D3D11CreateDevice` with no adapter and
+/// `D3D_DRIVER_TYPE_HARDWARE`, and Microsoft documents that argument as: pass
+/// `NULL` "to use the default adapter, which is the first adapter that is
+/// enumerated by `IDXGIFactory1::EnumAdapters`". `crate::windows::dxgi::adapters`
+/// enumerates with that same call and keeps its order, so the first entry that
+/// could host a hardware encoder is the adapter capture will land on.
+///
+/// Why the answer matters at all: an encoder backend is handed the device
+/// *capture* created, and every vendor runtime here refuses a device belonging
+/// to another vendor's adapter — AMF answers `AMF_INVALID_ARG` from
+/// `AMFContext::InitDX11`, and Quick Sync and NVENC have their own refusals. So
+/// on a machine with two vendors' adapters, an encoder that is present, whose
+/// runtime loads and whose transforms Windows lists can still be one no
+/// recording can use ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
+///
+/// Software rasterisers are skipped for the same reason they are skipped
+/// everywhere else here: `D3D_DRIVER_TYPE_HARDWARE` will not create a device on
+/// one, so capture cannot be there either.
+///
+/// [`crate::windows::dxgi`] holds the test that checks this inference against
+/// the machine it runs on, by creating the device capture creates and asking
+/// which adapter it landed on.
+#[must_use]
+pub(crate) fn capture_adapter(adapters: &[Adapter]) -> Option<&Adapter> {
+    adapters
+        .iter()
+        .find(|adapter| adapter.can_host_hardware_encoder())
+}
+
 impl fmt::Display for Adapter {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} ({})", self.description, self.kind)?;

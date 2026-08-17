@@ -99,7 +99,7 @@ use core::time::Duration;
 use std::collections::VecDeque;
 
 use crate::backend::VideoEncoder;
-use crate::codec::{Codec, EncoderKind, Resolution};
+use crate::codec::{Codec, EncoderKind, Resolution, Vendor};
 use crate::config::EncoderConfig;
 use crate::error::{EncodeContext, EncodeError, EncodeErrorKind};
 use crate::frame::{DeviceKind, GraphicsDevice, SourceFrame, SurfaceKind};
@@ -235,6 +235,30 @@ impl NvencEncoder {
                 supported: settings::SUPPORTED_FORMATS,
             }));
         }
+
+        // After every check that is about the *configuration* and before the
+        // first that is about this machine, which is where AMF and Quick Sync
+        // put theirs: a caller asking for something the backend cannot encode
+        // gets that answer whatever GPU it holds.
+        //
+        // NVENC is not exempt from the mismatch issue #443 was raised for, and
+        // it was the one backend that did not say so. Without this,
+        // `NvEncOpenEncodeSessionEx` is left to refuse the device, and the
+        // statuses it has for that — `NV_ENC_ERR_UNSUPPORTED_DEVICE` and
+        // `NV_ENC_ERR_NO_ENCODE_DEVICE` — name no adapter, which is the same
+        // shape of unreadable answer AMF's measured `AMF_INVALID_ARG` gave.
+        // **Which of the two arrives here has not been measured**, and this
+        // refusal is what makes that not matter.
+        //
+        // The laptop that makes it reachable is the mirror of the machine in
+        // that issue: a discrete NVIDIA card with the integrated adapter as the
+        // default one, so capture lands on Intel or AMD and NVENC is handed it.
+        //
+        // SAFETY: the handle has just been checked non-null, and this
+        // function's caller guarantees it is a live `ID3D11Device` it owns.
+        unsafe {
+            crate::windows::dxgi::require_adapter_vendor(device, Vendor::Nvidia, "NVENC", &fail)
+        }?;
 
         let runtime = api::NvencRuntime::load().map_err(|failure| {
             fail(match failure {

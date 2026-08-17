@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::adapter::{Adapter, AdapterId};
 use crate::cache::{CacheState, CapabilityCache, HardwareSignature};
 use crate::claim::Claim;
-use crate::codec::{Codec, EncoderKind, Resolution};
+use crate::codec::{Codec, EncoderKind, Resolution, Vendor};
 use crate::probe::{
     EncoderLimits, HardwareEncoder, ProbeError, Probing, RuntimeObservation, RuntimeOutcome,
     SystemFacts, SystemProbe,
@@ -61,15 +61,54 @@ pub enum Availability {
     /// Present and usable, as far as anything short of opening a session can
     /// tell.
     Available,
+    /// The hardware is here and working, and it is on an adapter no recording
+    /// made on this machine will hand it a frame from.
+    ///
+    /// A machine with a discrete NVIDIA card and integrated AMD graphics — the
+    /// ordinary gaming laptop — has an AMD encoder whose runtime loads and whose
+    /// transforms Windows lists, and `--encoder amf` on it cannot open a
+    /// session at all: capture creates its Direct3D device on the default
+    /// adapter, and every vendor runtime here refuses a device belonging to
+    /// somebody else's silicon
+    /// ([issue #443](https://github.com/wildware-uk/clipped/issues/443)).
+    ///
+    /// Deliberately neither [`Available`](Self::Available) nor
+    /// [`Unavailable`](Self::Unavailable). It is not available: no recording
+    /// can use it, so [`is_available`](Self::is_available) is `false` and
+    /// [`crate::recommend`] will not offer it as a choice. It is not
+    /// unavailable either: the encoder is real, the capability probe opens a
+    /// session on it and measures its limits, and blanking those out would
+    /// throw away a true answer about the machine to make a sentence simpler.
+    /// [`is_present`](Self::is_present) is the question that separates the two.
+    OnAnotherAdapter {
+        /// Which vendor's adapter capture will create its device on. Named
+        /// rather than identified, because the reason this encoder is out is
+        /// that the vendors differ, not that the identifiers do.
+        capture: Vendor,
+    },
     /// Not usable, for this reason.
     Unavailable(Unavailable),
 }
 
 impl Availability {
-    /// Whether the encoder is available.
+    /// Whether the encoder can be used for a recording on this machine.
     #[must_use]
     pub const fn is_available(self) -> bool {
         matches!(self, Self::Available)
+    }
+
+    /// Whether the hardware is here at all, whatever a recording could do with
+    /// it.
+    ///
+    /// The question a report asks before printing an encoder's limits, and
+    /// before counting it towards "is there a hardware encoder to ask?": an
+    /// encoder on the wrong adapter still has limits, and a capability probe
+    /// still measures them, because that probe creates its own device on the
+    /// encoder's adapter rather than borrowing capture's
+    /// (`crate::windows::device`).
+    #[must_use]
+    pub const fn is_present(self) -> bool {
+        !matches!(self, Self::Unavailable(_))
     }
 }
 
@@ -77,6 +116,13 @@ impl fmt::Display for Availability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Available => formatter.write_str("available"),
+            // Never the word "available" on its own line: a reader scanning a
+            // column of them must not take this for one that records.
+            Self::OnAnotherAdapter { capture } => write!(
+                formatter,
+                "present, and not usable for recording here: frames are captured on the \
+                 {capture} adapter"
+            ),
             Self::Unavailable(reason) => write!(formatter, "unavailable: {reason}"),
         }
     }
@@ -335,15 +381,38 @@ impl CapabilityReport {
         self.adapters.iter().find(|adapter| adapter.id() == id)
     }
 
-    /// Whether any hardware encoder is available.
+    /// The adapter a recording made on this machine will capture its frames on.
+    ///
+    /// The reason an encoder can be reported as
+    /// [`Availability::OnAnotherAdapter`], and the answer anything showing that
+    /// to a user needs in order to say which adapter it means. Inferred rather
+    /// than measured — [`crate::adapter::capture_adapter`] states the inference
+    /// and what it rests on — and read off this report rather than derived a
+    /// second time by each caller, so there is one answer to be right or wrong
+    /// (AGENTS.md section 55).
+    ///
+    /// [`None`] on a machine with no adapter that could host a hardware
+    /// encoder, where there is nothing for a recording to capture on either.
+    #[must_use]
+    pub fn capture_adapter(&self) -> Option<&Adapter> {
+        crate::adapter::capture_adapter(&self.adapters)
+    }
+
+    /// Whether this machine has a hardware encoder at all.
     ///
     /// `false` is an ordinary answer: the software encoder is still there, and
     /// [`recommend`](crate::recommend) still has something to return.
+    ///
+    /// [`Availability::is_present`] rather than
+    /// [`is_available`](Availability::is_available), because this asks about the
+    /// machine rather than about a recording: an encoder on an adapter capture
+    /// will not be on is still hardware here, still has limits, and is still
+    /// something `capabilities --refresh` opens a session on and measures.
     #[must_use]
     pub fn has_hardware_encoder(&self) -> bool {
         self.encoders
             .iter()
-            .any(|report| report.kind.is_hardware() && report.availability.is_available())
+            .any(|report| report.kind.is_hardware() && report.availability.is_present())
     }
 
     /// Whether an available hardware encoder is still quoting published limits
@@ -360,7 +429,7 @@ impl CapabilityReport {
     pub fn has_unasked_encoder(&self) -> bool {
         self.encoders
             .iter()
-            .filter(|report| report.kind.is_hardware() && report.availability.is_available())
+            .filter(|report| report.kind.is_hardware() && report.availability.is_present())
             .any(|report| !report.was_asked() && report.has_inferred_limit())
     }
 
@@ -534,8 +603,18 @@ fn detect_encoder(kind: EncoderKind, facts: &SystemFacts) -> EncoderReport {
             .map(|limits| Signal::SessionLimits((*limits).codec())),
     );
 
-    let availability = availability(&adapters, &runtimes, &hardware_encoders);
-    let codecs = if availability.is_available() {
+    let availability = availability(
+        vendor,
+        &adapters,
+        &runtimes,
+        &hardware_encoders,
+        crate::adapter::capture_adapter(facts.adapters()),
+    );
+    // `is_present` rather than `is_available`: an encoder on an adapter no
+    // recording will reach still has limits, and a `--refresh` still measures
+    // them on a device of its own. Blanking the table would hide a true answer
+    // about the machine behind a fact about this recording path.
+    let codecs = if availability.is_present() {
         codec_support(kind, &hardware_encoders, &measured)
     } else {
         Vec::new()
@@ -569,24 +648,50 @@ fn detect_encoder(kind: EncoderKind, facts: &SystemFacts) -> EncoderReport {
 /// The transforms are still a measurement, of a different question — which
 /// codecs the installed driver registers an encoder for — and they are kept as
 /// [`Signal`]s and used for [`codec_support`] whether or not the runtime loads.
+///
+/// # And then: whose adapter will the frames be on?
+///
+/// Everything above is about the encoder. The last question is about the
+/// *recording*, and it is the one nothing here used to ask: a backend is handed
+/// the Direct3D device capture created, and a runtime given a device from
+/// another vendor's adapter refuses it. So an encoder that passes every check
+/// above can still be one no recording on this machine can open
+/// ([issue #443](https://github.com/wildware-uk/clipped/issues/443)), and
+/// reporting it as available would promise a capability the recording would not
+/// have — the same mistake the paragraph above refuses to make about the Media
+/// Foundation transforms.
+///
+/// It is asked last because it is the least fundamental. A user whose AMD
+/// runtime is not installed should be told that, not told about adapters.
 fn availability(
+    vendor: Vendor,
     adapters: &[&Adapter],
     runtimes: &[&RuntimeObservation],
     hardware_encoders: &[&HardwareEncoder],
+    capture: Option<&Adapter>,
 ) -> Availability {
     if adapters.is_empty() && hardware_encoders.is_empty() {
         return Availability::Unavailable(Unavailable::NoVendorAdapter);
     }
-    if runtimes.iter().any(|observation| observation.loaded()) {
-        return Availability::Available;
+    if !runtimes.iter().any(|observation| observation.loaded()) {
+        if runtimes
+            .iter()
+            .any(|observation| matches!(observation.outcome(), RuntimeOutcome::FailedToLoad { .. }))
+        {
+            return Availability::Unavailable(Unavailable::RuntimeFailedToLoad);
+        }
+        return Availability::Unavailable(Unavailable::RuntimeNotInstalled);
     }
-    if runtimes
-        .iter()
-        .any(|observation| matches!(observation.outcome(), RuntimeOutcome::FailedToLoad { .. }))
-    {
-        return Availability::Unavailable(Unavailable::RuntimeFailedToLoad);
+
+    match capture {
+        // A machine whose adapters could not be enumerated at all says nothing
+        // about where capture will be, and inventing a mismatch from an absence
+        // would make a report worse rather than better.
+        Some(adapter) if adapter.vendor() != vendor => Availability::OnAnotherAdapter {
+            capture: adapter.vendor(),
+        },
+        _ => Availability::Available,
     }
-    Availability::Unavailable(Unavailable::RuntimeNotInstalled)
 }
 
 /// Builds the per-codec table: measured where something answered, from the
@@ -1670,5 +1775,176 @@ mod tests {
         // The software encoder's ceiling is the CPU, which nothing here
         // measures, so there is no number to give.
         assert_eq!(h264.max_framerate_at(Resolution::HD_1080P), Claim::Unknown);
+    }
+
+    // -----------------------------------------------------------------------
+    // Which adapter the frames will be on (issue #443)
+    // -----------------------------------------------------------------------
+
+    /// Both vendors' runtimes loaded, which is the state of the machine issue
+    /// #443 was reported from.
+    fn two_vendor_machine(adapters: Vec<Adapter>) -> SystemFacts {
+        SystemFacts::new(
+            adapters,
+            EncoderObservations::none()
+                .with_runtime(nvenc_runtime(RuntimeOutcome::Loaded))
+                .with_runtime(RuntimeObservation::new(
+                    EncoderKind::Amf,
+                    "amfrt64.dll",
+                    RuntimeOutcome::Loaded,
+                ))
+                .with_hardware_encoder(HardwareEncoder::new(
+                    Vendor::Amd,
+                    Codec::Hevc,
+                    "AMDh265Encoder",
+                )),
+        )
+    }
+
+    #[test]
+    fn an_encoder_on_an_adapter_frames_are_not_captured_on_is_not_called_available() {
+        // The machine in issue #443: an RTX 4090 enumerated first and integrated
+        // AMD graphics behind it. AMF's runtime loads, Windows lists
+        // `AMDh265Encoder`, and `--encoder amf` cannot open a session at all,
+        // because capture creates its device on the first adapter and AMF
+        // refuses a device that is not AMD's. A report calling that "available"
+        // promises a capability no recording on this machine has.
+        let report = detect(&two_vendor_machine(vec![nvidia_card(), integrated_amd()]));
+
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Amf)
+                .expect("every family is reported")
+                .availability(),
+            Availability::OnAnotherAdapter {
+                capture: Vendor::Nvidia
+            }
+        );
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Nvenc)
+                .expect("every family is reported")
+                .availability(),
+            Availability::Available,
+            "the encoder that is on the capture adapter is unaffected"
+        );
+    }
+
+    #[test]
+    fn the_same_two_adapters_the_other_way_round_reverse_the_answer() {
+        // The same two cards, enumerated in the other order — a laptop whose
+        // integrated part is the default adapter, which is the configuration
+        // issue #443 says would break NVENC. Nothing about either adapter has
+        // changed except which one capture will land on, and that alone has to
+        // move the answer.
+        //
+        // This is the test that fails if `capture_adapter` stops meaning "the
+        // first DXGI enumerates": one that picked the most video memory, or the
+        // vendor's own adapter, gives the same answer for both orders.
+        let report = detect(&two_vendor_machine(vec![integrated_amd(), nvidia_card()]));
+
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Amf)
+                .expect("every family is reported")
+                .availability(),
+            Availability::Available
+        );
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Nvenc)
+                .expect("every family is reported")
+                .availability(),
+            Availability::OnAnotherAdapter {
+                capture: Vendor::Amd
+            }
+        );
+    }
+
+    #[test]
+    fn an_encoder_on_another_adapter_keeps_the_codecs_it_was_measured_to_have() {
+        // Not `Unavailable`, and this is the difference: the AMD encoder is
+        // real, `capabilities --refresh` opens a session on it — on a device of
+        // its own, made on the AMD adapter (`crate::windows::device`) — and
+        // blanking the table would throw away a true answer about the machine
+        // to make one sentence simpler.
+        let report = detect(&two_vendor_machine(vec![nvidia_card(), integrated_amd()]));
+        let amf = report.encoder(EncoderKind::Amf).expect("AMF is reported");
+
+        assert!(
+            amf.availability().is_present(),
+            "the hardware is here; it is the recording that cannot reach it"
+        );
+        assert!(!amf.availability().is_available());
+        assert_eq!(
+            amf.codec(Codec::Hevc).map(CodecSupport::supported),
+            Some(Claim::Measured(true)),
+            "Windows listed an AMD HEVC encoder and the report must still say so: {:?}",
+            amf.codecs()
+        );
+        assert!(
+            report.has_hardware_encoder(),
+            "this machine has hardware encoders, whichever of them a recording can use"
+        );
+    }
+
+    #[test]
+    fn a_machine_with_one_vendor_is_not_affected_by_the_rule() {
+        // The overwhelmingly common machine. Nothing here may change for it, or
+        // the rule costs every single-GPU user their hardware encoder.
+        let report = detect(&SystemFacts::new(
+            vec![nvidia_card(), basic_render_driver()],
+            EncoderObservations::none().with_runtime(nvenc_runtime(RuntimeOutcome::Loaded)),
+        ));
+
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Nvenc)
+                .expect("NVENC is reported")
+                .availability(),
+            Availability::Available,
+            "a software rasteriser behind the card must not be mistaken for the capture adapter"
+        );
+    }
+
+    #[test]
+    fn a_missing_runtime_is_reported_before_the_adapter_it_is_on() {
+        // Order matters in the answer a user acts on. Someone whose AMD driver
+        // has no `amfrt64.dll` needs to be told that, not told about adapters —
+        // installing the runtime is something they can do, and the adapter
+        // arrangement is not.
+        let report = detect(&SystemFacts::new(
+            vec![nvidia_card(), integrated_amd()],
+            EncoderObservations::none().with_runtime(nvenc_runtime(RuntimeOutcome::Loaded)),
+        ));
+
+        assert_eq!(
+            report
+                .encoder(EncoderKind::Amf)
+                .expect("AMF is reported")
+                .availability(),
+            Availability::Unavailable(Unavailable::RuntimeNotInstalled)
+        );
+    }
+
+    #[test]
+    fn the_qualification_never_reads_as_the_word_available() {
+        // A reader scans a column of these. "available, but …" in a list of
+        // "available" and "unavailable: …" is read as the first of the three,
+        // which is exactly the misreading issue #443's second criterion is
+        // about.
+        let said = Availability::OnAnotherAdapter {
+            capture: Vendor::Nvidia,
+        }
+        .to_string();
+
+        assert!(
+            !said.starts_with("available"),
+            "the qualification must not open with the word it qualifies: {said}"
+        );
+        assert!(
+            said.contains("NVIDIA"),
+            "it has to name the adapter frames will be captured on: {said}"
+        );
     }
 }
