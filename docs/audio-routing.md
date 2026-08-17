@@ -52,13 +52,14 @@ section 21, and the decision that shapes the whole subsystem is
 
 ```rust
 let mut capture = SystemAudioCapture::open()?;
-loop {
+while recording {
     match capture.read(Duration::from_millis(100))? {
         Capture::Samples(audio) => { /* audio.samples(), audio.timestamp() */ }
         Capture::Idle => {}
         Capture::FormatChanged(format) => { /* see "Device changes" */ }
     }
 }
+capture.finish(); // then read until `NotOpen`: see "Ending a capture".
 ```
 
 Every buffer carries interleaved `f32` samples, the format they are in, the
@@ -279,10 +280,13 @@ let mut capture = MicrophoneCapture::open(&MicrophoneSelection::SystemDefault)?;
 // ... or MicrophoneSelection::device(id, name) for one the user chose.
 ```
 
-`read`, `format`, `stats` and `close` behave exactly as they do for system
-audio, and the buffers are the same contiguous, timestamped `f32` on the same
-clock, so a microphone track can be compared with a video frame or with the
-system audio track by subtracting timestamps.
+`read`, `format`, `stats`, `finish` and `close` behave exactly as they do for
+system audio, and the buffers are the same contiguous, timestamped `f32` on the
+same clock, so a microphone track can be compared with a video frame or with the
+system audio track by subtracting timestamps. Ending one is
+[the same two calls with a read loop between them](#ending-a-capture), and here
+it is the difference between keeping and losing the last words somebody said
+before they pressed stop.
 
 Four things about a microphone are genuinely different.
 
@@ -543,16 +547,11 @@ reads 0.00003 — about 1,900 times apart, against a rejection threshold of eigh
 by hand: it opens the pair and prints a peak level per side, so a game tone and a
 browser tone should raise one column each and never both at once.
 
-**Ending a capture drains it.** The audio engine holds up to 200 ms of captured
-audio; closing a capture throws that away, which is the last fraction of a
-second before somebody stopped recording — often the part they pressed the key
-for. `finish()` therefore leaves the capture readable and stops it looking
-forwards: the queued packets are handed over on the same timeline as everything
-before them, and then the capture closes itself and `read` reports `NotOpen`.
-The client is deliberately **not** stopped first. Measured on Windows 11 build
-26200, a process-scoped stream stopped after a 150 ms stall reported no queued
-packets at all, where the same stream drained before stopping produced the
-150 ms.
+**Ending a capture drains it**, here and on the other two — see
+[Ending a capture](#ending-a-capture). The client is deliberately **not**
+stopped first: measured on Windows 11 build 26200, a process-scoped stream
+stopped after a 150 ms stall reported no queued packets at all, where the same
+stream drained before stopping produced the 150 ms.
 
 **It may not be available at all.** Process loopback is documented from Windows
 build 20348, which no shipping Windows 10 release reaches, and
@@ -889,6 +888,53 @@ Event-driven loopback is used where the audio engine accepts it, which it does
 on Windows 11 build 26200. Where it does not, the capture falls back to looking
 at the packet queue every 5 ms and says so in the log.
 
+## Ending a capture
+
+All three captures end the same way, and it is **two calls with a read loop
+between them**:
+
+```rust
+capture.finish();
+loop {
+    match capture.read(Duration::from_millis(100)) {
+        Ok(Capture::Samples(audio)) => { /* the tail, on the same timeline */ }
+        // The drain has handed over everything and closed the capture itself.
+        Ok(Capture::Idle | Capture::FormatChanged(_)) => break,
+        Err(AudioError::NotOpen) => break,
+        Err(error) => { /* a drain does not fail */ }
+    }
+}
+capture.close();
+```
+
+`close()` alone throws away whatever the audio engine is still holding, which is
+up to the 200 ms it buffers for the stream — the last fraction of a second
+before somebody pressed stop, which is the part they were watching. `finish()`
+closes nothing: it stops the capture looking forwards, so the queued packets
+come back through `read` on the same timeline as everything before them, and
+once they run out the capture closes itself and the next read reports
+`NotOpen`.
+
+**The read loop is not optional, and leaving it out is silent.** A caller that
+calls `finish()` and then `close()` has thrown the audio away exactly as a bare
+close would, and nothing says so — no error, no log line, only a track that ends
+early. `clipped-session` did precisely that for as long as `finish` existed, so
+every recording lost its tail on every track while this page said otherwise
+([issue #320](https://github.com/wildware-uk/clipped/issues/320)).
+
+A drain **waits for nothing**. It reads what is queued and stops; nothing is
+reopened, no silence is synthesised for time passing, and a device that has been
+unplugged ends it on the first look. That matters most for a microphone, which
+Windows shows an in-use indicator for as long as anything holds.
+
+What that is worth, measured on Windows 11 Pro build 26200:
+
+| Measurement | Result |
+| --- | --- |
+| A microphone capture finished after a 500 ms stall | 9,600 frames — 0.2000 s, the whole of the engine's buffer — every one of them from the device, none synthesised, in 13 ms of wall clock |
+| A system-audio capture finished after a 500 ms stall, with a 997 Hz tone playing | 0.200 s of endpoint audio in 4 ms; 997 Hz measures 0.040 in it against 0.000 of background, so what came back is the sound that was playing rather than silence of the right length |
+| A whole recording of a window, stopped normally (`tests/audio/track_isolation.rs`) | its tracks end 0.005–0.008 s apart, against 0.007–0.009 s on a build that drained nothing — the engine is holding almost nothing when the reader has been keeping up, and the 200 ms above is what a reader that fell behind leaves |
+
 ## Ownership
 
 Every native resource has one owner and one release point (AGENTS.md
@@ -1040,7 +1086,18 @@ cargo test -p clipped-audio
   endpoint change not ending the recording; and an endpoint that fails as soon
   as it opens being backed off rather than reopened in a loop — that one reads
   on a second thread, because the regression it guards against is a `read` that
-  never returns and a hung test says nothing.
+  never returns and a hung test says nothing. `tests/system_audio.rs` adds the
+  one that needs a sound to measure: a capture finished after a 500 ms stall,
+  with a 997 Hz tone playing, has to hand over that tone — found by sweeping the
+  spectrum rather than assumed — rather than silence of the right length, and
+  has to close itself while doing it (issue #320).
+- **A drained microphone**, in `src/windows/microphone.rs`: a capture finished
+  after a 500 ms stall hands over the audio the engine was holding, all of it
+  from the device rather than synthesised, on the same timeline as the
+  recording, closes itself, and takes long enough to be measured in milliseconds
+  — which is the acceptance criterion about Windows' microphone-in-use
+  indicator, since a drain that waited for a device that had gone would hold it
+  open (issue #320).
 - **The real microphone**, in `src/windows/microphone.rs`: a contiguous timeline
   over a second and a half of real capture, with synthesised silence asserted to
   be zero; a device change not ending the recording; a device that stops

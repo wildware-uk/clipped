@@ -230,7 +230,7 @@ applications and asks what landed on each of its tracks:
 
 | Test                  | What it decides                                                                                                                                                                                                                                                    |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `track_isolation.rs`  | That Windows really partitions the machine's audio: a tone played by the game's process tree is on the game's track and not on the complement's, a tone played by another process is on the complement's and not on the game's, and the compatibility mix holds both |
+| `track_isolation.rs`  | That Windows really partitions the machine's audio: a tone played by the game's process tree is on the game's track and not on the complement's, a tone played by another process is on the complement's and not on the game's, and the compatibility mix holds both. Also **where the tracks end** — within a packet of the picture, which nothing had measured against a produced recording before [#320](https://github.com/wildware-uk/clipped/issues/320) |
 
 `test-apps/process-tree-audio` has one of its own,
 `tests/process_loopback_isolation.rs`, which asks a narrower question with no

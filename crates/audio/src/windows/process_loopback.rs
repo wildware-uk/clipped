@@ -1196,7 +1196,7 @@ impl ProcessLoopbackCapture {
         self.capture.read(timeout)
     }
 
-    /// Stops capturing and hands over what the audio engine still holds.
+    /// Ends the capture by handing over what the audio engine still holds.
     ///
     /// The audio engine keeps up to 200 ms of captured audio for this stream. A
     /// capture that is simply closed loses it, which is the last fraction of a
@@ -1204,6 +1204,17 @@ impl ProcessLoopbackCapture {
     /// the key for. After this, [`read`](Self::read) returns the packets that
     /// were queued and then reports [`AudioError::NotOpen`]; nothing is
     /// reopened and no further silence is synthesised.
+    ///
+    /// **This does not close anything by itself**, and the reading is not
+    /// optional. A caller that calls this and then [`close`](Self::close)
+    /// without reading in between has thrown the audio away exactly as a bare
+    /// close would — which is what `clipped-session` did for as long as this
+    /// method existed, so every track of every recording lost its tail while
+    /// the one capture that could drain looked as though it did
+    /// ([issue #320](https://github.com/wildware-uk/clipped/issues/320)).
+    ///
+    /// It never waits for the client: a drain reads what is queued and stops,
+    /// so a game that has exited ends it on the first look.
     pub fn finish(&mut self) {
         self.capture.begin_drain();
     }

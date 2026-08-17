@@ -329,11 +329,42 @@ impl MicrophoneCapture {
         self.endpoint.read(timeout)
     }
 
-    /// Stops capturing and releases the device.
+    /// Ends the capture by handing over what the audio engine still holds.
     ///
-    /// Idempotent, and does the same thing as dropping the capture. Releasing
-    /// the microphone matters more than releasing a speaker: Windows shows a
-    /// microphone-in-use indicator for as long as any application holds one.
+    /// The audio engine keeps up to 200 ms of captured audio nobody has asked
+    /// for. A capture that is simply closed loses it, which is the last
+    /// fraction of a second of somebody speaking before they stopped recording
+    /// ([issue #320](https://github.com/wildware-uk/clipped/issues/320)).
+    ///
+    /// **This does not close anything by itself.** It leaves the capture
+    /// readable: [`read`](Self::read) then hands over the packets that were
+    /// queued, in order and on the same timeline as everything before them, and
+    /// once they run out the capture closes itself and the next read reports
+    /// [`AudioError::NotOpen`]. A caller that calls this and then
+    /// [`close`](Self::close) without reading in between has thrown the audio
+    /// away exactly as before.
+    ///
+    /// **It never waits for the device**, which matters more here than
+    /// anywhere: nothing is reopened during a drain and no silence is
+    /// synthesised for time passing, so a microphone that has been unplugged
+    /// ends the drain on the first look rather than holding the device — and
+    /// the indicator Windows shows beside it — open while a recording tries to
+    /// finish.
+    ///
+    /// Idempotent, and pointless after [`close`](Self::close): a closed capture
+    /// has already let go of the device and this cannot get it back.
+    pub fn finish(&mut self) {
+        self.endpoint.begin_drain();
+    }
+
+    /// Stops capturing and releases the device, discarding anything not yet
+    /// collected.
+    ///
+    /// [`finish`](Self::finish) is the ordinary way to end a recording; this is
+    /// for a caller that wants the device gone now. Idempotent, and does the
+    /// same thing as dropping the capture. Releasing the microphone matters
+    /// more than releasing a speaker: Windows shows a microphone-in-use
+    /// indicator for as long as any application holds one.
     pub fn close(&mut self) {
         self.endpoint.close();
     }
@@ -341,6 +372,7 @@ impl MicrophoneCapture {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
     use std::time::Instant;
 
     use windows::Win32::Foundation::E_FAIL;
@@ -349,6 +381,7 @@ mod tests {
     use super::*;
     use crate::buffer::SampleOrigin;
     use crate::windows::endpoint_capture::testing::{logged, skipped, suppressed, Contiguity};
+    use crate::windows::endpoint_capture::BUFFER_DURATION;
     use crate::windows::notifications::EndpointChange;
     use crate::windows::SystemAudioCapture;
 
@@ -766,6 +799,162 @@ mod tests {
             system.stats().endpoint_changes,
             0,
             "system audio must not reopen because a microphone is being captured"
+        );
+    }
+
+    /// How long the consumer stops reading for before it finishes the capture.
+    ///
+    /// Longer than the [`BUFFER_DURATION`] the engine holds, so that what the
+    /// drain has to produce is bounded from below by something the engine
+    /// cannot have discarded.
+    const STALL: Duration = Duration::from_millis(500);
+
+    /// The most a drain can recover: what the audio engine holds.
+    ///
+    /// [`BUFFER_DURATION`] is asked for in hundreds of nanoseconds, which is the
+    /// unit `IAudioClient::Initialize` takes. Everything a reader was away for
+    /// beyond this the engine has already discarded, and no drain can get it
+    /// back — the track covers that period as synthesised silence instead, which
+    /// is what `a_consumer_that_stalls_does_not_make_this_process_buffer_without_limit`
+    /// is about.
+    const ENGINE_BACKLOG: Duration = Duration::from_nanos(BUFFER_DURATION as u64 * 100);
+
+    /// How long a drain may take in wall-clock time.
+    ///
+    /// A drain reads what the engine has queued and stops; it waits for nothing.
+    /// This is the assertion behind issue #320's third acceptance criterion —
+    /// that a recording releases the microphone as promptly as it does today,
+    /// because Windows shows an in-use indicator for as long as anything holds
+    /// one. Generous by two orders of magnitude against the ~10 ms this takes,
+    /// so what it fails on is a drain that has started *waiting* for something
+    /// rather than one that had a busy afternoon.
+    const PROMPT: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn stopping_a_microphone_capture_hands_over_the_audio_the_engine_was_still_holding() {
+        // [Issue #320](https://github.com/wildware-uk/clipped/issues/320). The
+        // audio engine holds captured audio nobody has collected; a capture that
+        // is simply closed throws it away, which is the last fraction of a
+        // second of somebody speaking before they stopped recording.
+        //
+        // The consumer stops reading for long enough to leave a real backlog,
+        // and the drain then has to produce it. Nothing here looks at what was
+        // said: the counts, the timestamps and the clock are the assertion.
+        let Some(mut capture) = open() else { return };
+        let format = capture.format();
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(300) {
+            let _ = capture.read(Duration::from_millis(100));
+        }
+
+        // Measured, not assumed: `sleep` guarantees only that it does not return
+        // early, and the engine goes on capturing for however long this thread
+        // is really away.
+        let stall_began = Instant::now();
+        std::thread::sleep(STALL);
+        let stalled = stall_began.elapsed();
+
+        let before = capture.stats().frames;
+        capture.finish();
+
+        let drain_began = Instant::now();
+        let mut timeline = Contiguity::new(format);
+        let mut from_the_device = 0u64;
+        // Bounded, so that a `finish` which did nothing at all fails the
+        // assertions below rather than hanging the suite: a capture that is not
+        // draining goes on reading its device for ever.
+        let give_up_at = Instant::now() + Duration::from_secs(2);
+        let mut ended_itself = false;
+        while Instant::now() < give_up_at {
+            match capture.read(Duration::from_millis(100)) {
+                Ok(Capture::Samples(samples)) => {
+                    if samples.origin() == SampleOrigin::Endpoint {
+                        from_the_device += samples.frames() as u64;
+                    }
+                    timeline.accept(&samples);
+                }
+                // The drain has handed over everything and closed itself.
+                Ok(Capture::Idle | Capture::FormatChanged(_)) | Err(AudioError::NotOpen) => {
+                    ended_itself = true;
+                    break;
+                }
+                Err(error) => panic!("a drain does not fail: {error}"),
+            }
+        }
+        let drain_took = drain_began.elapsed();
+
+        let seconds = timeline.seconds();
+        let recovered = from_the_device as f64 / f64::from(format.sample_rate().get());
+        // What the engine could still have been holding: the reader was away
+        // for `stalled`, and the engine keeps at most `ENGINE_BACKLOG` of what
+        // happened while it was. A drain that hands over less than this has lost
+        // audio the engine still had.
+        //
+        // One-sided, and against the *smaller* of the two, because both ends are
+        // properties of the machine rather than of this crate: an engine granted
+        // a larger buffer than `BUFFER_DURATION` asked for hands over more, and
+        // a stall shorter than the buffer leaves less than a buffer to hand
+        // over. Measured on Windows 11 build 26200, five runs of this test each
+        // recovered exactly 9,600 frames — 0.2000 s, the whole of
+        // `BUFFER_DURATION` — from a 0.500 s stall, with no synthesised silence
+        // at all.
+        let recoverable = stalled.as_secs_f64().min(ENGINE_BACKLOG.as_secs_f64());
+        // Two device periods. The engine hands over whole packets, so a drain
+        // can end a packet either side of the figure above; it is not room for a
+        // drain that lost a tenth of a second.
+        let slack = 0.02;
+
+        // First, because it is the difference between a drain and an ordinary
+        // read, and every measurement below is meaningless without it: a drain
+        // ends by itself, at the last sample that exists. A `finish` that did
+        // nothing leaves a capture that goes on reading the live device, and
+        // gets here having read two seconds of it.
+        assert!(
+            ended_itself,
+            "a drain ends by handing over what it has and closing the capture; this one was \
+             still reading the device {drain_took:.3?} later, so finishing it began no drain"
+        );
+        assert!(
+            timeline.frames > 0,
+            "a {stalled:.3?} stall leaves audio in the engine, and finishing the capture has to \
+             hand it over rather than lose it"
+        );
+        // Not merely *a* length: the audio the engine was holding. A drain that
+        // had lost the packets and produced silence covering the same period
+        // would be exactly the right length and would contain nothing.
+        assert!(
+            recovered >= recoverable - slack,
+            "the engine was holding about {recoverable:.3} s when the capture was finished, and \
+             the drain has to hand that over as audio the device captured; it produced \
+             {recovered:.3} s of device audio in {seconds:.3} s of track, so the rest is silence \
+             this crate invented to cover a period the audio is missing from"
+        );
+        assert_eq!(
+            capture.stats().frames - before,
+            timeline.frames,
+            "everything the drain handed over is on the same timeline as the recording"
+        );
+        assert!(
+            matches!(
+                capture.read(Duration::from_millis(10)),
+                Err(AudioError::NotOpen)
+            ),
+            "a capture that has finished draining is closed"
+        );
+        // Issue #320's third acceptance criterion: the device is let go as
+        // promptly as it is without a drain. See `PROMPT`.
+        assert!(
+            drain_took <= PROMPT,
+            "draining took {drain_took:.3?}, which is longer than the {PROMPT:.3?} a drain that \
+             waits for nothing should need; Windows shows a microphone as in use for as long as \
+             this takes"
+        );
+
+        let _ = writeln!(
+            std::io::stderr(),
+            "drained {seconds:.3} s ({from_the_device} frames from the device) after a \
+             {stalled:.3?} stall, in {drain_took:.3?}"
         );
     }
 

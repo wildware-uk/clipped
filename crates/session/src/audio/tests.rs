@@ -33,6 +33,7 @@
 use core::num::{NonZeroU16, NonZeroU32};
 use core::sync::atomic::AtomicBool;
 use std::collections::VecDeque;
+use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -41,7 +42,7 @@ use std::time::Instant;
 use clipped_audio::{AudioTimestamp, CapturedAudio, ChannelMask, SampleFormat, SampleOrigin};
 use clipped_capture::{CaptureTimestamp, MediaTime, SourceClock, SyncState};
 use clipped_media_validation::{
-    require_media_tools, AudioStream, Media, TemporaryDirectory, Tone, VideoStream,
+    require_media_tools, AudioContent, AudioStream, Media, TemporaryDirectory, Tone, VideoStream,
 };
 use clipped_muxer::{MkvWriter, VideoCodec, VideoTrack};
 
@@ -99,21 +100,54 @@ struct ScriptedBuffer {
 struct ScriptedCapture {
     format: AudioFormat,
     ready: VecDeque<ScriptedBuffer>,
+    /// What the audio engine is still holding: handed over only once
+    /// [`AudioCapture::finish`] has been called, and lost entirely by a thread
+    /// that closes without draining.
+    ///
+    /// This is the whole of what a real engine's backlog does to a caller
+    /// (`EndpointCapture::begin_drain`, issue #320), with none of the timing:
+    /// the buffers are already converted and already on the timeline, so what a
+    /// test built on this measures is whether the recording *asks* for them.
+    held: VecDeque<ScriptedBuffer>,
     /// The buffer last handed out, which owns the samples it lends — the same
     /// lifetime a real capture's converted packet has.
     current: Option<ScriptedBuffer>,
     /// Raised when the script has run out, so a test can wait for the thread to
     /// have consumed everything rather than sleeping for a guess.
+    ///
+    /// The *script*, not [`Self::held`]: a source whose engine is holding
+    /// something is exhausted in exactly the sense this flag is used for — it
+    /// has nothing more to give until it is asked to finish — and that is the
+    /// moment a recording is stopped in.
     exhausted: Arc<AtomicBool>,
+    /// Whether [`AudioCapture::finish`] has been called.
+    draining: bool,
+    /// Whether the capture has let go, which a real one does by itself once a
+    /// drain has handed over everything.
+    closed: bool,
 }
 
 impl AudioCapture for ScriptedCapture {
     fn read(&mut self, _timeout: Duration) -> Result<Capture<'_>, AudioError> {
-        self.current = self.ready.pop_front();
+        if self.closed {
+            return Err(AudioError::NotOpen);
+        }
+        self.current = if self.draining {
+            self.held.pop_front()
+        } else {
+            self.ready.pop_front()
+        };
         let Some(buffer) = self.current.as_ref() else {
-            // A script that has run out stands for an endpoint with nothing to
-            // report, which is what a real one returns between packets.
-            self.exhausted.store(true, Ordering::Relaxed);
+            if self.draining {
+                // A drain that has handed over everything closes the capture
+                // itself, which is how a real one tells a caller there is no
+                // more (`EndpointCapture::next_ready`).
+                self.closed = true;
+            } else {
+                // A script that has run out stands for an endpoint with nothing
+                // to report, which is what a real one returns between packets.
+                self.exhausted.store(true, Ordering::Relaxed);
+            }
             return Ok(Capture::Idle);
         };
         let mut audio = CapturedAudio::new(
@@ -128,7 +162,13 @@ impl AudioCapture for ScriptedCapture {
         Ok(Capture::Samples(audio))
     }
 
-    fn close(&mut self) {}
+    fn finish(&mut self) {
+        self.draining = true;
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+    }
 }
 
 /// A source scripted to hand over `buffers`, and the flag raised when it has.
@@ -138,6 +178,17 @@ struct Scripted {
 }
 
 fn scripted(source: AudioSource, channels: u16, buffers: Vec<ScriptedBuffer>) -> Scripted {
+    scripted_holding(source, channels, buffers, Vec::new())
+}
+
+/// [`scripted`], with `held` standing for the audio the engine has captured and
+/// nobody has collected when the recording is stopped.
+fn scripted_holding(
+    source: AudioSource,
+    channels: u16,
+    buffers: Vec<ScriptedBuffer>,
+    held: Vec<ScriptedBuffer>,
+) -> Scripted {
     let exhausted = Arc::new(AtomicBool::new(false));
     Scripted {
         source: OpenSource {
@@ -147,8 +198,11 @@ fn scripted(source: AudioSource, channels: u16, buffers: Vec<ScriptedBuffer>) ->
             capture: Box::new(ScriptedCapture {
                 format: format(channels),
                 ready: buffers.into_iter().collect(),
+                held: held.into_iter().collect(),
                 current: None,
                 exhausted: Arc::clone(&exhausted),
+                draining: false,
+                closed: false,
             }),
         },
         exhausted,
@@ -650,6 +704,169 @@ fn three_sources_produce_three_tracks_with_no_sound_shared_between_them() {
         names,
         vec!["Game", "Other System Audio", "Microphone"],
         "all three sources should have reported, in the model's order"
+    );
+}
+
+/// The sound of the last fraction of a second, and of nothing before it.
+///
+/// A different frequency from the body of the track on purpose. What issue #320
+/// is about is the audio the engine had captured and not handed over when
+/// somebody pressed stop, and a tail carrying the same tone as everything before
+/// it is a tail no measurement can tell from the track simply being shorter. Not
+/// a harmonic of [`SYSTEM_TONE`] — 1760 Hz is its octave, and a quantised sine
+/// puts a little of itself there — and far enough away that a Goertzel window
+/// over one cannot see the other.
+const LAST_MOMENT_TONE: f64 = 1500.0;
+
+/// How long the engine is holding when the recording is stopped.
+///
+/// The 200 ms `EndpointCapture::begin_drain` exists for, which is what a real
+/// engine holds at most.
+const HELD_SECONDS: f64 = 0.2;
+
+/// How long the recording runs, picture and all.
+const RECORDING_SECONDS: f64 = 2.0;
+
+/// How far apart the tracks may end.
+///
+/// One video frame of this fixture is 16.7 ms and one audio buffer is 10 ms, so
+/// 40 ms is "within a packet" with room for the last of each landing on either
+/// side of the other. It is also the bound `synchronised_within` is used with
+/// everywhere else in this file, so a recording that lost its tail fails the
+/// same assertion the rest of the suite already makes rather than a looser one
+/// written for this test.
+const ENDS_WITHIN: Duration = Duration::from_millis(40);
+
+/// How much louder a tone has to be where it belongs than where it does not.
+///
+/// Eight times — about 18 dB — which is `Tone`'s own rejection threshold, so the
+/// tail is held to the same standard the isolation assertions in this file are.
+/// It is written out here because that constant is private to the harness; if
+/// the two ever disagree it is this one that is wrong.
+const REJECTION_RATIO: f64 = 8.0;
+
+#[test]
+fn a_recording_keeps_the_audio_its_engine_was_holding_when_it_was_stopped() {
+    // [Issue #320](https://github.com/wildware-uk/clipped/issues/320). The audio
+    // engine holds up to 200 ms that has been captured and not collected, and a
+    // capture that is simply closed throws it away — the last fraction of a
+    // second before somebody pressed stop, which is the part they were watching.
+    //
+    // The capture here holds back its last 200 ms until it is asked to finish,
+    // which is exactly what a real one does, and the assertions are made against
+    // the file rather than against the timestamps: the tail's own tone has to be
+    // *in* the track, in the last 200 ms of it and not before, and the track has
+    // to end with the picture.
+    //
+    // What makes every one of them fail is removing the `finish` and the reads
+    // that follow it from `pump`. That was the state of this crate until #320:
+    // `ProcessLoopbackCapture` was drained by a `close` that let go of the
+    // client in the same breath, and the two endpoint captures had no drain at
+    // all.
+    let Some(video) = coded_video() else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("session-audio-drain");
+    let path = directory.file("recording.mkv");
+
+    let body_seconds = RECORDING_SECONDS - HELD_SECONDS;
+    let held_from = (body_seconds * 1_000_000_000.0) as i64;
+    let reports = record(
+        video,
+        &path,
+        vec![scripted_holding(
+            AudioSource::OtherSystemAudio,
+            2,
+            tone(SYSTEM_TONE, 2, body_seconds, 0),
+            tone(LAST_MOMENT_TONE, 2, HELD_SECONDS, held_from),
+        )],
+        RECORDING_SECONDS,
+    );
+
+    let media = Media::open(&path).expect("a finished recording opens");
+    let content = media.audio_content(0).expect("the track decodes");
+    let rate = content.sample_rate();
+    assert_eq!(
+        rate, SAMPLE_RATE,
+        "the track decodes at the rate it declares"
+    );
+
+    // The last 200 ms of the track, and the 200 ms before it, measured
+    // separately. Two windows rather than one, because "the tail is present" and
+    // "the tail is where it belongs" are different claims: a recording that
+    // appended the drained audio somewhere else, or that let it overwrite the
+    // end of the body, satisfies the first and not the second.
+    let held_samples = (HELD_SECONDS * f64::from(rate)) as usize;
+    let samples = content.samples();
+    assert!(
+        samples.len() > held_samples * 2,
+        "the track is {} samples long, which is not enough to measure a {HELD_SECONDS}s tail in",
+        samples.len()
+    );
+    let split = samples.len() - held_samples;
+    let tail = AudioContent::from_samples(samples[split..].to_vec(), rate);
+    let before_the_tail =
+        AudioContent::from_samples(samples[split - held_samples..split].to_vec(), rate);
+
+    let in_tail = tail.magnitude_at(LAST_MOMENT_TONE);
+    let in_body = before_the_tail.magnitude_at(LAST_MOMENT_TONE);
+    let body_tone_in_body = before_the_tail.magnitude_at(SYSTEM_TONE);
+    let _ = writeln!(
+        std::io::stderr(),
+        "\n=== the drained tail ===\n\
+         track            : {:.3}s, {} frames reported\n\
+         last {HELD_SECONDS}s        : {LAST_MOMENT_TONE} Hz {in_tail:.5}\n\
+         the {HELD_SECONDS}s before  : {LAST_MOMENT_TONE} Hz {in_body:.5}, \
+         {SYSTEM_TONE} Hz {body_tone_in_body:.5}",
+        content.duration().as_secs_f64(),
+        reports.first().map_or(0, AudioTrackReport::frames),
+    );
+
+    media
+        .validate()
+        .audio_stream_count(1)
+        // Issue #320's second acceptance criterion, against a produced file
+        // rather than against the timestamps a capture reported: the audio ends
+        // where the picture does. Asserted before the tones so that a failure
+        // here is about the *shape* of the recording rather than about what is
+        // on the track. A recording that dropped the tail ends 200 ms early and
+        // fails this by five times the bound.
+        .synchronised_within(ENDS_WITHIN)
+        .monotonic_timestamps()
+        .streams_start_at(0.0, 0.001)
+        .assert_valid();
+
+    // The measurement issue #320 asks for: the sound of the last fraction of a
+    // second is in the file. Without the drain it is not in the file at all, and
+    // this measures 0.
+    assert!(
+        in_tail > in_body * REJECTION_RATIO,
+        "the last {HELD_SECONDS}s of the recording is the audio the engine was still holding \
+         when it was stopped, and it has to be in the track: {LAST_MOMENT_TONE} Hz measures \
+         {in_tail:.5} there against {in_body:.5} in the {HELD_SECONDS}s before it, which is \
+         {:.1}x apart and not the {:.0}x that would mean the tail arrived",
+        in_tail / in_body.max(f64::MIN_POSITIVE),
+        REJECTION_RATIO
+    );
+    // And it did not arrive by overwriting what was already there. The body's
+    // own tone is still in the body.
+    assert!(
+        body_tone_in_body > in_body * REJECTION_RATIO,
+        "the audio before the tail should still be the body's own {SYSTEM_TONE} Hz \
+         ({body_tone_in_body:.5}), not the tail's {LAST_MOMENT_TONE} Hz ({in_body:.5})"
+    );
+
+    // The same thing said in frames, so a failure distinguishes "the tail is
+    // missing from the file" from "the tail never left the capture".
+    let report = reports.first().expect("the source reported");
+    let expected = (RECORDING_SECONDS * f64::from(SAMPLE_RATE)) as u64;
+    assert_eq!(
+        report.frames(),
+        expected,
+        "{}s of recording plus the {HELD_SECONDS}s the engine was holding is {expected} frames; \
+         the source reported {}",
+        body_seconds,
+        report.frames()
     );
 }
 

@@ -152,6 +152,15 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the subject is given to stop.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How far apart the tracks may start and end.
+///
+/// One video frame at [`FPS`] is 16.7 ms and one audio buffer is 10 ms, so 40 ms
+/// is "within a packet" with room for the last of each landing on either side of
+/// the other. It is the same bound `crates/session/src/audio/tests.rs` holds a
+/// scripted recording to, so a real one is not held to a looser standard than a
+/// synthetic one.
+const ENDS_WITHIN: Duration = Duration::from_millis(40);
+
 /// The environment variable that turns "this machine cannot do this" from a
 /// skip into a failure.
 const REQUIRE_AUDIO: &str = "CLIPPED_REQUIRE_AUDIO";
@@ -306,6 +315,7 @@ fn each_track_holds_the_tone_of_the_tree_it_belongs_to_and_not_the_other_ones() 
 
     let media = Media::open(&output).expect("a finished recording opens");
     print_measurements(&media);
+    print_stream_ends(&media);
 
     media
         .validate()
@@ -341,6 +351,28 @@ fn each_track_holds_the_tone_of_the_tree_it_belongs_to_and_not_the_other_ones() 
             OTHER_TRACK,
             Tone::at(OTHER_SYSTEM_AUDIO).isolated_from(GAME),
         )
+        // Where the tracks *end*, which nothing had measured against a real
+        // recording until
+        // [issue #320](https://github.com/wildware-uk/clipped/issues/320) went
+        // looking for it.
+        //
+        // **This passed before that issue's fix as well as after it, and saying
+        // so is the point.** #320 expected a recording to end with its audio up
+        // to 200 ms short of its picture, because a capture that is closed
+        // rather than drained loses whatever the audio engine was holding. What
+        // six runs of this test measured is that the engine is holding almost
+        // nothing at that moment on a machine where the audio threads are
+        // keeping up: three runs on the undrained build ended 0.009, 0.007 and
+        // 0.008 s apart, and three on the drained build ended 0.008, 0.008 and
+        // 0.005 s apart. The 200 ms is what a *stalled* reader leaves behind,
+        // and `crates/audio` measures the drain recovering exactly that.
+        //
+        // It stays because it is the assertion whose absence let the question go
+        // unanswered for as long as it did: a recording that started losing its
+        // tail — to a drain that hung, a capture stopped early, a shutdown
+        // reordered — is a file that looks perfect by every other measurement in
+        // this test.
+        .synchronised_within(ENDS_WITHIN)
         .assert_valid();
 
     // The other half of the same claim, and the reason the two assertions above
@@ -405,6 +437,46 @@ fn print_measurements(media: &Media) {
             content.peak_amplitude(),
         );
     }
+}
+
+/// Prints where each stream of the file starts and ends.
+///
+/// The evidence behind the synchronisation assertion, and the first thing to
+/// look at when it fails: a table of ends says immediately whether one track is
+/// short or every one of them is, which is the difference between a capture that
+/// stopped early and a recording that lost the audio its engines were holding
+/// (issue #320).
+fn print_stream_ends(media: &Media) {
+    let mut ends: Vec<(String, f64, f64)> = Vec::new();
+    for stream in media.streams() {
+        let index = stream.number("index").map(|value| value as i64);
+        let end = media
+            .packets()
+            .iter()
+            .filter(|packet| Some(packet.stream_index) == index)
+            .map(|packet| packet.presentation_seconds + packet.duration_seconds.unwrap_or_default())
+            .fold(f64::NEG_INFINITY, f64::max);
+        ends.push((
+            stream.label(),
+            stream.number("start_time").unwrap_or(f64::NAN),
+            end,
+        ));
+    }
+
+    let last = ends.iter().map(|(_, _, end)| *end).fold(f64::NAN, f64::max);
+    let first = ends.iter().map(|(_, _, end)| *end).fold(f64::NAN, f64::min);
+    let _ = writeln!(std::io::stderr(), "\n=== where the tracks end ===");
+    for (label, start, end) in &ends {
+        let _ = writeln!(
+            std::io::stderr(),
+            "{label:<40} starts {start:.3}s, ends {end:.3}s"
+        );
+    }
+    let _ = writeln!(
+        std::io::stderr(),
+        "the tracks end {:.3}s apart",
+        last - first
+    );
 }
 
 fn is_set(name: &str) -> bool {

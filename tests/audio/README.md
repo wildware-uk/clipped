@@ -5,7 +5,7 @@ which are meant to stay separate really are separate (AGENTS.md section 21).
 
 | File | What it is |
 | --- | --- |
-| `track_isolation.rs` | Records `test-apps/video-pattern` playing one tone and this test process playing another, then measures every track of the resulting file by frequency: the game's track holds the game's tone and not the neighbour's, the complement's track holds the neighbour's and not the game's, and the compatibility mix holds both ([issue #34](https://github.com/wildware-uk/clipped/issues/34)) |
+| `track_isolation.rs` | Records `test-apps/video-pattern` playing one tone and this test process playing another, then measures every track of the resulting file by frequency: the game's track holds the game's tone and not the neighbour's, the complement's track holds the neighbour's and not the game's, and the compatibility mix holds both ([issue #34](https://github.com/wildware-uk/clipped/issues/34)). It also measures where the tracks *end*, within a packet of the picture ([issue #320](https://github.com/wildware-uk/clipped/issues/320)) |
 
 The test belongs to the package that owns the application it starts — Cargo only
 sets `CARGO_BIN_EXE_…` for a test in the binary's own package — so it is declared
