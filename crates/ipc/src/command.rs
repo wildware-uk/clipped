@@ -797,9 +797,20 @@ mod tests {
             "get_audio_devices",
             "shutdown",
         ] {
-            let command = Command::from_request(&request(name, serde_json::Value::Null))
-                .unwrap_or_else(|error| panic!("`{name}` is not a command: {}", error.message));
-            assert_eq!(command.name(), name);
+            // Parsed with no parameters, so a command with required ones is
+            // refused for *that* rather than for its name. The claim here is
+            // only that the name is one this build answers to, which is what
+            // `unknown_command` would deny; whether each command's parameters
+            // are right is every other test in this module.
+            match Command::from_request(&request(name, serde_json::Value::Null)) {
+                Ok(command) => assert_eq!(command.name(), name),
+                Err(error) => assert_ne!(
+                    error.code,
+                    ErrorCode::UnknownCommand,
+                    "`{name}` is in the protocol and this build does not answer to it: {}",
+                    error.message
+                ),
+            }
         }
     }
 
