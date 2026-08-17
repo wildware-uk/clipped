@@ -11,11 +11,15 @@
 # Two jobs, and the split is the point:
 #
 #   gate     Asks scripts/check-release-gates.ps1 whether this tag may become a
-#            release. Cheap, reads the repository and three GitHub answers, and
-#            builds nothing. Every gate is evaluated even after one refuses, so
-#            a tag that is wrong in four ways says so once.
-#   release  Builds the installer and drafts the release. It `needs: gate`, so
-#            it does not start unless every gate passed.
+#            release. Cheap - it reads the repository and three GitHub answers,
+#            and compiles nothing - though it does fetch the pinned FFmpeg and
+#            assemble the corresponding source, because two of the gates are
+#            about what the release would carry rather than about the tag. Every
+#            gate is evaluated even after one refuses, so a tag that is wrong in
+#            four ways says so once.
+#   release  Builds the installer and drafts the release, attaching the
+#            corresponding source the gate job approved. It `needs: gate`, so it
+#            does not start unless every gate passed.
 #
 # `workflow_dispatch` is a rehearsal. The gates report and the run continues,
 # because the gates all refuse today and a mechanism nobody can watch working is
@@ -167,6 +171,38 @@ jobs:
           & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The other half of the FFmpeg obligation, and the half that is not a file
+      # in the installer: the source of the exact build whose DLLs it ships
+      # (issue #123, docs/licensing.md). Every installed copy's NOTICE.md tells
+      # its reader the source "is published with the Clipped release that
+      # carries these files", so a release that publishes none puts a false
+      # sentence on somebody else's machine, unrecallably. It is assembled here,
+      # checked by the gate below, and attached to the release by the job after
+      # this one - which is why the gate can be trusted to notice if this step
+      # is ever removed.
+      #
+      # Deliberately not into third-party/ffmpeg/source, which is where the
+      # script puts it by default and which is inside the directory the cache
+      # step above restores. Source restored from a cache entry any branch could
+      # have written is not evidence of anything; a shallow fetch of the two
+      # commits, verified against their ids during this run, is. It costs about
+      # 22 MB of network and a few seconds.
+      - name: Assemble the corresponding source of the FFmpeg being shipped
+        env:
+          # One read-only API call, to expand the abbreviated commit in the
+          # asset name into a full object id that git will fetch. Authenticated
+          # because unauthenticated is sixty calls an hour for every runner
+          # sharing this address, and "try again in an hour" is not an answer on
+          # the day of a release. The token reads a public repository that is
+          # not this one and can do nothing else here.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg-source.ps1 -Destination ffmpeg-source
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'The corresponding source could not be assembled, so the DLLs may not be distributed.' -ForegroundColor Red
+              exit 1
+          }
+
       # The licence texts and third-party notices an installed copy is obliged to
       # carry (issue #123). Produced here rather than by the staging script,
       # which copies files: collecting them reads `cargo metadata` for several
@@ -236,12 +272,30 @@ jobs:
               -MilestonesJson evidence/milestones.json `
               -ReleasesJson evidence/releases.json `
               -CiRunsJson evidence/ci-runs.json `
+              -CorrespondingSourceDirectory ffmpeg-source `
               @rehearse 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $output
           "## Release gates for $($env:CLIPPED_TAG)`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "``````text`n$output`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           exit $code
+
+      # Handed to the release job rather than assembled again there, so that
+      # what is attached to the release is the directory the gate above passed
+      # rather than a second one that ought to be the same. A run artefact is
+      # not a cache: it was produced by the job above, in this run, from commits
+      # verified by id, and nothing outside this run can write it.
+      #
+      # Unlike the installer, this is a thing the project is *obliged* to
+      # publish - LGPL v3 source, redistributable by anyone - so uploading it
+      # where a reader can reach it is the point rather than a risk. It runs
+      # after the decision above, so a refused tag uploads nothing.
+      - name: Keep the corresponding source for the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ffmpeg-corresponding-source
+          path: ffmpeg-source
+          if-no-files-found: error
 
   release:
     name: Build the installer and draft the release
@@ -363,6 +417,36 @@ jobs:
           "path=$($found[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "name=$($found[0].Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      # The corresponding source the gate job assembled and the gates approved.
+      # Downloaded rather than rebuilt so that the bytes attached to the release
+      # are the ones a gate looked at; within one run this needs no token and no
+      # extra permission.
+      - name: Take the corresponding source the gates approved
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ffmpeg-corresponding-source
+          path: ffmpeg-source
+
+      # What arrived, not what was sent. An artefact that downloaded empty would
+      # otherwise become a release with an installer and no source on it, which
+      # is the exact failure this whole path exists to prevent - and it would
+      # look like a success. Cheap, and it names the assets in the log so the
+      # run records what was published.
+      - name: Check the corresponding source arrived whole
+        run: |
+          $manifest = 'ffmpeg-source/CORRESPONDING-SOURCE.md'
+          $archives = @(Get-ChildItem -Path 'ffmpeg-source' -Filter '*.zip' -File -ErrorAction SilentlyContinue)
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or $archives.Count -lt 2) {
+              Write-Host 'The corresponding source did not arrive from the gate job.' -ForegroundColor Red
+              Write-Host "  manifest present: $(Test-Path -LiteralPath $manifest -PathType Leaf)"
+              Write-Host "  archives found:   $($archives.Count)"
+              Write-Host 'The DLLs in this installer are LGPL v3 and their source is published with'
+              Write-Host 'them or the installer is not published at all. See docs/licensing.md.'
+              exit 1
+          }
+          Get-ChildItem -Path 'ffmpeg-source' -File |
+              ForEach-Object { Write-Host ("  {0,-56} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB)) }
+
       # The checksum is computed from the installer being released and written
       # into both the notes and a sidecar file, so that a reader can check the
       # download by eye or with a tool. Publishing it beside an unsigned build
@@ -377,7 +461,8 @@ jobs:
               -Tag $env:CLIPPED_TAG `
               -InstallerPath $env:INSTALLER_PATH `
               -OutFile release-notes.md `
-              -FfmpegPinPath third-party/ffmpeg/current/.clipped-ffmpeg-pin.json
+              -FfmpegPinPath third-party/ffmpeg/current/.clipped-ffmpeg-pin.json `
+              -CorrespondingSourceDirectory ffmpeg-source
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $hash = (Get-FileHash -LiteralPath $env:INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -415,6 +500,15 @@ jobs:
           }
           $prerelease = @()
           if ($env:PRERELEASE -eq 'true') { $prerelease = @('--prerelease') }
+          # The corresponding source goes up in the same call as the installer,
+          # onto the same release page. That is the whole discharge of the source
+          # obligation: whoever can reach the object code can reach its source in
+          # the same place, at the same time, with no request to make and nobody
+          # to ask. Attaching it in a second step, or by hand afterwards, would
+          # leave a window in which the installer was downloadable and its source
+          # was not.
+          $source = @(Get-ChildItem -Path 'ffmpeg-source' -File | Sort-Object Name | ForEach-Object { $_.FullName })
+          Write-Host "Attaching $($source.Count) corresponding-source asset(s) beside the installer."
           # --verify-tag so that the release is attached to the tag that exists,
           # rather than gh creating one from the default branch if it does not.
           gh release create $env:CLIPPED_TAG `
@@ -424,7 +518,8 @@ jobs:
               --notes-file release-notes.md `
               @prerelease `
               $env:INSTALLER_PATH `
-              "$($env:INSTALLER_NAME).sha256"
+              "$($env:INSTALLER_NAME).sha256" `
+              @source
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host 'Drafted. It is not visible to anybody until a human publishes it.'
 
@@ -432,7 +527,10 @@ jobs:
         if: github.event_name != 'push'
         run: |
           Write-Host 'Rehearsal complete. The installer was built, hashed and described, and'
-          Write-Host 'then left on the runner: no release was created and nothing was uploaded.'
+          Write-Host 'then left on the runner: no release was created and no installer was'
+          Write-Host 'uploaded anywhere. The corresponding FFmpeg source was assembled, gated'
+          Write-Host 'and carried into this job, so everything the real path does with it has'
+          Write-Host 'now run except the `gh release create` call that attaches it.'
           Write-Host 'An installer built today may not be distributed at all - see the licence'
           Write-Host 'gate in the job above, and docs/licensing.md.'
           "`n> Rehearsal: built and hashed, published nothing.`n" |

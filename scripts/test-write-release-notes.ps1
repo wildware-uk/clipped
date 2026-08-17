@@ -42,7 +42,8 @@ function Invoke-Notes {
         [Parameter(Mandatory)] [string] $Tag,
         [Parameter(Mandatory)] [string] $InstallerPath,
         [Parameter(Mandatory)] [string] $OutFile,
-        [string] $FfmpegPinPath = ''
+        [string] $FfmpegPinPath = '',
+        [string] $CorrespondingSourceDirectory = ''
     )
 
     $arguments = @(
@@ -52,6 +53,7 @@ function Invoke-Notes {
         '-OutFile', $OutFile
     )
     if ($FfmpegPinPath) { $arguments += @('-FfmpegPinPath', $FfmpegPinPath) }
+    if ($CorrespondingSourceDirectory) { $arguments += @('-CorrespondingSourceDirectory', $CorrespondingSourceDirectory) }
 
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -164,6 +166,43 @@ try {
     Assert-That `
         -Name 'with a pin record, the exact FFmpeg build is named' `
         -Condition ($withPin.Notes -like '*ffmpeg-n8.1.2-34-g9b6c8969e0-win64-lgpl-shared-8.1.zip*')
+
+    Write-Host ''
+    Write-Host 'The source published beside the installer is named in the notes'
+
+    # A release page with an installer and two zips on it, and notes that do not
+    # say what the zips are, leaves the reader who is owed the source to guess.
+    # The obligation is discharged by publishing it *and* by the recipient being
+    # able to find it.
+    $sourceDirectory = Join-Path $fixtureRoot 'ffmpeg-source'
+    New-Item -ItemType Directory -Path $sourceDirectory -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $sourceDirectory 'CORRESPONDING-SOURCE.md') -Value '# the manifest' -Encoding Ascii
+    [System.IO.File]::WriteAllBytes((Join-Path $sourceDirectory 'ffmpeg-9b6c8969e0-source.zip'), (New-Object byte[] 2048))
+    [System.IO.File]::WriteAllBytes((Join-Path $sourceDirectory 'ffmpeg-builds-autobuild-2026-08-09-13-03-source.zip'), (New-Object byte[] 1024))
+
+    $withSource = Invoke-Notes -Tag 'v1.0.0' -InstallerPath $installer -OutFile (Join-Path $fixtureRoot 'notes-source.md') -CorrespondingSourceDirectory $sourceDirectory
+    Assert-That `
+        -Name 'the source assets are named, so a reader can find them among the downloads' `
+        -Condition ($withSource.Notes -like '*ffmpeg-9b6c8969e0-source.zip*' -and
+            $withSource.Notes -like '*ffmpeg-builds-autobuild-2026-08-09-13-03-source.zip*' -and
+            $withSource.Notes -like '*CORRESPONDING-SOURCE.md*')
+    Assert-That `
+        -Name 'and the notes say they are on this page rather than obtainable somewhere' `
+        -Condition ($withSource.Notes -like '*published as assets on this release*')
+
+    # Facts it does not have, it does not invent - the same rule the pin record
+    # follows. Notes claiming the source is attached when it is not would be a
+    # false statement on a page nobody can recall.
+    Assert-That `
+        -Name 'with no source directory, the notes do not claim the source is attached' `
+        -Condition ($result.Notes -notlike '*published as assets on this release*')
+
+    $emptyDirectory = Join-Path $fixtureRoot 'ffmpeg-source-empty'
+    New-Item -ItemType Directory -Path $emptyDirectory -Force | Out-Null
+    $emptySource = Invoke-Notes -Tag 'v1.0.0' -InstallerPath $installer -OutFile (Join-Path $fixtureRoot 'notes-empty-source.md') -CorrespondingSourceDirectory $emptyDirectory
+    Assert-That `
+        -Name 'a directory without the manifest in it is not read as source having been published' `
+        -Condition ($emptySource.Notes -notlike '*published as assets on this release*')
 
     Write-Host ''
     Write-Host 'No installer, no notes'

@@ -229,7 +229,7 @@ manifests is a placeholder for "unreleased".
 the argument for it, including the alternatives that lost and the one most
 likely to win later. [docs/releasing.md](docs/releasing.md) is the rule in full
 — what a version is, who may decide a milestone is finished (a maintainer, by
-closing it on GitHub), what an agent may and may not do, and the five gates a
+closing it on GitHub), what an agent may and may not do, and the six gates a
 tag has to pass before
 [`.github/workflows/release.yml`](.github/workflows/release.yml) will build
 anything. Read it before tagging.
@@ -244,9 +244,10 @@ Two things worth knowing even if you never make a release:
   pinned LGPL v3 FFmpeg, so conveying it owes the notices and licence texts
   ([#123](https://github.com/wildware-uk/clipped/issues/123)). Those now ship in
   the bundle and the gate passes — it checks the artefact rather than the issue,
-  so anything that drops them from `bundle.resources` re-closes it. Two
-  obligations remain manual, and are on whoever publishes the draft: attaching
-  the corresponding FFmpeg source, and testing the relinking permission.
+  so anything that drops them from `bundle.resources` re-closes it. The source of
+  the exact FFmpeg build is gated the same way and attached to the release beside
+  the installer. One obligation remains manual, and is on whoever publishes the
+  draft: testing the relinking permission.
 
 ## Licensing and dependencies
 

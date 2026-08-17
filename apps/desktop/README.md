@@ -60,9 +60,11 @@ npm run build:app
 
 Without it, the installer build stops before it compiles anything and says which
 file is missing and how to produce it. What the installer contains, and why it is
-put there the way it is, is [docs/packaging.md](../../docs/packaging.md). An
-installer built today is not one that may be distributed — the licence texts and
-notices it owes are [#123](https://github.com/wildware-uk/clipped/issues/123).
+put there the way it is, is [docs/packaging.md](../../docs/packaging.md).
+The licence texts and notices it owes are staged into it, and the build refuses
+without them ([#123](https://github.com/wildware-uk/clipped/issues/123)); an
+installer built today is still not one that may be distributed, for the reasons
+[docs/releasing.md](../../docs/releasing.md) gates on.
 
 ## Layout
 

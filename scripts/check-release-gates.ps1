@@ -12,7 +12,7 @@
     a release on its own - it asks this script for permission first, and every
     check below is a way of saying no.
 
-    Five gates, each of which is a thing that has gone wrong for somebody else:
+    Six gates, each of which is a thing that has gone wrong for somebody else:
 
     1. Version.      The tag is the source of truth for the version, and every
                      version this repository declares has to agree with it. A
@@ -31,10 +31,20 @@
     4. Milestones.   Nothing is released until every milestone is finished. See
                      docs/releasing.md for what that means and who decides it.
     5. Licences.     The installer carries a pinned LGPL v3 FFmpeg, and
-                     distributing it owes a written offer, the relinking
-                     permission and the third-party notices (docs/licensing.md,
-                     issue #123). A build that can publish before those ship is
-                     a build that can break a licence by accident.
+                     distributing it owes a notice, both licence texts and the
+                     third-party notices (docs/licensing.md, issue #123). A
+                     build that can publish before those ship is a build that
+                     can break a licence by accident.
+    6. Corresponding The other half of that obligation: the source of the exact
+       source.       FFmpeg build being shipped, published with the binary
+                     rather than promised. scripts/fetch-ffmpeg-source.ps1
+                     assembles it and .github/workflows/release.yml attaches it
+                     to the release; this gate is what notices when that step is
+                     removed, fails, or assembles the source of a different
+                     build than the one the pin now names. The notice inside
+                     every installed copy says the source is published with the
+                     release, so a release that publishes none makes an
+                     installed file lie.
 
     Every gate is evaluated, always, even after one has refused. A release
     blocked by four things should say so once, rather than four times over four
@@ -75,6 +85,19 @@
     The ref the tagged commit must be an ancestor of. `origin/main` in the
     workflow; the tests point it at a local branch.
 
+.PARAMETER CorrespondingSourceDirectory
+    Where scripts/fetch-ffmpeg-source.ps1 assembled the corresponding source of
+    the FFmpeg being shipped. Defaults to that script's own default,
+    third-party/ffmpeg/source, so that a person running the gates by hand after
+    running it needs no argument. release.yml passes a directory of its own,
+    outside the cached third-party tree, for the reason given there.
+
+.PARAMETER FetchScript
+    The script the FFmpeg pin is read from, by running it with -PrintPin. The
+    pin is asked for rather than parsed, so that this gate cannot come to a
+    different conclusion about which build is shipped than the script that
+    downloads it. The tests point it at a fixture.
+
 .PARAMETER Rehearse
     Report on every gate and exit 0 whatever they say. For a rehearsal that
     cannot publish anything - `workflow_dispatch` in
@@ -104,6 +127,8 @@ param(
     [Parameter(Mandatory)] [string] $CiRunsJson,
     [string] $RepositoryRoot = '',
     [string] $MainRef = 'origin/main',
+    [string] $CorrespondingSourceDirectory = '',
+    [string] $FetchScript = '',
     [switch] $Rehearse
 )
 
@@ -111,6 +136,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not $RepositoryRoot) { $RepositoryRoot = Split-Path -Parent $PSScriptRoot }
+if (-not $CorrespondingSourceDirectory) {
+    $CorrespondingSourceDirectory = Join-Path $RepositoryRoot 'third-party\ffmpeg\source'
+}
+if (-not $FetchScript) { $FetchScript = Join-Path $RepositoryRoot 'scripts\fetch-ffmpeg.ps1' }
 
 # Semantic versioning, with the pre-release and build-metadata parts it allows.
 # Anchored, so `v1.2` and `v1.0.0.1` are refused by name rather than quietly
@@ -672,6 +701,245 @@ function Test-LicenceGate {
     return New-GateResult -Name 'Licences' -Passed $false -Lines $lines
 }
 
+function Get-PinnedFFmpeg {
+    <#
+    .SYNOPSIS
+        The FFmpeg build this tree ships, asked of the script that downloads it.
+    .DESCRIPTION
+        The pin is a set of parameter defaults in scripts/fetch-ffmpeg.ps1, and
+        this gate must not carry a second copy of it or a regular expression
+        over it: either would let the gate approve source for one build while
+        the release job downloaded another. `-PrintPin` exists so that anything
+        needing the pin can ask the pin, and this is the second caller of it
+        after ci.yml's cache key.
+    #>
+
+    if (-not (Test-Path -LiteralPath $FetchScript -PathType Leaf)) {
+        throw "$FetchScript does not exist, so which FFmpeg build this release would ship cannot be established."
+    }
+
+    # Windows PowerShell wraps a native command's stderr in ErrorRecords, and
+    # under 'Stop' that terminates before the exit code has been read. The exit
+    # code is what decides here.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $printed = & powershell -ExecutionPolicy Bypass -File $FetchScript -PrintPin 2>&1 | Out-String
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+
+    if ($code -ne 0) {
+        throw "$FetchScript -PrintPin exited $code, so the FFmpeg pin could not be read:`n$printed"
+    }
+
+    $pin = @{}
+    foreach ($line in ($printed -split "`r?`n")) {
+        if ($line -match '^(?<key>[A-Za-z0-9_]+)=(?<value>.+)$') {
+            $pin[$Matches['key'].ToLowerInvariant()] = $Matches['value'].Trim()
+        }
+    }
+
+    foreach ($key in @('tag', 'asset', 'sha256')) {
+        if (-not $pin.ContainsKey($key)) {
+            throw "$FetchScript -PrintPin printed no $key, so the FFmpeg pin could not be read:`n$printed"
+        }
+    }
+
+    return $pin
+}
+
+function Get-ZipEntryCount {
+    <#
+    .SYNOPSIS
+        How many entries an archive holds, or -1 if it is not an archive.
+    .DESCRIPTION
+        A file of the right name and a source archive are different things, and
+        the difference is invisible in a directory listing. A truncated
+        download, an error page saved with a .zip name and an empty file all
+        pass a "does it exist" check and are all useless to whoever is owed the
+        source.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+
+    $zip = $null
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        return $zip.Entries.Count
+    } catch {
+        return -1
+    } finally {
+        if ($zip) { $zip.Dispose() }
+    }
+}
+
+function Test-CorrespondingSourceGate {
+    <#
+    .SYNOPSIS
+        The source of the exact FFmpeg being shipped is assembled and ready to
+        publish, and is the source of *this* build.
+    .DESCRIPTION
+        The installed NOTICE.md tells every recipient that the source of these
+        libraries "is published with the Clipped release that carries these
+        files". That sentence is either true on the day of the release or it is
+        a false statement inside an artefact nobody can recall, so it is checked
+        here rather than left to whoever is drafting at the time.
+
+        Three things, and each of them has a way of being wrong that the others
+        do not catch:
+
+        - the manifest is there at all, which is what fails when the step that
+          assembles the source is removed from the workflow or errors out;
+        - it names the pinned asset and its SHA-256, which is what fails when
+          the pin moves and a directory assembled for the previous build is
+          left behind - the case where every file exists and every one of them
+          is the source of something else;
+        - every archive the manifest promises exists and opens as an archive,
+          which is what fails on a truncated fetch.
+
+        Deliberately not checked: that the archives contain FFmpeg. The commit
+        ids in the manifest are what tie them to the build, they were verified
+        against the remote when the archives were made
+        (scripts/fetch-ffmpeg-source.ps1), and a gate that tried to recognise
+        FFmpeg by its file names would refuse a correct release the first time
+        upstream renamed something.
+    #>
+
+    $manifestName = 'CORRESPONDING-SOURCE.md'
+    $manifest = Join-Path $CorrespondingSourceDirectory $manifestName
+
+    # Caught here rather than left to the outer handler, which would report
+    # "a gate could not be evaluated" without saying which one or why. Not
+    # knowing which FFmpeg is shipped is a refusal either way: the question this
+    # gate asks is whether the source matches it.
+    try {
+        $pin = Get-PinnedFFmpeg
+    } catch {
+        return New-GateResult -Name 'Corresponding source' -Passed $false -Lines @(
+            'Which FFmpeg build this release would ship could not be established, so',
+            'whether the corresponding source matches it cannot be either.',
+            '',
+            "  $($_.Exception.Message)"
+        )
+    }
+
+    $how = @(
+        '',
+        'scripts/fetch-ffmpeg-source.ps1 assembles it - two archives and a manifest',
+        'naming the FFmpeg commit and the build recipe the DLLs were produced from - and',
+        '.github/workflows/release.yml runs it before this gate and attaches what it',
+        'produced to the release. docs/licensing.md is the whole obligation; issue #123',
+        'is the work.'
+    )
+
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        return New-GateResult -Name 'Corresponding source' -Passed $false -Lines (@(
+                "No $manifestName in $CorrespondingSourceDirectory,",
+                'so this release has no corresponding source to publish. The installer would',
+                'ship',
+                '',
+                "    $($pin.asset)",
+                '',
+                'whose libraries are LGPL v3. Conveying them obliges this project to give',
+                'whoever received them the source of that exact build, and the NOTICE.md inside',
+                'the installer tells them it is published with the release. Publishing the',
+                'installer without it would make that sentence false on somebody else''s machine.'
+            ) + $how)
+    }
+
+    $recorded = Get-Content -LiteralPath $manifest -Raw
+    if (-not $recorded) { $recorded = '' }
+
+    if (-not ($recorded.Contains($pin.asset) -and $recorded.Contains($pin.sha256))) {
+        return New-GateResult -Name 'Corresponding source' -Passed $false -Lines (@(
+                "$(Get-RelativePath $manifest) is not the source of the build this release would ship.",
+                '',
+                "    the pin names   $($pin.asset)",
+                "    SHA-256         $($pin.sha256)",
+                '',
+                'and the manifest does not record both of those. A directory left over from a',
+                'previous pin looks exactly like a current one: every file is present, every',
+                'archive opens, and all of it is the source of a build nobody is shipping.',
+                'Re-assemble it, or delete it and let the workflow assemble it again.'
+            ) + $how)
+    }
+
+    # Every archive the manifest promises. Taken from the manifest rather than
+    # from a directory listing, because the manifest is the document a recipient
+    # reads: a file it names and the release does not carry is the failure, and
+    # an extra file beside it is not. The pinned binary asset is named in there
+    # too - it is what the source corresponds to - and is not one of ours to
+    # find on disk.
+    $named = @([regex]::Matches($recorded, '`(?<file>[^`]+\.zip)`') |
+            ForEach-Object { $_.Groups['file'].Value } |
+            Where-Object { $_ -ne $pin.asset } |
+            Sort-Object -Unique)
+
+    if ($named.Count -lt 2) {
+        return New-GateResult -Name 'Corresponding source' -Passed $false -Lines (@(
+                "$(Get-RelativePath $manifest) names $($named.Count) source archive(s), and the corresponding",
+                'source is two: FFmpeg at the commit the binary was built from, and the build',
+                'recipe it was configured and compiled by. FFmpeg alone does not describe the',
+                'artefact - the configure arguments and every external library compiled into it',
+                'live in BtbN/FFmpeg-Builds - so half of it is not the corresponding source of',
+                'anything.'
+            ) + $how)
+    }
+
+    # Small enough that a real source archive cannot be mistaken for a stub, and
+    # large enough that no plausible source tree is under it: the two archives
+    # this produces hold ten thousand entries and three hundred.
+    $minimumEntries = 25
+
+    $problems = @()
+    $present = @()
+    foreach ($archive in $named) {
+        $path = Join-Path $CorrespondingSourceDirectory $archive
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $problems += ("    {0,-52} promised by the manifest, not in the directory" -f $archive)
+            continue
+        }
+
+        $entries = Get-ZipEntryCount -Path $path
+        $bytes = (Get-Item -LiteralPath $path).Length
+        if ($entries -lt 0) {
+            $problems += ("    {0,-52} {1:N0} bytes, and not a readable archive" -f $archive, $bytes)
+            continue
+        }
+        if ($entries -lt $minimumEntries) {
+            $problems += ("    {0,-52} opens, but holds only {1} entries" -f $archive, $entries)
+            continue
+        }
+
+        $present += ("    {0,-52} {1,7:N1} MB, {2:N0} entries" -f $archive, ($bytes / 1MB), $entries)
+    }
+
+    if ($problems.Count -gt 0) {
+        return New-GateResult -Name 'Corresponding source' -Passed $false -Lines (@(
+                'The corresponding source is incomplete:',
+                ''
+            ) + $problems + @(
+                '',
+                'A file of the right name is not a source archive, and the difference does not',
+                'show in a directory listing. Whoever is owed this source is owed something',
+                'they can build.'
+            ) + $how)
+    }
+
+    return New-GateResult -Name 'Corresponding source' -Passed $true -Lines (@(
+            'The release publishes the source of the FFmpeg it ships:',
+            '',
+            "    build       $($pin.asset)",
+            "    assembled   $(Get-RelativePath $CorrespondingSourceDirectory)",
+            ''
+        ) + $present + @(
+            "    $manifestName" + (' ' * 33) + 'which binary they are the source of, by commit id'
+        ))
+}
+
 $gates = @()
 $failure = $null
 
@@ -681,6 +949,7 @@ try {
     $gates += Test-ContinuousIntegrationGate
     $gates += Test-MilestoneGate
     $gates += Test-LicenceGate
+    $gates += Test-CorrespondingSourceGate
 } catch {
     $failure = $_
 }
