@@ -352,6 +352,135 @@ fn a_saved_replay_is_the_last_n_seconds_and_every_picture_of_it_decodes() {
     assert_eq!(recorded["complete"], serde_json::Value::from(true));
 }
 
+/// A session for a capture in `directory` that writes **no recording**.
+///
+/// The same call `clipped-recorder replay --no-recording` makes, with the same
+/// two empty inputs `session` uses and for the same reason.
+fn buffered_session(directory: &Path) -> Mutex<ManualSession> {
+    Mutex::new(ManualSession::start_buffered(
+        directory,
+        &Configuration::defaults(),
+        &clipped_game_detection::catalogue::Catalogue::default(),
+        &clipped_game_detection::launcher::Launchers::none(),
+        clipped_session::automatic::RecordedProcess::new(4_242, "cs2.exe"),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725),
+    ))
+}
+
+/// Everything in `directory`, by file name, sorted.
+fn contents_of(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .expect("the directory can be listed")
+        .map(|entry| {
+            entry
+                .expect("an entry can be read")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_sitting_that_wrote_no_recording_saves_a_playable_clip_and_leaves_nothing_else() {
+    // Issue #423's acceptance criteria, from the layer a person uses: a capture
+    // with no recording file produces a clip that plays, the output directory
+    // holds that clip and the session record and nothing else, and the record
+    // itself says there was no recording rather than pointing at one that does
+    // not exist (ADR 0018).
+    //
+    // The capture and the encoder are the fixture's rather than a GPU's, for the
+    // reason this file's header gives; that the *loop* writes no file with these
+    // settings is asserted in `clipped-session`'s own
+    // `a_capture_with_no_recording_writes_no_file_and_still_fills_its_replay_buffer`,
+    // which runs the real loop against a WARP device.
+    let Some(replay) = buffered(35) else {
+        return;
+    };
+    let directory = TemporaryDirectory::new("replay-no-recording");
+    let session = buffered_session(directory.path());
+
+    let saved = save(
+        &replay,
+        &session,
+        Duration::from_secs(10),
+        None,
+        SystemTime::now(),
+    )
+    .expect("ten seconds of a thirty-second buffer can be saved");
+    let clip = &saved.clip;
+
+    // The clip is exactly the clip a recording's buffer would have produced —
+    // the mode changes what is written beside it, not what a save gives you.
+    Media::open(clip.path())
+        .expect("the clip opens")
+        .validate()
+        .stream_count(3)
+        .video(
+            VideoStream::codec("h264")
+                .resolution(WIDTH, HEIGHT)
+                .decoded_frames_at_least(600),
+        )
+        .audio_stream_count(2)
+        .audio_tone(0, Tone::at(GAME_TONE).isolated_from(MICROPHONE_TONE))
+        .audio_tone(1, Tone::at(MICROPHONE_TONE).isolated_from(GAME_TONE))
+        .monotonic_timestamps()
+        .assert_valid();
+
+    let sidecar_path = session.lock().expect("a fresh lock").sidecar_path();
+    assert_eq!(
+        contents_of(directory.path()),
+        vec![
+            sidecar_path
+                .file_name()
+                .expect("the sidecar has a name")
+                .to_string_lossy()
+                .into_owned(),
+            clip.path()
+                .file_name()
+                .expect("the clip has a name")
+                .to_string_lossy()
+                .into_owned(),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>(),
+        "a sitting asked for no continuous recording put something else in the output \
+         directory"
+    );
+
+    let text = std::fs::read_to_string(&sidecar_path).expect("the session's record is on disk");
+    let written: serde_json::Value = serde_json::from_str(&text).expect("the sidecar is JSON");
+
+    assert_eq!(
+        written["recordings"],
+        serde_json::Value::Array(Vec::new()),
+        "a sitting that wrote no file must not claim a recording: the library would index \
+         it, find it missing and draw a tile nothing can play (#383): {text}"
+    );
+
+    let recorded = &written["clips"][0];
+    assert_eq!(
+        recorded["path"].as_str().expect("the clip names its file"),
+        clip.path().display().to_string(),
+        "the record has to name the file that was written: {text}"
+    );
+    assert_eq!(
+        recorded["source_recording"],
+        serde_json::Value::Null,
+        "the key has to be absent, not an index into an empty list: {text}"
+    );
+    assert!(
+        recorded["source_start_seconds"].is_number() && recorded["source_end_seconds"].is_number(),
+        "the clip's bounds on the capture's own timeline are still written, because that \
+         timeline exists whether or not a file does: {text}"
+    );
+    assert_eq!(recorded["complete"], serde_json::Value::from(true));
+}
+
 #[test]
 fn pressing_the_replay_key_saves_a_clip_and_no_other_key_does_anything() {
     // The wiring between "a key was pressed" and everything the test above

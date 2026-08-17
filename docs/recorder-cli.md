@@ -58,6 +58,15 @@ and 16). The clip is written beside the recording, named after the session, and
 entered in the session's own record — so it reaches the library exactly as the
 recording does ([sessions.md](sessions.md), [replay-buffer.md](replay-buffer.md)).
 
+**`replay --no-recording` keeps the buffer and writes no recording at all.**
+SPEC.md section 4's Manual/Replay capture mode
+([#423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md)): the same capture,
+the same encoder and the same audio, with no container opened and no muxing
+thread started, so the only files a sitting produces are the clips that were
+asked for. A five-hour sitting costs the buffer's rolling window instead of five
+hours of video.
+
 **`watch` records games automatically.** It is the mode the product exists for
 (SPEC.md section 2): a game launching starts a session recording and quitting it
 finalises one, with nothing to press
@@ -76,7 +85,7 @@ rather than only a fixture.
 
 ```text
 clipped-recorder record --window <TITLE>
-clipped-recorder replay --window <TITLE> [--duration <SECONDS>]
+clipped-recorder replay --window <TITLE> [--duration <SECONDS>] [--no-recording]
 clipped-recorder watch [--output-directory <PATH>]
 clipped-recorder list-windows [--all] [<selector>]
 clipped-recorder capabilities [--refresh]
@@ -321,10 +330,12 @@ That is a complete invocation. It records exactly as `record` does — the same
 target rules, the same options, the same file in the same place — and adds two
 things:
 
-- **A rolling buffer** of the last `--duration` seconds of encoded video, held
-  in memory. There is one encoder and two consumers of its packets, so the
-  buffer costs one `memcpy` per packet and the memory its window needs, not a
-  second encode ([replay-buffer.md](replay-buffer.md)).
+- **A rolling buffer** of the last `--duration` seconds of encoded video. There
+  is one encoder and two consumers of its packets, so the buffer costs one
+  `memcpy` per packet rather than a second encode. On a machine that lets it
+  spill it costs about a megabyte of memory whatever the window is, and holds the
+  window on the system drive instead — 208 MB for the half-hour maximum at
+  1080p60, rolling rather than growing ([replay-buffer.md](replay-buffer.md)).
 - **A hotkey.** `Ctrl`+`F10` writes the last `--save-duration` seconds out as a
   clip, beside the recording and named after the session
   (`clipped-<session>-replay-1.mkv`, then `-2`, and so on). A combination
@@ -335,17 +346,59 @@ things:
 | --- | --- | --- |
 | `--duration <SECONDS>` | the configured replay window, 300 unless changed | How much video the buffer keeps, from 30 to 1800 |
 | `--save-duration <SECONDS>` | the whole of `--duration` | How much one save keeps, from 1 second up |
+| `--no-recording` | off | Keep only the buffer; write no continuous recording |
 
 Every `record` option — `--window`, `--process`, `--pid`, `--output`,
 `--resolution`, `--framerate`, `--codec`, `--encoder`, `--microphone`,
 `--system-audio` — means exactly what it means there, because they are the same
 arguments validated by the same code.
 
-**It writes the ordinary recording as well as the clips.** SPEC.md section 4's
-Manual/Replay capture mode keeps the buffer and writes no continuous file; this
-build has no recording without one, so `replay` costs the disk what `record`
-costs it. Buffer-only capture is
-[#423](https://github.com/wildware-uk/clipped/issues/423).
+### `--no-recording`, which is the Manual/Replay capture mode
+
+By default `replay` writes the ordinary recording as well as the clips, and costs
+the disk what `record` costs it. `--no-recording` is SPEC.md section 4's
+Manual/Replay capture mode: **no continuous file is written at all**
+([#423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md)).
+
+```text
+clipped-recorder replay --window "Counter-Strike 2" --no-recording
+
+Keeping the last 5 minutes. Press Ctrl+F10 to save 5 minutes; Ctrl+C to stop.
+No recording will be written; only the clips you save, in D:\clips.
+```
+
+The capture, the encoder, the audio tracks and the window rules are identical —
+it is the same call into `clipped-session` with a directory in place of a file,
+not a second capture path — and what is missing is the container. So:
+
+- **Nothing goes in the output directory except the clips and the session
+  record.** `--output` still says *where*, because that is where clips go; the
+  file name in it is unused, since a clip is named after its session
+  (`clipped-<session>-replay-1.mkv`). `--overwrite` means nothing, because
+  nothing is written that could replace anything.
+- **What it costs is the buffer's window and nothing that grows.** A five-hour
+  sitting at 1080p60 would have written about 42 GB of video; instead it holds a
+  rolling 208 MB at the half-hour maximum, on the system drive, and about a
+  megabyte of memory ([replay-buffer.md](replay-buffer.md)).
+- **The disk guard is not armed**, because there is no file growing on a drive
+  for it to watch. The room check still runs once, before the capture starts,
+  against the directory the clips will go in — a save that could never land is
+  worth refusing while somebody is still looking at their terminal.
+- **The session record has no `recordings` entry** and its clips carry no
+  `source_recording` ([sessions.md](sessions.md)). It is indexed like any other
+  sitting.
+- **A capture no video reached still fails**, with the same message a recording
+  gets: a window that is not drawing produced nothing, and a buffer nothing
+  reached is a hotkey that would never produce a clip.
+
+The line the command prints when it ends names no file, because there is none:
+
+```text
+Recorded 17982 frames of 2560x1440 AV1 in 299.70s (NVIDIA NVENC, Windows
+Graphics Capture, 60.0 fps sustained; 0 frames dropped). Stopped by request.
+3 replay clips saved.
+```
 
 What comes out is not exactly what was asked for, and the command says so on
 every save:

@@ -80,3 +80,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0015](0015-capture-holds-the-display-awake.md) | Capture holds the display awake, and says so when a source goes quiet anyway | Accepted |
 | [0016](0016-derived-pictures-cross-the-control-protocol.md) | A recording's thumbnail and its waveform cross the control protocol, and the window gains no file-system reach | Accepted |
 | [0017](0017-a-replay-save-does-not-reach-across-a-gap.md) | A replay save never reaches across a gap, and one that lands entirely inside one is refused | Accepted |
+| [0018](0018-a-capture-that-writes-no-recording.md) | A capture that writes no recording has no `recordings` entry, and its clips point at nothing | Accepted |

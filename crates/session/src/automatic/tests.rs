@@ -322,7 +322,7 @@ fn exit(pid: u32, name: &str) -> WatchEvent {
 /// A finished recording, as the driver would report it.
 fn recorded(output: &Path, end_reason: EndReason) -> RecordingOutcome {
     RecordingOutcome::Recorded(Box::new(RecordingReport {
-        output: output.to_path_buf(),
+        output: Some(output.to_path_buf()),
         capture_method: CaptureMethod::WindowsGraphicsCapture,
         encoder: EncoderKind::Nvenc,
         codec: Codec::H264,

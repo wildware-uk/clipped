@@ -639,13 +639,16 @@ pub struct RecordArgs {
 ///
 /// # What it does that `record` does not
 ///
-/// It keeps the last [`Self::duration`] seconds of encoded video in memory and
-/// saves them to a clip when Ctrl+F10 is pressed. **It also writes the ordinary
+/// It keeps the last [`Self::duration`] seconds of encoded video and saves them
+/// to a clip when Ctrl+F10 is pressed. By default it **also writes the ordinary
 /// recording**, because the buffer is filled from the packets that recording
 /// produces — there is one encoder and two consumers of it, not two encodes
-/// (`docs/replay-buffer.md`). A capture that keeps *only* the buffer and writes
-/// no continuous file is SPEC.md section 4's Manual/Replay capture mode and is
-/// [issue #423](https://github.com/wildware-uk/clipped/issues/423).
+/// (`docs/replay-buffer.md`).
+///
+/// [`Self::no_recording`] is the other half: SPEC.md section 4's Manual/Replay
+/// capture mode, which keeps the buffer and writes no continuous file at all
+/// ([issue #423](https://github.com/wildware-uk/clipped/issues/423),
+/// ADR 0018).
 #[derive(Debug, Args)]
 pub struct ReplayArgs {
     /// Everything `record` takes, meaning exactly what it means there.
@@ -655,9 +658,11 @@ pub struct ReplayArgs {
     /// Seconds of video to keep in the buffer, from 30 to 1800. [default: the
     /// configured replay window, which is 300 unless it has been changed]
     ///
-    /// This is what a save can reach back through, and what the buffer's memory
-    /// is spent on: about 140 MiB a minute at 1080p60, and about 4 GiB at the
-    /// half-hour maximum. `docs/replay-buffer.md` has the table.
+    /// This is what a save can reach back through, and what the buffer costs:
+    /// on a machine that will let it spill, about a megabyte of memory whatever
+    /// the window is, and about 7 MB of disk a minute at 1080p60 — 208 MB at the
+    /// half-hour maximum, held on the system drive and rolling rather than
+    /// growing. `docs/replay-buffer.md` has the measurements.
     //
     // The default is stated in the summary rather than through a
     // `default_value` because it comes from the settings file, and `-h` should
@@ -677,6 +682,21 @@ pub struct ReplayArgs {
     // will be.
     #[arg(short, long, value_name = "SECONDS")]
     pub save_duration: Option<ReplayLength>,
+
+    /// Keep only the buffer: write no continuous recording, just the clips that
+    /// are asked for. [default: off]
+    ///
+    /// SPEC.md section 4's Manual/Replay capture mode. The capture, the encoder
+    /// and the audio are identical to a recording; what is missing is the file,
+    /// so a five-hour sitting costs the buffer's rolling window rather than five
+    /// hours of video (issue #423, ADR 0018). `--output` still says *where*,
+    /// because that is where the clips go; the file name in it is unused, since
+    /// a clip is named after its session.
+    ///
+    /// `--overwrite` means nothing here, because nothing is written that could
+    /// replace anything.
+    #[arg(long)]
+    pub no_recording: bool,
 }
 
 #[cfg(test)]
@@ -841,6 +861,33 @@ mod tests {
         // are the same arguments.
         assert_eq!(args.record.framerate, Framerate::DEFAULT);
         assert_eq!(args.record.microphone, AudioDeviceSelection::Default);
+        assert!(
+            !args.no_recording,
+            "an invocation that says nothing must still write the recording, because that              is what `replay` has always done"
+        );
+    }
+
+    #[test]
+    fn a_replay_can_be_asked_to_write_no_recording_at_all() {
+        // SPEC.md section 4's Manual/Replay capture mode, as it is typed
+        // (issue #423). It is a flag rather than a subcommand of its own for the
+        // reason the module doc gives: the mode is `replay` with the recording
+        // left out, so every `record` option still means what it means.
+        let args = replay_args(&[
+            "replay",
+            "--window",
+            "Counter-Strike 2",
+            "--no-recording",
+            "--duration",
+            "60",
+        ]);
+
+        assert!(args.no_recording);
+        assert_eq!(
+            args.duration.map(|window| window.duration()),
+            Some(std::time::Duration::from_secs(60)),
+            "the flag must not swallow the argument beside it"
+        );
     }
 
     #[test]

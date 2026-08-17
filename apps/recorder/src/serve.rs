@@ -1564,7 +1564,15 @@ impl RecordingState {
         }
 
         let id = format!("r-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
-        let output = asked_for.output().to_path_buf();
+        // `serve` starts recordings and never a buffered capture: every
+        // `start_recording` names an output, and `--no-recording` is a
+        // `clipped-recorder replay` argument (ADR 0018). Should the protocol
+        // ever ask for one, `recording_started` and `recording_stopped` need a
+        // shape for a sitting with no file rather than an empty string here.
+        let output = asked_for
+            .output()
+            .expect("a recording started over the protocol always names a file")
+            .to_path_buf();
         let target = config.target.to_string();
 
         tracing::info!(
@@ -2730,7 +2738,11 @@ fn summarise(report: &RecordingReport) -> RecordingSummary {
     let (width, height) = report.size();
 
     RecordingSummary {
-        output: report.output().to_string_lossy().into_owned(),
+        // Empty only for a capture that wrote no file, which `serve` never
+        // starts — see `start_recording` above.
+        output: report
+            .output()
+            .map_or_else(String::new, |output| output.to_string_lossy().into_owned()),
         duration_ms: u64::try_from(report.duration().as_millis()).unwrap_or(u64::MAX),
         // The protocol's own three words where they line up, and
         // `EndReason::Other` where they do not. The disk guard's reasons

@@ -277,12 +277,23 @@ in the same place: the position it is placed against is the media timestamp of
 the frame that went to both the file and the buffer, and the sidecar belongs to
 the file.
 
-A recording that fills a buffer and writes *no* file has nothing for a bookmark
-to be an offset into, and no build makes one: `clipped-recorder replay` fills a
-buffer *and* writes the recording, and a capture that keeps only the buffer is
-[issue #423](https://github.com/wildware-uk/clipped/issues/423). What a
-bookmark should mean in that mode is a decision for the ticket that builds it,
-and the honest answer today is that this build cannot be in that state.
+A capture that fills a buffer and writes *no* file has nothing for a bookmark to
+be an offset into, and `clipped-recorder replay --no-recording` is one
+([issue #423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md)). **It takes no
+bookmarks, and nothing can ask it for one.** A bookmark is written into the
+bookmark file of the recording it is in and is stored as a position in that file;
+with no file there is neither. The subcommand registers one hotkey — Save
+replay — so a press of `Ctrl`+`F9` during such a sitting reaches no handler and
+is reported as unhandled rather than quietly doing nothing
+(`clipped_hotkeys::Unhandled`), and `add_bookmark` cannot reach it at all because
+`serve` starts no buffered capture.
+
+What a bookmark *should* mean in that mode is still open, and the shape it would
+take is now visible: the clips are the only files, so a mark would have to be
+something the session record carries against the capture's own timeline, to be
+resolved into whichever clip later covers that moment. That is a session-record
+change rather than a bookmark-file one, and nothing needs it yet.
 
 ## Where the interface says it
 

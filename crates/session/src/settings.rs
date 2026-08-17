@@ -290,11 +290,67 @@ pub enum EncoderPreference {
     Fixed(EncoderKind),
 }
 
+/// Where a recording's video ends up.
+///
+/// Two answers, and the second is a capture *mode* rather than a missing value:
+/// SPEC.md section 4's Manual/Replay mode keeps a rolling buffer and writes no
+/// continuous file, so a five-hour sitting costs the buffer's window rather than
+/// five hours of disk ([issue
+/// #423](https://github.com/wildware-uk/clipped/issues/423),
+/// `docs/adr/0018-a-capture-that-writes-no-recording.md`).
+///
+/// It is an enum rather than an `Option<PathBuf>` because both arms carry a
+/// path and they are different paths: a recording knows the *file* it writes,
+/// and a buffered capture knows the *directory* its clips go in. Collapsing the
+/// two would leave a buffered capture with nowhere to check for room and no
+/// directory to name in a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Destination {
+    /// The Matroska file this recording writes, as it captures.
+    File(PathBuf),
+    /// No file at all; the directory anything saved out of this capture goes
+    /// in.
+    Buffer {
+        /// Where a clip saved from the replay buffer will be written.
+        directory: PathBuf,
+    },
+}
+
+impl Destination {
+    /// The file, or [`None`] for a capture that writes none.
+    fn file(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Buffer { .. } => None,
+        }
+    }
+
+    /// The directory this capture belongs to, which both arms have.
+    ///
+    /// A file with no parent — a bare name, which is a recording into the
+    /// working directory — answers `.` rather than nothing, because every
+    /// caller of this wants somewhere to measure free space on or create
+    /// (`crate::disk::free_space`, `crate::muxing::SpaceGuard`).
+    fn directory(&self) -> &Path {
+        match self {
+            Self::File(path) => {
+                let parent = path.parent().unwrap_or_else(|| Path::new(""));
+                if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                }
+            }
+            Self::Buffer { directory } => directory,
+        }
+    }
+}
+
 /// Everything a recording needs to be told before it starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingSettings {
     target: CaptureTargetSettings,
-    output: PathBuf,
+    output: Destination,
     resolution: ResolutionSetting,
     framerate: u32,
     codec: CodecPreference,
@@ -313,6 +369,40 @@ impl RecordingSettings {
     /// the session.
     #[must_use]
     pub fn new(target: CaptureTargetSettings, output: PathBuf) -> Self {
+        Self::with_destination(target, Destination::File(output))
+    }
+
+    /// A capture of `target` that writes **no continuous recording**, keeping
+    /// only what its outputs are given.
+    ///
+    /// SPEC.md section 4's Manual/Replay mode. Everything up to and including
+    /// the encoder is identical to [`Self::new`] — the same target rules, the
+    /// same encoder, the same packets — and what is missing is the container:
+    /// no file is created, no muxing thread is started, and the only thing the
+    /// packets reach is whatever [`RecordingOutputs`](crate::RecordingOutputs)
+    /// carries. Given no outputs at all it captures, encodes and throws every
+    /// packet away, which is a legitimate thing to measure and a useless thing
+    /// to run; the mode exists for
+    /// [`with_replay`](crate::RecordingOutputs::with_replay).
+    ///
+    /// `directory` is where the clips saved out of it go. It is not a file and
+    /// nothing writes to it as the capture runs, but it is checked for room
+    /// before the capture starts, for the reason
+    /// [`Self::new`]'s output is: a save that could never land is worth
+    /// refusing while somebody is still looking at their terminal (AGENTS.md
+    /// section 45).
+    ///
+    /// [`Self::output`] answers [`None`] for one of these, which is what makes
+    /// "did this write a file" a question the type system asks rather than one
+    /// a caller has to remember (AGENTS.md section 44).
+    #[must_use]
+    pub fn buffered(target: CaptureTargetSettings, directory: PathBuf) -> Self {
+        Self::with_destination(target, Destination::Buffer { directory })
+    }
+
+    /// The two constructors' shared body, so that a default added for one is
+    /// never missing from the other.
+    fn with_destination(target: CaptureTargetSettings, output: Destination) -> Self {
         Self {
             target,
             output,
@@ -449,10 +539,33 @@ impl RecordingSettings {
         &self.target
     }
 
-    /// Where the recording is written.
+    /// Where the recording is written, or [`None`] for a capture that writes
+    /// no continuous file.
+    ///
+    /// [`None`] is the whole of what makes SPEC.md section 4's Manual/Replay
+    /// mode different from a recording ([`Self::buffered`]), and it is an
+    /// [`Option`] rather than a flag beside a path so that a caller cannot
+    /// reach a file that was never going to exist.
     #[must_use]
-    pub fn output(&self) -> &Path {
-        &self.output
+    pub fn output(&self) -> Option<&Path> {
+        self.output.file()
+    }
+
+    /// The directory this capture belongs to: the one its file goes in, or the
+    /// one its clips go in.
+    ///
+    /// Always answerable, which is what the disk check and every message about
+    /// where a capture is going need. A recording written to a bare file name
+    /// answers `.`.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        self.output.directory()
+    }
+
+    /// Whether this capture writes a continuous recording at all.
+    #[must_use]
+    pub const fn writes_a_recording(&self) -> bool {
+        matches!(self.output, Destination::File(_))
     }
 
     /// The size to encode at.
@@ -777,5 +890,57 @@ mod tests {
         )
         .with_minimum_free_space(0);
         assert_eq!(settings.minimum_free_space(), 0);
+    }
+
+    #[test]
+    fn a_buffered_capture_names_a_directory_and_no_file_at_all() {
+        // The whole of what makes SPEC.md section 4's Manual/Replay mode a
+        // different mode, expressed where a caller cannot miss it: `output` is
+        // `None`, so nothing downstream can open, name or report a file that was
+        // never going to exist (ADR 0018). A `buffered` that returned the
+        // directory from `output` instead would compile everywhere and would
+        // have the recording loop create a Matroska file called `D:\clips`.
+        let recorded = RecordingSettings::new(
+            CaptureTargetSettings::window(1, 1280, 720),
+            PathBuf::from(r"D:\clips\session.mkv"),
+        );
+        let buffered = RecordingSettings::buffered(
+            CaptureTargetSettings::window(1, 1280, 720),
+            PathBuf::from(r"D:\clips"),
+        );
+
+        assert_eq!(recorded.output(), Some(Path::new(r"D:\clips\session.mkv")));
+        assert!(recorded.writes_a_recording());
+        assert_eq!(
+            recorded.directory(),
+            Path::new(r"D:\clips"),
+            "a recording belongs to the folder its file goes in"
+        );
+
+        assert_eq!(
+            buffered.output(),
+            None,
+            "a buffered capture must not name a file, because it writes none"
+        );
+        assert!(!buffered.writes_a_recording());
+        assert_eq!(
+            buffered.directory(),
+            Path::new(r"D:\clips"),
+            "a buffered capture belongs to the folder its clips go in"
+        );
+    }
+
+    #[test]
+    fn a_recording_written_to_a_bare_name_still_belongs_to_a_directory() {
+        // `directory` is what the room check and the disk guard are given, and
+        // `Path::parent` of a bare file name is the empty path — which names no
+        // volume and which `create_dir_all` would be asked to create. The
+        // working directory is what a bare name means.
+        let settings = RecordingSettings::new(
+            CaptureTargetSettings::window(1, 1280, 720),
+            PathBuf::from("session.mkv"),
+        );
+
+        assert_eq!(settings.directory(), Path::new("."));
     }
 }

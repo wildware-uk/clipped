@@ -19,11 +19,13 @@ starts ([issue #427](https://github.com/wildware-uk/clipped/issues/427)).
 what knows the video in the buffer well enough to write a container header for
 it — and `docs/sessions.md` is where a saved clip is written down.
 
-What still does not exist is a capture that keeps *only* the buffer: SPEC.md
-section 4's Manual/Replay mode writes no continuous file, and this build has no
-recording without one, which is
-[issue #423](https://github.com/wildware-uk/clipped/issues/423). Spilling
-segments to disk for long durations is done
+**A capture can keep only the buffer.** `clipped-recorder replay --no-recording`
+is SPEC.md section 4's Manual/Replay mode: the same capture and the same encoder
+with no container opened, so the only files a sitting produces are the clips
+somebody asked for
+([issue #423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md), and "A capture with
+no recording" below). Spilling segments to disk for long durations is done
 ([issue #36](https://github.com/wildware-uk/clipped/issues/36)) and has its own
 section below.
 
@@ -832,6 +834,47 @@ free to encode and AV1's rate control spends what the content needs rather than
 what it was offered. That is the design working, not a measurement to quote for
 a game: the buffer's footprint follows the bitrate the encoder actually
 produces, which for a real game is the configured one.
+
+## A capture with no recording
+
+`clipped-recorder replay --no-recording` fills a buffer and writes no continuous
+file ([issue #423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md),
+`docs/recorder-cli.md`). Nothing in `clipped-replay` changes for it and nothing
+here needs a second reading: a buffer does not know whether a file is being
+written beside it, and never did.
+
+What changes is one branch in `clipped-session`. `RecordingSettings::buffered`
+names a *directory* instead of a file, `RecordingSettings::output` answers
+`None`, and the recording loop opens no `MkvWriter`, starts no muxing thread and
+arms no disk guard. Everything above that — the backend, the first-frame device,
+the encoder, the audio endpoints, the track layout, the frame gate, the resize
+and minimise handling, and the silence reporting below — is the same code in the
+same order, so the diagram above loses its left branch and keeps its right one:
+
+```text
+ drain packets ────▶ ReplayBuffer::push
+```
+
+**What it is worth is disk, and the figure is the recording's rather than the
+buffer's.** A buffer's own cost is bounded by its window either way and is small
+once it spills — 0.94 MB resident and 208 MB on disk for thirty minutes, from the
+table above. What a sitting saves by not recording is the *file*: five hours at
+the 18.7 Mbit/s a 1080p60 recording is given is about 42 GB that grows for as
+long as the game runs, against a rolling 208 MB that does not.
+
+**The disk guard is not armed**, because there is nothing of the capture's
+growing on a drive for it to watch, and the spill area gives up spilling rather
+than filling one ("When the disk fills or goes away" above). The room check that
+runs before a recording still runs, once, against the directory the clips will go
+in.
+
+**The silence report is still made**, which is the thing ADR 0017 named this mode
+as the way to lose. `note_source_silence` is called from the same acquisition
+arms, because it is the same loop — and `clipped-session`'s
+`a_capture_with_no_recording_still_tells_its_replay_buffer_when_its_source_goes_quiet`
+asserts it against a running capture rather than against the fact that the code
+happens to be shared today.
 
 ## Threading
 

@@ -102,6 +102,128 @@ fn documented_sidecar() -> String {
     block.to_owned()
 }
 
+/// The JSON block `docs/sessions.md` prints for a sitting that wrote no
+/// recording.
+///
+/// Found by the empty `recordings` list rather than by position, because that is
+/// the one thing about the example that is load-bearing: an example that grew a
+/// recording entry would no longer be describing the mode, and this would say so
+/// rather than quietly indexing an ordinary sitting.
+fn documented_buffered_sidecar() -> String {
+    let document = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("docs")
+        .join("sessions.md");
+    let text = fs::read_to_string(&document)
+        .unwrap_or_else(|error| panic!("{} can be read: {error}", document.display()));
+
+    let block = text
+        .split("```json")
+        .find(|block| block.contains("\"recordings\": []"))
+        .and_then(|block| block.split("```").next())
+        .unwrap_or_else(|| {
+            panic!(
+                "{} no longer prints a session that wrote no recording as a ```json block \
+                 with an empty `recordings` list, so what a Manual/Replay sitting's record \
+                 looks like is undocumented (issue #423)",
+                document.display()
+            )
+        });
+    block.to_owned()
+}
+
+/// A sitting that wrote no recording indexes, and its clip points at nothing.
+///
+/// SPEC.md section 4's Manual/Replay capture mode
+/// ([issue #423](https://github.com/wildware-uk/clipped/issues/423),
+/// `docs/adr/0018-a-capture-that-writes-no-recording.md`) produces a shape this
+/// reader had never been given: a session with clips and no recordings at all.
+/// Nothing in the reader needed changing for it — `write_recordings` loops over
+/// an empty list and `write_clips` resolves an absent `source_recording` to
+/// NULL, which is what `clips.source_recording_id` was made nullable for — and
+/// "nothing needed changing" is exactly the claim that has to be checked rather
+/// than asserted, because the writer and the reader are four layers apart and
+/// the compiler holds neither to the other.
+#[test]
+fn a_sitting_that_wrote_no_recording_indexes_and_its_clip_has_no_source() {
+    let root = scratch_directory("no-recording");
+    let text = documented_buffered_sidecar();
+    serde_json::from_str::<Value>(&text)
+        .expect("the example printed in docs/sessions.md is not valid JSON");
+
+    let text = text.replace(
+        "D:\\\\clips",
+        &root.display().to_string().replace('\\', "\\\\"),
+    );
+    fs::write(
+        root.join("clipped-counter-strike-2-20260817-201400.session.json"),
+        &text,
+    )
+    .expect("the documented sidecar can be written");
+    fs::write(
+        root.join("clipped-counter-strike-2-20260817-201400-replay-1.mkv"),
+        [0u8; 64],
+    )
+    .expect("the clip it names can be written");
+
+    // `index` asserts the run reported no problems at all, which is the whole
+    // of "indexes without a problem".
+    let database = index(&root);
+
+    let recordings: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM recordings", [], |row| row.get(0))
+        .expect("the recordings can be counted");
+    assert_eq!(
+        recordings, 0,
+        "a sitting that wrote no file must not produce a recording row: the reconciliation \
+         would mark it missing and the library would draw a tile nothing can play (#383)"
+    );
+
+    let (path, source, start, duration, size, missing): (
+        String,
+        Option<i64>,
+        f64,
+        f64,
+        i64,
+        Option<String>,
+    ) = database
+        .connection()
+        .query_row(
+            "SELECT path, source_recording_id, source_start_seconds, duration_seconds, \
+             size_bytes, missing_since FROM clips",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("the clip is indexed");
+    assert!(path.ends_with("-replay-1.mkv"), "{path}");
+    assert_eq!(
+        source, None,
+        "a clip out of a capture with no recording has no source recording, which is what \
+         `clips.source_recording_id` is nullable for"
+    );
+    assert!((start - 1642.017).abs() < 0.001, "{start}");
+    assert!((duration - 29.983).abs() < 0.001, "{duration}");
+    assert_eq!(size, 64, "the clip's own file was found and measured");
+    assert_eq!(missing, None, "a clip that is there was marked missing");
+
+    let ended: String = database
+        .connection()
+        .query_row("SELECT end_reason FROM sessions", [], |row| row.get(0))
+        .expect("the session is indexed");
+    assert_eq!(ended, "recording-ended");
+}
+
 /// The game event the documentation prints reaches a row, field for field.
 ///
 /// Separate from the whole-file test below because a document this build cannot

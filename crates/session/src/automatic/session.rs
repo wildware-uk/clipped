@@ -252,7 +252,7 @@ impl SessionRecording {
 pub struct SessionClip {
     pub(crate) path: PathBuf,
     pub(crate) created_at: SystemTime,
-    pub(crate) source_index: u32,
+    pub(crate) source_index: Option<u32>,
     pub(crate) source_start: Duration,
     pub(crate) source_end: Duration,
     pub(crate) requested: Duration,
@@ -272,9 +272,22 @@ impl SessionClip {
         self.created_at
     }
 
-    /// Which recording of the session it was cut from.
+    /// Which recording of the session it was cut from, or [`None`] when there
+    /// was none.
+    ///
+    /// [`None`] for a clip saved out of a capture that wrote no continuous
+    /// recording, which is SPEC.md section 4's Manual/Replay mode: the sitting
+    /// has no `recordings` entry for this to point at, and
+    /// `clipped-storage`'s `clips.source_recording_id` is nullable in as many
+    /// words for exactly this case
+    /// (`crates/storage/migrations/0004_clips_without_a_file.sql`,
+    /// `docs/adr/0018-a-capture-that-writes-no-recording.md`).
+    ///
+    /// [`source_start`](Self::source_start) and [`source_end`](Self::source_end)
+    /// are still offsets into the capture's own timeline, which exists whether
+    /// or not a file was written.
     #[must_use]
-    pub const fn source_index(&self) -> u32 {
+    pub const fn source_index(&self) -> Option<u32> {
         self.source_index
     }
 
@@ -442,8 +455,13 @@ pub enum SessionEventKind {
     /// event is what puts the save in the session's own history beside the
     /// recording it came out of.
     ReplaySaved {
-        /// Which recording of the session it was cut from.
-        index: u32,
+        /// Which recording of the session it was cut from, or [`None`] when the
+        /// sitting wrote no recording for it to have come out of.
+        ///
+        /// A capture that keeps only a replay buffer produces clips and no
+        /// continuous file, so there is nothing for this to name
+        /// (`docs/adr/0018-a-capture-that-writes-no-recording.md`).
+        index: Option<u32>,
         /// The file that was written.
         output: PathBuf,
     },

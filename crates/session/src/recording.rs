@@ -54,6 +54,7 @@
 //! else, and a bug in this file must still leave something that plays.
 
 use core::time::Duration;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -236,14 +237,36 @@ fn record_frames(
     // (`crate::replay::ReplayRecording::buffer_handle`).
     let buffered_audio = replay.and_then(crate::replay::ReplayRecording::buffer_handle);
 
-    let writer = open_output(settings, &layout)?;
-    let muxing = MuxingThread::start(
-        writer,
-        SpaceGuard::new(settings.output(), settings.minimum_free_space()),
-        &layout,
-    )?;
+    // The container, and the thread that owns it — **or neither**. A capture
+    // that writes no continuous recording opens no file, starts no muxing
+    // thread and arms no disk guard, because there is nothing growing on a
+    // drive for a guard to watch (`crate::settings::RecordingSettings::buffered`,
+    // ADR 0018). Everything above this line is identical either way: one
+    // capture, one encoder, one set of packets.
+    let muxing = match settings.output() {
+        Some(output) => {
+            let writer = open_output(settings, output, &layout)?;
+            Some(MuxingThread::start(
+                writer,
+                SpaceGuard::new(output, settings.minimum_free_space()),
+                &layout,
+            )?)
+        }
+        None => {
+            // Somewhere for the clips to go, and room for them: both are
+            // settled here, before a game has been running for an hour and
+            // while somebody is still looking at their terminal (AGENTS.md
+            // section 45). It is the same directory a recording's own parent is
+            // created as, by the same rule — Clipped's own recordings folder is
+            // made by whatever goes in it, and a directory the *user* named is
+            // never created here.
+            make_directory(settings.directory())?;
+            check_there_is_room(settings)?;
+            None
+        }
+    };
     let sinks = PacketSinks {
-        muxing: &muxing,
+        muxing: muxing.as_ref(),
         replay: replay_buffer,
     };
 
@@ -278,8 +301,14 @@ fn record_frames(
         // the recording while there is still room to finish the file, so a
         // frame that has already been captured is worth less than the trailer.
         // One relaxed atomic load — the filesystem call behind it happened on
-        // the writer thread (`crate::muxing`).
-        match muxing.space() {
+        // the writer thread (`crate::muxing`). A capture with no file is always
+        // `Ample`: nothing of its is growing on the drive, and the rolling
+        // buffer's own spill area is bounded by its window and gives up
+        // spilling rather than filling a disk (`docs/replay-buffer.md`).
+        match muxing
+            .as_ref()
+            .map_or(SpaceState::Ample, MuxingThread::space)
+        {
             SpaceState::Ample => {}
             SpaceState::Low => {
                 if !low_space_reported {
@@ -289,7 +318,7 @@ fn record_frames(
                     // recording that spends its last minutes writing about
                     // itself.
                     tracing::warn!(
-                        output = %RedactedPath::new(settings.output()),
+                        output = %RedactedPath::new(settings.directory()),
                         "the drive this recording is being written to is filling up; the \
                          recording will be finished cleanly if it reaches the reserve"
                     );
@@ -297,7 +326,7 @@ fn record_frames(
             }
             SpaceState::Exhausted => {
                 tracing::warn!(
-                    output = %RedactedPath::new(settings.output()),
+                    output = %RedactedPath::new(settings.directory()),
                     "the drive this recording is being written to reached its reserve; \
                      finishing the recording now so that the file is complete"
                 );
@@ -335,8 +364,13 @@ fn record_frames(
                 // not before: a packet has nowhere to go on a timeline that has
                 // not begun (`docs/av-sync.md`).
                 if let Some(sources) = sources.take() {
-                    audio_threads =
-                        start_audio(sources, &layout, clock, &muxing, buffered_audio.as_ref());
+                    audio_threads = start_audio(
+                        sources,
+                        &layout,
+                        clock,
+                        muxing.as_ref(),
+                        buffered_audio.as_ref(),
+                    );
                 }
 
                 if let Err(error) = offer(
@@ -466,15 +500,18 @@ fn record_frames(
     // holds a clone of the writer's queue, and the writer's loop only ends once
     // the last of them has been dropped. Joining them here is also what puts
     // their final buffers into the file rather than into a closed channel.
-    let audio_tracks = stop_audio(audio_threads, &muxing);
+    let audio_tracks = stop_audio(audio_threads, muxing.as_ref());
 
-    let summary = match muxing.finish() {
+    // The muxer's account of the file when there was one, and nothing when
+    // there was not. Everything the report takes from it below has a figure of
+    // its own for the second case (`Produced`).
+    let summary = match muxing.map(MuxingThread::finish).transpose() {
         Ok(summary) => summary,
         Err(error) => return Err(reported_failure(failure, error)),
     };
 
     let report = RecordingReport {
-        output: settings.output().to_path_buf(),
+        output: settings.output().map(Path::to_path_buf),
         capture_method: method,
         encoder: opened.kind,
         codec: opened.codec,
@@ -488,27 +525,43 @@ fn record_frames(
         frames_missed_by_source: counters.missed_by_source,
         times_target_minimised: counters.minimised_stretches,
         longest_source_silence: counters.longest_silence,
-        packets_written: summary.packets,
-        timestamps_corrected: summary.timestamps_corrected(),
-        duration: summary.duration,
+        packets_written: summary
+            .as_ref()
+            .map_or(counters.produced.packets, |summary| summary.packets),
+        timestamps_corrected: summary
+            .as_ref()
+            .map_or(0, clipped_muxer::RecordingSummary::timestamps_corrected),
+        duration: summary
+            .as_ref()
+            .map_or_else(|| counters.produced.duration(), |summary| summary.duration),
         end_reason,
         audio_tracks,
     };
 
-    if summary.audio_tracks_without_packets > 0 {
+    if let Some(empty) = summary
+        .as_ref()
+        .map(|summary| summary.audio_tracks_without_packets)
+        .filter(|empty| *empty > 0)
+    {
         // The muxer counted the tracks nothing was ever written to; each source
         // has already said what it produced, and this is the file's own account
         // of the same fact. Both are worth having: a track can be empty because
         // its device was silent, and it can be empty because everything it
         // produced preceded the recording.
         tracing::warn!(
-            empty_audio_tracks = summary.audio_tracks_without_packets,
+            empty_audio_tracks = empty,
             "the recording has audio tracks with no audio in them"
         );
     }
 
     tracing::info!(
-        output = %RedactedPath::new(report.output()),
+        // The file, or the directory the capture belonged to when there was no
+        // file. `wrote_a_recording` is what tells the two apart, because a path
+        // alone cannot: a support bundle showing a capture that produced 60,000
+        // packets and no file has to be readable as the mode it was, and not as
+        // a recording that went missing.
+        output = %RedactedPath::new(report.output().unwrap_or_else(|| settings.directory())),
+        wrote_a_recording = settings.writes_a_recording(),
         frames_encoded = report.frames_encoded(),
         frames_captured = report.frames_captured(),
         frames_skipped_for_rate = report.frames_skipped_for_rate(),
@@ -584,6 +637,12 @@ fn record_frames(
 /// a caller could do about it, and the error a user is owed is the one about
 /// their recording rather than one about tidying up after it (AGENTS.md section
 /// 15).
+///
+/// **A capture that wrote no file still fails on no video**, and has nothing to
+/// remove. It is the same diagnosis for the same reason — a window that is not
+/// drawing produced nothing, and a buffer nothing reached is a hotkey that will
+/// never produce a clip — and saying "there is no file" would be describing the
+/// mode rather than the fault (ADR 0018).
 fn conclude(
     report: RecordingReport,
     failure: Option<SessionError>,
@@ -595,7 +654,17 @@ fn conclude(
         return Ok(report);
     }
 
-    let output = report.output();
+    let Some(output) = report.output() else {
+        tracing::info!(
+            end_reason = report.end_reason().token(),
+            times_target_minimised = report.times_target_minimised(),
+            longest_source_silence_seconds = report.longest_source_silence().as_secs_f64(),
+            "no video reached this capture, and it wrote no file for there to be anything to \
+             remove"
+        );
+        return Err(SessionError::NoFrames);
+    };
+
     match std::fs::remove_file(output) {
         Ok(()) => tracing::info!(
             output = %RedactedPath::new(output),
@@ -768,7 +837,7 @@ fn start_audio(
     sources: Vec<OpenSource>,
     layout: &RecordingLayout,
     clock: CaptureClock,
-    muxing: &MuxingThread,
+    muxing: Option<&MuxingThread>,
     replay: Option<&std::sync::Arc<clipped_replay::ReplayBuffer>>,
 ) -> Option<AudioThreads> {
     (!sources.is_empty()).then(|| AudioThreads::start(sources, layout, clock, muxing, replay))
@@ -779,11 +848,15 @@ fn start_audio(
 /// Empty for a recording that had none. The count of buffers the writer had no
 /// room for is read from the queue rather than summed from the reports, because
 /// a thread that panicked has no report and the buffers it lost are still
-/// missing from the file.
-fn stop_audio(threads: Option<AudioThreads>, muxing: &MuxingThread) -> Vec<AudioTrackReport> {
+/// missing from the file. A capture with no file has no writer to fall behind,
+/// so the count is zero and nothing is said.
+fn stop_audio(
+    threads: Option<AudioThreads>,
+    muxing: Option<&MuxingThread>,
+) -> Vec<AudioTrackReport> {
     let tracks = threads.map_or_else(Vec::new, |mut threads| threads.finish());
 
-    let dropped = muxing.audio_buffers_dropped();
+    let dropped = muxing.map_or(0, MuxingThread::audio_buffers_dropped);
     if dropped > 0 {
         // A fault, and one nothing else would report: audio is gone from the
         // file, in holes wherever the disk could not keep up. Said once, at the
@@ -875,6 +948,49 @@ struct Counters {
     /// source quiet for an hour produces one line rather than thirty-six
     /// thousand (AGENTS.md section 35).
     silence_reported: bool,
+    /// Every packet the encoder produced, and the span they cover.
+    ///
+    /// The muxer counts both for a recording, out of the file it actually
+    /// wrote, and its figures are the ones a recording reports. A capture that
+    /// writes no file has no muxer to ask, and a report with no length and no
+    /// packet count would say a buffered sitting did nothing — which is what
+    /// `clipped-recorder replay --no-recording` prints when it ends, and what
+    /// its session record keeps (ADR 0018).
+    produced: Produced,
+}
+
+/// What the encoder produced, counted where the muxer cannot.
+///
+/// Deliberately *not* a [`clipped_muxer::RecordingSummary`] built by hand: that
+/// type is the muxer's account of a file, and filling one in for a capture that
+/// wrote no file would put "packets written" against packets nothing wrote. The
+/// two figures here are the only ones a buffered capture can honestly claim,
+/// and [`RecordingReport`] takes them from here or from the muxer accordingly.
+#[derive(Debug, Default)]
+struct Produced {
+    /// How many encoded packets were drained.
+    packets: u64,
+    /// The presentation time of the first and last of them, in nanoseconds.
+    first: Option<i64>,
+    last: i64,
+}
+
+impl Produced {
+    /// Records one packet's presentation time.
+    fn note(&mut self, presentation_nanos: i64) {
+        self.packets += 1;
+        self.first.get_or_insert(presentation_nanos);
+        self.last = self.last.max(presentation_nanos);
+    }
+
+    /// The span between the first and last packets, which is what
+    /// [`clipped_muxer::RecordingSummary::duration`] measures for a file.
+    fn duration(&self) -> Duration {
+        let Some(first) = self.first else {
+            return Duration::ZERO;
+        };
+        Duration::from_nanos(self.last.saturating_sub(first).unsigned_abs())
+    }
 }
 
 impl Counters {
@@ -949,15 +1065,26 @@ impl Counters {
 
 /// Where a drained packet goes.
 ///
-/// The file always, and the replay buffer as well when one was given. The two
-/// are a pair rather than two arguments because they are always passed
-/// together, and because the pairing is the point: **there is one encoder**. A
-/// recording and a replay buffer running at the same time encode once and copy
-/// the bytes twice, which is what SPEC.md section 16 asks for and what makes a
-/// replay buffer nearly free while a recording is running.
+/// The file when there is one, and the replay buffer as well when one was
+/// given. The two are a pair rather than two arguments because they are always
+/// passed together, and because the pairing is the point: **there is one
+/// encoder**. A recording and a replay buffer running at the same time encode
+/// once and copy the bytes twice, which is what SPEC.md section 16 asks for and
+/// what makes a replay buffer nearly free while a recording is running.
+///
+/// Both are optional, and the four combinations are all reachable and all
+/// meaningful:
+///
+/// | muxing | replay | what it is |
+/// | --- | --- | --- |
+/// | yes | no | `clipped-recorder record` |
+/// | yes | yes | `clipped-recorder replay` |
+/// | no | yes | `clipped-recorder replay --no-recording` (ADR 0018) |
+/// | no | no | a capture that encodes and keeps nothing, which only a
+/// measurement asks for |
 #[derive(Debug, Clone, Copy)]
 struct PacketSinks<'sinks> {
-    muxing: &'sinks MuxingThread,
+    muxing: Option<&'sinks MuxingThread>,
     replay: Option<&'sinks ReplayBuffer>,
 }
 
@@ -1002,7 +1129,10 @@ fn offer(
         counters.skipped_for_rate += 1;
         return Ok(());
     }
-    if sinks.muxing.is_behind() {
+    // A capture with no file has no writer to fall behind, so no frame is ever
+    // dropped for one. That is not a saving to advertise — it is the absence of
+    // the thing that could not keep up.
+    if sinks.muxing.is_some_and(MuxingThread::is_behind) {
         counters.dropped_writer_behind += 1;
         return Ok(());
     }
@@ -1035,7 +1165,7 @@ fn offer(
         // frame (AGENTS.md section 20).
         progress.reached(Duration::from_nanos(nanos.unsigned_abs()));
     }
-    let packets = drain(encoder, sinks)?;
+    let packets = drain(encoder, sinks, counters)?;
     report_submission_over_headroom(packets);
     Ok(())
 }
@@ -1045,7 +1175,8 @@ fn offer(
 ///
 /// **The muxer first, the buffer second.** The file is the recording and the
 /// buffer is a copy of it, so a packet is never held back from the file for the
-/// buffer's sake.
+/// buffer's sake. A capture with no file skips the first half and is otherwise
+/// identical: the same encoder, the same packets, the same push (ADR 0018).
 ///
 /// The replay buffer's result is not a `Result`: it copies bytes into memory it
 /// already owns and has no failure to report. A buffer that has reached its
@@ -1053,21 +1184,33 @@ fn offer(
 /// are further apart than it can hold, the video it cannot buffer — and says so
 /// in its statistics rather than refusing the packet, because a replay buffer
 /// must never be able to end a recording (AGENTS.md section 17).
-fn drain(encoder: &mut dyn VideoEncoder, sinks: &PacketSinks<'_>) -> Result<usize, SessionError> {
+fn drain(
+    encoder: &mut dyn VideoEncoder,
+    sinks: &PacketSinks<'_>,
+    counters: &mut Counters,
+) -> Result<usize, SessionError> {
     let mut moved = 0;
     while let Some(packet) = encoder.next_packet()? {
         // Both timestamps are nanoseconds from the same zero as the frames that
         // went in, which is what the muxer's `PacketTimestamp` wants
         // (`crates/encoder/src/packet.rs`).
-        sinks.muxing.write(
-            packet.data(),
-            nanos_of(packet.presentation_time()),
-            nanos_of(packet.decode_time()),
-            packet.is_keyframe(),
-        )?;
+        let presentation = nanos_of(packet.presentation_time());
+        if let Some(muxing) = sinks.muxing {
+            muxing.write(
+                packet.data(),
+                presentation,
+                nanos_of(packet.decode_time()),
+                packet.is_keyframe(),
+            )?;
+        }
         if let Some(replay) = sinks.replay {
             replay.push(&packet);
         }
+        // Counted here rather than only by the muxer, because a capture with no
+        // muxer would otherwise report a sitting of no packets and no length.
+        // For a recording the muxer's own figures win: they are what reached
+        // the file, which is what a recording's report is about.
+        counters.produced.note(presentation);
         moved += 1;
     }
     Ok(moved)
@@ -1119,7 +1262,7 @@ fn flush(
 ) -> Result<(), SessionError> {
     let before = counters.encoded;
     encoder.finish()?;
-    let result = drain(encoder, sinks).map(|_| ());
+    let result = drain(encoder, sinks, counters).map(|_| ());
     // At `info` rather than `debug`: it happens once per recording, and it is
     // the line that says the pictures the encoder was holding back reached the
     // file — which is the difference between a recording that ends where the
@@ -1240,6 +1383,7 @@ fn video_track(encoder: &dyn VideoEncoder, codec: Codec, size: (u32, u32)) -> Vi
 /// Creates the output file with every track the recording will contain.
 fn open_output(
     settings: &RecordingSettings,
+    output: &Path,
     layout: &RecordingLayout,
 ) -> Result<MkvWriter, SessionError> {
     // The recordings directory is Clipped's own and is created by the recording
@@ -1247,11 +1391,8 @@ fn open_output(
     // leaving an empty folder in somebody's videos (docs/recorder-cli.md). A
     // directory the *user* named is never created here: the caller has already
     // refused a `--output` inside one that does not exist.
-    if let Some(directory) = settings.output().parent() {
-        if !directory.exists() {
-            std::fs::create_dir_all(directory)
-                .map_err(|source| SessionError::OutputDirectory { source })?;
-        }
+    if let Some(directory) = output.parent() {
+        make_directory(directory)?;
     }
 
     check_there_is_room(settings)?;
@@ -1259,12 +1400,28 @@ fn open_output(
     // `MkvWriter::create` refuses to truncate anything that is already there
     // (AGENTS.md section 56), so replacing an existing recording is done here,
     // deliberately, and only when the caller asked for it.
-    if settings.overwrite() && settings.output().exists() {
-        std::fs::remove_file(settings.output())
-            .map_err(|source| SessionError::OutputDirectory { source })?;
+    if settings.overwrite() && output.exists() {
+        std::fs::remove_file(output).map_err(|source| SessionError::OutputDirectory { source })?;
     }
 
-    Ok(MkvWriter::create(settings.output(), layout)?)
+    Ok(MkvWriter::create(output, layout)?)
+}
+
+/// Creates a directory a capture is about to put files in, if it is not there.
+///
+/// One rule for both modes: a recording creates the folder its file goes in and
+/// a buffered capture creates the folder its clips go in, and neither creates a
+/// directory the *user* named — the caller refused an output inside one that
+/// does not exist long before this (AGENTS.md section 55).
+///
+/// # Errors
+///
+/// [`SessionError::OutputDirectory`].
+fn make_directory(directory: &Path) -> Result<(), SessionError> {
+    if directory.as_os_str().is_empty() || directory.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(directory).map_err(|source| SessionError::OutputDirectory { source })
 }
 
 /// Refuses a recording the drive has no room to make.
@@ -1281,13 +1438,19 @@ fn open_output(
 /// specific than "the free space could not be read"; refusing here would
 /// replace a good message with a worse one, and would stop recording altogether
 /// on any volume Windows will not answer for.
+///
+/// A capture that writes no file is asked the same question about the directory
+/// its clips go in. It is the only disk check such a capture gets — there is no
+/// growing file for [`SpaceGuard`] to watch — and it is worth having, because a
+/// hotkey pressed an hour in on a drive that was already full is the one moment
+/// somebody cannot be told anything useful (ADR 0018).
 fn check_there_is_room(settings: &RecordingSettings) -> Result<(), SessionError> {
     let minimum = settings.minimum_free_space();
     if minimum == 0 {
         return Ok(());
     }
 
-    match crate::disk::free_space(settings.output()) {
+    match crate::disk::free_space(settings.directory()) {
         Ok(space) => {
             let free = space.free_bytes();
             if crate::disk::judge(free, minimum) == crate::disk::SpaceVerdict::Exhausted {
@@ -1648,7 +1811,7 @@ mod tests {
     /// A report for a recording that wrote `frames_encoded` frames to `output`.
     fn finished(output: PathBuf, frames_encoded: u64) -> RecordingReport {
         RecordingReport {
-            output,
+            output: Some(output),
             capture_method: CaptureMethod::WindowsGraphicsCapture,
             encoder: clipped_encoder::EncoderKind::Nvenc,
             codec: Codec::Av1,
@@ -2046,13 +2209,14 @@ mod tests {
         let muxing = muxing_for(&recording);
         let buffer = replay_buffer();
         let sinks = PacketSinks {
-            muxing: &muxing,
+            muxing: Some(&muxing),
             replay: Some(&buffer),
         };
         let scripted = scripted_second();
         let mut encoder = ScriptedEncoder::new(scripted.clone());
+        let mut counters = Counters::default();
 
-        let moved = drain(&mut encoder, &sinks).expect("every packet is accepted");
+        let moved = drain(&mut encoder, &sinks, &mut counters).expect("every packet is accepted");
         let summary = muxing.finish().expect("the recording can be finalised");
 
         assert_eq!(moved, scripted.len());
@@ -2100,12 +2264,13 @@ mod tests {
         let recording = TemporaryRecording::new("no-replay");
         let muxing = muxing_for(&recording);
         let sinks = PacketSinks {
-            muxing: &muxing,
+            muxing: Some(&muxing),
             replay: None,
         };
         let mut encoder = ScriptedEncoder::new(scripted_second());
+        let mut counters = Counters::default();
 
-        let moved = drain(&mut encoder, &sinks).expect("every packet is accepted");
+        let moved = drain(&mut encoder, &sinks, &mut counters).expect("every packet is accepted");
         let summary = muxing.finish().expect("the recording can be finalised");
 
         assert_eq!(moved, 60);
@@ -2132,12 +2297,13 @@ mod tests {
 
         let buffer = replay_buffer();
         let sinks = PacketSinks {
-            muxing: &muxing,
+            muxing: Some(&muxing),
             replay: Some(&buffer),
         };
         let mut encoder = ScriptedEncoder::new(scripted_second());
+        let mut counters = Counters::default();
 
-        let error = drain(&mut encoder, &sinks).expect_err("the writer has stopped");
+        let error = drain(&mut encoder, &sinks, &mut counters).expect_err("the writer has stopped");
 
         assert!(matches!(error, SessionError::WriterLost), "{error}");
         assert_eq!(
@@ -2306,6 +2472,225 @@ mod tests {
     /// Runs the whole recording loop over `steps` and returns what it reported.
     fn recording_of(purpose: &str, steps: impl IntoIterator<Item = Step>) -> RecordingReport {
         recording_into(purpose, steps, &crate::RecordingOutputs::default())
+    }
+
+    /// The same settings for a capture that writes no continuous recording.
+    ///
+    /// The directory is the one a recording's file would have gone in, which is
+    /// where its clips would go — so a test can assert what a run of this mode
+    /// leaves behind by listing exactly the folder a recording would have
+    /// filled.
+    fn buffered_loop_settings(recording: &TemporaryRecording) -> RecordingSettings {
+        RecordingSettings::buffered(
+            crate::settings::CaptureTargetSettings::window(0x1234, TEST_SIZE.0, TEST_SIZE.1),
+            directory_of(recording).to_path_buf(),
+        )
+        .with_minimum_free_space(0)
+        .with_codec(crate::settings::CodecPreference::Fixed(Codec::H264))
+        .with_encoder(crate::settings::EncoderPreference::Fixed(
+            EncoderKind::Software,
+        ))
+    }
+
+    /// The folder a temporary recording lives in.
+    fn directory_of(recording: &TemporaryRecording) -> &std::path::Path {
+        recording
+            .path()
+            .parent()
+            .expect("the temporary recording is inside a directory")
+    }
+
+    /// Everything in `directory`, by file name, sorted.
+    fn contents_of(directory: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .expect("the directory the capture ran in can be listed")
+            .map(|entry| {
+                entry
+                    .expect("an entry can be read")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Runs the whole loop with **no continuous recording**, and answers the
+    /// report and the directory it ran in.
+    ///
+    /// The directory is handed back rather than listed here because what each
+    /// test wants to say about it differs, and because the [`TemporaryRecording`]
+    /// has to outlive the assertion — it removes the directory when it is
+    /// dropped.
+    fn buffered_capture_into(
+        purpose: &str,
+        steps: impl IntoIterator<Item = Step>,
+        outputs: &crate::RecordingOutputs<'_>,
+    ) -> (RecordingReport, TemporaryRecording) {
+        let device =
+            test_device().expect("no Direct3D 11 device could be created, on hardware or on WARP");
+        let texture = test_texture(&device, TEST_SIZE.0, TEST_SIZE.1);
+
+        let format = format_of(TEST_SIZE.0, TEST_SIZE.1);
+        let recording = TemporaryRecording::new(purpose);
+        let settings = buffered_loop_settings(&recording);
+        let mut backend = ScriptedBackend::new(format, steps).drawing(texture);
+        let stop = StopAfter::polls(40);
+
+        let report = record_frames(
+            &settings,
+            &stop,
+            &mut backend,
+            format,
+            CaptureMethod::WindowsGraphicsCapture,
+            outputs,
+        )
+        .expect("a capture with frames in it is a capture");
+
+        (report, recording)
+    }
+
+    #[test]
+    fn a_capture_with_no_recording_writes_no_file_and_still_fills_its_replay_buffer() {
+        // Issue #423's whole claim, run through the real loop: a WARP Direct3D
+        // device, the software H.264 encoder, real captured frames, real encoded
+        // packets — and **no container**. What it must produce is a buffer full
+        // of the capture's own video and an empty directory, and the two
+        // together are the mode. Either alone is satisfiable by a bug: a loop
+        // that still opened a writer would fill the buffer and leave a file, and
+        // one that never reached the encoder would leave nothing and buffer
+        // nothing.
+        let replay = crate::replay::ReplayRecording::new(Duration::from_secs(30))
+            .expect("thirty seconds is in range");
+
+        let (report, recording) = buffered_capture_into(
+            "buffered-capture",
+            [Step::Drew, Step::Drew, Step::Drew, Step::Drew, Step::Drew],
+            &crate::RecordingOutputs::default().with_replay(&replay),
+        );
+
+        assert_eq!(
+            report.output(),
+            None,
+            "a capture that wrote no file must not name one"
+        );
+        assert!(
+            report.frames_encoded() > 0,
+            "the capture encoded nothing, so this says nothing about the rest"
+        );
+        assert_eq!(
+            contents_of(directory_of(&recording)),
+            Vec::<String>::new(),
+            "a capture asked for no continuous recording left something in the output \
+             directory anyway"
+        );
+
+        let stats = replay
+            .stats()
+            .expect("the capture never started the replay buffer it was given");
+        assert_eq!(
+            stats.packets_buffered(),
+            report.frames_encoded(),
+            "the buffer was not fed the capture's own packets, so there would be nothing to \
+             save and nothing else would have noticed: {stats:?}"
+        );
+        assert!(
+            stats
+                .covered()
+                .is_some_and(|covered| !covered.length().is_zero()),
+            "the buffer holds no stretch of the capture's timeline: {stats:?}"
+        );
+
+        // The muxer is what counts these for a recording, and there is no muxer.
+        // Without `Produced` the report would say a sitting that encoded half a
+        // second of video produced no packets and lasted no time, which is what
+        // the command prints when it ends.
+        assert_eq!(
+            report.packets_written(),
+            stats.packets_buffered(),
+            "the report did not count the packets the capture produced"
+        );
+        assert!(
+            !report.duration().is_zero(),
+            "the report gave a capture with video in it no length at all"
+        );
+        assert_eq!(
+            report.timestamps_corrected(),
+            0,
+            "nothing corrected a timestamp, because nothing wrote a container"
+        );
+    }
+
+    #[test]
+    fn a_capture_with_no_recording_still_tells_its_replay_buffer_when_its_source_goes_quiet() {
+        // ADR 0017 named this mode, by number, as the way to lose the silence
+        // report: "a Manual/Replay-mode capture with no continuous file (#423)
+        // that never calls `note_source_silence` reintroduces the
+        // during-the-stall half of this defect and nothing in `clipped-replay`
+        // will notice". It shares the loop today and therefore cannot — but "it
+        // shares the loop today" is exactly the sort of fact that stops being
+        // true in a later change, and the failure is silent: a save during the
+        // stall is answered with the video from before it, marked complete.
+        //
+        // So it is asserted for this mode too, against a running capture rather
+        // than against the shape of the code.
+        let replay = crate::replay::ReplayRecording::new(Duration::from_secs(30))
+            .expect("thirty seconds is in range");
+
+        let (_report, _recording) = buffered_capture_into(
+            "buffered-silence",
+            [
+                Step::Drew,
+                Step::Drew,
+                Step::Drew,
+                Step::Minimised,
+                Step::Minimised,
+                Step::Nothing,
+                Step::Nothing,
+            ],
+            &crate::RecordingOutputs::default().with_replay(&replay),
+        );
+
+        let stats = replay
+            .stats()
+            .expect("the capture never started the replay buffer it was given");
+        assert!(
+            stats.source_silence() > Duration::ZERO,
+            "a capture with no recording waited out a minimised window and a stretch of \
+             nothing without telling its buffer, so a save during either would be answered \
+             with the video from before it: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn a_capture_with_no_recording_and_no_video_fails_rather_than_reporting_a_sitting() {
+        // The same diagnosis a recording gets, for the same reason: a window
+        // that is not drawing produced nothing, and a buffer nothing reached is
+        // a hotkey that would never produce a clip. `conclude` reaches it
+        // through a different arm — there is no file to remove — and an arm that
+        // returned the report instead would hand somebody a successful sitting
+        // that could not produce a single clip.
+        let device =
+            test_device().expect("no Direct3D 11 device could be created, on hardware or on WARP");
+        let texture = test_texture(&device, TEST_SIZE.0, TEST_SIZE.1);
+        let format = format_of(TEST_SIZE.0, TEST_SIZE.1);
+        let recording = TemporaryRecording::new("buffered-no-video");
+        let settings = buffered_loop_settings(&recording);
+        let mut backend = ScriptedBackend::new(format, [Step::Minimised]).drawing(texture);
+
+        let error = record_frames(
+            &settings,
+            &StopAfter::polls(4),
+            &mut backend,
+            format,
+            CaptureMethod::WindowsGraphicsCapture,
+            &crate::RecordingOutputs::default(),
+        )
+        .expect_err("no frame was ever drawn");
+
+        assert!(matches!(error, SessionError::NoFrames), "{error}");
+        assert_eq!(contents_of(directory_of(&recording)), Vec::<String>::new());
     }
 
     /// The same, writing into `outputs` as well as into the file.

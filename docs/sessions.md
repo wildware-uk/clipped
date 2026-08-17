@@ -138,17 +138,25 @@ because turning a process identifier into a window needs a desktop.
 **Full Session**, and only that: start when the game starts, stop when it exits,
 keep everything (SPEC.md section 7).
 
-The other three modes are not offered rather than offered and doing nothing.
-Match Recording needs an integration that can say when a match begins, which is
-the highlight provider API in M9. Highlights Only and Manual/Replay Buffer need a
-replay buffer a clip can be *saved* from: the buffer exists, fills from the same
-encoder and can be written out as a clip (`docs/replay-buffer.md`, [#37]). The
-command exists ([#38]) and the hotkey now reaches an automatic recording ([#421])
-— what is still missing is a *buffer* on one. An automatic recording keeps none,
-because a rolling window costs about 140 MiB a minute and nothing has decided to
-spend it on every game somebody launches; that is [#427]. So `save_replay` is
-refused during an automatic session, in the recorder's own words, rather than
-being a key that quietly does nothing.
+That is what an *automatic* session does. The other three modes are not offered
+rather than offered and doing nothing. Match Recording needs an integration that
+can say when a match begins, which is the highlight provider API in M9.
+Highlights Only and Manual/Replay Buffer need a replay buffer a clip can be
+*saved* from: the buffer exists, fills from the same encoder and can be written
+out as a clip (`docs/replay-buffer.md`, [#37]). The command exists ([#38]) and
+the hotkey now reaches an automatic recording ([#421]) — what is still missing is
+a *buffer* on one. An automatic recording keeps none, because nothing has decided
+to spend a rolling window on every game somebody launches; that is [#427]. So
+`save_replay` is refused during an automatic session, in the recorder's own
+words, rather than being a key that quietly does nothing.
+
+**Manual/Replay Buffer exists as a sitting somebody starts**, which is the other
+way a session begins. `clipped-recorder replay --no-recording` captures, encodes
+and fills a buffer and writes no continuous file at all
+([#423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md),
+`docs/recorder-cli.md`). It produces a session like any other, with one thing
+missing from its record — "A sitting that wrote no recording" below.
 
 ## How a launch becomes a recording
 
@@ -541,13 +549,80 @@ that file is and which part of which recording it came from:
   `source_start_seconds`/`source_end_seconds` are offsets into *that recording's
   own timeline* rather than wall-clock times, so they still mean something after
   the folder has been moved to another drive. They are the two columns
-  `clipped-storage`'s `clips` table already has for exactly this.
+  `clipped-storage`'s `clips` table already has for exactly this. It is
+  **absent** for a clip saved out of a capture that wrote no recording — see "A
+  sitting that wrote no recording" below.
 - `requested_seconds` and `complete` are what the library does not store and a
   person reading the file wants. A clip is bought at keyframe granularity, so it
   is usually slightly longer at the front than was asked for; and a buffer that
   had not filled yet gives less, which is what `complete: false` records. "I
   pressed the key for thirty seconds and got twelve" has an answer here
   (`docs/replay-buffer.md`).
+
+### A sitting that wrote no recording
+
+`clipped-recorder replay --no-recording` is SPEC.md section 4's Manual/Replay
+capture mode: it captures, encodes and fills a rolling buffer, and the only
+files it writes are the clips somebody asked for
+([#423](https://github.com/wildware-uk/clipped/issues/423),
+[ADR 0018](adr/0018-a-capture-that-writes-no-recording.md)). Its session record
+is every other session's, with **one list empty**:
+
+```json
+{
+  "schema_version": 2,
+  "session_id": "counter-strike-2-20260817-201400",
+  "game": { "kind": "known", "game_id": "counter-strike-2", "name": "Counter-Strike 2" },
+  "started_at": "2026-08-17T20:14:00+01:00",
+  "ended_at": "2026-08-17T21:02:37+01:00",
+  "recordings": [],
+  "clips": [
+    {
+      "path": "D:\\clips\\clipped-counter-strike-2-20260817-201400-replay-1.mkv",
+      "created_at": "2026-08-17T20:41:52+01:00",
+      "source_start_seconds": 1642.017,
+      "source_end_seconds": 1672.0,
+      "duration_seconds": 29.983,
+      "requested_seconds": 30.0,
+      "complete": true
+    }
+  ],
+  "bookmarks": [],
+  "events": [
+    { "at": "2026-08-17T20:14:00+01:00", "event": "session-started", "pid": 4242, "image_name": "cs2.exe" },
+    { "at": "2026-08-17T20:41:52+01:00", "event": "replay-saved", "output": "…-replay-1.mkv" },
+    { "at": "2026-08-17T21:02:37+01:00", "event": "session-ended", "reason": "recording-ended" }
+  ],
+  "game_events": []
+}
+```
+
+**`recordings` is empty, and no entry stands in for the capture.** A recording in
+that list is a file — `clipped-storage`'s `recordings.path` is `TEXT NOT NULL
+UNIQUE` — and this sitting wrote none. An entry naming the file it *would* have
+written would be indexed like any other, found to be absent, marked
+`missing_since` and drawn as a tile that cannot be played, which is the failure
+[#383](https://github.com/wildware-uk/clipped/issues/383) removed from the
+recording path. ADR 0018 has the alternatives and what the empty list costs: the
+per-recording `settings` block, which is the only place a session says what it
+was captured at, and which such a sitting therefore does not carry.
+
+**The clips have no `source_recording`.** There is nothing for it to name, so the
+key is absent — which the reader already allows for and the library already
+resolves to a null `clips.source_recording_id`, the column
+`crates/storage/migrations/0004_clips_without_a_file.sql` made nullable in as
+many words for "a replay saved while nothing was being recorded".
+`source_start_seconds` and `source_end_seconds` are still written and still mean
+what they mean: offsets into the capture's own timeline, which exists whether or
+not a file does. A `replay-saved` event carries no `index` for the same reason.
+
+**Nothing else differs.** The sidecar is written the moment the capture opens, so
+a clip saved thirty seconds in has a record to be entered in and a recorder that
+is killed leaves one behind; the game comes from the catalogue through the same
+lookup; the session ends for the same reason, `recording-ended`, because its
+capture stopped. `clipped-library` indexes such a sitting with no problems
+reported — `crates/library/tests/sidecars.rs` indexes the example above and reads
+the clip row back with a null source.
 
 ### A clip with no file
 
@@ -616,7 +691,8 @@ one word it could not interpret.
 `system-resumed`, `recording-limit-reached` and `session-ended`. A
 `replay-saved` carries the `index` of the recording it came out of and the
 `output` it was written to — the same clip `clips` describes, in the session's
-history, so that "what happened during this sitting" reads in order. These are events about the
+history, so that "what happened during this sitting" reads in order. The `index`
+is absent when there was no recording for the clip to come out of. These are events about the
 *session*; game events — a kill, a round starting — are a different vocabulary
 entirely, they come from plugins, and they are M9's `clipped-events`.
 

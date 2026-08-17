@@ -337,7 +337,10 @@ impl SidecarClip {
         Self {
             path: Some(clip.path().display().to_string()),
             created_at: clock::rfc3339(clip.created_at()),
-            source_recording: Some(clip.source_index()),
+            // Absent when the sitting wrote no recording for it to point at,
+            // which the reader already allows for and the library already
+            // resolves to a null `source_recording_id` (ADR 0018).
+            source_recording: clip.source_index(),
             source_start_seconds: Some(clip.source_start().as_secs_f64()),
             source_end_seconds: Some(clip.source_end().as_secs_f64()),
             duration_seconds: Some(clip.duration().as_secs_f64()),
@@ -574,7 +577,7 @@ impl SidecarEvent {
                 written.outcome = Some(outcome.clone());
             }
             SessionEventKind::ReplaySaved { index, output } => {
-                written.index = Some(*index);
+                written.index = *index;
                 written.output = Some(output.display().to_string());
             }
             SessionEventKind::GameExited { pid } | SessionEventKind::GameRelaunched { pid } => {

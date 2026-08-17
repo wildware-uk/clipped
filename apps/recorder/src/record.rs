@@ -348,18 +348,60 @@ fn selector(target: &CaptureTarget) -> TargetSelector {
 /// recording asked for over IPC and one asked for on the command line must
 /// reach the session as the same settings.
 pub(crate) fn settings_for(config: &RecordingConfig, window: &WindowInfo) -> RecordingSettings {
-    let size = window.geometry().client_size();
-    let target =
-        CaptureTargetSettings::window(window.handle().as_u64(), size.width(), size.height())
-            .content_protected(window.is_content_protected())
-            // False by the time `resolve_window` has returned, which refuses a
-            // minimised window outright. It is passed through anyway because
-            // this function is also how a caller that resolved a window some
-            // other way reaches the session, and the session's own refusal is
-            // what protects that caller (`CaptureTargetSettings::minimised`).
-            .minimised(window.is_minimised());
+    configured(
+        RecordingSettings::new(target_of(window), config.output.clone()),
+        config,
+    )
+}
 
-    RecordingSettings::new(target, config.output.clone())
+/// The same settings for a capture that writes **no continuous recording**.
+///
+/// SPEC.md section 4's Manual/Replay mode: everything is resolved exactly as it
+/// is for a recording — the same window rules, the same encoder, the same audio
+/// — and the one difference is that no file is opened
+/// ([`RecordingSettings::buffered`], ADR 0018). `--output` still decides *where*,
+/// because that is where the clips go; only the file name it carries is unused,
+/// since a clip is named after its session rather than after the recording it
+/// came from (`clipped_session::automatic::Session::clip_path`).
+///
+/// Beside [`settings_for`] rather than a flag inside it, because the two differ
+/// in one line and everything after it has to stay the same: a resolution rule
+/// added to one and not the other would make a buffered sitting record
+/// differently from the recording somebody compared it against (AGENTS.md
+/// section 55).
+pub(crate) fn buffered_settings_for(
+    config: &RecordingConfig,
+    window: &WindowInfo,
+) -> RecordingSettings {
+    let directory = config
+        .output
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+
+    configured(
+        RecordingSettings::buffered(target_of(window), directory),
+        config,
+    )
+}
+
+/// What a resolved window is, as the session's capture target.
+fn target_of(window: &WindowInfo) -> CaptureTargetSettings {
+    let size = window.geometry().client_size();
+    CaptureTargetSettings::window(window.handle().as_u64(), size.width(), size.height())
+        .content_protected(window.is_content_protected())
+        // False by the time `resolve_window` has returned, which refuses a
+        // minimised window outright. It is passed through anyway because this
+        // function is also how a caller that resolved a window some other way
+        // reaches the session, and the session's own refusal is what protects
+        // that caller (`CaptureTargetSettings::minimised`).
+        .minimised(window.is_minimised())
+}
+
+/// Everything the command line decides about a capture, whether or not it
+/// writes a file.
+fn configured(settings: RecordingSettings, config: &RecordingConfig) -> RecordingSettings {
+    settings
         .with_overwrite(config.overwrite)
         .with_resolution(match config.resolution {
             Resolution::Source => ResolutionSetting::Source,
@@ -643,11 +685,54 @@ mod tests {
     fn the_window_the_selector_resolved_to_is_what_the_session_is_pointed_at() {
         let settings = settings_for(&config(), &window());
         assert_eq!(settings.target().size(), (2560, 1440));
-        assert_eq!(settings.output(), PathBuf::from(r"D:\clips\session.mkv"));
+        assert_eq!(settings.output(), Some(Path::new(r"D:\clips\session.mkv")));
         assert_eq!(settings.framerate(), 60);
         assert_eq!(settings.resolution(), ResolutionSetting::Source);
         assert_eq!(settings.codec(), CodecPreference::Automatic);
         assert_eq!(settings.encoder(), EncoderPreference::Automatic);
+    }
+
+    #[test]
+    fn a_buffered_capture_keeps_the_directory_and_every_other_choice_and_drops_the_file() {
+        // `--no-recording`, from the one place this command line turns arguments
+        // into settings. Two things have to be true and they pull opposite ways:
+        // no file, and *everything else the same* — because a buffered sitting
+        // that quietly captured at different settings from the recording
+        // somebody compared it against would be indistinguishable from one that
+        // did not (issue #423, ADR 0018).
+        let mut config = config();
+        config.framerate = "30".parse().expect("thirty is a supported frame rate");
+        config.codec = VideoCodec::Av1;
+        config.microphone = AudioDeviceSelection::Disabled;
+
+        let recorded = settings_for(&config, &window());
+        let buffered = buffered_settings_for(&config, &window());
+
+        assert_eq!(
+            buffered.output(),
+            None,
+            "a capture asked for no continuous recording still named a file to write"
+        );
+        assert!(!buffered.writes_a_recording());
+        assert_eq!(
+            buffered.directory(),
+            recorded.directory(),
+            "--output still says where, because that is where the clips go"
+        );
+
+        assert_eq!(buffered.target(), recorded.target());
+        assert_eq!(buffered.resolution(), recorded.resolution());
+        assert_eq!(buffered.framerate(), recorded.framerate());
+        assert_eq!(buffered.codec(), recorded.codec());
+        assert_eq!(buffered.encoder(), recorded.encoder());
+        assert_eq!(buffered.system_audio(), recorded.system_audio());
+        assert_eq!(buffered.microphone(), recorded.microphone());
+        assert_eq!(buffered.capture_cursor(), recorded.capture_cursor());
+        assert_eq!(
+            buffered.minimum_free_space(),
+            recorded.minimum_free_space(),
+            "the room check still applies, against the directory the clips go in"
+        );
     }
 
     #[test]
