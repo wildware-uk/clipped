@@ -401,7 +401,7 @@ questions the activation cannot answer:
 | A process of the game starts or exits | nothing: Windows follows the tree itself |
 | The process the activation names exits with descendants still running | re-scopes onto a surviving member and activates again, logging one `info`; the outage is filled with silence. The other side of a pair follows it onto the same process — see below |
 | …and more than one member survives, in separate trees | re-scopes onto the lowest-numbered one and logs a `warn` naming the members whose audio is therefore not in this track ([issue #311](https://github.com/wildware-uk/clipped/issues/311)) |
-| The game and everything it started exit | `target_is_running` becomes `false`, one `info` is logged, and the including side continues as silence until the caller stops it. What the excluding side then carries is [an open question](#what-the-excluding-side-does-after-the-game-exits) |
+| The game and everything it started exit | `target_is_running` becomes `false`, one `info` is logged, and the including side continues as silence until the caller stops it. The excluding side becomes [everything the machine plays](#what-the-excluding-side-does-after-the-game-exits), because the set it excludes is now empty |
 | A process of the game cannot be opened | it is not a member — an unpinned identifier is not one to scope a capture to — and its name is logged at `debug` |
 
 The tree is rooted at the game rather than at the launcher, for the reason
@@ -450,20 +450,58 @@ unanswerable (AGENTS.md section 35).
 
 ### What the excluding side does after the game exits
 
-**Not known, and deliberately not claimed.** Once the tree is empty, the
-excluding activation names a process that no longer exists. An already-open
-stream is left alone — nothing asks it to reopen — but whether Windows then
-delivers everything the machine plays, or nothing, has not been measured on
-hardware, so neither the log line nor this document says which.
+**It carries everything the machine plays, which is what that track is for**
+([issue #563](https://github.com/wildware-uk/clipped/issues/563)). Once the tree
+is empty the set being excluded is empty, so the exclusion selects nothing and
+the capture is ordinary system audio for the rest of the recording. That is the
+case the track exists for: the game closes, the user keeps recording, and a
+browser or a voice call is still playing.
 
-What *is* certain from the code is the reopen path: `open_stream` refuses an
-empty tree, so if anything does ask the excluding side to reopen after the game
-has gone, that track becomes synthesised silence for the rest of the recording.
-For a user still playing a browser after closing the game, that is a track that
-should have audio on it and does not. Fixing it means either activating an
-exclude-mode client against a dead identifier, or falling back to
-`SystemAudioCapture` on the whole endpoint — and choosing between those needs
-the measurement above, not a guess.
+It used not to be. `open_stream` refused an empty tree on **both** sides, so an
+already-open stream carried on but any *reopen* from that point — an endpoint
+change, a re-scope — produced no stream at all, and the track was synthesised
+silence for the rest of the recording.
+
+Whether Windows accepts an exclude-mode activation naming a process that has
+exited is undocumented, so it was measured rather than reasoned about. On
+**Windows 11 Pro build 26200**, with a 997 Hz tone playing from the measuring
+process and a `cmd.exe` that plays nothing as the game:
+
+| Activation | `ActivateAudioInterfaceAsync`, `Initialize`, `Start` | 997 Hz measured |
+| --- | --- | --- |
+| exclude, live identifier | all succeed | 0.02687 |
+| exclude, identifier of a process that has exited | all succeed | 0.02690 |
+| exclude, identifier that has never existed | all succeed | 0.02717 |
+| include, identifier of a process that has exited | all succeed | 0.00000 |
+| either side, identifier `0` | activation refused, `E_INVALIDARG` | — |
+
+A dead identifier is not a special case to Windows: it excludes a tree with no
+members, which is everything. The include row is the control — it says the
+filter really is being applied rather than every activation returning the
+endpoint — and the exclude rows are within a fraction of a percent of the live
+baseline.
+
+The other candidate was to fall back to `SystemAudioCapture` on the whole
+endpoint for the remainder. It was rejected: it is a different capture with a
+different activation, so it would need a changeover that is seamless in the
+timeline and that cannot double if the tree becomes non-empty again, and the
+measurement says none of that machinery buys anything. What is built is the same
+activation with the same client and the same fixed format, so there is no
+changeover at all.
+
+The **including** side still refuses. There is nothing left to include, so the
+track is silence either way, and a `Game` track that quietly became everything
+the machine plays is exactly ADR 0003's cardinal sin — muting the game in an
+editor would not silence it.
+
+What this costs is process-identifier reuse. Once the tree is empty,
+`ProcessTree` has released the handle that was pinning the identifier — that is
+what makes an empty tree empty — so a reopen long afterwards can name an
+identifier Windows has since given to something else, and that process's audio
+would be missing from this track. It is bounded, it is the same exposure
+[issue #311](https://github.com/wildware-uk/clipped/issues/311) already
+describes, and the alternative it replaces is the whole track silent. Closing it
+needs `clipped-windows` to lend out the handle that pins an identifier.
 
 ### Proving the contents are separated
 
@@ -1000,7 +1038,8 @@ cargo test -p clipped-audio
 - **The game's own track**, in `src/windows/process_loopback.rs`. Four of these
   capture a process tree that **plays nothing** — this test process, or a
   `cmd.exe` chain the test starts — so they make no sound at all and are not
-  suppressed by `CLIPPED_SKIP_AUDIO`; what they need is a Windows that can scope
+  suppressed by `CLIPPED_SKIP_AUDIO` (the fifth, below, does make a sound and
+  is); what they need is a Windows that can scope
   a capture to a process, and where it cannot they skip loudly rather than
   failing. **That is a property of the machine, not of CI** — this page used to
   say a GitHub runner cannot do it and that they skip there, which is false
@@ -1016,6 +1055,18 @@ cargo test -p clipped-audio
   game which exits the process it was launched as, leaving a descendant, is
   followed onto that descendant with the recording contiguous across the
   re-scoping.
+
+  One of them **does** make a sound, and it is the one that measures
+  [what the excluding side does after the game exits](#what-the-excluding-side-does-after-the-game-exits)
+  (issue #563). It holds a 997 Hz tone in the test process, opens both sides
+  against a `cmd.exe` that plays nothing, kills it, forces a reopen through the
+  same path an unplugged headset takes, and measures the tone on both tracks
+  either side of that. The other-system track has to carry it and the game's
+  track has to carry nothing from a client at all — a build that stopped
+  refusing an empty tree on *both* sides would put the whole machine into the
+  track named after the game, and that assertion is what catches it.
+  `CLIPPED_SKIP_AUDIO` skips it; `CLIPPED_REQUIRE_AUDIO` turns the skip into a
+  failure.
 
   Beside them are the arithmetic that needs no machine at all: the
   `WAVEFORMATEXTENSIBLE` describing exactly the format the crate then converts
