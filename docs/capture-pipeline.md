@@ -870,8 +870,14 @@ on screen for six seconds, which is precisely what `DXGI_ERROR_ACCESS_DENIED`
 means here and precisely what a game recorder has to survive. Acquisitions report
 `Acquisition::Timeout` throughout, and the log says why every five seconds. The
 one case that cannot be retried away is a display rotated mid-recording, which is
-refused every time until it is rotated back
-([issue #138](https://github.com/wildware-uk/clipped/issues/138)).
+refused every time until it is rotated back. [Issue
+#138](https://github.com/wildware-uk/clipped/issues/138) looked at correcting
+this instead — rotating the duplicated image on the GPU — and declined to: it
+would be the first GPU blit anywhere in this pipeline, and getting the
+direction of the transpose wrong is exactly the kind of bug that stays
+invisible without a physically rotated display to check it against, which
+nothing running this project's tests has. A wrongly-rotated recording would
+look like a fix and be one nobody could tell was broken, so the refusal stays.
 
 ### What it will not do
 
@@ -879,7 +885,7 @@ refused every time until it is rotated back
 | --- | --- |
 | The cursor | Never appears. Desktop Duplication does not draw the pointer into the desktop image; it reports the position and shape separately for an application to composite. So `CaptureConfig::capture_cursor` cannot be honoured in either direction, `BackendCapabilities::is_cursor_optional` is false, and asking for a cursor logs that there will not be one. |
 | Occlusion | Anything drawn over the target is in the recording, because this is a duplicate of the screen. `is_occlusion_independent` is false, and this is the main reason SPEC.md section 8 ranks the method below Windows Graphics Capture. |
-| A rotated display | Refused, with `CaptureError::UnsupportedTarget`. DXGI hands over a rotated display's image *unrotated*, so a portrait display would record sideways, and a window cropped out of it would be cropped from the wrong pixels entirely. [Issue #138](https://github.com/wildware-uk/clipped/issues/138) owns rotation. |
+| A rotated display | Refused, with `CaptureError::UnsupportedTarget`. DXGI hands over a rotated display's image *unrotated*: a monitor target would simply record sideways, and a window target would be worse — cropped from the wrong pixels entirely, because window positions and the duplicated image disagree about which orientation they are in. [Issue #138](https://github.com/wildware-uk/clipped/issues/138) considered correcting this on the GPU and chose to keep refusing instead, since nothing in this pipeline could verify the direction of the rotation without a physically rotated display. Windows Graphics Capture composes the rotation itself and is unaffected. |
 | A minimised window | Waited out, like the other backend: acquisitions report `Acquisition::TargetMinimised` until it comes back, rather than cropping the rectangle at (-32000, -32000) where Windows parks it. |
 | A protected window | Declined at `availability`, like the other backend. `WDA_MONITOR` renders the window black and `WDA_EXCLUDEFROMCAPTURE` leaves whatever is behind it in the frame; neither is the recording anybody asked for. |
 | A machine with no display output | Declined at `initialise` with `UnsupportedTarget`, naming the case: a remote session, a headless server or a virtual machine with no display. A basic display driver that has outputs but cannot duplicate them is declined the same way, naming that instead. |
