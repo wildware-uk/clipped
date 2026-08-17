@@ -18,7 +18,7 @@
 /** The three-segment clip, as the object it serialises from. */
 function base(): Record<string, unknown> {
   return {
-    schema_version: 1,
+    schema_version: 2,
     title: 'Round 12 ace',
     aspect_ratio: { width: 16, height: 9 },
     sources: [
@@ -57,7 +57,6 @@ function base(): Record<string, unknown> {
         ],
         gain_db: -3,
         muted: false,
-        soloed: false,
         fade_in: 0,
         fade_out: 1_000_000_000,
       },
@@ -66,7 +65,6 @@ function base(): Record<string, unknown> {
         inputs: [{ source: 0, stream: 1 }],
         gain_db: 0,
         muted: true,
-        soloed: false,
         fade_in: 0,
         fade_out: 0,
       },

@@ -204,9 +204,41 @@ export function outputPositionsOf(
   return found;
 }
 
-/** Whether anything in the document is soloed. */
-export function anySoloed(document: EditDocument): boolean {
-  return document.audio_tracks.some((track) => track.soloed);
+/**
+ * Which track, if any, the editor is listening to on its own; `null` is the
+ * whole mix. The TypeScript mirror of `Solo` in `crates/edit/src/audio.rs`.
+ *
+ * **Playback state, not part of a document.** [Issue
+ * #85](https://github.com/wildware-uk/clipped/issues/85) moved soloing out of
+ * the edit document — `docs/editing.md#solo-is-not-a-property-of-a-track` —
+ * because it describes a moment of somebody's editing session rather than the
+ * clip. So this holds a track index rather than a document field, the editor
+ * keeps it in its own component state (`ClipEditor`'s `useState`), it is never
+ * written to storage, and {@link resolve} — what an export reads — does not
+ * take one at all. A `number` rather than a set, so that "two tracks are
+ * soloed" is not a state this type can hold: {@link toggleSolo} moves the solo
+ * rather than adding to it.
+ */
+export type Solo = number | null;
+
+/** Listening to the whole mix, which is where the editor starts. */
+export const SOLO_NONE: Solo = null;
+
+/**
+ * The solo after the control on `track` is pressed: `Solo::toggled` in
+ * `crates/edit`.
+ *
+ * Pressing it on the soloed track clears the solo; pressing it on any other
+ * track moves the solo there. There is deliberately no way to reach a state
+ * with two tracks soloed.
+ */
+export function toggleSolo(current: Solo, track: number): Solo {
+  return current === track ? SOLO_NONE : track;
+}
+
+/** Whether `solo` silences `track`, which is true of every other track. */
+function soloSilences(solo: Solo, track: number): boolean {
+  return solo !== null && solo !== track;
 }
 
 /** What a track contributes once mute and solo are resolved. */
@@ -214,19 +246,108 @@ export type TrackOutput =
   { readonly audible: false } | { readonly audible: true; readonly gainDb: number };
 
 /**
- * Resolves `track` against whether anything in the document is soloed.
+ * What `track` contributes to the **export**: `resolve` in
+ * `crates/edit/src/audio.rs`.
  *
- * The rules are `docs/editing.md`'s, which are every mixing desk's: mute wins,
- * including over solo on the same track; solo is exclusive; and solo does
- * nothing when nothing is soloed. A type rather than a level, so that "silent"
- * cannot be misread as "no gain applied" — the mistake that exports a muted
- * microphone at full volume.
+ * Mute and the level, and nothing about how anybody was listening — an export
+ * is never given a {@link Solo}, so nothing about a solo left on can reach the
+ * file. A type rather than a level, so that "silent" cannot be misread as "no
+ * gain applied", which is the mistake that exports a muted microphone at full
+ * volume.
  */
-export function trackOutput(track: AudioTrack, soloed: boolean): TrackOutput {
-  if (track.muted || (soloed && !track.soloed)) {
+export function resolve(track: AudioTrack): TrackOutput {
+  if (track.muted) {
     return { audible: false };
   }
   return { audible: true, gainDb: track.gain_db };
+}
+
+/**
+ * What `track` contributes to the **preview**, given the editor's `solo`:
+ * `monitor` in `crates/edit/src/audio.rs`.
+ *
+ * The rules are `docs/editing.md`'s, which are every mixing desk's: **mute
+ * wins**, including on the track that is itself soloed, so soloing a muted
+ * track does not unmute it; **solo is exclusive**, silencing every other track
+ * while it is on; and **solo does nothing when nothing is soloed**, so the
+ * preview matches {@link resolve} — the export — exactly in the ordinary case.
+ */
+export function monitor(track: AudioTrack, index: number, solo: Solo): TrackOutput {
+  if (soloSilences(solo, index)) {
+    return { audible: false };
+  }
+  return resolve(track);
+}
+
+/** An amplitude multiplier from a level in decibels: `amplitude_from_db` in `crates/edit`. */
+function amplitudeFromDb(gainDb: number): number {
+  return 10 ** (gainDb / 20);
+}
+
+/**
+ * The fade envelope of `track` at `atNanos` of a clip lasting `clipNanos`:
+ * `fade_amplitude` in `crates/edit/src/audio.rs`.
+ *
+ * A multiplier between `0` and `1` on top of the track's level, defined once so
+ * that a preview and an export cannot draw two different curves. It rises
+ * linearly in amplitude across `fade_in` and falls linearly to zero across
+ * `fade_out`; past the end of the clip there is nothing to hear, which is why
+ * `atNanos >= clipNanos` answers `0` rather than being asked for.
+ */
+export function fadeAmplitude(track: AudioTrack, atNanos: number, clipNanos: number): number {
+  if (atNanos >= clipNanos) {
+    return 0;
+  }
+  let amplitude = 1;
+  if (atNanos < track.fade_in) {
+    amplitude *= atNanos / track.fade_in;
+  }
+  const remaining = clipNanos - atNanos;
+  if (remaining <= track.fade_out) {
+    amplitude *= remaining / track.fade_out;
+  }
+  return amplitude;
+}
+
+/** `output`'s level and `track`'s fade envelope, folded into one multiplier. */
+function amplitudeOf(
+  output: TrackOutput,
+  track: AudioTrack,
+  atNanos: number,
+  clipNanos: number,
+): number {
+  if (!output.audible) {
+    return 0;
+  }
+  return amplitudeFromDb(output.gainDb) * fadeAmplitude(track, atNanos, clipNanos);
+}
+
+/**
+ * How loud `track` is at `atNanos` of a clip lasting `clipNanos`, in the
+ * **export**: `track_amplitude_at` in `crates/edit`.
+ *
+ * The whole mix for one track at one moment, as a multiplier on the recorded
+ * samples: its level, its mute and its fades, resolved into the number an
+ * exporter would multiply by. `0` is silence and `1` is the track exactly as
+ * recorded.
+ */
+export function trackAmplitudeAt(track: AudioTrack, atNanos: number, clipNanos: number): number {
+  return amplitudeOf(resolve(track), track, atNanos, clipNanos);
+}
+
+/**
+ * The same figure in the **preview**, with the editor's `solo` applied:
+ * `monitored_amplitude_at` in `crates/edit`. Agrees with
+ * {@link trackAmplitudeAt} exactly whenever `solo` is {@link SOLO_NONE}.
+ */
+export function monitoredAmplitudeAt(
+  track: AudioTrack,
+  index: number,
+  solo: Solo,
+  atNanos: number,
+  clipNanos: number,
+): number {
+  return amplitudeOf(monitor(track, index, solo), track, atNanos, clipNanos);
 }
 
 /** The overlays on screen at `atNanos`, in the order the document holds them. */

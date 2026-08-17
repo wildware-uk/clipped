@@ -136,7 +136,7 @@ describe('events on the timeline', () => {
       within(screen.getByRole('list', { name: 'Tracks' }))
         .getAllByRole('listitem')
         .map((track) => track.textContent),
-    ).toEqual(['Video3 segments', 'Game-3.0 dB', 'MicrophoneMuted']);
+    ).toEqual(['Video3 segments', 'GameSolo-3.0 dB', 'MicrophoneSoloMuted']);
   });
 
   it('says a session had none differently from a session nobody asked about', () => {
@@ -232,19 +232,23 @@ describe('events on the timeline', () => {
      *   action to the end would make a keyboard user's focus jump from the
      *   bottom of the screen back to the top.
      * - then the timeline's own controls, outermost inwards: the zoom, the kind
-     *   filters, the marks themselves.
+     *   filters, each track's Solo button, the marks themselves.
      * - **the playhead last**, because it is the innermost thing and the one a
      *   user stays on: the arrow keys, Home, End and Page Up/Down all work from
      *   there, so it is where a keyboard user wants to be left.
      *
      * Zoom out and Fit are disabled at the first zoom step, so neither is a tab
-     * stop; that is why the zoom contributes one entry and not three.
+     * stop; that is why the zoom contributes one entry and not three. The
+     * fixture has two audio tracks, "Game" and "Microphone", so Solo
+     * contributes two.
      */
     expect(await tabOrder(user)).toEqual([
       'Export…',
       'Zoom in',
       'Kill (2)',
       'Death (1)',
+      'Solo',
+      'Solo',
       'Kill at 00:04.000, reported by counter-strike-2',
       'Death at 00:05.000, reported by counter-strike-2',
       'Kill at 00:11.000, reported by counter-strike-2',
@@ -256,8 +260,10 @@ describe('events on the timeline', () => {
     const user = userEvent.setup();
     render(<EditorScreen clip={storedDocument()} events={[event('kill', 34)]} />);
 
-    // The fourth stop, by the order above: Export, Zoom in, the kind toggle,
-    // then the mark.
+    // The sixth stop, by the order above: Export, Zoom in, the kind toggle,
+    // the two Solo buttons, then the mark.
+    await user.tab();
+    await user.tab();
     await user.tab();
     await user.tab();
     await user.tab();
