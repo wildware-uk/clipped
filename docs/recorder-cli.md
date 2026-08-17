@@ -43,9 +43,11 @@ be discovered in a file:
   silently recorded at the source size.
 
 A recording also ends if the window changes size, because Matroska fixes a
-track's dimensions in its header and the encoder is configured for one size. The
-file is finished at that point and says so; what a session should do instead is
-[#184](https://github.com/wildware-uk/clipped/issues/184).
+track's dimensions in its header and the encoder session is configured for one
+size — neither can change part way through a file. The file is finished at that
+point, complete and seekable, and says why. **A `watch` session carries on in the
+next file; a `record` run does not**, and the section below says what each one
+does.
 
 **`replay` keeps the last few minutes and saves them on a key.** It is `record`
 with a rolling buffer beside it: the recording runs as usual, every encoded
@@ -234,6 +236,39 @@ The recording is deliberately **kept open** while the window is minimised.
 Alt-tabbing out of an exclusive fullscreen game minimises it, and stopping there
 would cost the rest of the session for two keystrokes; everything before the
 minimise and everything after the restore is in the one file, on one timeline.
+
+A window **resized** is the other answer, and the sentence says so:
+
+```text
+Recorded 229 frames of 1282x752 AV1 in 7.66s to D:\clips\session.mkv (NVIDIA NVENC, Windows Graphics Capture, 29.8 fps sustained; 0 frames dropped). Stopped because the recorded window changed size, which one file cannot follow.
+```
+
+Dragging a window's edge, a game changing resolution and a borderless window
+going fullscreen all reach the recorder as the same thing: the capture's frames
+are a different shape from the ones the file was opened for. A Matroska track's
+dimensions live in the header and an encoder session's resolution is fixed when
+it opens, so the file is finished there rather than filled with pictures of a
+size it does not declare. Nothing is lost — everything up to the change is in
+that file, flushed, finalised and seekable.
+
+**`record` stops; `watch` carries straight on.** `record` was given one path to
+write and writes that file; there is no second file for it to make and no session
+to put one in. An automatic session treats the change as a seam and starts the
+next recording of the same sitting immediately — a resize is proof that the
+window is still there, so it does not wait out the delay that exists for a game
+that may have quit. Two files, one sitting, joined by the session record
+([sessions.md](sessions.md), [ADR 0012](adr/0012-a-session-follows-a-resize-with-a-new-file.md)).
+
+Clipped does **not** scale the new size back to the old one to keep a single
+file. Doing so would put a resample on the frame path the game is paying for, and
+would record an enlarged window as an upscale of the smaller picture in a track
+that admits nothing about it. The ADR has the full argument.
+
+One size change cannot be followed at all: a window whose new client area has an
+**odd** width or height has no 4:2:0 representation, so no encoder will open for
+it and the recording that follows the resize fails with `encoder-unavailable`.
+That is [#561](https://github.com/wildware-uk/clipped/issues/561) and is not
+specific to resizing — such a window cannot be recorded from the start either.
 
 **A recording that captured nothing at all leaves no file.** If capture never
 produced a frame the file would be a header with no picture in it — which the
