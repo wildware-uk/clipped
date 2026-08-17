@@ -332,7 +332,7 @@ into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
 `shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`, `settings`,
-`microphone_level`, `automatic`.
+`microphone_level`, `startup`, `automatic`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -397,6 +397,14 @@ still has a working list of devices, so it must draw the chooser and leave out
 the meter rather than refuse the whole screen. It is also the one capability a
 build can lack for a reason other than its age: a recorder compiled without an
 audio backend does not claim it.
+`startup` says the build has both [`get_start_at_login`](#get_start_at_login)
+and `set_start_at_login`. It is separate from `settings` because starting at
+login is not a setting — it is a `Run` value Windows reads at sign-in rather
+than a key in `settings.json` — and because a recorder built before issue #308
+has every settings command and neither of these, so it refuses both with
+`unknown_command`. That refusal and "Clipped does not start at sign-in" are
+opposite answers, and a switch drawn without checking would show the second for
+the first.
 
 ## Compatibility policy
 
@@ -582,6 +590,8 @@ twice. It is absent for a recording that is not part of a sitting.
 | `apply_settings` | `values`, below | `settings` | yes |
 | `get_audio_devices` | none | `audio_devices` | yes |
 | `get_microphone_level` | `microphone` | `microphone_level` | yes |
+| `get_start_at_login` | none | `start_at_login` | yes |
+| `set_start_at_login` | `enabled` | `start_at_login` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 
 ### `save_replay`
@@ -1522,6 +1532,78 @@ cannot be opened is `internal` carrying the reason, for the same reason
 [#252]: https://github.com/wildware-uk/clipped/issues/252
 [#308]: https://github.com/wildware-uk/clipped/issues/308
 [#316]: https://github.com/wildware-uk/clipped/issues/316
+
+### `get_start_at_login`
+
+Whether the recorder starts when this user signs in, and what is arranged. Not
+part of the settings: it is one value under
+`HKEY_CURRENT_USER\…\CurrentVersion\Run` that Windows reads once, at sign-in,
+and that Windows also lists in **Settings > Apps > Startup** with a switch of
+its own. `settings.json` does not carry it, and a copy there could disagree with
+the registry — which is the thing that actually decides ([#308]).
+
+```json
+{"type":"response","id":16,"outcome":{"ok":{"reply":"start_at_login",
+  "start_at_login":{"enabled":true,
+    "location":"HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder",
+    "command":"\"C:\\Program Files\\Clipped\\clipped-recorder.exe\" serve --watch-for-games"}}}}
+```
+
+`enabled` is the switch's position and nothing more. `command` is what Windows
+would run, present exactly when `enabled` is true, and it is worth sending
+because there is nowhere else to see it short of a registry editor. `location`
+is sent rather than known by the caller, so that a window can say where the
+value lives without keeping its own copy of a path only the recorder changes.
+
+`missing_executable` is the third state, and it is neither on nor off:
+
+```json
+{"type":"response","id":18,"outcome":{"ok":{"reply":"start_at_login",
+  "start_at_login":{"enabled":true,"location":"…",
+    "command":"\"C:\\Old\\clipped-recorder.exe\" serve --watch-for-games",
+    "missing_executable":"C:\\Old\\clipped-recorder.exe"}}}}
+```
+
+A Clipped that was moved or reinstalled leaves a value naming a path that is no
+longer there. `enabled` stays **true**, because Windows will still try it — a
+caller that drew that as "off" would offer to turn on something already on — and
+the path that is missing is named so that the caller can say what was looked
+for. It is **reported rather than repaired**: rewriting somebody's startup entry
+because a status was read, or because a settings screen was opened, is the
+surprising behaviour this whole arrangement avoids
+([privacy.md](privacy.md)). The repair is `set_start_at_login` with `true`,
+which writes the running recorder's own path.
+
+### `set_start_at_login`
+
+Turns it on or off. One boolean, because it is one switch:
+
+```json
+{"type":"request","id":17,"command":"set_start_at_login","params":{"enabled":true}}
+```
+
+Answered with `start_at_login` as it now stands, read back out of the registry —
+for the reason `apply_settings` answers with the settings as they now stand: a
+window that drew the switch where the user put it would show "on" for a write
+the registry refused.
+
+Both are idempotent. `true` over an entry that is already there rewrites it with
+this recorder's path, which is the repair above; `false` over nothing is the
+state being asked for rather than a failure.
+
+**The recorder writes it, and no other process can.** The value is a command
+line naming the executable to run, and that executable is the recorder — a
+window writing a path it worked out from its own location would leave a startup
+entry pointing at nothing whenever the two were not where it assumed, and a
+startup entry that points at nothing fails silently, once, at a sign-in nobody
+is watching. `clipped-recorder start-at-login` and these two commands are the
+same code (`apps/recorder/src/start_at_login.rs`,
+[recorder-cli.md](recorder-cli.md)).
+
+A build with no registry — anything that is not Windows — refuses both with
+`internal` and the reason, so a caller says why it cannot offer the switch
+rather than drawing one in the off position as though it had looked (AGENTS.md
+section 27).
 
 ## Commands this build cannot perform
 

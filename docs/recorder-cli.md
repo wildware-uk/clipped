@@ -967,8 +967,13 @@ It writes exactly one value, under this account only:
 
 ```text
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-    "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve
+    "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve --watch-for-games
 ```
+
+`--watch-for-games` because a recorder started at login that did not watch for
+games would record nothing until somebody opened the window and pressed a
+button, which is the opposite of what it is for
+([#421](https://github.com/wildware-uk/clipped/issues/421)).
 
 `HKEY_CURRENT_USER` rather than `HKEY_LOCAL_MACHINE`, so it needs no elevation
 and applies to one person on a shared machine — and so the recorder runs in the
@@ -989,8 +994,12 @@ installation you want.
 ([#220](https://github.com/wildware-uk/clipped/issues/220)). That is worth
 knowing before turning it on.
 
-There is no setting for this in the desktop application yet; the settings screen
-is [#108](https://github.com/wildware-uk/clipped/issues/108).
+The Settings screen's **Startup** section has the same switch
+([#308](https://github.com/wildware-uk/clipped/issues/308)), and it is the same
+code: the window has no registry of its own and could not name the executable to
+run if it did, so it asks the recorder over `get_start_at_login` and
+`set_start_at_login` ([ipc.md](ipc.md)). Turning it on there and running `enable`
+here do exactly the same thing, and either can undo the other.
 
 ## Exit codes
 

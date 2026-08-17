@@ -72,8 +72,12 @@ Clipped's own. **That last row is the one exception for Clipped itself**, so it
 is stated plainly: it is the only thing the recorder or the desktop application
 writes anywhere else on your computer, and it is written only when you ask for
 it. `clipped-recorder start-at-login enable` puts it there, `disable` removes it
-and leaves nothing behind, and `status` tells you which it is. No installer
-writes it for you, nothing else in Clipped reads or changes that key, and it is
+and leaves nothing behind, and `status` tells you which it is; the Settings
+screen's Startup switch does the same three things, through the same code — it
+asks the recorder, because the value names the recorder's own program and the
+window would have to guess at it. Reading it never changes it, so opening that
+screen writes nothing. No installer writes it for you, nothing else in Clipped
+reads or changes that key, and it is
 under `HKEY_CURRENT_USER`, so it applies to your account and to nobody else
 signed in to the same machine. The value holds a path and nothing about you.
 The decision is [ADR 0006](adr/0006-recorder-lifetime-and-supervision.md).

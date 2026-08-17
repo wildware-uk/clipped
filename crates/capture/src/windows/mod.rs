@@ -36,6 +36,7 @@
 //! have in `clipped-windows` anyway.
 
 mod apartment;
+mod crop;
 mod desktop_duplication;
 mod device;
 mod graphics_capture;

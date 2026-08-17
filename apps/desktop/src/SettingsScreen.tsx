@@ -5,6 +5,7 @@ import { Link } from 'react-router';
 
 import { HotkeyList } from './HotkeyList';
 import type { LibraryRead } from './library';
+import { StartAtLoginSwitch } from './StartAtLoginSwitch';
 import {
   chooseRecordingDirectory,
   describeSettingsProblem,
@@ -13,6 +14,7 @@ import {
   microphoneOptions,
   RECORDING_DIRECTORY,
   SETTINGS_SECTIONS,
+  STARTUP_SECTION,
   useAudioDevices,
   useSettings,
   type SettingRow,
@@ -344,6 +346,13 @@ function Pane({
        * the only process that knows (issue #232).
        */}
       {section.id === HOTKEYS_SECTION ? <HotkeyList /> : null}
+
+      {/*
+       * The other one, and not a setting either: a Run value Windows reads at
+       * sign-in rather than a key in the settings file, written by the recorder
+       * because the recorder is the executable it names (issue #308).
+       */}
+      {section.id === STARTUP_SECTION ? <StartAtLoginSwitch /> : null}
 
       {section.rows.length > 0 ? (
         <table className="clipped-table">

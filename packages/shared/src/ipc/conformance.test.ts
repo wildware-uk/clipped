@@ -43,6 +43,9 @@ import type {
   MicrophoneLevel,
   MicrophoneLevelParams,
   MicrophoneLevelReply,
+  SetStartAtLoginParams,
+  StartAtLogin,
+  StartAtLoginReply,
   SettingEntry,
   SettingsReply,
   SettingsView,
@@ -591,6 +594,17 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     muted: 'optional',
   }),
   'reply.microphone_level': fields<MicrophoneLevelReply>({ reply: 'required', level: 'required' }),
+  start_at_login: fields<StartAtLogin>({
+    enabled: 'required',
+    location: 'required',
+    command: 'optional',
+    missing_executable: 'optional',
+  }),
+  set_start_at_login: fields<SetStartAtLoginParams>({ enabled: 'required' }),
+  'reply.start_at_login': fields<StartAtLoginReply>({
+    reply: 'required',
+    start_at_login: 'required',
+  }),
   apply_settings: fields<ApplySettingsParams>({ values: 'optional' }),
   'recorder_status.idle': fields<IdleStatus>({ state: 'required' }),
   'recorder_status.watching': fields<WatchingStatus>({ state: 'required', session: 'optional' }),
@@ -773,6 +787,18 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'get_start_at_login',
+    params: null,
+    reply: 'reply.start_at_login',
+    available_in_this_build: true,
+  },
+  {
+    name: 'set_start_at_login',
+    params: 'set_start_at_login',
+    reply: 'reply.start_at_login',
+    available_in_this_build: true,
+  },
+  {
     name: 'shutdown',
     params: 'shutdown',
     reply: 'reply.shutting_down',
@@ -859,6 +885,18 @@ function replyDiscriminant(reply: Reply): string {
       // the same shape with a field left out, and which is which is
       // `MicrophoneLevel.device` rather than a different reply.
       return 'microphone_level';
+    case 'start_at_login':
+      // Three paths, because they are the three things the window says
+      // differently: off, on, and on but pointing at an executable that is no
+      // longer there. A mirror that dropped either field would reach the same
+      // discriminant for a working startup arrangement and a broken one
+      // (issue #308).
+      if (!reply.start_at_login.enabled) {
+        return 'start_at_login.off';
+      }
+      return reply.start_at_login.missing_executable === undefined
+        ? 'start_at_login.on'
+        : 'start_at_login.missing';
     case 'recording_exported':
       // Whether the copy is complete is part of the path, because it is the one
       // thing the window has to say differently: a mirror that dropped

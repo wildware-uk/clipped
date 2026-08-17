@@ -124,6 +124,7 @@ mod plugins;
 pub mod schema;
 pub mod server;
 pub mod settings;
+pub mod startup;
 pub mod status;
 pub mod supervisor;
 pub mod transport;
@@ -156,6 +157,7 @@ pub use settings::{
     ApplySettings, AudioDevice, AudioDevices, MicrophoneLevel, MicrophoneLevelRequest,
     SettingEntry, SettingsView,
 };
+pub use startup::{SetStartAtLogin, StartAtLogin};
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
     ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,

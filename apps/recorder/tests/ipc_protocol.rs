@@ -654,6 +654,69 @@ fn the_recorder_lists_the_microphones_it_would_record_from_or_says_why_it_cannot
 }
 
 #[test]
+fn the_recorder_says_whether_it_starts_at_login_without_changing_whether_it_does() {
+    // **A read only.** `set_start_at_login` is deliberately not exercised from
+    // here: the only entry a served recorder can be asked about is the real one
+    // under this account, and a test that turned it on would arrange for the
+    // machine running the suite to start a recorder at every sign-in afterwards
+    // (AGENTS.md section 25). What the write does is
+    // `clipped_recorder::start_at_login`'s own tests, against a scratch key.
+    //
+    // What this proves is the half those cannot: that a `serve` really answers
+    // the command, so a window asking it gets an arrangement or a reason rather
+    // than `unknown_command`.
+    let recorder = ServedRecorder::start("start-at-login");
+    let mut client = recorder.client();
+
+    let before = client.call(&IpcCommand::GetStartAtLogin);
+    match &before {
+        Ok(Reply::StartAtLogin { start_at_login }) => {
+            assert!(
+                start_at_login.location.contains(r"CurrentVersion\Run"),
+                "the window is told where the entry is, and it is the key Windows reads: {:?}",
+                start_at_login.location,
+            );
+            assert_eq!(
+                start_at_login.enabled,
+                start_at_login.command.is_some(),
+                "on and no command, or off and a command, is a state that cannot be drawn: {start_at_login:?}",
+            );
+        }
+        Err(ClientError::Refused(refusal)) => {
+            assert!(
+                !refusal.message.trim().is_empty(),
+                "a recorder that cannot read the entry has to say why, so a window can say it \
+                 too rather than drawing the switch off",
+            );
+        }
+        other => panic!("expected an arrangement or a reason, got {other:?}"),
+    }
+
+    // And asking twice changes nothing, which is the property that makes this
+    // safe to run on somebody's machine: reading is not repairing.
+    let again = client.call(&IpcCommand::GetStartAtLogin);
+    match (&before, &again) {
+        (
+            Ok(Reply::StartAtLogin {
+                start_at_login: first,
+            }),
+            Ok(Reply::StartAtLogin {
+                start_at_login: second,
+            }),
+        ) => {
+            assert_eq!(first, second, "reading the arrangement changed it");
+        }
+        (Err(_), Err(_)) => {}
+        (first, second) => {
+            panic!("the same question was answered two ways: {first:?} then {second:?}")
+        }
+    }
+
+    drop(client);
+    recorder.stop();
+}
+
+#[test]
 fn a_command_this_recorder_has_never_heard_of_is_refused_by_name() {
     let recorder = ServedRecorder::start("unknown-command");
     let mut client = recorder.client();

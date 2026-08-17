@@ -1,4 +1,4 @@
-import type { AudioDevices, SettingEntry, SettingsView } from '@clipped/shared';
+import type { AudioDevices, SettingEntry, SettingsView, StartAtLogin } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useState } from 'react';
@@ -104,6 +104,14 @@ export const NOTIFICATIONS_FILE = String.raw`%APPDATA%\uk.wildware.clipped\notif
  */
 export const HOTKEYS_SECTION = 'hotkeys';
 
+/**
+ * The section with the other thing that is live and is not a setting.
+ *
+ * Named here for the reason {@link HOTKEYS_SECTION} is: renaming the section
+ * must not silently stop the start-at-login switch being drawn.
+ */
+export const STARTUP_SECTION = 'startup';
+
 /** The key the recording directory has in the settings file. */
 export const RECORDING_DIRECTORY = 'recording_directory';
 
@@ -147,6 +155,21 @@ export async function saveSettings(
 /** Asks the recorder which microphones this machine has. */
 export async function readAudioDevices(): Promise<AudioDevices> {
   return invoke<AudioDevices>('audio_devices');
+}
+
+/** Asks the recorder whether it starts when this user signs in. */
+export async function readStartAtLogin(): Promise<StartAtLogin> {
+  return invoke<StartAtLogin>('start_at_login');
+}
+
+/**
+ * Turns starting at login on or off, and answers with where it now stands.
+ *
+ * The recorder writes the value, because the value names the recorder's own
+ * executable and this window would have to guess at it (issue #308).
+ */
+export async function saveStartAtLogin(enabled: boolean): Promise<StartAtLogin> {
+  return invoke<StartAtLogin>('set_start_at_login', { enabled });
 }
 
 /**
@@ -306,16 +329,90 @@ export function useSettings(): SettingsControl {
   return { read, save, apply };
 }
 
-/** The microphones this machine has, read once when the screen is opened. */
+/**
+ * The microphones this machine has, asked for when the screen opens and again
+ * whenever the window comes back to the front.
+ *
+ * Asked again rather than kept, because the answer goes stale in the one way
+ * that matters: somebody plugs in the headset they are about to choose. The
+ * recorder enumerates the endpoints on every request precisely so that it can
+ * be asked twice (`apps/recorder/src/serve.rs`), and a window that asked once
+ * would offer a list of the devices that happened to be there when the screen
+ * opened (issue #308).
+ *
+ * Coming back to the front is the trigger because it is when it is worth
+ * asking and no more often: plugging a device in means going to the machine and
+ * returning to the window. Polling would ask hundreds of times for one answer
+ * that changes twice a day.
+ *
+ * The previous list stays on screen while the new one is fetched. Dropping back
+ * to `reading` would blank a control somebody may be in the middle of using,
+ * for an answer that is almost always identical.
+ */
 export function useAudioDevices(): LibraryRead<AudioDevices> {
   const [read, setRead] = useState<LibraryRead<AudioDevices>>({ state: 'reading' });
 
   useEffect(() => {
     let current = true;
-    readAudioDevices()
-      .then((devices) => {
+    const ask = () => {
+      readAudioDevices()
+        .then((devices) => {
+          if (current) {
+            setRead({ state: 'read', value: devices });
+          }
+        })
+        .catch((thrown: unknown) => {
+          if (current) {
+            setRead({ state: 'unread', problem: asProblem(thrown) });
+          }
+        });
+    };
+
+    ask();
+    window.addEventListener('focus', ask);
+    return () => {
+      current = false;
+      window.removeEventListener('focus', ask);
+    };
+  }, []);
+
+  return read;
+}
+
+/** Whether the recorder starts at sign-in, and the one way this screen changes it. */
+export interface StartAtLoginControl {
+  /** The arrangement as the recorder last reported it. */
+  readonly read: LibraryRead<StartAtLogin>;
+  /** What the last change did. */
+  readonly save: SaveState;
+  /**
+   * Moves the switch, and redraws from what came back.
+   *
+   * Answers whether the recorder took it, so that a refused change leaves the
+   * switch where the registry actually is rather than where it was pushed.
+   */
+  readonly set: (enabled: boolean) => Promise<boolean>;
+}
+
+/**
+ * Whether the recorder starts at sign-in, read when the screen opens.
+ *
+ * Not part of {@link useSettings}: it is not in `settings.json` and
+ * `apply_settings` does not reach it. It is a `Run` value under this account
+ * that Windows reads once, at sign-in, and that Windows also lists in
+ * Settings > Apps > Startup with a switch of its own — so it is read back from
+ * the registry after every change rather than assumed (issue #308).
+ */
+export function useStartAtLogin(): StartAtLoginControl {
+  const [read, setRead] = useState<LibraryRead<StartAtLogin>>({ state: 'reading' });
+  const [save, setSave] = useState<SaveState>({ state: 'idle' });
+
+  useEffect(() => {
+    let current = true;
+    readStartAtLogin()
+      .then((state) => {
         if (current) {
-          setRead({ state: 'read', value: devices });
+          setRead({ state: 'read', value: state });
         }
       })
       .catch((thrown: unknown) => {
@@ -328,7 +425,23 @@ export function useAudioDevices(): LibraryRead<AudioDevices> {
     };
   }, []);
 
-  return read;
+  const set = useCallback(async (enabled: boolean) => {
+    setSave({ state: 'saving' });
+    try {
+      setRead({ state: 'read', value: await saveStartAtLogin(enabled) });
+      setSave({ state: 'saved' });
+      return true;
+    } catch (thrown: unknown) {
+      // The switch is left reading whatever the last successful answer said,
+      // which is where the registry is. A switch that moved on a refused write
+      // would be telling somebody their machine is arranged in a way it is not
+      // (AGENTS.md section 27).
+      setSave({ state: 'refused', problem: asProblem(thrown) });
+      return false;
+    }
+  }, []);
+
+  return { read, save, set };
 }
 
 /**
@@ -527,31 +640,27 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     ],
   },
   {
-    id: 'startup',
+    id: STARTUP_SECTION,
     label: 'Startup',
     lead:
-      'Closing this window minimises it to the notification area and leaves the recorder ' +
-      'recording; the tray’s Exit is the only thing that stops one. That is fixed behaviour ' +
-      'rather than a setting.',
+      'The switch below is not a setting in the settings file: it is one Run value under this ' +
+      'account that Windows reads at sign-in, and it is the same value ' +
+      '`clipped-recorder start-at-login enable` writes from a terminal. Windows lists it in ' +
+      'Settings > Apps > Startup too, with a switch of its own. Closing this window minimises ' +
+      'it to the notification area and leaves the recorder recording; the tray’s Exit is the ' +
+      'only thing that stops one. That is fixed behaviour rather than a setting.',
     keys: [],
     rows: [
       {
-        label: 'Start the recorder when I sign in',
+        label: 'Start Clipped’s window when I sign in',
         today:
-          'Opt-in and reversible from the command line. It writes one Run value under this ' +
-          'account, which Windows also lists in Settings > Apps > Startup; disable removes it ' +
-          'and status reports it without changing anything.',
-        run: 'clipped-recorder start-at-login enable',
+          'Nothing. What has to be running at sign-in is the recorder, and the switch above ' +
+          'starts it without a window: it records, watches for games and sits in the ' +
+          'notification area, and this window is a client that opens when somebody opens it.',
         needs:
-          'Issue #308: starting at sign-in is not configuration and no protocol command reads ' +
-          'or sets it, so this window cannot offer the switch.',
-      },
-      {
-        label: 'Start Clipped when I sign in',
-        today:
-          'Nothing. Starting at sign-in is the recorder’s, because the recorder is what records ' +
-          'and this window is a client of it.',
-        needs: 'Issue #308, with the setting above.',
+          'Nothing is waiting on it. A second Run value naming this application would start a ' +
+          'window nobody asked for, and issue #308 deliberately built the recorder’s entry ' +
+          'and not one for the window.',
       },
     ],
   },
