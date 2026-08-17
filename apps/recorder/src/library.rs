@@ -1513,6 +1513,131 @@ mod tests {
         );
     }
 
+    /// A reader over one sitting with two clips: one exported, one not.
+    ///
+    /// Written as SQL because what is under test is the read, and the row a
+    /// generated highlight leaves is a `path` of NULL whichever writer made it
+    /// (`0004_clips_without_a_file.sql`).
+    fn library_with_an_unexported_highlight(name: &str) -> LibraryReader {
+        let path = scratch_directory(name).join("library.db");
+        {
+            let database = Database::open(&path).expect("a database opens");
+            let connection = database.connection();
+            connection
+                .execute(
+                    "INSERT INTO sessions (session_id, started_at) \
+                     VALUES ('cs2-20260811-201400', '2026-08-11T20:14:00+01:00')",
+                    [],
+                )
+                .expect("a session inserts");
+            connection
+                .execute(
+                    "INSERT INTO recordings (session_id, session_index, path, started_at) \
+                     VALUES ('cs2-20260811-201400', 1, ?1, '2026-08-11T20:14:00+01:00')",
+                    params![r"D:\clips\cs2-20260811-201400-1.mkv"],
+                )
+                .expect("a recording inserts");
+            connection
+                .execute(
+                    "INSERT INTO clips (session_id, path, created_at, origin) \
+                     VALUES ('cs2-20260811-201400', ?1, '2026-08-11T20:41:00+01:00', \
+                             'replay-buffer')",
+                    params![r"D:\clips\ace-on-mirage.mkv"],
+                )
+                .expect("the saved replay inserts");
+            connection
+                .execute(
+                    "INSERT INTO clips (session_id, path, created_at, origin, origin_detail) \
+                     VALUES ('cs2-20260811-201400', NULL, '2026-08-11T20:45:00+01:00', \
+                             'highlight', '{\"kind\":\"kill\"}')",
+                    [],
+                )
+                .expect("the generated highlight inserts");
+        }
+        LibraryReader::at(Some(path))
+    }
+
+    #[test]
+    fn a_clip_with_no_file_crosses_the_boundary_with_no_path_rather_than_failing_the_page() {
+        // Issue #591, at the boundary. The index half is
+        // `clipped-library`'s `a_clip_with_no_file_is_listed_rather_than_failing_the_listing`;
+        // this is what the window actually receives, asserted **on the bytes of
+        // the frame** rather than on a parsed reply. #576 and #586 were both
+        // fields that a parsed reply could not tell from present, so a mirror
+        // agreeing with a `LibraryClip` this process built proves nothing about
+        // what went down the pipe.
+        let library = library_with_an_unexported_highlight("library-unexported");
+
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("a sitting with an unexported highlight lists");
+
+        let frame = {
+            let mut bytes = Vec::new();
+            clipped_ipc::frame::write_message(
+                &mut bytes,
+                &clipped_ipc::ServerMessage::Response(clipped_ipc::Response {
+                    id: 1,
+                    outcome: clipped_ipc::Outcome::Ok(clipped_ipc::Reply::LibrarySessions { page }),
+                }),
+            )
+            .expect("the page fits in a frame");
+            bytes
+        };
+
+        // The frame as the peer reads it: a little-endian length and then the
+        // JSON, parsed here with nothing of this build's own types involved.
+        let declared = u32::from_le_bytes(
+            frame[..clipped_ipc::LENGTH_PREFIX_BYTES]
+                .try_into()
+                .expect("a frame carries its length"),
+        ) as usize;
+        let body = &frame[clipped_ipc::LENGTH_PREFIX_BYTES..];
+        assert_eq!(declared, body.len(), "the frame's length is its payload's");
+
+        let sent: serde_json::Value = serde_json::from_slice(body).expect("the frame carries JSON");
+        let clips = sent["outcome"]["ok"]["page"]["sessions"][0]["clips"]
+            .as_array()
+            .expect("the clips are on the wire");
+        assert_eq!(
+            clips.len(),
+            2,
+            "a clip with no file is a clip somebody made and must be sent, not dropped: {sent}"
+        );
+
+        assert_eq!(
+            clips[0]["path"].as_str(),
+            Some(r"D:\clips\ace-on-mirage.mkv"),
+            "the exported clip lost its file on the wire: {}",
+            clips[0]
+        );
+
+        let highlight = clips[1].as_object().expect("a clip is an object");
+        assert!(
+            !highlight.contains_key("path"),
+            "a clip with no file must carry no `path` key at all — a null or an empty string \
+             would be a file name a window would try to open: {highlight:?}"
+        );
+        assert!(
+            !highlight.contains_key("missing_since"),
+            "a clip nothing has exported has no file to have gone, and must not reach a window \
+             looking like one whose file was lost: {highlight:?}"
+        );
+        assert_eq!(
+            highlight["clip_id"].as_i64(),
+            Some(2),
+            "the highlight arrived without the identifier everything else names it by"
+        );
+
+        // Nothing else in the sitting may be lost by tolerating the pathless
+        // clip (AGENTS.md section 56).
+        assert_eq!(
+            sent["outcome"]["ok"]["page"]["sessions"][0]["recordings"][0]["path"].as_str(),
+            Some(r"D:\clips\cs2-20260811-201400-1.mkv"),
+            "the recording went missing from the frame: {sent}"
+        );
+    }
+
     #[test]
     fn a_search_that_does_not_parse_is_refused_with_what_was_wrong_with_it() {
         // Not an empty result set: a search box has to be able to say what is

@@ -445,7 +445,7 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   }),
   library_clip: fields<LibraryClip>({
     clip_id: 'required',
-    path: 'required',
+    path: 'optional',
     title: 'optional',
     created_at: 'required',
     duration_seconds: 'optional',
@@ -1202,6 +1202,65 @@ describe('every reply the recorder can send', () => {
       ).toBe(true);
     });
   }
+});
+
+describe('a clip nothing has exported yet', () => {
+  /**
+   * Issue #591's wire half, asserted on the frame itself.
+   *
+   * The frame is the recorder's own — `crates/ipc/src/schema.rs` builds it out
+   * of the real `LibraryClip` and serialises it with the real `serde`, and it
+   * is committed here — so what this reads is what goes down the pipe. #576 and
+   * #586 were both fields whose absence a *parsed* reply could not distinguish
+   * from their presence, which is why the key is checked on the raw JSON before
+   * anything in this package touches it.
+   */
+  const frame = sampleNamed('a clip nothing has exported yet, which has no file').frame;
+
+  it('is sent with no `path` key at all, rather than a null or a blank one', () => {
+    const sent = frame as {
+      outcome: { ok: { page: { sessions: { clips: Record<string, unknown>[] }[] } } };
+    };
+    const clip = sent.outcome.ok.page.sessions[0]?.clips[0];
+    if (clip === undefined) {
+      throw new Error('the sample carries a sitting with a clip in it');
+    }
+
+    expect(Object.keys(clip)).not.toContain('path');
+    expect(Object.keys(clip)).not.toContain('missing_since');
+    expect(clip['clip_id']).toBe(3);
+  });
+
+  it('is read as a clip with no file rather than refusing the whole page', () => {
+    const result = parseServerMessage(frame);
+    expect(
+      result.ok,
+      result.ok ? '' : `a sitting with an unexported highlight was rejected: ${result.problem}`,
+    ).toBe(true);
+    if (!result.ok || result.message.type !== 'response' || !('ok' in result.message.outcome)) {
+      throw new Error('the sample is a successful response');
+    }
+    const reply = result.message.outcome.ok;
+    if (reply.reply !== 'library_sessions') {
+      throw new Error('the sample is a page of the library');
+    }
+
+    const session = reply.page.sessions[0];
+    if (session === undefined) {
+      throw new Error('the sample carries a sitting');
+    }
+
+    // Nothing else in the sitting is lost by tolerating the pathless clip.
+    expect(session.recordings).toHaveLength(1);
+    expect(session.recordings[0]?.path).toBe('D:\\clips\\cs2-20260811-201400-1.mkv');
+
+    expect(session.clips).toHaveLength(1);
+    const clip = session.clips[0];
+    // Absent, not `''`: an empty string is a file name a screen would open.
+    expect(clip).not.toHaveProperty('path');
+    expect(clip).not.toHaveProperty('missing_since');
+    expect(clip?.title).toBe('Ace on Mirage');
+  });
 });
 
 describe('a recorder newer than this build', () => {

@@ -37,6 +37,26 @@
 //! the library is concerned, and the trash has a screen of its own
 //! ([issue #94](https://github.com/wildware-uk/clipped/issues/94)).
 //!
+//! # A clip with no file is listed too, and says so
+//!
+//! [`IndexedClip::path`] is optional for the same reason, and the choice was
+//! between that and a `WHERE path IS NOT NULL` on the clips query
+//! ([issue #591](https://github.com/wildware-uk/clipped/issues/591)). Filtering
+//! is the smaller change and it is the wrong one: a clip with no file is a clip
+//! **the user made** — a highlight the application generated and nobody has
+//! exported — and the whole point of `0004_clips_without_a_file.sql` is that
+//! those cost nothing until somebody asks for one. A query that hid them would
+//! draw an empty highlights list for a sitting full of them, and the user would
+//! have no way to tell that from a sitting where nothing happened. Hiding a row
+//! is the same failure as deleting it, one screen further out (AGENTS.md
+//! section 27).
+//!
+//! So the absence crosses the boundary, exactly as [`IndexedRecording`]'s
+//! `missing_since` does, and the two are deliberately different states: no path
+//! is "there is no file yet", and `missing_since` is "there was one and it has
+//! gone". A clip that has never been exported must never be drawn as one whose
+//! file was lost.
+//!
 //! # Search is compiled to SQL, and checked against the matcher
 //!
 //! A [`Query`](crate::search::Query) becomes a `WHERE` fragment
@@ -238,8 +258,21 @@ pub struct IndexedRecording {
 pub struct IndexedClip {
     /// The index's own identifier for it.
     pub clip_id: i64,
-    /// The file.
-    pub path: String,
+    /// The file, when there is one.
+    ///
+    /// [`None`] for a clip nothing has exported yet, which is what
+    /// `clipped_library::virtual_clip` describes and what
+    /// `0004_clips_without_a_file.sql` made the column nullable for: a
+    /// highlight the application generated costs no disk and no encoder time
+    /// until somebody asks for the file.
+    ///
+    /// This was a `String` until [issue
+    /// #591](https://github.com/wildware-uk/clipped/issues/591), which read a
+    /// nullable column into a non-nullable field. `rusqlite` answers a NULL
+    /// there with `InvalidColumnType`, so one unexported highlight failed the
+    /// whole of [`list_sessions`] — not that clip, the call — and the Library
+    /// screen showed an error instead of a library.
+    pub path: Option<String>,
     /// What it is called, if anything.
     pub title: Option<String>,
     /// When it was made, RFC 3339 with an offset.

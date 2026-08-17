@@ -1042,8 +1042,19 @@ export interface LibraryRecording {
 export interface LibraryClip {
   /** The index's own identifier for it. */
   readonly clip_id: number;
-  /** The file. */
-  readonly path: string;
+  /**
+   * The file, when there is one.
+   *
+   * **Absent for a clip nothing has exported yet**, which is the normal state
+   * of a generated highlight: it is a range of a recording until somebody asks
+   * for a file, and asking is what makes one. It is still a clip the user made,
+   * so a screen draws it — with whatever it offers in place of "reveal in
+   * Explorer".
+   *
+   * Absent is not {@link LibraryClip.missing_since}. No path is "there is no
+   * file yet"; `missing_since` is "there was one and it has gone".
+   */
+  readonly path?: string;
   /** What it is called, if anything. */
   readonly title?: string;
   /** When it was made, RFC 3339 with an offset. */
