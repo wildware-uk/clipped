@@ -55,6 +55,8 @@
         "get_settings",
         "apply_settings",
         "get_audio_devices",
+        "get_start_at_login",
+        "set_start_at_login",
         "shutdown"
       ],
       "tolerates_unrecognised": true
@@ -133,6 +135,7 @@
         "hotkeys",
         "replay",
         "settings",
+        "startup",
         "automatic"
       ],
       "tolerates_unrecognised": true
@@ -176,6 +179,7 @@
         "hotkeys",
         "settings",
         "audio_devices",
+        "start_at_login",
         "shutting_down",
         "library_events",
         "library_trash",
@@ -698,6 +702,13 @@
         "finalising"
       ]
     },
+    "reply.start_at_login": {
+      "required": [
+        "reply",
+        "start_at_login"
+      ],
+      "optional": []
+    },
     "reply.status": {
       "required": [
         "reply",
@@ -772,6 +783,12 @@
         "game_name"
       ]
     },
+    "set_start_at_login": {
+      "required": [
+        "enabled"
+      ],
+      "optional": []
+    },
     "setting_entry": {
       "required": [
         "accepted",
@@ -797,6 +814,16 @@
       "required": [],
       "optional": [
         "finalise_recording"
+      ]
+    },
+    "start_at_login": {
+      "required": [
+        "enabled",
+        "location"
+      ],
+      "optional": [
+        "command",
+        "missing_executable"
       ]
     },
     "start_recording": {
@@ -976,6 +1003,18 @@
       "name": "get_audio_devices",
       "params": null,
       "reply": "reply.audio_devices",
+      "available_in_this_build": true
+    },
+    {
+      "name": "get_start_at_login",
+      "params": null,
+      "reply": "reply.start_at_login",
+      "available_in_this_build": true
+    },
+    {
+      "name": "set_start_at_login",
+      "params": "set_start_at_login",
+      "reply": "reply.start_at_login",
       "available_in_this_build": true
     },
     {
@@ -1161,6 +1200,7 @@
           "hotkeys",
           "replay",
           "settings",
+          "startup",
           "automatic"
         ],
         "protocol_version": 2,
@@ -2264,6 +2304,66 @@
       },
       "parses": true,
       "discriminant": "response.ok.audio_devices"
+    },
+    {
+      "name": "the recorder does not start at sign-in",
+      "direction": "server",
+      "frame": {
+        "id": 16,
+        "outcome": {
+          "ok": {
+            "reply": "start_at_login",
+            "start_at_login": {
+              "enabled": false,
+              "location": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.start_at_login.off"
+    },
+    {
+      "name": "the recorder starts at sign-in, and the command it will run",
+      "direction": "server",
+      "frame": {
+        "id": 17,
+        "outcome": {
+          "ok": {
+            "reply": "start_at_login",
+            "start_at_login": {
+              "command": "\"C:\\Program Files\\Clipped\\clipped-recorder.exe\" serve --watch-for-games",
+              "enabled": true,
+              "location": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.start_at_login.on"
+    },
+    {
+      "name": "the recorder is set to start at sign-in from a Clipped that moved",
+      "direction": "server",
+      "frame": {
+        "id": 18,
+        "outcome": {
+          "ok": {
+            "reply": "start_at_login",
+            "start_at_login": {
+              "command": "\"C:\\Program Files\\Clipped\\clipped-recorder.exe\" serve --watch-for-games",
+              "enabled": true,
+              "location": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Clipped Recorder",
+              "missing_executable": "C:\\Program Files\\Clipped\\clipped-recorder.exe"
+            }
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.start_at_login.missing"
     },
     {
       "name": "a setting refused with what would have been accepted",

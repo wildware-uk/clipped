@@ -171,6 +171,12 @@ fn features_of_this_build() -> Vec<String> {
         // read and written through `clipped_session::config` and the
         // microphones are enumerated by `clipped-audio` (issue #51).
         features::SETTINGS.to_owned(),
+        // And this before it draws a start-at-login switch, so that a recorder
+        // built before issue #308 — which has the settings commands and neither
+        // of these two — is told apart from a recorder that is simply not set
+        // to start at sign-in. Those are opposite answers, and the second is
+        // what an unanswered command looks like if nobody checks.
+        features::STARTUP.to_owned(),
     ]
 }
 
@@ -746,6 +752,21 @@ impl CommandHandler for RecorderService {
             // one somebody is about to choose (issue #308).
             Command::GetAudioDevices => Ok(Reply::AudioDevices {
                 devices: crate::settings::audio_devices()?,
+            }),
+            // One registry value, read and written by the same code the
+            // `start-at-login` subcommand runs (`crate::start_at_login`, issue
+            // #308). It is answered here rather than in the window because the
+            // value names the executable to run, and that executable is this
+            // process — a window writing a path it guessed at would leave a
+            // startup entry pointing at nothing.
+            Command::GetStartAtLogin => Ok(Reply::StartAtLogin {
+                start_at_login: crate::start_at_login::current()?,
+            }),
+            // Answered with the arrangement as it now stands, read back out of
+            // the registry, for the reason `apply_settings` is answered with
+            // the settings as they now stand.
+            Command::SetStartAtLogin(request) => Ok(Reply::StartAtLogin {
+                start_at_login: crate::start_at_login::set(&request)?,
             }),
             // Also answered by `clipped-ipc` before dispatch, for the opposite
             // reason: what a shutdown ends is the accept loop, which belongs to

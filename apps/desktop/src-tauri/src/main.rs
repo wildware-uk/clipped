@@ -212,6 +212,8 @@ fn main() {
             recorder_settings,
             apply_recorder_settings,
             audio_devices,
+            start_at_login,
+            set_start_at_login,
             start_recording,
             stop_recording,
             export_recording,
@@ -734,6 +736,40 @@ fn audio_devices(
     match link.call(&clipped_ipc::Command::GetAudioDevices)? {
         clipped_ipc::Reply::AudioDevices { devices } => Ok(devices),
         _ => Err(wrong_reply("get_audio_devices")),
+    }
+}
+
+/// Whether the recorder starts when this user signs in.
+///
+/// Not a setting, so not `get_settings`: it is a `Run` value Windows reads at
+/// sign-in rather than a key in `settings.json`. The window cannot read the
+/// registry — and would not want to, because what it would have to *write* is
+/// the recorder's own executable path, which only the recorder knows
+/// (issue #308).
+#[tauri::command(async)]
+fn start_at_login(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<clipped_ipc::StartAtLogin, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetStartAtLogin)? {
+        clipped_ipc::Reply::StartAtLogin { start_at_login } => Ok(start_at_login),
+        _ => Err(wrong_reply("get_start_at_login")),
+    }
+}
+
+/// Turns starting at login on or off, and answers with where it now stands.
+///
+/// The answer is the registry's, not this window's idea of what it sent: a
+/// write the registry refused would otherwise be drawn as a switch that moved.
+#[tauri::command(async)]
+fn set_start_at_login(
+    link: tauri::State<'_, RecorderLink>,
+    enabled: bool,
+) -> Result<clipped_ipc::StartAtLogin, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::SetStartAtLogin(
+        clipped_ipc::SetStartAtLogin { enabled },
+    ))? {
+        clipped_ipc::Reply::StartAtLogin { start_at_login } => Ok(start_at_login),
+        _ => Err(wrong_reply("set_start_at_login")),
     }
 }
 

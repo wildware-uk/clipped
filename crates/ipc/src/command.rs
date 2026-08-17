@@ -49,6 +49,7 @@ use crate::message::Request;
 use crate::playback::{OpenPlayback, PlaybackStream};
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
 use crate::settings::{ApplySettings, AudioDevices, SettingsView};
+use crate::startup::{SetStartAtLogin, StartAtLogin};
 use crate::status::{
     BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
     ScreenshotSummary,
@@ -139,6 +140,20 @@ pub enum Command {
     /// window has to be able to show what is there rather than asking somebody
     /// to type a name they cannot see.
     GetAudioDevices,
+    /// Whether the recorder starts when this user signs in.
+    ///
+    /// Not a setting: it is a `Run` value Windows reads at sign-in rather than
+    /// a key `settings.json` carries, and it is read here rather than in the
+    /// window because the window cannot see the registry
+    /// (`crate::startup`, issue #308).
+    GetStartAtLogin,
+    /// Turn starting at login on or off.
+    ///
+    /// Answered with the arrangement as it now stands, for the reason
+    /// [`Self::ApplySettings`] is: a switch drawn from what a window asked for
+    /// rather than from what the registry did would show "on" for a write that
+    /// was refused.
+    SetStartAtLogin(SetStartAtLogin),
     /// Stop serving, finish anything still being recorded, and exit.
     ///
     /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
@@ -176,6 +191,8 @@ impl Command {
             Self::GetSettings => "get_settings",
             Self::ApplySettings(_) => "apply_settings",
             Self::GetAudioDevices => "get_audio_devices",
+            Self::GetStartAtLogin => "get_start_at_login",
+            Self::SetStartAtLogin(_) => "set_start_at_login",
             Self::Shutdown(_) => "shutdown",
         }
     }
@@ -212,6 +229,8 @@ impl Command {
             "get_settings" => Ok(Self::GetSettings),
             "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
             "get_audio_devices" => Ok(Self::GetAudioDevices),
+            "get_start_at_login" => Ok(Self::GetStartAtLogin),
+            "set_start_at_login" => Ok(Self::SetStartAtLogin(parse_params(request)?)),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
             name => Err(ProtocolError::new(
                 ErrorCode::UnknownCommand,
@@ -237,7 +256,8 @@ impl Command {
             | Self::Plugins
             | Self::GetHotkeys
             | Self::GetSettings
-            | Self::GetAudioDevices => Ok(serde_json::Value::Null),
+            | Self::GetAudioDevices
+            | Self::GetStartAtLogin => Ok(serde_json::Value::Null),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
             Self::LibraryTrash(request) => serde_json::to_value(request),
@@ -253,6 +273,7 @@ impl Command {
             Self::ExportRecording(export) => serde_json::to_value(export),
             Self::OpenPlayback(playback) => serde_json::to_value(playback),
             Self::ApplySettings(settings) => serde_json::to_value(settings),
+            Self::SetStartAtLogin(request) => serde_json::to_value(request),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
         }
         .map_err(|error| {
@@ -747,6 +768,17 @@ pub enum Reply {
         /// Every microphone, with the default one marked.
         devices: AudioDevices,
     },
+    /// Whether the recorder starts at sign-in, as it now stands.
+    ///
+    /// The answer to `get_start_at_login` **and** to `set_start_at_login`, for
+    /// the reason [`Self::Settings`] answers both settings commands: what a
+    /// window draws is what the registry says, never what the window asked for
+    /// (`crate::startup`).
+    StartAtLogin {
+        /// The arrangement: whether it is on, what would run, and whether that
+        /// still exists.
+        start_at_login: StartAtLogin,
+    },
     /// The recorder has stopped listening and is winding up.
     ///
     /// Sent **before** the recorder exits, because a reply written after the
@@ -859,6 +891,8 @@ mod tests {
             "get_settings",
             "apply_settings",
             "get_audio_devices",
+            "get_start_at_login",
+            "set_start_at_login",
             "shutdown",
         ] {
             // Parsed with no parameters, so a command with required ones is
@@ -910,6 +944,39 @@ mod tests {
             Command::from_request(&request("get_audio_devices", serde_json::Value::Null))
                 .expect("it parses"),
             Command::GetAudioDevices,
+        );
+    }
+
+    #[test]
+    fn starting_at_login_is_read_with_nothing_and_changed_with_one_switch() {
+        // It is not a setting and it is not spelled like one: no key, no value
+        // string, no map. A window sends where the user put the switch, and
+        // reading takes nothing at all so that a screen can ask before it knows
+        // anything (issue #308).
+        assert_eq!(
+            Command::from_request(&request("get_start_at_login", serde_json::Value::Null))
+                .expect("it parses"),
+            Command::GetStartAtLogin,
+        );
+
+        let command = Command::from_request(&request(
+            "set_start_at_login",
+            serde_json::json!({"enabled": true}),
+        ))
+        .expect("turning it on parses");
+        assert_eq!(
+            command,
+            Command::SetStartAtLogin(SetStartAtLogin { enabled: true }),
+        );
+
+        // And it survives the round trip a client actually makes, which is
+        // where a variant that serialised its parameters as `null` would be
+        // read back as "turn it off".
+        let request = command.to_request(3).expect("it can be represented");
+        assert_eq!(request.command, "set_start_at_login");
+        assert_eq!(
+            Command::from_request(&request).expect("and parses back"),
+            command,
         );
     }
 

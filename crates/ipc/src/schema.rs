@@ -538,6 +538,14 @@ fn structures() -> BTreeMap<String, Structure> {
             "audio_device".to_owned(),
             structure_of(&exemplar_audio_device(), &[]),
         ),
+        (
+            "set_start_at_login".to_owned(),
+            structure_of(&exemplar_set_start_at_login(), &[]),
+        ),
+        (
+            "start_at_login".to_owned(),
+            structure_of(&exemplar_start_at_login(), &[]),
+        ),
     ]);
 
     for outcome in every_outcome() {
@@ -607,6 +615,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::OpenPlayback(_) => Some("open_playback".to_owned()),
                 Command::ApplySettings(_) => Some("apply_settings".to_owned()),
+                Command::SetStartAtLogin(_) => Some("set_start_at_login".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
                 | Command::GetStatus
@@ -614,7 +623,8 @@ fn commands() -> Vec<CommandSchema> {
                 | Command::Plugins
                 | Command::GetHotkeys
                 | Command::GetSettings
-                | Command::GetAudioDevices => None,
+                | Command::GetAudioDevices
+                | Command::GetStartAtLogin => None,
             },
             reply: match command {
                 Command::Ping => Some("reply.pong".to_owned()),
@@ -643,6 +653,12 @@ fn commands() -> Vec<CommandSchema> {
                     Some("reply.settings".to_owned())
                 }
                 Command::GetAudioDevices => Some("reply.audio_devices".to_owned()),
+                // And both start-at-login commands, for the same reason: what
+                // a change produced is the arrangement as it now stands
+                // (`crate::startup`).
+                Command::GetStartAtLogin | Command::SetStartAtLogin(_) => {
+                    Some("reply.start_at_login".to_owned())
+                }
                 Command::Shutdown(_) => Some("reply.shutting_down".to_owned()),
             },
             available_in_this_build: true,
@@ -1303,6 +1319,41 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "the recorder does not start at sign-in",
+            ServerMessage::Response(Response {
+                id: 16,
+                outcome: Outcome::Ok(Reply::StartAtLogin {
+                    start_at_login: crate::startup::StartAtLogin {
+                        enabled: false,
+                        location: exemplar_start_at_login().location,
+                        command: None,
+                        missing_executable: None,
+                    },
+                }),
+            }),
+        ),
+        (
+            "the recorder starts at sign-in, and the command it will run",
+            ServerMessage::Response(Response {
+                id: 17,
+                outcome: Outcome::Ok(Reply::StartAtLogin {
+                    start_at_login: crate::startup::StartAtLogin {
+                        missing_executable: None,
+                        ..exemplar_start_at_login()
+                    },
+                }),
+            }),
+        ),
+        (
+            "the recorder is set to start at sign-in from a Clipped that moved",
+            ServerMessage::Response(Response {
+                id: 18,
+                outcome: Outcome::Ok(Reply::StartAtLogin {
+                    start_at_login: exemplar_start_at_login(),
+                }),
+            }),
+        ),
+        (
             "a setting refused with what would have been accepted",
             ServerMessage::Response(Response {
                 id: 15,
@@ -1597,6 +1648,20 @@ fn reply_discriminant(reply: &Reply) -> String {
         Reply::Hotkeys { .. } => "hotkeys".to_owned(),
         Reply::Settings { .. } => "settings".to_owned(),
         Reply::AudioDevices { .. } => "audio_devices".to_owned(),
+        // Three paths rather than one, because they are the three things a
+        // window says differently and a mirror that dropped either field would
+        // reach the same discriminant for all of them. "Off" and "on" are the
+        // switch; "on and pointing at nothing" is a Clipped that moved, which
+        // is neither — it is on, it will not work, and the thing to offer is
+        // turning it on again from here (issue #308).
+        Reply::StartAtLogin { start_at_login } => match (
+            start_at_login.enabled,
+            start_at_login.missing_executable.is_some(),
+        ) {
+            (false, _) => "start_at_login.off".to_owned(),
+            (true, false) => "start_at_login.on".to_owned(),
+            (true, true) => "start_at_login.missing".to_owned(),
+        },
         // Whether the copy is complete is part of the path, because it is the
         // one thing a window has to say differently: a mirror that dropped
         // `lossless` would reach the same discriminant for an MP4 that holds
@@ -1862,6 +1927,30 @@ fn exemplar_audio_devices() -> crate::settings::AudioDevices {
                 is_default: false,
             },
         ],
+    }
+}
+
+/// Turning starting at login on.
+fn exemplar_set_start_at_login() -> crate::startup::SetStartAtLogin {
+    crate::startup::SetStartAtLogin { enabled: true }
+}
+
+/// A startup entry that is on and points at nothing.
+///
+/// The broken case rather than the working one, deliberately: both optional
+/// fields are present, and a schema derived from an exemplar that left them
+/// `None` would never describe them at all — a window written against it would
+/// have no way to know a moved installation can be reported (issue #308).
+fn exemplar_start_at_login() -> crate::startup::StartAtLogin {
+    crate::startup::StartAtLogin {
+        enabled: true,
+        location:
+            r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\Clipped Recorder"
+                .to_owned(),
+        command: Some(
+            r#""C:\Program Files\Clipped\clipped-recorder.exe" serve --watch-for-games"#.to_owned(),
+        ),
+        missing_executable: Some(r"C:\Program Files\Clipped\clipped-recorder.exe".to_owned()),
     }
 }
 
@@ -2338,6 +2427,8 @@ fn every_built_command() -> Vec<Command> {
         Command::GetSettings,
         Command::ApplySettings(exemplar_apply_settings()),
         Command::GetAudioDevices,
+        Command::GetStartAtLogin,
+        Command::SetStartAtLogin(exemplar_set_start_at_login()),
         Command::Shutdown(Shutdown::default()),
     ];
     for command in &commands {
@@ -2364,6 +2455,8 @@ fn every_built_command() -> Vec<Command> {
             | Command::GetSettings
             | Command::ApplySettings(_)
             | Command::GetAudioDevices
+            | Command::GetStartAtLogin
+            | Command::SetStartAtLogin(_)
             | Command::Shutdown(_) => {}
         }
     }
@@ -2551,6 +2644,12 @@ fn every_reply() -> Vec<Reply> {
         Reply::AudioDevices {
             devices: exemplar_audio_devices(),
         },
+        Reply::StartAtLogin {
+            // The broken arrangement, because both optional fields are `Some`
+            // in it and a `None` is skipped: the schema would otherwise never
+            // describe the two fields a moved installation is reported with.
+            start_at_login: exemplar_start_at_login(),
+        },
         Reply::ShuttingDown {
             // `Some`, or the field is skipped and the schema would not see it.
             finalising: Some(exemplar_active_recording()),
@@ -2652,6 +2751,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::Hotkeys { .. }
             | Reply::Settings { .. }
             | Reply::AudioDevices { .. }
+            | Reply::StartAtLogin { .. }
             | Reply::RecordingExported { .. }
             | Reply::PlaybackOpened { .. }
             | Reply::ShuttingDown { .. } => {}
@@ -2796,6 +2896,9 @@ mod tests {
             "apply_settings",
             "audio_device",
             "audio_devices",
+            "reply.start_at_login",
+            "start_at_login",
+            "set_start_at_login",
             "error_detail.unsupported_protocol_version",
             "error_detail.not_implemented",
             "outcome.ok",

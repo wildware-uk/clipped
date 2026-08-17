@@ -234,6 +234,26 @@ pub mod features {
         /// a window that did not check would draw a full form of controls and
         /// discover that none of them save only when somebody pressed Save.
         SETTINGS = "settings";
+        /// The recorder can say whether it starts when this user signs in, and
+        /// turn that on and off: `get_start_at_login` and
+        /// `set_start_at_login`.
+        ///
+        /// A capability of its own rather than part of
+        /// [`SETTINGS`](self::SETTINGS), because it is not a setting: it is a
+        /// `Run` value Windows reads at sign-in rather than a key in
+        /// `settings.json`, and a recorder built before
+        /// [issue #308](https://github.com/wildware-uk/clipped/issues/308) has
+        /// the settings commands and neither of these — it would refuse both
+        /// with
+        /// [`ErrorCode::UnknownCommand`](crate::ErrorCode::UnknownCommand)
+        /// after a screen had already drawn a switch.
+        ///
+        /// It says the recorder *can be asked*, not that this is a machine
+        /// where the answer is useful: a build with no registry answers both
+        /// with [`ErrorCode::Internal`](crate::ErrorCode::Internal) and the
+        /// reason, which is a refusal a window renders rather than a switch it
+        /// draws in the wrong position.
+        STARTUP = "startup";
         /// The recorder watches for games and records them by itself: its
         /// status can be
         /// [`RecorderStatus::Watching`](crate::RecorderStatus::Watching), a
