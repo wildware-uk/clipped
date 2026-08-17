@@ -123,6 +123,7 @@ pub mod playback;
 mod plugins;
 pub mod schema;
 pub mod server;
+pub mod settings;
 pub mod status;
 pub mod supervisor;
 pub mod transport;
@@ -130,7 +131,7 @@ pub mod transport;
 pub use client::{Client, ClientError, EventClient};
 pub use command::{
     AddBookmark, Command, ExportRecording, Reply, SaveReplay, Shutdown, StartRecording,
-    StopRecording, TakeScreenshot, UnbuiltCommand, UNBUILT_COMMANDS,
+    StopRecording, TakeScreenshot,
 };
 pub use error::{ErrorCode, ErrorDetail, ProtocolError};
 pub use frame::{FrameError, LENGTH_PREFIX_BYTES, MAX_FRAME_BYTES};
@@ -151,6 +152,7 @@ pub use server::{
     CommandHandler, EventPublisher, Server, ServerError, ShutdownRequest,
     MAX_CONCURRENT_CONNECTIONS,
 };
+pub use settings::{ApplySettings, AudioDevice, AudioDevices, SettingEntry, SettingsView};
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
     ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,

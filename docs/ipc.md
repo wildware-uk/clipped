@@ -331,7 +331,8 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`, `automatic`.
+`shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`, `settings`,
+`automatic`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -377,6 +378,17 @@ nobody would question it. Whether the recording that is running has a buffer to
 save from is `active_recording.replay_seconds`, because that is a property of
 the recording rather than of the build: a window offering the control needs both
 to be true.
+
+`settings` says the build has all three of [`get_settings`](#the-settings),
+`apply_settings` and [`get_audio_devices`](#get_audio_devices) — one build has
+either all of them or none. It is the sharpest of these to get wrong: a recorder
+built before issue #51 *has* an `apply_settings` command and refuses every call
+to it with `not_implemented`, so a window that drew a form and checked nothing
+would find out that none of it saves only when somebody pressed Save. Clipped's
+own Settings screen reaches the same place from the other end — it asks
+`get_settings` when it opens and draws no control until that is answered, so an
+older recorder produces the refusal in place of the form rather than a form that
+does not work.
 
 ## Compatibility policy
 
@@ -558,8 +570,10 @@ twice. It is absent for a recording that is not part of a sitting.
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
 | `open_playback` | `source`, `audio_track` (optional) | `playback_opened` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
+| `get_settings` | none | `settings` | yes |
+| `apply_settings` | `values`, below | `settings` | yes |
+| `get_audio_devices` | none | `audio_devices` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
-| `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
 
 ### `save_replay`
 
@@ -1355,38 +1369,125 @@ has to allow for finalising a file.
 rather than a request that was ignored. A client that would rather not ask at all
 checks `shutdown` in [`welcome.features`](#the-handshake) first.
 
-## Commands this build cannot perform
+### The settings
 
-**One** command is defined by the protocol and refused by this build —
-`apply_settings` — with `not_implemented` and a detail naming the subsystem, the
-milestone and the issue:
+`get_settings` and `apply_settings` are how a window reads and changes
+`settings.json`, which the **recorder** owns: its defaults, its validation, its
+layering and its migrations are `clipped_session::config`
+(`docs/configuration.md`), and the desktop application may link
+`clipped-ipc` and nothing else of the workspace. A window that read that file
+itself would be a second implementation of all of it, against the file
+somebody's settings live in (AGENTS.md section 55, [#252]).
 
 ```json
-{"type":"response","id":3,"outcome":{"error":{
-  "code":"not_implemented",
-  "message":"the settings API is not in this build",
-  "detail":{"detail":"not_implemented",
-            "subsystem":"the settings API",
-            "milestone":"M7","tracking_issue":108}}}}
+{"type":"request","id":13,"command":"get_settings"}
 ```
 
-`save_replay` was in this list until issue #38 built it, and is now an ordinary
-command with a schema of its own — see [`save_replay`](#save_replay) above.
-`UNBUILT_COMMANDS` in `crates/ipc/src/command.rs` is the list this section
-describes, and it is the one to check rather than this prose.
+```json
+{"type":"response","id":13,"outcome":{"ok":{"reply":"settings","settings":{
+  "file":"C:\\Users\\alex\\AppData\\Local\\Clipped\\settings.json",
+  "settings":[
+    {"key":"microphone","label":"Microphone","value":"name:Shure MV7",
+     "overridden":true,"accepted":"\"default\", \"none\" or a device name",
+     "applies":true},
+    {"key":"capture_target","label":"Capture target","value":"game-window",
+     "overridden":false,"choices":["game-window","display"],
+     "accepted":"\"game-window\" or \"display\"","applies":false,
+     "unavailable":"every recording captures the game's own window. Reading this setting when a recording starts is issue #61"}]}}}}
+```
 
-It is refused **before dispatch**, so there is no handler for it to be wired
-to. That is the point: a command that could be handled is a command that could
-be answered "applied" by something that applied nothing (AGENTS.md sections 27 and
-54). The UI is expected to render the refusal as what it is — "the settings API is
-not in this build" — rather than showing a dead control.
+Every value crosses as **the words the settings file spells it in** — `120`,
+`hevc`, `name:Shure MV7` — and goes back the same way. A variant per setting on
+the wire would have been a second vocabulary beside the file's own and a
+protocol change for every setting added; instead the recorder parses what comes
+back with the file reader's own parsers, so a value a window can save is exactly
+a value the file would accept.
 
-Its *parameters* are deliberately left as an open object rather than given a
-schema, because nobody yet knows what the settings API takes; inventing a shape
-now would be a public API designed against a guess, and
-one the milestone that builds it would have to break (AGENTS.md section 43).
-That is what happened to `save_replay`, which got its shape from the work that
-built it rather than from a guess made in advance.
+Two fields decide what a screen may draw, and both are the recorder's answer
+rather than the window's guess:
+
+- `choices` is the closed set of values, and is **absent** when the set is open
+  — a frame rate, a size, a device name. That is how a list of options is told
+  from a field without the window keeping a copy of either.
+- `applies` is whether anything in *this build* reads the setting when a
+  recording starts. `false` carries `unavailable`, the recorder's sentence
+  naming what would have to land, and a window draws the value and that sentence
+  rather than a control — a control that changed nothing being the defect
+  AGENTS.md section 27 is about. It is the same pair a `hotkeys` row carries.
+
+`apply_settings` sends only what changed. `null` clears a setting, which is
+Reset: it returns the setting to the value Clipped ships with *and* keeps
+following it, which writing today's default in as a value would not.
+
+```json
+{"type":"request","id":14,"command":"apply_settings",
+ "params":{"values":{"microphone":"name:Shure MV7","framerate":null}}}
+```
+
+The reply is `settings` again — the settings **as they now stand** — so a window
+draws what was saved rather than what it hoped had been: a value the recorder
+refused, or one another window changed a moment earlier, cannot be drawn as
+applied. Nothing is written unless every value is accepted, so a request naming
+one good value and one bad one leaves the file exactly as it was, and the
+refusal is `invalid_parameters` carrying `clipped_session`'s own sentence, which
+names the setting, the value and what would have been accepted.
+
+A recorder that cannot work out where settings live at all refuses with
+`internal` and says so, rather than accepting a change it has nowhere to keep.
+
+### `get_audio_devices`
+
+Which microphones this machine has, so that picking one is a choice from a list
+rather than a name somebody has to type and cannot see ([#308]). The window
+cannot enumerate them: `clipped-audio` is in the recorder's process, and a
+configured name is matched against the endpoints present when a recording
+starts — so the list has to be the recorder's own.
+
+```json
+{"type":"response","id":15,"outcome":{"ok":{"reply":"audio_devices","devices":{
+  "microphones":[{"name":"Shure MV7","is_default":true},
+                 {"name":"Line In (Realtek)","is_default":false}]}}}}
+```
+
+The default one is **marked** rather than being first: Windows lists endpoints
+in its own order, and `default` follows whichever endpoint it is currently
+using. Playback endpoints are not listed at all, because a recording cannot be
+told to use one that is not the default ([#316]) — an empty list of them would
+say something untrue about the machine, so there is no field for them.
+
+A recorder that could not enumerate the endpoints refuses with `internal` and
+the reason, so a window says why there is no list rather than drawing an empty
+one as though it had looked (AGENTS.md section 27).
+
+[#252]: https://github.com/wildware-uk/clipped/issues/252
+[#308]: https://github.com/wildware-uk/clipped/issues/308
+[#316]: https://github.com/wildware-uk/clipped/issues/316
+
+## Commands this build cannot perform
+
+**None.** The protocol used to define commands it could not perform: they parsed
+— so that the refusal could name the command rather than rejecting the name —
+and were then refused with `not_implemented` and a detail naming the subsystem,
+the milestone and the issue. `save_replay` was one until issue #38 built it, and
+`apply_settings` was the last, until the settings reached the protocol (issue
+#51). Every command this build defines, it performs.
+
+The shape is still in the protocol, for the thing that still needs it: an
+`events` connection asking for the `metrics` stream is refused the same way,
+because nothing measures those figures during a recording yet ([#100]).
+
+```json
+{"type":"refused","code":"not_implemented",
+ "message":"live recording metrics is not in this build",
+ "detail":{"detail":"not_implemented","subsystem":"live recording metrics",
+           "milestone":"M14","tracking_issue":100}}
+```
+
+A client should render that as what it is — "live metrics are not in this build"
+— rather than as a stream that is simply quiet, which is the same rule that
+applied to the commands.
+
+[#100]: https://github.com/wildware-uk/clipped/issues/100
 
 ## Events
 

@@ -233,6 +233,25 @@ impl SettingKey {
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|key| key.name() == name)
     }
+
+    /// Every value this setting can be spelled as, where the set is closed.
+    ///
+    /// Empty when the set is open — a frame rate, a size, a device name — so a
+    /// screen offers a list of choices for one setting and a field for another
+    /// without keeping a copy of either. The spellings are the file's, which is
+    /// what [`ResolvedSettings::written_value`](crate::config::ResolvedSettings::written_value)
+    /// returns and what [`Preferences::set_written`](crate::config::Preferences::set_written)
+    /// takes back.
+    #[must_use]
+    pub fn choices(self) -> Vec<String> {
+        crate::config::document::choices_for(self)
+    }
+
+    /// What this setting accepts, in the words its refusal uses.
+    #[must_use]
+    pub fn accepted(self) -> String {
+        crate::config::document::accepted_for(self)
+    }
 }
 
 impl fmt::Display for SettingKey {

@@ -117,6 +117,23 @@ both pages and means the same thing on both.
 questions without naming a setting's type, so the badge and the Reset control
 can be drawn by a loop over `SettingKey::ALL`.
 
+A screen also needs to change a setting without knowing its type, which is
+`Preferences::set_written(key, value)`: the value is the text the settings file
+spells that setting in — `120`, `hevc`, `name:Shure MV7` — and it is parsed by
+the file reader's own parsers, so a value a screen can save is exactly a value
+the file would accept, refused with the same message when it is not.
+`SettingKey::choices()` is the closed set of values where there is one and empty
+where the set is open, and `SettingKey::accepted()` is the sentence a refusal
+would carry — which is how a screen draws a list of options for one setting and
+a field for another without keeping a copy of either.
+
+The window itself reaches none of this directly: it may link `clipped-ipc` and
+nothing else of this workspace, so it asks the recorder — `get_settings`,
+`apply_settings` and `get_audio_devices`, in `docs/ipc.md`. The recorder answers
+with one entry per setting carrying exactly the fields above, plus whether
+anything in that build reads the setting when a recording starts, so that a
+screen never draws a control for a key nothing acts on (AGENTS.md section 27).
+
 ## The settings
 
 Exactly the settings this build can be told about, and no others. SPEC.md
@@ -166,9 +183,12 @@ setting, then the videos folder Clipped would pick on its own — so a run someb
 typed a path into still goes where they said, and everything else goes where the
 settings screen said ([#307]).
 
-It must be absolute. The recorder is started by the shell's `Run` key, with a
-working directory nobody chose, so a relative path names somewhere different
-every time it starts. Whether the directory exists, is writable, or has room is
+It must be absolute, and it must not be blank. The recorder is started by the
+shell's `Run` key, with a working directory nobody chose, so a relative path
+names somewhere different every time it starts; blank is refused separately,
+because `""` is not a path anybody can be told to make absolute and because
+clearing the setting is removing the key rather than writing an empty string.
+Whether the directory exists, is writable, or has room is
 **not** checked when the file is read: a settings file is read at start-up and a
 drive can be unplugged after it, so the answer that matters is the one at the
 moment a recording starts, and that is where it is reported.

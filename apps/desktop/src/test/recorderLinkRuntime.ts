@@ -87,6 +87,37 @@ export interface CommandAnswers {
    */
   readonly recorderHotkeys?: () => unknown;
   /**
+   * What `recorder_settings` answers: every setting, as the recorder holds it.
+   *
+   * The default is a rejection, as every recorder command's is. A stub that
+   * quietly answered with an empty list of settings would let a screen test
+   * pass while the screen drew a form over a recorder nobody asked (issue #51).
+   */
+  readonly recorderSettings?: () => unknown;
+  /**
+   * What `apply_recorder_settings` answers, given the values it was sent.
+   *
+   * The answer is the settings as they now stand, which is what the screen
+   * redraws from — so a stub that returns the previous view is a recorder that
+   * refused nothing and changed nothing, and the screen has to show that.
+   */
+  readonly applySettings?: (args: Record<string, unknown>) => unknown;
+  /**
+   * What `audio_devices` answers: the microphones this machine has.
+   *
+   * The default is a rejection, because "this machine has no microphone" and
+   * "nobody asked" must not look the same on screen (AGENTS.md section 27).
+   */
+  readonly audioDevices?: () => unknown;
+  /**
+   * Which folder the directory dialog says to record into, given what it was
+   * opened with.
+   *
+   * `null` is the dialog being dismissed, which is a real answer and not a
+   * failure.
+   */
+  readonly openDialog?: (args: Record<string, unknown>) => unknown;
+  /**
    * What `get_status` answers, once per ask.
    *
    * Called again for every round of asking, so a case can move the recorder
@@ -250,6 +281,22 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'recorder_hotkeys') {
         return answered(commands.recorderHotkeys);
+      }
+      if (command === 'recorder_settings') {
+        return answered(commands.recorderSettings);
+      }
+      if (command === 'apply_recorder_settings') {
+        return answered(
+          commands.applySettings === undefined ? undefined : () => commands.applySettings?.(args),
+        );
+      }
+      if (command === 'audio_devices') {
+        return answered(commands.audioDevices);
+      }
+      if (command === 'plugin:dialog|open') {
+        return answered(
+          commands.openDialog === undefined ? undefined : () => commands.openDialog?.(args),
+        );
       }
       if (command === 'recorder_status') {
         return answered(commands.recorderStatus);

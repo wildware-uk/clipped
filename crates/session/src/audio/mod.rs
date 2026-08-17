@@ -345,6 +345,47 @@ pub(crate) fn plan_system_audio(
     }
 }
 
+/// One microphone this machine has, as something to choose from.
+///
+/// The two things a settings screen needs about a device it is offering
+/// ([issue #51](https://github.com/wildware-uk/clipped/issues/51)): what it is
+/// called, and whether it is the one `default` currently resolves to. The name
+/// is the one [`chosen_microphone`] matches a configured name against, so a
+/// device picked from this list is a device that recording will find.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrophoneChoice {
+    /// The name Windows gives the endpoint.
+    pub name: String,
+    /// Whether Windows currently considers it the default capture endpoint.
+    pub is_default: bool,
+}
+
+/// Every microphone this machine has, in the order Windows lists them.
+///
+/// The same enumeration a recording resolves a configured name against
+/// ([`chosen_microphone`]), so that what a settings screen offers and what a
+/// recording can open are one list rather than two (AGENTS.md section 55).
+///
+/// # Errors
+///
+/// [`SessionError::Audio`] when the endpoints cannot be enumerated at all —
+/// which a caller shows as the reason there is no list, rather than as an empty
+/// one (AGENTS.md section 27).
+pub fn available_microphones() -> Result<Vec<MicrophoneChoice>, SessionError> {
+    let devices = clipped_audio::windows::microphones().map_err(|source| SessionError::Audio {
+        track: AudioSource::Microphone.track_name(),
+        source,
+    })?;
+
+    Ok(devices
+        .into_iter()
+        .map(|device| MicrophoneChoice {
+            name: device.name().to_owned(),
+            is_default: device.is_default(),
+        })
+        .collect())
+}
+
 /// The microphone whose name contains `wanted`.
 ///
 /// # Errors

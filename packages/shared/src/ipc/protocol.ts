@@ -125,6 +125,7 @@ export const FEATURES = [
   'playback',
   'hotkeys',
   'replay',
+  'settings',
   'automatic',
 ] as const;
 
@@ -141,7 +142,7 @@ export type KnownFeature = (typeof FEATURES)[number];
  */
 export type Feature = Extensible<KnownFeature>;
 
-/** Every command the protocol defines, including the one no build performs yet. */
+/** Every command the protocol defines. There is no longer one no build performs. */
 export const COMMANDS = [
   'ping',
   'get_status',
@@ -162,8 +163,10 @@ export const COMMANDS = [
   'export_recording',
   'open_playback',
   'get_hotkeys',
-  'shutdown',
+  'get_settings',
   'apply_settings',
+  'get_audio_devices',
+  'shutdown',
 ] as const;
 
 /** A command the protocol defines. */
@@ -251,6 +254,8 @@ export const REPLIES = [
   'recording_exported',
   'playback_opened',
   'hotkeys',
+  'settings',
+  'audio_devices',
   'shutting_down',
 ] as const;
 
@@ -540,6 +545,24 @@ export type ExportRecordingParams = {
   readonly source: string;
   /** Where to write the MP4. */
   readonly destination: string;
+};
+
+/**
+ * What to change in the settings, and to what. A type alias for the reason
+ * {@link StartRecordingParams} is one.
+ *
+ * A map rather than one key and one value, because a settings screen saves what
+ * somebody edited: two changes made together are applied together, and a value
+ * the recorder refuses refuses the whole request rather than leaving half of it
+ * written.
+ *
+ * `null` clears a setting, which is Reset: it returns the setting to the value
+ * Clipped ships with *and* keeps following it, which writing today's default in
+ * as a value would not.
+ */
+export type ApplySettingsParams = {
+  /** The settings to change, by the key each has in the settings file. */
+  readonly values?: Readonly<Record<string, string | null>>;
 };
 
 /**
@@ -1332,6 +1355,87 @@ export interface HotkeyBinding {
   readonly unavailable?: string;
 }
 
+/**
+ * One setting, as a window draws it.
+ *
+ * The value crosses as the words the settings file spells it in — `120`,
+ * `hevc`, `name:Shure MV7` — and goes back the same way, so the window keeps no
+ * second vocabulary for settings and no second opinion about what is valid.
+ */
+export interface SettingEntry {
+  /** The key the settings file holds it under, such as `microphone`. */
+  readonly key: string;
+  /** The setting's name in the words a person reads. */
+  readonly label: string;
+  /** What it resolves to, spelled the way the file spells it. Never blank. */
+  readonly value: string;
+  /** Whether this was configured, rather than being the value Clipped ships with. */
+  readonly overridden: boolean;
+  /**
+   * Every value it can take, where the set is closed.
+   *
+   * Absent for the settings whose values are open — a frame rate, a size, a
+   * device name — which is how a list of options is told from a field.
+   */
+  readonly choices?: readonly string[];
+  /** What it would accept, in the words its refusal uses. */
+  readonly accepted: string;
+  /**
+   * Whether anything reads it when a recording starts.
+   *
+   * `false` is a setting the file can carry and no recording acts on. Drawn as
+   * a value with the sentence below rather than as a working control, for the
+   * reason {@link HotkeyBinding.handled} exists (AGENTS.md section 27).
+   */
+  readonly applies: boolean;
+  /** Why changing it would not change a recording, when that is the case. */
+  readonly unavailable?: string;
+}
+
+/** The settings, and the file they came from. */
+export interface SettingsView {
+  /** The settings file they live in, as the recorder resolved it. */
+  readonly file: string;
+  /** Every setting the recorder will accept, in the order a screen lists them. */
+  readonly settings: readonly SettingEntry[];
+}
+
+/** Every setting, as it now stands. The answer to a read and to a change alike. */
+export interface SettingsReply {
+  /** The tag. */
+  readonly reply: 'settings';
+  /** The settings, and the file they live in. */
+  readonly settings: SettingsView;
+}
+
+/** One audio endpoint this machine has. */
+export interface AudioDevice {
+  /** The name Windows gives it, which is what a settings file names it by. */
+  readonly name: string;
+  /** Whether this is the endpoint Windows currently considers the default. */
+  readonly is_default: boolean;
+}
+
+/**
+ * The audio endpoints a recording could be told to use.
+ *
+ * Microphones only: a recording cannot be told to use a playback endpoint that
+ * is not the default one, so an empty list of them would say something untrue
+ * about the machine (issue #316).
+ */
+export interface AudioDevices {
+  /** Every capture endpoint present and active, in the order Windows lists them. */
+  readonly microphones: readonly AudioDevice[];
+}
+
+/** The audio endpoints this machine has. */
+export interface AudioDevicesReply {
+  /** The tag. */
+  readonly reply: 'audio_devices';
+  /** Every microphone, with the default one marked. */
+  readonly devices: AudioDevices;
+}
+
 /** Every action a global hotkey can perform, and where each one stands. */
 export interface HotkeysReply {
   /** The tag. */
@@ -1385,6 +1489,8 @@ export type Reply =
   | RecordingExportedReply
   | PlaybackOpenedReply
   | HotkeysReply
+  | SettingsReply
+  | AudioDevicesReply
   | ShuttingDownReply;
 
 /** Nothing is being recorded, and nothing will be until something asks. */

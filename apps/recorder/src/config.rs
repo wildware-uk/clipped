@@ -277,6 +277,14 @@ impl RecordingConfig {
     /// It creates nothing that outlives the call — not the output file, and
     /// not the default recordings directory, which is created with the first
     /// recording rather than by validating a command that may never make one.
+    ///
+    /// `configured` is where recordings go when `--output` does not say: the
+    /// user's configured recording directory, where they have set one
+    /// (`clipped_session::config`'s `storage` section, issue #307). It is
+    /// passed in rather than read here, so that validating a command never
+    /// depends on the settings file of whoever is running the tests (AGENTS.md
+    /// section 25) — and so that `record`, which takes everything from its
+    /// command line, can pass nothing.
     pub fn resolve(args: &RecordArgs, configured: Option<&Path>) -> Result<Self, ConfigError> {
         let target = resolve_target(args)?;
         let output = resolve_output(
@@ -461,6 +469,12 @@ fn resolve_output(
             // reason the middle one exists at all — a directory chosen once in
             // the settings screen has to survive the window being closed
             // (issue #307).
+            //
+            // A configured directory that has gone — an unplugged drive — is
+            // reported against this recording by the check below, rather than
+            // being quietly replaced by the videos folder: a recording somebody
+            // cannot find is worse than one that did not start (AGENTS.md
+            // section 45).
             let directory = match configured {
                 Some(chosen) => chosen.to_path_buf(),
                 None => default_output_directory().ok_or(ConfigError::NoDefaultOutputDirectory)?,

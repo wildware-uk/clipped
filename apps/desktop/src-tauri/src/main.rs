@@ -51,9 +51,15 @@
 //! playing a recording adds **nothing** to it: the `clip` URI scheme is
 //! registered by this process rather than granted to the interface, and it
 //! serves only what the recorder has already answered `open_playback` with
-//! ([`playback`], issue #304). The one line the export added is
-//! `dialog:allow-save`, so that the interface can ask the operating system
-//! where an export should go.
+//! ([`playback`], issue #304).
+//!
+//! Two lines of it are dialogs: `dialog:allow-save`, which the export added so
+//! that the interface can ask the operating system where an export should go,
+//! and `dialog:allow-open`, which the settings screen added so that it can ask
+//! which folder to record into (issue #51). Both answer with a path a person
+//! chose and neither reaches a file: `tauri-plugin-fs` is present as a
+//! dependency of the dialog plugin and is **not registered**, so none of its
+//! commands exists to be permitted.
 //!
 //! Opening a recording and revealing it in Explorer could have been the same
 //! shape — `tauri-plugin-opener` has commands the interface can call — and are
@@ -184,8 +190,9 @@ fn main() {
         .manage(link)
         // The interface calls neither of these directly. `opener` is reached
         // from `open_recording` and `reveal_recording` below, and `dialog` is
-        // reached from the interface through `dialog:allow-save` and nothing
-        // else — see the header, and `capabilities/default.json`.
+        // reached from the interface through `dialog:allow-save` and
+        // `dialog:allow-open` and nothing else — see the header, and
+        // `capabilities/default.json`.
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -202,6 +209,9 @@ fn main() {
             record_target,
             recorder_status,
             recorder_hotkeys,
+            recorder_settings,
+            apply_recorder_settings,
+            audio_devices,
             start_recording,
             stop_recording,
             export_recording,
@@ -664,6 +674,66 @@ fn recorder_hotkeys(
     match link.call(&clipped_ipc::Command::GetHotkeys)? {
         clipped_ipc::Reply::Hotkeys { hotkeys } => Ok(hotkeys),
         _ => Err(wrong_reply("get_hotkeys")),
+    }
+}
+
+/// Every setting, what it resolves to, and whether anything reads it.
+///
+/// Asked of the recorder rather than read from `settings.json`, because the
+/// recorder owns that file — its versioning, its migrations and its validation
+/// live in `clipped_session::config`, which this window may not link
+/// (`tests/integration/tests/workspace_layering.rs`). A window that read the
+/// file itself would be a second implementation of all three, against the file
+/// somebody's settings live in (AGENTS.md section 55, issue #252).
+///
+/// `async` for the reason [`recorder_status`] is: it opens a pipe and waits for
+/// an answer, and the thread drawing the window may not.
+#[tauri::command(async)]
+fn recorder_settings(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<clipped_ipc::SettingsView, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetSettings)? {
+        clipped_ipc::Reply::Settings { settings } => Ok(settings),
+        _ => Err(wrong_reply("get_settings")),
+    }
+}
+
+/// Changes settings, and answers with the settings as they now stand.
+///
+/// The answer is the recorder's, not this window's idea of what it sent: a value
+/// the recorder refused, or one another window changed a moment earlier, would
+/// otherwise be drawn as saved. `null` clears a setting, which is Reset.
+///
+/// A refusal carries the recorder's own sentence, naming the setting, the value
+/// and what would have been accepted — the same sentence somebody hand-editing
+/// the file would get, because it is the same validation (AGENTS.md section 45).
+#[tauri::command(async)]
+fn apply_recorder_settings(
+    link: tauri::State<'_, RecorderLink>,
+    values: std::collections::BTreeMap<String, Option<String>>,
+) -> Result<clipped_ipc::SettingsView, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::ApplySettings(
+        clipped_ipc::ApplySettings { values },
+    ))? {
+        clipped_ipc::Reply::Settings { settings } => Ok(settings),
+        _ => Err(wrong_reply("apply_settings")),
+    }
+}
+
+/// The microphones this machine has, asked of the recorder.
+///
+/// The window cannot enumerate them: `clipped-audio` is in the recorder's
+/// process, and a name in the settings file is matched against the endpoints
+/// present when a recording starts — so the list the user chooses from has to be
+/// the recorder's own or it would be a list of devices that may not be there
+/// (issue #308).
+#[tauri::command(async)]
+fn audio_devices(
+    link: tauri::State<'_, RecorderLink>,
+) -> Result<clipped_ipc::AudioDevices, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::GetAudioDevices)? {
+        clipped_ipc::Reply::AudioDevices { devices } => Ok(devices),
+        _ => Err(wrong_reply("get_audio_devices")),
     }
 }
 

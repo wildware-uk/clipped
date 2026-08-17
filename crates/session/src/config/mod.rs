@@ -76,12 +76,22 @@
 //! `clipped_replay::ReplayConfig` where a recording opens a replay buffer.
 //! `docs/configuration.md` has the whole of it.
 //!
-//! What still does not read this module is `apps/recorder`'s `watch`: it hands
-//! the session manager no configuration and does not apply what it is given, so
-//! a settings file changes nothing about a shipped build's recordings yet. That
-//! is stated here rather than left to be discovered, because a configuration
-//! API that looked as though it were in force would be worse than one that
-//! admits it is not (AGENTS.md section 54).
+//! `apps/recorder` reads it in both of the ways a recording can start: `watch`
+//! resolves each game's settings through the session manager and lays them over
+//! its command line, and `serve` does the same for a recording the window asked
+//! for — and re-reads the file whenever the window changes it, so a setting
+//! saved from the Settings screen reaches the *next* recording without a
+//! restart ([issue #51](https://github.com/wildware-uk/clipped/issues/51)).
+//!
+//! One setting is still carried and read by nothing when a recording starts,
+//! and the recorder says so rather than leaving it to be discovered
+//! (`apps/recorder/src/settings.rs`, AGENTS.md section 54):
+//! [`SettingKey::CaptureTarget`], which decides which handle the caller
+//! resolves before a recording exists.
+//! [`SettingKey::ReplayWindow`] joined the others when
+//! [issue #427](https://github.com/wildware-uk/clipped/issues/427) gave a
+//! recording the window started a buffer: the request carries `replay` with no
+//! length, and the recorder resolves the length from here.
 //!
 //! Per-game defaults from the game catalogue are a fourth layer that does not
 //! exist yet either: `clipped_game_detection::catalogue::Entry::default_settings`

@@ -41,6 +41,8 @@
 
 import type {
   ActiveRecording,
+  AudioDevice,
+  AudioDevices,
   BookmarkSummary,
   ClientMessage,
   ErrorDetail,
@@ -62,6 +64,8 @@ import type {
   PlaybackStream,
   PlaybackTrack,
   PluginDeclaration,
+  SettingEntry,
+  SettingsView,
   PluginState,
   RefusedPlugin,
   LibraryGame,
@@ -412,6 +416,10 @@ function readReply(value: JsonValue | undefined): Reply {
         reply: 'hotkeys',
         hotkeys: arrayField(reply['hotkeys'], 'a hotkey list', readHotkeyBinding),
       };
+    case 'settings':
+      return { reply: 'settings', settings: readSettingsView(reply['settings']) };
+    case 'audio_devices':
+      return { reply: 'audio_devices', devices: readAudioDevices(reply['devices']) };
     case 'shutting_down': {
       const finalising = reply['finalising'];
       return {
@@ -490,6 +498,50 @@ function readSessionRecording(value: JsonValue | undefined): SessionRecording {
     // sitting reports.
     ...(outcome === undefined ? {} : { outcome }),
     ...(duration === undefined ? {} : { duration_ms: duration }),
+  };
+}
+
+function readSettingsView(value: JsonValue | undefined): SettingsView {
+  const view = object(value, 'the settings');
+  return {
+    file: stringField(view, 'file', 'the settings'),
+    settings: arrayField(view['settings'], 'a settings list', readSettingEntry),
+  };
+}
+
+function readSettingEntry(value: JsonValue | undefined): SettingEntry {
+  const entry = object(value, 'a setting');
+  const what = 'a setting';
+  const choices = optionalStringArrayField(entry, 'choices', what);
+  const unavailable = optionalStringField(entry, 'unavailable', what);
+  return {
+    key: stringField(entry, 'key', what),
+    label: stringField(entry, 'label', what),
+    value: stringField(entry, 'value', what),
+    overridden: booleanField(entry, 'overridden', what),
+    // Absent means the value set is open — a frame rate, a device name — which
+    // is a fact about the setting rather than a gap in the frame.
+    ...(choices === undefined ? {} : { choices }),
+    accepted: stringField(entry, 'accepted', what),
+    applies: booleanField(entry, 'applies', what),
+    // Present exactly when nothing reads the setting, and it is the sentence
+    // the screen shows in place of a working control.
+    ...(unavailable === undefined ? {} : { unavailable }),
+  };
+}
+
+function readAudioDevices(value: JsonValue | undefined): AudioDevices {
+  const devices = object(value, 'the audio devices');
+  return {
+    microphones: arrayField(devices['microphones'], 'a microphone list', readAudioDevice),
+  };
+}
+
+function readAudioDevice(value: JsonValue | undefined): AudioDevice {
+  const device = object(value, 'an audio device');
+  return {
+    name: stringField(device, 'name', 'an audio device'),
+    is_default: booleanField(device, 'is_default', 'an audio device'),
   };
 }
 

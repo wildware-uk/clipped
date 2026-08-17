@@ -402,7 +402,7 @@ it costs somebody a session.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--output-directory <PATH>` | the Clipped folder of your videos directory | Where recordings and session records go |
+| `--output-directory <PATH>` | `recording_directory` from the settings file, or the Clipped folder of your videos directory | Where recordings and session records go |
 | `--window-timeout <SECONDS>` | 120 | How long a game may take to put a window on screen |
 | `--resolution`, `--framerate`, `--codec`, `--encoder` | as `record` | Applied to every automatic recording the settings file says nothing about |
 | `--microphone`, `--system-audio` | `default` | As `record`: one named audio track per source, `none` to record without it |
@@ -416,6 +416,12 @@ gives everything, in its global layer — is what that game records at. **Every
 setting it does not mention is what this command line asked for**, so
 `watch --framerate 144` records at 144 on a machine with no settings file, and
 on one whose file says nothing about the frame rate.
+
+The recording directory follows the same rule the other way round: it is the one
+setting the flag wins, because `--output-directory` is what somebody typed for
+*this* run, and where a run writes is decided before any game has launched. With
+no flag, `recording_directory` from the settings file is where recordings go —
+which is what a directory picked on the Settings screen sets.
 
 A setting configured for a game therefore wins over the same option typed here.
 Which of the two should win is

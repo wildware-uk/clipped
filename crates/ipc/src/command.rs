@@ -16,28 +16,25 @@
 //!
 //! # Commands whose subsystem does not exist yet
 //!
-//! One of the commands the protocol defines belongs to a subsystem that is not
-//! built: the configuration API. It is an [`UnbuiltCommand`], it is refused with
-//! [`ErrorCode::NotImplemented`] and the milestone and issue that build it, and
-//! there is deliberately nowhere for it to be handled — a command that could be
-//! wired to a handler which quietly did nothing is exactly what AGENTS.md
-//! sections 27 and 54 forbid.
+//! There are none left. The protocol used to define a command it could not
+//! perform — one that parsed, so that the refusal could name it, and was then
+//! refused with [`ErrorCode::NotImplemented`], the milestone and the issue.
+//! `save_replay` was one until
+//! [issue #38](https://github.com/wildware-uk/clipped/issues/38) and
+//! `apply_settings` was the last, until the settings reached the protocol
+//! ([issue #51](https://github.com/wildware-uk/clipped/issues/51),
+//! `crate::settings`). Every command this build defines, it performs.
 //!
-//! Its *parameters* are left as an open object rather than given a schema:
-//! inventing a shape for a subsystem that does not exist would be a public API
-//! designed against a guess, and one the milestone that builds it would have to
-//! break (AGENTS.md section 43).
-//!
-//! `save_replay` was the other one until
-//! [issue #38](https://github.com/wildware-uk/clipped/issues/38), and what it
-//! takes is now decided rather than open — see [`SaveReplay`].
+//! The shape is still in the protocol for the thing that still needs it:
+//! [`EventStream::Metrics`](crate::EventStream) is a subscription this build
+//! refuses the same way, because nothing measures those figures yet.
 //!
 //! # The command with no handler behind it
 //!
 //! [`Command::Shutdown`] is the one command a [`CommandHandler`](crate::CommandHandler)
-//! never sees, and for the opposite reason to [`UnbuiltCommand`]: not because
-//! nothing can perform it, but because the thing that performs it is the accept
-//! loop rather than the application. `crates/ipc/src/server.rs` answers it.
+//! never sees: not because nothing can perform it, but because the thing that
+//! performs it is the accept loop rather than the application.
+//! `crates/ipc/src/server.rs` answers it.
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +48,7 @@ use crate::library::{
 use crate::message::Request;
 use crate::playback::{OpenPlayback, PlaybackStream};
 use crate::plugins::{PluginDeclaration, RefusedPlugin};
+use crate::settings::{ApplySettings, AudioDevices, SettingsView};
 use crate::status::{
     BookmarkSummary, ExportSummary, RecorderStatus, RecordingSummary, ReplaySummary,
     ScreenshotSummary,
@@ -123,6 +121,24 @@ pub enum Command {
     /// starts, which is usually before any window exists to be told
     /// (`crate::hotkeys`).
     GetHotkeys,
+    /// Every setting, what it resolves to, and whether anything reads it.
+    ///
+    /// Asked of the recorder rather than read from the file, because the
+    /// recorder is the process that owns `settings.json` and the only one that
+    /// knows which settings this build acts on (`crate::settings`).
+    GetSettings,
+    /// Change settings, and save them.
+    ///
+    /// Answered with the settings as they now stand, so a window draws what was
+    /// saved rather than what it hoped had been.
+    ApplySettings(ApplySettings),
+    /// Which audio endpoints this machine has.
+    ///
+    /// Step 3 of SPEC.md section 45's MVP is picking a microphone, and a name
+    /// is matched against the endpoints present when a recording starts — so a
+    /// window has to be able to show what is there rather than asking somebody
+    /// to type a name they cannot see.
+    GetAudioDevices,
     /// Stop serving, finish anything still being recorded, and exit.
     ///
     /// The one command not performed by a [`CommandHandler`](crate::CommandHandler):
@@ -131,12 +147,6 @@ pub enum Command {
     /// [`ShutdownRequest`](crate::server::ShutdownRequest) for the contract that
     /// makes "and exit" true rather than aspirational.
     Shutdown(Shutdown),
-    /// A command whose subsystem this build does not contain.
-    ///
-    /// It is parsed — so that the refusal names the command rather than
-    /// rejecting the name — and then refused. See
-    /// [`UnbuiltCommand::refusal`].
-    Unbuilt(UnbuiltCommand),
 }
 
 impl Command {
@@ -163,8 +173,10 @@ impl Command {
             Self::ExportRecording(_) => "export_recording",
             Self::OpenPlayback(_) => "open_playback",
             Self::GetHotkeys => "get_hotkeys",
+            Self::GetSettings => "get_settings",
+            Self::ApplySettings(_) => "apply_settings",
+            Self::GetAudioDevices => "get_audio_devices",
             Self::Shutdown(_) => "shutdown",
-            Self::Unbuilt(command) => command.name(),
         }
     }
 
@@ -197,14 +209,14 @@ impl Command {
             "export_recording" => Ok(Self::ExportRecording(parse_params(request)?)),
             "open_playback" => Ok(Self::OpenPlayback(parse_params(request)?)),
             "get_hotkeys" => Ok(Self::GetHotkeys),
+            "get_settings" => Ok(Self::GetSettings),
+            "apply_settings" => Ok(Self::ApplySettings(parse_params(request)?)),
+            "get_audio_devices" => Ok(Self::GetAudioDevices),
             "shutdown" => Ok(Self::Shutdown(parse_params(request)?)),
-            name => match UnbuiltCommand::from_name(name) {
-                Some(command) => Ok(Self::Unbuilt(command)),
-                None => Err(ProtocolError::new(
-                    ErrorCode::UnknownCommand,
-                    format!("this recorder has no `{name}` command"),
-                )),
-            },
+            name => Err(ProtocolError::new(
+                ErrorCode::UnknownCommand,
+                format!("this recorder has no `{name}` command"),
+            )),
         }
     }
 
@@ -223,7 +235,9 @@ impl Command {
             | Self::GetStatus
             | Self::LibraryGames
             | Self::Plugins
-            | Self::GetHotkeys => Ok(serde_json::Value::Null),
+            | Self::GetHotkeys
+            | Self::GetSettings
+            | Self::GetAudioDevices => Ok(serde_json::Value::Null),
             Self::LibrarySessions(listing) => serde_json::to_value(listing),
             Self::LibraryEvents(request) => serde_json::to_value(request),
             Self::LibraryTrash(request) => serde_json::to_value(request),
@@ -238,8 +252,8 @@ impl Command {
             Self::SaveReplay(replay) => serde_json::to_value(replay),
             Self::ExportRecording(export) => serde_json::to_value(export),
             Self::OpenPlayback(playback) => serde_json::to_value(playback),
+            Self::ApplySettings(settings) => serde_json::to_value(settings),
             Self::Shutdown(shutdown) => serde_json::to_value(shutdown),
-            Self::Unbuilt(_) => Ok(serde_json::Value::Null),
         }
         .map_err(|error| {
             ProtocolError::new(
@@ -276,72 +290,6 @@ fn parse_params<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, 
             ),
         )
     })
-}
-
-/// A command the protocol defines and this build cannot perform.
-///
-/// Each one names the subsystem it needs, the milestone that builds it and the
-/// issue that tracks it, so the refusal the UI renders is specific enough to
-/// act on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnbuiltCommand {
-    /// `apply_settings` — needs the configuration API.
-    ApplySettings,
-}
-
-/// Every command the protocol defines and this build cannot perform.
-///
-/// A test walks this, so a command added to [`UnbuiltCommand`] and forgotten
-/// here is a failure rather than a command that quietly stops being refused.
-pub const UNBUILT_COMMANDS: &[UnbuiltCommand] = &[UnbuiltCommand::ApplySettings];
-
-impl UnbuiltCommand {
-    /// The command's name on the wire.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::ApplySettings => "apply_settings",
-        }
-    }
-
-    /// The unbuilt command with that name, if it is one.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        UNBUILT_COMMANDS
-            .iter()
-            .copied()
-            .find(|command| command.name() == name)
-    }
-
-    /// The subsystem it needs, in the words a person would use.
-    #[must_use]
-    pub const fn subsystem(self) -> &'static str {
-        match self {
-            Self::ApplySettings => "the settings API",
-        }
-    }
-
-    /// The milestone that builds it.
-    #[must_use]
-    pub const fn milestone(self) -> &'static str {
-        match self {
-            Self::ApplySettings => "M7",
-        }
-    }
-
-    /// The issue that tracks it.
-    #[must_use]
-    pub const fn tracking_issue(self) -> u32 {
-        match self {
-            Self::ApplySettings => 108,
-        }
-    }
-
-    /// The refusal this command always gets in this build.
-    #[must_use]
-    pub fn refusal(self) -> ProtocolError {
-        ProtocolError::not_implemented(self.subsystem(), self.milestone(), self.tracking_issue())
-    }
 }
 
 /// What to record, and how.
@@ -783,6 +731,22 @@ pub enum Reply {
         /// the recorder has never heard of.
         hotkeys: Vec<HotkeyBinding>,
     },
+    /// Every setting, as it now stands.
+    ///
+    /// The answer to `get_settings` **and** to `apply_settings`, deliberately:
+    /// a window that drew its own idea of what it had just saved would show a
+    /// value the recorder had refused to write, or one another window had
+    /// changed a moment earlier. What it draws is what came back
+    /// (`crate::settings`).
+    Settings {
+        /// The settings, and the file they live in.
+        settings: SettingsView,
+    },
+    /// The audio endpoints this machine has.
+    AudioDevices {
+        /// Every microphone, with the default one marked.
+        devices: AudioDevices,
+    },
     /// The recorder has stopped listening and is winding up.
     ///
     /// Sent **before** the recorder exits, because a reply written after the
@@ -865,26 +829,88 @@ mod tests {
     }
 
     #[test]
-    fn every_unbuilt_command_parses_and_then_refuses_with_somewhere_to_look() {
-        for unbuilt in UNBUILT_COMMANDS {
-            let command =
-                Command::from_request(&request(unbuilt.name(), serde_json::json!({"any": 1})))
-                    .expect("an unbuilt command still parses, so that it can be refused by name");
-            assert_eq!(command, Command::Unbuilt(*unbuilt));
-
-            let refusal = unbuilt.refusal();
-            assert_eq!(refusal.code, ErrorCode::NotImplemented);
-            assert!(
-                refusal.detail.is_some(),
-                "{} must say which milestone builds it",
-                unbuilt.name()
-            );
-            assert!(
-                unbuilt.tracking_issue() > 0,
-                "{} must name a tracking issue",
-                unbuilt.name()
-            );
+    fn every_command_this_protocol_defines_is_one_this_build_performs() {
+        // There is no longer such a thing as a command that parses and is then
+        // refused as unbuilt: `apply_settings` was the last, and the settings
+        // reached the protocol with issue #51. The guard that replaces the list
+        // is this one — every name the protocol answers to has to become a
+        // command, and a name that quietly stopped being parsed would be
+        // `unknown_command` here.
+        for name in [
+            "ping",
+            "get_status",
+            "start_recording",
+            "stop_recording",
+            "add_bookmark",
+            "take_screenshot",
+            "save_replay",
+            "library_sessions",
+            "library_games",
+            "library_events",
+            "library_trash",
+            "restore_from_trash",
+            "empty_trash",
+            "set_favourite",
+            "set_lock",
+            "plugins",
+            "export_recording",
+            "open_playback",
+            "get_hotkeys",
+            "get_settings",
+            "apply_settings",
+            "get_audio_devices",
+            "shutdown",
+        ] {
+            // Parsed with no parameters, so a command with required ones is
+            // refused for *that* rather than for its name. The claim here is
+            // only that the name is one this build answers to, which is what
+            // `unknown_command` would deny; whether each command's parameters
+            // are right is every other test in this module.
+            match Command::from_request(&request(name, serde_json::Value::Null)) {
+                Ok(command) => assert_eq!(command.name(), name),
+                Err(error) => assert_ne!(
+                    error.code,
+                    ErrorCode::UnknownCommand,
+                    "`{name}` is in the protocol and this build does not answer to it: {}",
+                    error.message
+                ),
+            }
         }
+    }
+
+    #[test]
+    fn the_settings_commands_carry_what_they_change_and_nothing_else() {
+        // `apply_settings` used to take an open object, because nothing knew
+        // what it would need. It knows now: keys spelled as the settings file
+        // spells them, and a `null` for the one thing a value cannot express,
+        // which is Reset.
+        let command = Command::from_request(&request(
+            "apply_settings",
+            serde_json::json!({"values": {"microphone": "name:Shure MV7", "framerate": null}}),
+        ))
+        .expect("a settings change parses");
+
+        let Command::ApplySettings(applied) = command else {
+            panic!("apply_settings parsed as something else");
+        };
+        assert_eq!(
+            applied.values.get("microphone"),
+            Some(&Some("name:Shure MV7".to_owned()))
+        );
+        assert_eq!(applied.values.get("framerate"), Some(&None));
+
+        // And the two reads take nothing at all, so a window can ask without
+        // knowing anything about the settings first.
+        assert_eq!(
+            Command::from_request(&request("get_settings", serde_json::Value::Null))
+                .expect("it parses"),
+            Command::GetSettings,
+        );
+        assert_eq!(
+            Command::from_request(&request("get_audio_devices", serde_json::Value::Null))
+                .expect("it parses"),
+            Command::GetAudioDevices,
+        );
     }
 
     #[test]
@@ -945,17 +971,10 @@ mod tests {
     #[test]
     fn a_bookmark_is_a_command_this_build_performs_rather_than_one_it_refuses() {
         // Issue #64 built the bookmark store, so `add_bookmark` stopped being
-        // an `UnbuiltCommand`. Leaving it in that list would mean the recorder
-        // refused every bookmark with "bookmarks arrive in M8" while the
-        // subsystem sat there working, and the refusal reads plausibly enough
-        // that nobody would question it.
-        assert_eq!(UnbuiltCommand::from_name("add_bookmark"), None);
-        assert!(
-            !UNBUILT_COMMANDS
-                .iter()
-                .any(|unbuilt| unbuilt.name() == "add_bookmark"),
-            "add_bookmark is still listed as unbuilt: {UNBUILT_COMMANDS:?}"
-        );
+        // a command that was parsed only to be refused. Leaving it refused
+        // would have meant the recorder answering every bookmark with
+        // "bookmarks arrive in M8" while the subsystem sat there working, and
+        // the refusal reads plausibly enough that nobody would question it.
         assert!(matches!(
             Command::from_request(&request("add_bookmark", serde_json::Value::Null)),
             Ok(Command::AddBookmark(_))
@@ -1152,17 +1171,10 @@ mod tests {
     #[test]
     fn reading_the_library_is_a_command_this_build_performs_rather_than_one_it_refuses() {
         // The mistake this guards against is the one `add_bookmark` records
-        // above: a command left in `UNBUILT_COMMANDS` after its subsystem
-        // landed refuses every request with a plausible sentence about a
-        // milestone, and nobody questions it.
+        // above: a command refused as unbuilt after its subsystem landed
+        // answers every request with a plausible sentence about a milestone,
+        // and nobody questions it.
         for name in ["library_sessions", "library_games"] {
-            assert_eq!(UnbuiltCommand::from_name(name), None);
-            assert!(
-                !UNBUILT_COMMANDS
-                    .iter()
-                    .any(|unbuilt| unbuilt.name() == name),
-                "{name} is still listed as unbuilt: {UNBUILT_COMMANDS:?}"
-            );
             assert!(
                 Command::from_request(&request(name, serde_json::Value::Null)).is_ok(),
                 "{name} should parse"
@@ -1279,15 +1291,18 @@ mod tests {
     #[test]
     fn exporting_is_a_command_this_build_performs_rather_than_one_it_refuses() {
         // The mistake `add_bookmark` and the library commands above record: a
-        // command left in `UNBUILT_COMMANDS` after its subsystem landed refuses
-        // every request with a plausible sentence about a milestone, and nobody
+        // command refused as unbuilt after its subsystem landed answers every
+        // request with a plausible sentence about a milestone, and nobody
         // questions it.
-        assert_eq!(UnbuiltCommand::from_name("export_recording"), None);
         assert!(
-            !UNBUILT_COMMANDS
-                .iter()
-                .any(|unbuilt| unbuilt.name() == "export_recording"),
-            "export_recording is still listed as unbuilt: {UNBUILT_COMMANDS:?}"
+            matches!(
+                Command::from_request(&request(
+                    "export_recording",
+                    serde_json::json!({"source": "a.mkv", "destination": "a.mp4"}),
+                )),
+                Ok(Command::ExportRecording(_)),
+            ),
+            "export_recording should parse into the command that performs it",
         );
     }
 

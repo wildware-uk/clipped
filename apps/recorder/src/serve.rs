@@ -167,6 +167,10 @@ fn features_of_this_build() -> Vec<String> {
         // recording has a buffer to save from is
         // `ActiveRecording::replay_seconds`.
         features::REPLAY.to_owned(),
+        // Every command behind it is one this build performs: the settings are
+        // read and written through `clipped_session::config` and the
+        // microphones are enumerated by `clipped-audio` (issue #51).
+        features::SETTINGS.to_owned(),
     ]
 }
 
@@ -272,7 +276,7 @@ pub fn run(args: &ServeArgs) -> Result<(), ServeError> {
     // with registration.
     let (hotkeys, registered) = crate::hotkeys::start(
         &(Arc::clone(&service) as Arc<dyn CommandHandler>),
-        service.configuration(),
+        &service.configuration(),
     );
     service.publish_hotkeys(registered);
 
@@ -385,6 +389,14 @@ fn identity() -> PeerIdentity {
 #[derive(Debug)]
 pub struct RecorderService {
     recordings: Arc<RecordingState>,
+    /// The settings file, and the configuration in force (`crate::settings`,
+    /// issue #51).
+    ///
+    /// Shared with [`RecordingState`] rather than copied into it, so that a
+    /// setting saved from the window is what the *next* recording is made with
+    /// — without a restart, and without anything re-reading a file underneath a
+    /// recording that is already running.
+    settings: Arc<crate::settings::SettingsFile>,
     /// The recording library, which this process reads on the window's behalf
     /// because the window cannot (`crate::library`, issue #301).
     library: LibraryReader,
@@ -416,27 +428,20 @@ impl RecorderService {
     /// place.
     #[must_use]
     pub fn new(events: EventPublisher) -> Self {
+        // The same file `watch` reads, so that "what does this record at" has
+        // one answer whichever subcommand is asking (AGENTS.md sections 30 and
+        // 55). Read once here and held, because from now on the window changes
+        // it through this process (`crate::settings`, issue #51).
+        let settings = Arc::new(crate::settings::SettingsFile::for_this_user());
         Self::over(
             events,
             LibraryReader::for_this_user(),
             // The storage limits come from the same settings file the recording
-            // settings do, read once here. Without them the indexer sweeps
-            // nothing, which is what an unconfigured machine gets (issue #111).
-            LibraryIndexer::for_this_user().with_storage(
-                crate::watch::load_configuration(
-                    clipped_session::config::ConfigurationStore::default_path().as_deref(),
-                )
-                .storage()
-                .clone(),
-            ),
-            // The same file `watch` reads, through the same function, so that
-            // "what does this record at" has one answer whichever subcommand is
-            // asking (AGENTS.md sections 30 and 55). Read once, here: a
-            // recording resolves what it is made with when it starts, and
-            // nothing re-reads a file underneath a running encoder (issue #61).
-            crate::watch::load_configuration(
-                clipped_session::config::ConfigurationStore::default_path().as_deref(),
-            ),
+            // settings do. Without them the indexer sweeps nothing, which is
+            // what an unconfigured machine gets (issue #111).
+            LibraryIndexer::for_this_user()
+                .with_storage(settings.configuration().storage().clone()),
+            settings,
             // And the same catalogue `watch` matches processes against, read
             // once for the same reason (issue #403).
             catalogue_for_recordings(),
@@ -465,7 +470,11 @@ impl RecorderService {
             events,
             library,
             indexer,
-            Configuration::defaults(),
+            // Nowhere, deliberately: a service built for a test must not read
+            // or write the settings of whoever is running it (AGENTS.md
+            // section 25). A test that is *about* the settings uses
+            // [`Self::with_settings`].
+            Arc::new(crate::settings::SettingsFile::nowhere()),
             catalogue,
             // A handler built for a test is told nothing about this machine's
             // launchers, for the reason its catalogue is a fixture (AGENTS.md
@@ -478,7 +487,7 @@ impl RecorderService {
         events: EventPublisher,
         library: LibraryReader,
         indexer: LibraryIndexer,
-        configuration: Configuration,
+        settings: Arc<crate::settings::SettingsFile>,
         catalogue: Catalogue,
         launchers: Launchers,
     ) -> Self {
@@ -487,26 +496,48 @@ impl RecorderService {
             recordings: Arc::new(RecordingState::new(
                 events,
                 Arc::clone(&indexer),
-                configuration,
+                Arc::clone(&settings),
                 catalogue,
                 launchers,
             )),
+            settings,
             library,
             indexer,
             hotkeys: OnceLock::new(),
         }
     }
 
-    /// The settings this process resolved when it started.
+    /// The same, over a settings file the caller names.
     ///
-    /// Read once, here, for the reason [`Self::new`] gives: a recording resolves
-    /// what it is made with when it starts, and nothing re-reads a file
-    /// underneath a running encoder. `serve` asks for it to resolve the hotkey
-    /// bindings, so that "what is Save Replay bound to" has one answer in this
-    /// process (AGENTS.md section 30).
+    /// For the tests that are *about* the settings, which need a file of their
+    /// own rather than the one belonging to whoever is running them.
     #[must_use]
-    pub fn configuration(&self) -> &Configuration {
-        &self.recordings.configuration
+    pub fn with_settings(
+        events: EventPublisher,
+        library: LibraryReader,
+        indexer: LibraryIndexer,
+        catalogue: Catalogue,
+        settings: crate::settings::SettingsFile,
+    ) -> Self {
+        Self::over(
+            events,
+            library,
+            indexer,
+            Arc::new(settings),
+            catalogue,
+            Launchers::none(),
+        )
+    }
+
+    /// The settings in force.
+    ///
+    /// `serve` asks for them to resolve the hotkey bindings, so that "what is
+    /// Save Replay bound to" has one answer in this process (AGENTS.md section
+    /// 30). A recording asks when it starts, and never again while it runs
+    /// (issue #61).
+    #[must_use]
+    pub fn configuration(&self) -> Configuration {
+        self.settings.configuration()
     }
 
     /// The one recording this process runs at a time.
@@ -698,10 +729,24 @@ impl CommandHandler for RecorderService {
             Command::GetHotkeys => Ok(Reply::Hotkeys {
                 hotkeys: self.hotkeys()?,
             }),
-            // Refused by `clipped-ipc` before dispatch, so that no handler can
-            // answer a command whose subsystem does not exist (AGENTS.md
-            // section 54). Reaching here would be a bug in that refusal.
-            Command::Unbuilt(unbuilt) => Err(unbuilt.refusal()),
+            // Answered on the connection thread, like a library read: reading
+            // or writing one small file shares nothing with a recording, and
+            // the only lock it takes is the settings file's own
+            // (`crate::settings`, issue #51).
+            Command::GetSettings => Ok(Reply::Settings {
+                settings: self.settings.view()?,
+            }),
+            // Answered with the settings as they now stand, so the window draws
+            // what was saved rather than what it hoped had been.
+            Command::ApplySettings(request) => Ok(Reply::Settings {
+                settings: self.settings.apply(&request)?,
+            }),
+            // Asked of Windows each time rather than answered from a list read
+            // at start-up: a microphone plugged in while the window is open is
+            // one somebody is about to choose (issue #308).
+            Command::GetAudioDevices => Ok(Reply::AudioDevices {
+                devices: crate::settings::audio_devices()?,
+            }),
             // Also answered by `clipped-ipc` before dispatch, for the opposite
             // reason: what a shutdown ends is the accept loop, which belongs to
             // the server rather than to this service. It stops the listener,
@@ -743,13 +788,14 @@ pub(crate) struct RecordingState {
     /// Asked to bring the library up to date once a recording's session record
     /// is final (`crate::library`, issue #402).
     indexer: Arc<LibraryIndexer>,
-    /// The user's settings, as they stood when this process started
-    /// (`RecorderService::new`).
+    /// The user's settings, shared with the service that can change them
+    /// (`crate::settings`, issue #51).
     ///
-    /// Held rather than re-read, exactly as `watch` holds them: a recording
-    /// resolves what it is made with when it starts, and nothing re-reads a file
-    /// underneath a running encoder (`clipped_session::config`, issue #61).
-    configuration: Configuration,
+    /// Asked when a recording starts and never while one is running: what a
+    /// recording is made with belongs to the moment it started, so a setting
+    /// saved half way through reaches the *next* recording rather than the
+    /// encoder that is running (`clipped_session::config`, issue #61).
+    settings: Arc<crate::settings::SettingsFile>,
     /// What Clipped knows about games, as it stood when this process started
     /// ([`catalogue_for_recordings`]).
     ///
@@ -935,7 +981,7 @@ impl RecordingState {
     fn new(
         events: EventPublisher,
         indexer: Arc<LibraryIndexer>,
-        configuration: Configuration,
+        settings: Arc<crate::settings::SettingsFile>,
         catalogue: Catalogue,
         launchers: Launchers,
     ) -> Self {
@@ -945,7 +991,7 @@ impl RecordingState {
             events,
             next_id: AtomicU64::new(1),
             indexer,
-            configuration,
+            settings,
             catalogue,
             launchers,
         }
@@ -973,6 +1019,10 @@ impl RecordingState {
         output: PathBuf,
         target: String,
         window: &WindowInfo,
+        // The settings this recording is made with, resolved by its caller at
+        // the moment it started rather than read again here: one recording
+        // reads the file once (issue #51).
+        configuration: &Configuration,
         now: SystemTime,
     ) -> Running {
         // Asked of Windows here rather than carried on `WindowInfo`, which
@@ -995,7 +1045,7 @@ impl RecordingState {
         let session = ManualSession::start(
             output.parent().unwrap_or_else(|| Path::new(".")),
             output.clone(),
-            &self.configuration,
+            configuration,
             &self.catalogue,
             &self.launchers,
             process,
@@ -1134,17 +1184,36 @@ impl RecordingState {
         &self.catalogue
     }
 
+    /// The settings in force, from the one state this process keeps them in.
+    ///
+    /// For the automatic recorder, which resolves each game's settings through
+    /// a session manager of its own (`crate::watch`, issue #421). It reads them
+    /// from here rather than opening the settings file a second time, so that
+    /// "what did the user configure" has one answer in this process however a
+    /// recording was started — the same reason a recording the window asked for
+    /// reads them from here (AGENTS.md sections 30 and 55, issue #51).
+    pub(crate) fn configuration(&self) -> Configuration {
+        self.settings.configuration()
+    }
+
     /// Validates the request, resolves the target, opens a session and starts
     /// recording.
     fn start(self: &Arc<Self>, request: &StartRecording) -> Result<Reply, ProtocolError> {
         let args = record_args(request)?;
-        // The same settings file every other command reads, and the same
-        // answer: a recording the window started goes where the settings screen
-        // said, unless the request named a file itself (issue #307).
-        let configured = crate::watch::load_configuration(
-            clipped_session::config::ConfigurationStore::default_path().as_deref(),
-        );
-        let config = RecordingConfig::resolve(&args, configured.storage().recording_directory())
+        // Read once, here, and from the state `apply_settings` writes rather
+        // than from the file: everything this recording is made with — where it
+        // goes, and what it is made at — comes from the settings as they stand
+        // at the moment it starts, and nothing re-reads them afterwards
+        // (issue #61).
+        //
+        // The *one* state, not a start-up snapshot and not a second read of the
+        // file. A recording the window started goes where the settings screen
+        // said (issue #307), and it has to be the answer the screen last saved
+        // rather than the answer the file held when this process started, or
+        // the screen is a control that does nothing until the recorder is
+        // restarted (`crate::settings`, issue #51).
+        let configuration = self.settings.configuration();
+        let config = RecordingConfig::resolve(&args, configuration.storage().recording_directory())
             .map_err(invalid_parameters)?;
         // Before the window is resolved and before anything is created: a
         // duration no buffer can hold is a parameter to fix, and finding that
@@ -1190,6 +1259,7 @@ impl RecordingState {
                 output.clone(),
                 target,
                 &window,
+                &configuration,
                 SystemTime::now(),
             )
             // After the session, because the length of a buffer nobody named is
@@ -2436,10 +2506,21 @@ mod tests {
         catalogue: Catalogue,
         configuration: Configuration,
     ) -> Arc<RecordingState> {
+        // A settings file inside the scratch directory, never the user's own:
+        // `ConfigurationStore::default_path` is whoever is running the tests,
+        // and a test that read it would pass or fail on their settings
+        // (AGENTS.md section 25). Written and then read back rather than held in
+        // memory, so that what the caller configured reaches a recording by the
+        // path a real one takes.
+        let path = directory.join("settings.json");
+        clipped_session::config::ConfigurationStore::at(&path)
+            .store(configuration)
+            .expect("a scratch settings file can be written");
+
         Arc::new(RecordingState::new(
             EventPublisher::new(),
             Arc::new(indexer_over(directory)),
-            configuration,
+            Arc::new(crate::settings::SettingsFile::at(path)),
             catalogue,
             // Not the machine's: a test that asked what is installed here would
             // answer differently on another machine (AGENTS.md section 25).
@@ -2489,6 +2570,7 @@ mod tests {
                 output.to_path_buf(),
                 "process cs2.exe".to_owned(),
                 &window_of(4_242, "cs2.exe"),
+                &Configuration::defaults(),
                 moment(),
             )
             .with_replay(replay);
@@ -2731,13 +2813,14 @@ mod tests {
             .expect("ninety seconds is a window a buffer will take");
         configuration.set_global(global);
 
-        let state = state_configured(&directory, Catalogue::default(), configuration);
+        let state = state_configured(&directory, Catalogue::default(), configuration.clone());
         let running = state
             .begin(
                 "r-1".to_owned(),
                 output.clone(),
                 "process cs2.exe".to_owned(),
                 &window_of(4_242, "cs2.exe"),
+                &configuration,
                 moment(),
             )
             .with_replay_asked(ReplayAsked::Configured)
@@ -2763,6 +2846,7 @@ mod tests {
                 output,
                 "process cs2.exe".to_owned(),
                 &window_of(4_242, "cs2.exe"),
+                &configuration,
                 moment(),
             )
             .with_replay_asked(ReplayAsked::Nothing)
@@ -2802,13 +2886,18 @@ mod tests {
             for_the_game,
         );
 
-        let state = state_configured(&directory, catalogue_claiming_this_process(), configuration);
+        let state = state_configured(
+            &directory,
+            catalogue_claiming_this_process(),
+            configuration.clone(),
+        );
         let running = state
             .begin(
                 "r-1".to_owned(),
                 output,
                 format!("process {}", this_executable_name()),
                 &window_of(std::process::id(), &this_executable_name()),
+                &configuration,
                 moment(),
             )
             .with_replay_asked(ReplayAsked::Configured)
@@ -3349,6 +3438,7 @@ mod tests {
             output.clone(),
             format!("process {}", this_executable_name()),
             &window_of(std::process::id(), &this_executable_name()),
+            &Configuration::defaults(),
             moment(),
         );
         *service.recordings.current.lock().expect("a fresh lock") = Some(running);
@@ -3446,6 +3536,7 @@ mod tests {
             output.clone(),
             format!("process {}", this_executable_name()),
             &window_of(std::process::id(), &this_executable_name()),
+            &Configuration::defaults(),
             moment(),
         );
 
@@ -3605,13 +3696,61 @@ mod tests {
     }
 
     #[test]
+    fn a_setting_saved_through_the_protocol_is_what_the_next_recording_is_made_with() {
+        // Through `CommandHandler::call` rather than through `crate::settings`
+        // beside it, for the reason the export case below gives: what issue #51
+        // is about is a change from the window reaching the settings a
+        // *recording* resolves from. Until it landed, this service held a
+        // `Configuration` copied out of the file when the process started, so a
+        // setting saved from the window reached the next recording only after a
+        // restart — which is not what "close the window and recording works
+        // from then on" means (SPEC.md section 45).
+        let directory = scratch("settings-dispatch");
+        let service = RecorderService::with_settings(
+            EventPublisher::new(),
+            LibraryReader::at(Some(directory.join("library.db"))),
+            indexer_over(&directory),
+            Catalogue::default(),
+            crate::settings::SettingsFile::at(directory.join("settings.json")),
+        );
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("microphone".to_owned(), Some("name:Shure MV7".to_owned()));
+        let reply = service
+            .call(Command::ApplySettings(clipped_ipc::ApplySettings {
+                values,
+            }))
+            .expect("a device name is a value the settings file can hold");
+
+        let Reply::Settings { settings } = reply else {
+            panic!("apply_settings answered with something other than the settings");
+        };
+        assert!(settings
+            .settings
+            .iter()
+            .any(|entry| entry.key == "microphone" && entry.value == "name:Shure MV7"));
+
+        // The settings a recording starting now resolves from — the state the
+        // recordings share, rather than a snapshot taken at start-up.
+        assert_eq!(
+            service
+                .recordings
+                .settings
+                .configuration()
+                .resolve_global()
+                .written_value(clipped_session::config::SettingKey::Microphone),
+            "name:Shure MV7",
+        );
+    }
+
+    #[test]
     fn an_export_is_routed_to_the_muxer_through_the_real_dispatch() {
         // Deliberately through `CommandHandler::call` rather than through
         // `crate::export` beside it. What issue #399 is about is a command
         // reaching the muxer at all; an export function that works while
         // nothing routes a command to it is exactly the gap this ticket exists
-        // to close, and a command wired to the wrong handler — or left in
-        // `UNBUILT_COMMANDS` and refused before dispatch — fails here and
+        // to close, and a command wired to the wrong handler — or refused
+        // before dispatch as one this build does not perform — fails here and
         // nowhere else.
         //
         // The source is deliberately not media: what is under test is the
