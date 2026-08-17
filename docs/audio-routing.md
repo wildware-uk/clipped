@@ -420,6 +420,17 @@ a note saying separation was unavailable (ADR 0003). So:
 let (game, other) = ProcessLoopbackCapture::open_pair(game_process)?;
 ```
 
+That is `clipped_session::audio::open`, and naming the caller is deliberate:
+this page said "what a recording opens" for a week while no recording opened it
+([issue #581](https://github.com/wildware-uk/clipped/issues/581)). The session
+opened `open` and `open_excluding` two lines apart, so issue #27's agreement
+existed and never happened, with the code and the prose both reading as though
+it did. What stops that returning is that
+`clipped_session::audio::PlannedSource::ScopedPair` is **one** plan item for the
+two captures — the session can no longer name one side without the other — and
+that a test drives the session's own `open` and asserts the two captures it
+returns report the same `ScopeAgreement`.
+
 `open` and `open_excluding` are still there for a caller that wants one side,
 but a recording that opened both of them separately would carry a defect that
 only appears when a game's launcher exits partway through. Each capture then
@@ -493,6 +504,20 @@ The **including** side still refuses. There is nothing left to include, so the
 track is silence either way, and a `Game` track that quietly became everything
 the machine plays is exactly ADR 0003's cardinal sin — muting the game in an
 editor would not silence it.
+
+**Which dead identifier it reopens against is the pair's, not this side's own.**
+The two mechanisms meet here. When the tree empties, `decide_scope` returns
+`Ended` on both sides and *neither* publishes, so the shared cell still names
+the last process the pair agreed on and each capture stays activated on it —
+which is what `the_game_ending_does_not_split_the_pair` asserts. A reopen from
+that point names that agreed identifier rather than whichever survivor this side
+happened to resolve on its own, which is the difference the pair makes: before
+it, a game that exited its launcher and then ended entirely could leave the two
+sides having reopened against two different dead identifiers. It changes nothing
+about *what is captured* — excluding a tree with no members is everything the
+machine plays whichever dead identifier is named, which is what the table above
+measures — but it is the reason the identifier is now determined rather than
+raced for.
 
 What this costs is process-identifier reuse. Once the tree is empty,
 `ProcessTree` has released the handle that was pinning the identifier — that is
@@ -1068,6 +1093,12 @@ cargo test -p clipped-audio
   `CLIPPED_SKIP_AUDIO` skips it; `CLIPPED_REQUIRE_AUDIO` turns the skip into a
   failure.
 
+  One more opens a real pair and a real lone capture and asserts what
+  `ScopeAgreement` claims: the two sides of one `open_pair` report the same
+  agreement, and a capture opened by itself reports a different one. It makes no
+  sound, and it is what stops the session's check below from being satisfied by
+  an agreement that said "same" about everything.
+
   Beside them are the arithmetic that needs no machine at all: the
   `WAVEFORMATEXTENSIBLE` describing exactly the format the crate then converts
   by, the speaker mask filled in for an unlabelled stereo endpoint and not
@@ -1173,6 +1204,29 @@ cargo test -p clipped-windows
   anything else means "it exited a moment ago" — is unit tested against both
   error codes; that Windows returns the first one for an anti-cheat service is
   not.
+
+And the consumer, which is where issue #581 was:
+
+```text
+cargo test -p clipped-session
+```
+
+- **That a recording opens the pair**, in `crates/session/src/audio/tests.rs`.
+  The planning tests decide *which* captures a recording opens and need no
+  machine; `pairing` is the other half and needs one. It creates an off-screen
+  window of this process, builds the settings a recording of a window is made
+  with, calls the session's own `open` — the same call `crate::recording` makes
+  — and asserts that the two captures it gets back report the **same**
+  `ScopeAgreement`.
+
+  It is that and not `scoped_to`, because two captures opened separately name
+  the same process for as long as nothing has exited: the assertion that fails
+  on the wrong build has to be over the identity of the cell, not its contents.
+  Reverting `open` to `ProcessLoopbackCapture::open` and `open_excluding` fails
+  it with two addresses and one process identifier, which is exactly the defect
+  as it shipped. It plays nothing and reads no packet; where Windows will not
+  scope a capture it skips loudly, and `CLIPPED_REQUIRE_AUDIO` turns that into a
+  failure.
 
 Everything that touches an endpoint skips, loudly, on a machine without one —
 which is why these are not in the pull-request CI job, since a GitHub Windows

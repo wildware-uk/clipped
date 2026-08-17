@@ -18,4 +18,4 @@ mod process_loopback;
 pub use endpoint_capture::CaptureStats;
 pub use loopback::SystemAudioCapture;
 pub use microphone::{microphones, Microphone, MicrophoneCapture, MicrophoneSelection};
-pub use process_loopback::ProcessLoopbackCapture;
+pub use process_loopback::{ProcessLoopbackCapture, ScopeAgreement};

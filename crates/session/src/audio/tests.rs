@@ -1215,11 +1215,10 @@ mod planning {
 
         assert_eq!(
             planned,
-            vec![
-                PlannedSource::GameTree(GAME),
-                PlannedSource::EverythingExceptGameTree(GAME),
-            ],
-            "a window recording gets both halves of the split, against one tree"
+            vec![PlannedSource::ScopedPair(GAME)],
+            "a window recording gets both halves of the split, against one tree, as one plan \
+             item — two items would be two decisions, and a recording that acted on them \
+             independently is issue #581"
         );
     }
 
@@ -1279,6 +1278,202 @@ mod planning {
             plan_system_audio(&named, Some(GAME)),
             Err(SessionError::AudioDeviceNotSelectable)
         ));
+    }
+}
+
+/// That a recording opens the two scoped captures **as a pair**.
+///
+/// # Why this is here and not in `clipped-audio`
+///
+/// `clipped-audio` already measures that `open_pair` works. What nothing
+/// measured was whether anything *called* it: for a week
+/// `crates/session/src/audio/mod.rs` opened `open` and `open_excluding`
+/// separately, two lines apart, while that crate's own documentation and
+/// `docs/audio-routing.md` both said a recording opened the pair
+/// ([issue #581](https://github.com/wildware-uk/clipped/issues/581)). Every
+/// test of the producer passed throughout. So this drives the real recording
+/// path — [`open`], the function `crate::recording` calls — and asserts on what
+/// comes back out of it (AGENTS.md section 55).
+///
+/// # What it can and cannot see
+///
+/// Two captures opened separately and two opened as a pair are identical in
+/// every observable way *until* the process the activation names exits with
+/// descendants still running, and which of them each side then picks depends on
+/// when two independent process-table scans happened to run. A test that
+/// arranged that and compared `scoped_to` would pass on a build with no
+/// agreement at all, most of the time.
+///
+/// What is exact is the agreement itself:
+/// [`ProcessLoopbackCapture::scope_agreement`] is the identity of the cell the
+/// two sides re-scope through, and it is equal for the two halves of one
+/// `open_pair` and for nothing else. So the assertion is that identity, which
+/// fails if `open` reverts to two separate calls **and** fails if `open_pair`
+/// stops handing its two captures one cell.
+///
+/// # What it needs from the machine
+///
+/// A real window of this process, so that `game_process` resolves the way it
+/// does for a recording of a game, and a Windows that will scope a capture to a
+/// process tree at all. It plays nothing and records nothing: the tree it opens
+/// is this test binary, which makes no sound, and no packet is ever read. Where
+/// the activation is refused it skips loudly, and `CLIPPED_REQUIRE_AUDIO` turns
+/// that skip into a failure for whoever is supposed to have the hardware
+/// (AGENTS.md section 54). A GitHub Windows runner has no audio endpoint and
+/// still scopes a capture — issue #441 is the afternoon that assuming otherwise
+/// cost — so this is not an `#[ignore]`d suite.
+mod pairing {
+    use std::io::Write as _;
+
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP,
+    };
+
+    use super::*;
+    use crate::settings::CaptureTargetSettings;
+
+    /// The environment variable that turns "this machine will not scope a
+    /// capture" from a skip into a failure. The same one `clipped-audio` uses,
+    /// so one machine's configuration governs both.
+    const REQUIRE_AUDIO: &str = "CLIPPED_REQUIRE_AUDIO";
+
+    /// Reports that the test could not run here.
+    ///
+    /// Written through `std::io::stderr()` rather than with `eprintln!`, which
+    /// libtest captures: a skip nobody can see in a passing run is exactly how
+    /// a test becomes a no-op without anybody noticing.
+    ///
+    /// # Panics
+    ///
+    /// When [`REQUIRE_AUDIO`] is set, because a machine that is supposed to be
+    /// able to do this saying it cannot is a failure and not a skip.
+    fn skipped(reason: &str) {
+        assert!(
+            std::env::var_os(REQUIRE_AUDIO).is_none_or(|value| value.is_empty()),
+            "{REQUIRE_AUDIO} is set, so this must not be skipped: {reason}"
+        );
+        let _ = writeln!(std::io::stderr(), "SKIPPED (audio): {reason}");
+    }
+
+    /// A real window belonging to this process, for `game_process` to resolve.
+    ///
+    /// `CaptureTargetSettings::window` takes a handle and the audio sources are
+    /// opened against whatever process owns it, so a fabricated handle would
+    /// plan a whole-endpoint recording and measure nothing. The system `STATIC`
+    /// class needs no class registration; the window is never shown and is far
+    /// off-screen, because a test on a shared machine must not put anything in
+    /// front of somebody.
+    struct TestWindow(HWND);
+
+    impl TestWindow {
+        fn open() -> Option<Self> {
+            // SAFETY: `STATIC` is a system window class and both strings are
+            // static wide literals that outlive the call. No parent, menu,
+            // instance or creation parameter is passed, which is what the
+            // `None`s mean. `Drop` destroys what this returns.
+            let window = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    windows::core::w!("STATIC"),
+                    windows::core::w!("clipped audio pairing test window"),
+                    WS_POPUP,
+                    -32_000,
+                    -32_000,
+                    16,
+                    16,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .ok()?;
+            Some(Self(window))
+        }
+
+        /// The handle in the form `CaptureTargetSettings::window` takes, which
+        /// is what `WindowHandle::as_u64` produces and `game_process` casts
+        /// back to an `isize` to undo.
+        fn handle(&self) -> u64 {
+            clipped_windows::WindowHandle::from_raw(self.0 .0 as isize).as_u64()
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from `CreateWindowExW` on this thread and
+            // is destroyed once, here.
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn a_recording_opens_the_two_scoped_captures_as_one_pair() {
+        let Some(window) = TestWindow::open() else {
+            skipped("this machine would not create a window to record");
+            return;
+        };
+        let settings = RecordingSettings::new(
+            CaptureTargetSettings::window(window.handle(), 640, 360),
+            std::path::PathBuf::from("pairing.mkv"),
+        )
+        .with_system_audio(AudioSourceSetting::SystemDefault);
+
+        // The real thing: the same call `crate::recording` makes, against the
+        // same settings a recording of a window is made with. Nothing below
+        // here knows this is a test.
+        let mut sources = match open(&settings) {
+            Ok(sources) => sources,
+            Err(error) => {
+                skipped(&format!(
+                    "a process-scoped capture could not be opened here: {error}"
+                ));
+                return;
+            }
+        };
+
+        let tracks: Vec<_> = sources
+            .iter()
+            .map(|source| source.source.track_name())
+            .collect();
+        assert_eq!(
+            tracks,
+            vec![
+                AudioSource::Game.track_name(),
+                AudioSource::OtherSystemAudio.track_name(),
+            ],
+            "a window recording is the game's tree and everything except it, in track order"
+        );
+
+        let agreements: Vec<_> = sources
+            .iter()
+            .map(|source| source.capture.scope_agreement())
+            .collect();
+
+        // The two activations are released here rather than left to the end of
+        // the test binary: this runs on somebody's machine, and the assertions
+        // below need nothing from the captures that has not already been asked.
+        for source in &mut sources {
+            source.capture.close();
+        }
+
+        let [Some(game), Some(other)] = agreements.as_slice() else {
+            panic!(
+                "both scoped captures have an agreement to report; got {agreements:?}, which is \
+                 a recording that opened something other than two process-scoped captures"
+            );
+        };
+
+        assert_eq!(
+            game, other,
+            "the game's track and the other-system-audio track are scoped through two different \
+             cells, so nothing keeps them on the same process once the game's launcher exits: a \
+             process in one side's tree and not the other's is then on both tracks or on \
+             neither. That is a recording opened through `open` and `open_excluding` separately \
+             rather than through `open_pair` (issue #581), or an `open_pair` that has stopped \
+             sharing its cell (issue #27)"
+        );
     }
 }
 
