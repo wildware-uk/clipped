@@ -1983,7 +1983,11 @@ name = "test-game.exe"
 
                 let recorder = Arc::clone(&service) as Arc<dyn CommandHandler>;
                 pressed = Some(
-                    crate::hotkeys::handlers_for(&recorder)
+                    // The real resolver, because this presses the bookmark key
+                    // and nothing on that path asks what is in front. A press
+                    // that *did* would be reaching Windows from a test, which
+                    // `crate::hotkeys`'s own tests are what cover.
+                    crate::hotkeys::handlers_for(&recorder, &crate::hotkeys::what_is_in_front())
                         .press(
                             clipped_hotkeys::HotkeyAction::AddBookmark,
                             "Ctrl+F9".parse().expect("Ctrl+F9 is a hotkey"),

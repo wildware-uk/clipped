@@ -386,6 +386,36 @@ file is for. Where a test _can_ usefully skip — the capture unit tests inside
 `clipped-capture` — the project has `CLIPPED_REQUIRE_CAPTURE` to turn a skip
 into a failure on a machine that is supposed to be able to capture.
 
+## Taking the foreground
+
+One test does, and it is the only one:
+`crates/windows/tests/foreground.rs::the_window_in_front_is_what_would_be_recorded`.
+It creates a visible titled window, puts it in front, and asserts that
+`clipped_windows::foreground_target` — what a press of the "Start or stop
+recording" hotkey records ([issue
+#416](https://github.com/wildware-uk/clipped/issues/416), `docs/hotkeys.md`) —
+answers with *that* window and the process that owns it. The rules around it are
+unit tested against written-down windows in `crates/windows/src/foreground.rs`;
+what only this can reach is `GetForegroundWindow` and describing what it names.
+
+```text
+cargo test -p clipped-windows --test foreground -- --ignored --nocapture
+```
+
+It is `#[ignore]`d for two reasons, and the second is the firmer one. It takes
+the foreground away from whatever the developer is doing, and Windows grants
+`SetForegroundWindow` only to a process that has just produced input — so it
+synthesises a zero-pixel mouse movement to qualify. Neither belongs in
+`cargo test --workspace`, and a hosted runner has no desktop to do either on.
+
+**A run Windows refuses fails**, naming what did not happen, rather than
+passing: a green run that never entered the case it is named for is worse than
+no run at all (AGENTS.md section 54). That is the same rule
+`crates/hotkeys/tests/windows_hotkeys.rs` applies through
+`CLIPPED_REQUIRE_HOTKEYS`, and this test needs no switch for it because it is
+`#[ignore]`d — somebody typing the command above is asking for the case, so
+failing to reach it is a failure.
+
 ## Running the suite without making a noise
 
 Some tests play sound. `crates/audio/tests/system_audio.rs` renders a quiet

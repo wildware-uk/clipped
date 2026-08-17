@@ -178,7 +178,7 @@ support bundle needs in order to answer "the hotkey does nothing"
 | `save_replay` | `save_replay`, naming no recording, no duration and no file | Refused: there is no replay buffer to save from ([#38](https://github.com/wildware-uk/clipped/issues/38)) |
 | `add_bookmark` | `add_bookmark`, naming no recording | Refused: there is no recording to mark a moment in |
 | `take_screenshot` | `take_screenshot`, naming no target | Refused: there is no window to photograph |
-| `toggle_recording` | `stop_recording`, naming no recording | Refused: a key press does not say which window to record ([#416](https://github.com/wildware-uk/clipped/issues/416)) |
+| `toggle_recording` | `stop_recording`, naming no recording | **`start_recording`, naming the process the user is in** ([#416](https://github.com/wildware-uk/clipped/issues/416)); refused, naming what was there instead, when what is in front is Clipped's own window, part of the shell, or nothing |
 | everything else | nothing: no handler is registered | Reported as unhandled, naming the milestone and the issue |
 
 "Whatever is running" is the point of the middle column, and it includes a
@@ -194,6 +194,65 @@ against one:
   stop that undid itself would be worse than a key that did nothing (AGENTS.md
   section 27). The sitting stays open — the game is still running, and a
   relaunch still joins it — and recording resumes when the game restarts.
+
+### What a press records
+
+A key press carries no target, which is why the toggle could only ever *stop* a
+recording ([#416](https://github.com/wildware-uk/clipped/issues/416)). The
+recorder now answers the same question the window's Record button answers —
+*the application the user is in* — from `clipped_windows::foreground_target`,
+and sends the same `start_recording` the button sends: the process identifier,
+and a replay buffer, and nothing else. Naming the process rather than the
+window is what puts both through one `resolve_window` (AGENTS.md section 55),
+and asking for the buffer is what keeps `Ctrl`+`F10` working against a
+recording the keyboard started.
+
+**It asks at the moment of the press, rather than following the foreground.**
+The desktop application cannot: opening a notification-area menu gives the
+foreground to the taskbar, so by the time a menu item is clicked, asking
+Windows what is in front answers with the shell — which is why
+`apps/desktop/src-tauri/src/foreground.rs` runs an `EVENT_SYSTEM_FOREGROUND`
+hook and remembers. A press raises nothing, so the recorder can ask when it is
+asked. That costs nothing when no key is pressed, needs no message pump in a
+recorder running with no interactive desktop, and cannot answer with a window
+that has since closed.
+
+What is in front decides, and a refusal says which of these it was — never
+merely that there was no target:
+
+| What is in front | What a press does |
+| --- | --- |
+| A game, an application, a File Explorer window | Records it |
+| Clipped's own window, or the webview drawing its interface | Refused: recording Clipped because somebody pressed the key while looking at it is worse than refusing |
+| The taskbar, Start, Search, the desktop | Refused, naming the surface |
+| Nothing, or a window that cannot be captured | Refused, with the reason a window listing would have given |
+
+**A recorder that is watching for games starts one too.** Watching is not
+recording, and [#421](https://github.com/wildware-uk/clipped/issues/421) left
+the key refusing in that state only because the recorder could not then say
+which window it would record. It can now, so the press does what it does when
+nothing is running: the game somebody reaches for the keyboard over is the one
+the catalogue did not recognise, and a key that refused every press while
+nothing was being recorded would be a key that does nothing (AGENTS.md section
+27). If a game launches into the recording that press started, the watcher is
+refused with the recorder's own "one thing at a time" sentence — the same one
+it gets when the window started the recording.
+
+Clipped's own window is recognised by the executables it ships as and by
+parentage — `clipped-desktop.exe`, `clipped-recorder.exe`, and anything either
+started — because the webview host drawing the interface is a process of its
+own ([#390](https://github.com/wildware-uk/clipped/issues/390)) and
+`msedgewebview2.exe` by name would refuse Teams and every other application
+that hosts a webview.
+
+**The window and the hotkey have to agree**, and they cannot share the code: the
+desktop application may link no member of this workspace but `clipped-ipc`
+(ADR 0002). What they share is the list of shell surfaces, and
+`tests/integration/tests/foreground_rules.rs` fails when one side changes it
+alone. Having the recorder answer for *both* — a `foreground_target` command
+the window asks for — is the other way to do it, argued on issue #416 and not
+taken here: it would put a named-pipe round trip on the tray menu's hover path
+and a foreground hook in a process that may have no desktop.
 
 ## Where a conflict is shown
 
@@ -238,7 +297,7 @@ line and will appear in a configuration file.
 | Save replay | `save_replay` | `Ctrl`+`F10` | **The recorder saves the clip**, through `save_replay` ([#38](https://github.com/wildware-uk/clipped/issues/38), docs/replay-buffer.md). `clipped-recorder replay` binds it too and writes the last N seconds out directly; over the protocol the recording has to be keeping a buffer, which is `active_recording.replay_seconds` |
 | Add bookmark | `add_bookmark` | `Ctrl`+`F9` | **The recorder marks the moment**, through `add_bookmark` ([#64](https://github.com/wildware-uk/clipped/issues/64), docs/bookmarks.md) |
 | Take screenshot | `take_screenshot` | — | **The recorder writes a still**, through `take_screenshot` ([#67](https://github.com/wildware-uk/clipped/issues/67), docs/screenshots.md) |
-| Start or stop recording | `toggle_recording` | — | **The recorder stops the recording that is running.** Starting one needs a window a key press cannot name, [#416](https://github.com/wildware-uk/clipped/issues/416) |
+| Start or stop recording | `toggle_recording` | — | **The recorder starts a recording of whatever the user is in, and stops the one that is running** ([#416](https://github.com/wildware-uk/clipped/issues/416)) — see [What a press records](#what-a-press-records) |
 | Mute microphone | `mute_microphone` | — | Nothing mutes a microphone mid-recording, [#234](https://github.com/wildware-uk/clipped/issues/234) |
 | Toggle microphone | `toggle_microphone` | — | As above |
 | Open overlay | `open_overlay` | — | Nothing: the overlay is M5, [#53](https://github.com/wildware-uk/clipped/issues/53) |

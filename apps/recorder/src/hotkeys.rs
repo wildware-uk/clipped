@@ -41,6 +41,17 @@
 //!       └──────▶ RecorderService::call ◀──────┘
 //! ```
 //!
+//! # What a press records
+//!
+//! The window it was pressed in front of. A key press carries no target, which
+//! is why "Start or stop recording" could only ever *stop* one
+//! ([issue #416](https://github.com/wildware-uk/clipped/issues/416)); the
+//! recorder now answers the same question the Record button answers, from
+//! `clipped_windows::foreground_target` and at the moment of the press. It
+//! sends the same `start_recording` the window sends — see
+//! [`start_what_is_in_front`] — and refuses, naming what was in front instead,
+//! when what is there is Clipped's own window, part of the shell, or nothing.
+//!
 //! # Threads
 //!
 //! `clipped_hotkeys` gives each handled action a thread of its own and never
@@ -58,9 +69,31 @@ use clipped_hotkeys::{
 };
 use clipped_ipc::{
     AddBookmark, Command, CommandHandler, ErrorCode, HotkeyBinding, HotkeyState, ProtocolError,
-    RecorderStatus, Reply, SaveReplay, StopRecording, TakeScreenshot,
+    RecorderStatus, Reply, SaveReplay, StartRecording, StopRecording, TakeScreenshot,
 };
 use clipped_session::config::Configuration;
+use clipped_windows::{ForegroundTarget, WindowsError};
+
+/// How this process finds out what the user was looking at when they pressed a
+/// key.
+///
+/// A function rather than a call, for one reason: what has the foreground on a
+/// machine running the test suite is not something a test may decide, and the
+/// question this ticket is about — which command a press produces when a game
+/// is in front — has no answer at all without being able to say what is in
+/// front. Production passes [`what_is_in_front`], which is the real one and the
+/// only one in the shipped binary.
+pub(crate) type Foreground = Arc<dyn Fn() -> Result<ForegroundTarget, WindowsError> + Send + Sync>;
+
+/// Asking Windows, at the moment of the press.
+///
+/// See `clipped_windows::foreground`: a hotkey press raises no window, so
+/// unlike the desktop application's tray menu the recorder can ask when it is
+/// asked rather than following the foreground with a hook it would have to run
+/// for the life of the process.
+pub(crate) fn what_is_in_front() -> Foreground {
+    Arc::new(clipped_windows::foreground_target)
+}
 
 /// The hotkey service this process is running, and what it registered.
 ///
@@ -131,7 +164,7 @@ pub fn start(
         }
     };
 
-    let handlers = handlers_for(recorder);
+    let handlers = handlers_for(recorder, &what_is_in_front());
 
     match HotkeyService::start(&bindings, handlers) {
         Ok((service, events)) => {
@@ -179,7 +212,10 @@ pub fn start(
 /// #421's acceptance criterion and cannot be asserted from here — this module
 /// has no way to make a recording. Pressing through the handlers this registers,
 /// rather than calling [`perform`], is what makes it the real path.
-pub(crate) fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
+pub(crate) fn handlers_for(
+    recorder: &Arc<dyn CommandHandler>,
+    foreground: &Foreground,
+) -> Handlers {
     let mut handlers = Handlers::new();
     for action in [
         // `Ctrl`+`F10` is the reason this list exists at all (SPEC.md section
@@ -192,8 +228,9 @@ pub(crate) fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
         HotkeyAction::ToggleRecording,
     ] {
         let recorder = Arc::clone(recorder);
+        let foreground = Arc::clone(foreground);
         handlers = handlers.on(action, move |press| {
-            perform(&recorder, press.action(), press.hotkey())
+            perform(&recorder, &foreground, press.action(), press.hotkey());
         });
     }
     handlers
@@ -206,8 +243,13 @@ pub(crate) fn handlers_for(recorder: &Arc<dyn CommandHandler>) -> Handlers {
 /// why — so the refusal is logged at `warn` with the recorder's own sentence,
 /// which is the same one the window would have been shown had it asked
 /// (AGENTS.md section 15).
-fn perform(recorder: &Arc<dyn CommandHandler>, action: HotkeyAction, hotkey: Hotkey) {
-    match command_for(recorder.as_ref(), action) {
+fn perform(
+    recorder: &Arc<dyn CommandHandler>,
+    foreground: &Foreground,
+    action: HotkeyAction,
+    hotkey: Hotkey,
+) {
+    match command_for(recorder.as_ref(), foreground, action) {
         Ok(command) => {
             let name = command.name();
             match recorder.as_ref().call(command) {
@@ -242,12 +284,12 @@ fn perform(recorder: &Arc<dyn CommandHandler>, action: HotkeyAction, hotkey: Hot
 ///
 /// # Errors
 ///
-/// The refusal for a press that cannot become a command at all, which today is
-/// exactly one case: starting a recording, which needs a window to record and a
-/// key press does not carry one ([issue
-/// #416](https://github.com/wildware-uk/clipped/issues/416)).
+/// The refusal for a press that cannot become a command at all: today, a toggle
+/// pressed with nothing in front worth recording, which names what it found
+/// instead ([issue #416](https://github.com/wildware-uk/clipped/issues/416)).
 fn command_for(
     recorder: &dyn CommandHandler,
+    foreground: &Foreground,
     action: HotkeyAction,
 ) -> Result<Command, ProtocolError> {
     match action {
@@ -267,22 +309,29 @@ fn command_for(
         HotkeyAction::TakeScreenshot => Ok(Command::TakeScreenshot(TakeScreenshot::default())),
         HotkeyAction::ToggleRecording => match recorder.status() {
             RecorderStatus::Recording(_) => Ok(Command::StopRecording(StopRecording::default())),
-            RecorderStatus::Idle => Err(ProtocolError::new(
-                ErrorCode::NotRecording,
-                "nothing is being recorded, and a hotkey does not say which window to record. \
-                 Start the recording from the Clipped window or the tray",
-            )),
-            // Watching is not idle, and the idle refusal would be a lie here:
-            // it tells somebody to start a recording from the window, when a
-            // watching recorder is going to start one itself the moment a game
-            // appears. Whether this key should *also* start one early is issue
-            // #421's question, and answering it here would be answering it in
-            // the wrong place.
-            RecorderStatus::Watching(_) => Err(ProtocolError::new(
-                ErrorCode::NotRecording,
-                "nothing is being recorded yet. Clipped is watching for a game and will start \
-                 recording on its own when one appears",
-            )),
+            // What the user was looking at when the key went down, which is the
+            // same thing the window's Record button offers and the same command
+            // it sends (issue #416).
+            RecorderStatus::Idle => start_what_is_in_front(foreground),
+            // The same thing, and this is where issue #421 left it: a watching
+            // recorder was told to refuse, because the only sentence available
+            // was "start it from the window" and a recorder that is about to
+            // start one itself should not be saying that. Whether the key
+            // should *also* start one early was left open, and it is answered
+            // here because #416 is what makes it answerable — the recorder can
+            // now say which window, so a press has something to record.
+            //
+            // Starting is the answer, for the reason the whole ticket exists:
+            // watching is not recording, and a key that refuses every press
+            // while nothing is being recorded is a key that does nothing
+            // (AGENTS.md section 27). The game a user reaches for the keyboard
+            // over is the one the catalogue did not recognise. Nothing is at
+            // risk either way — there is no footage to lose while nothing is
+            // being recorded (AGENTS.md section 56) — and if a game launches
+            // into a recording this press started, the watcher is refused with
+            // the recorder's own "one at a time" sentence, which is what it
+            // already gets when the window starts one.
+            RecorderStatus::Watching(_) => start_what_is_in_front(foreground),
         },
         // Not reachable: `handlers_for` registers the three above and nothing
         // else, so a press of any other action never reaches a handler and is
@@ -302,6 +351,70 @@ fn command_for(
     }
 }
 
+/// `start_recording` for whatever the user was looking at, or the refusal that
+/// says what was in front instead.
+///
+/// # Why this is the same thing the window sends
+///
+/// Byte for byte the request `apps/desktop/src-tauri/src/main.rs`'s
+/// `recording_request` builds: the process identifier and a replay buffer, and
+/// nothing else. That is the third acceptance criterion of
+/// [issue #416](https://github.com/wildware-uk/clipped/issues/416) — the Record
+/// button and the hotkey have to agree about what the target is — and it is
+/// worth spelling out that "agree" is doing two jobs here:
+///
+/// - **The same field.** A process identifier, not a window handle and not an
+///   executable name, so the recorder resolves the window through the one
+///   `resolve_window` both paths already go through (AGENTS.md section 55).
+/// - **The same recording.** `replay: true` is what the window asks for
+///   ([issue #427](https://github.com/wildware-uk/clipped/issues/427)), so a
+///   recording started with the key keeps a buffer and `Ctrl`+`F10` works
+///   against it. Without it, the first thing a user did after starting a
+///   recording from the keyboard would be refused — one hotkey quietly
+///   disabling another (AGENTS.md section 27).
+///
+/// # Errors
+///
+/// The refusal for a press with nothing sensible in front. It names what *was*
+/// in front rather than only that something was missing, because "the key does
+/// nothing" is the failure this whole module exists to prevent, and a log line
+/// saying "no target" is one nobody can act on (AGENTS.md section 15).
+fn start_what_is_in_front(foreground: &Foreground) -> Result<Command, ProtocolError> {
+    match foreground() {
+        Ok(ForegroundTarget::Recordable(window)) => Ok(Command::StartRecording(StartRecording {
+            pid: Some(window.process_id()),
+            replay: true,
+            ..StartRecording::default()
+        })),
+        Ok(ForegroundTarget::NothingToRecord(reason)) => Err(ProtocolError::new(
+            // The two codes `crate::serve::unrecordable_target` already uses
+            // for the same distinction — nothing to record, against one thing
+            // that cannot be recorded as it is — so a client branching on the
+            // code reads a refused press the way it reads a refused
+            // `start_recording`.
+            match reason {
+                clipped_windows::NotRecordable::NotCapturable { .. } => {
+                    ErrorCode::TargetNotCapturable
+                }
+                _ => ErrorCode::TargetNotFound,
+            },
+            format!(
+                "nothing was recorded, because {reason}. Bring what you want recorded to the \
+                 front and press the key again"
+            ),
+        )),
+        // Windows refusing to describe the window it has just named as the
+        // foreground one. Reported rather than guessed past: the alternative is
+        // recording something the user did not choose.
+        Err(error) => Err(ProtocolError::new(
+            ErrorCode::TargetNotFound,
+            format!(
+                "nothing was recorded, because Windows would not say what is in front: {error}"
+            ),
+        )),
+    }
+}
+
 /// What a reply says happened, in the few words a log line wants.
 ///
 /// Deliberately not the whole reply: a `bookmark_added` carries the file it was
@@ -312,6 +425,7 @@ fn described(reply: &Reply) -> &'static str {
         Reply::ReplaySaved { .. } => "a replay clip was saved",
         Reply::BookmarkAdded { .. } => "the moment was marked",
         Reply::ScreenshotTaken { .. } => "a screenshot was written",
+        Reply::RecordingStarted { .. } => "a recording of what was in front was started",
         Reply::RecordingStopped { .. } => "the recording was stopped and its file finished",
         _ => "done",
     }
@@ -361,11 +475,48 @@ mod tests {
     use clipped_hotkeys::{Bindings, Hotkey, HotkeyAction, HotkeyService, Registration, ACTIONS};
     use clipped_ipc::{
         ActiveRecording, Command, CommandHandler, ErrorCode, HotkeyState, ProtocolError,
-        RecorderStatus, Reply, SaveReplay,
+        RecorderStatus, Reply, SaveReplay, StartRecording,
     };
     use clipped_session::config::{Configuration, HotkeyOverride, HotkeyOverrides};
 
-    use super::{command_for, handlers_for, perform, report_of, row_for, start};
+    use clipped_windows::{
+        ForegroundTarget, NotRecordable, PixelSize, WindowGeometry, WindowInfo, WindowsError,
+        DEFAULT_DPI,
+    };
+
+    use super::{command_for, handlers_for, perform, report_of, row_for, start, Foreground};
+
+    /// The process the game in these tests is running as.
+    const A_GAME: u32 = 4_242;
+
+    /// A foreground that answers with the window in front of a written-down
+    /// desktop, rather than with whatever is in front of whoever is running the
+    /// suite (AGENTS.md section 25).
+    fn in_front_of_the_user(target: ForegroundTarget) -> Foreground {
+        Arc::new(move || Ok(target.clone()))
+    }
+
+    /// A game, in front, that this recorder can record.
+    fn a_game_in_front() -> Foreground {
+        in_front_of_the_user(ForegroundTarget::Recordable(Box::new(WindowInfo::new(
+            clipped_windows::WindowHandle::from_raw(0x1234),
+            "Counter-Strike 2".to_owned(),
+            A_GAME,
+            Some("cs2.exe".to_owned()),
+            WindowGeometry::new(
+                PixelSize::new(2560, 1440),
+                DEFAULT_DPI,
+                clipped_windows::MonitorHandle::from_raw(1),
+            ),
+            false,
+            None,
+        ))))
+    }
+
+    /// Nothing in front worth recording.
+    fn nothing_in_front(reason: NotRecordable) -> Foreground {
+        in_front_of_the_user(ForegroundTarget::NothingToRecord(reason))
+    }
 
     /// A recorder that records what it was asked, and answers.
     ///
@@ -384,6 +535,21 @@ mod tests {
             Self {
                 asked: Mutex::new(Vec::new()),
                 status: RecorderStatus::Idle,
+            }
+        }
+
+        /// Watching for games, with none running.
+        ///
+        /// A state the protocol has a word for and no recorder reports yet:
+        /// `serve --watch-for-games` still answers `Idle` while it waits, which
+        /// is the half of [issue
+        /// #241](https://github.com/wildware-uk/clipped/issues/241) that is
+        /// still open. It is written down here because the arm exists and
+        /// because what a press does in it is a decision, not an accident.
+        fn watching() -> Self {
+            Self {
+                asked: Mutex::new(Vec::new()),
+                status: RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
             }
         }
 
@@ -445,7 +611,9 @@ mod tests {
     fn the_actions_with_handlers_are_the_ones_this_recorder_can_perform() {
         let recorder = Arc::new(AskedRecorder::idle());
 
-        let handled: Vec<HotkeyAction> = handlers_for(&handler(&recorder)).handled().collect();
+        let handled: Vec<HotkeyAction> = handlers_for(&handler(&recorder), &a_game_in_front())
+            .handled()
+            .collect();
 
         assert_eq!(
             handled,
@@ -465,10 +633,11 @@ mod tests {
     fn every_action_with_a_handler_becomes_a_command_while_a_recording_is_running() {
         let recorder = Arc::new(AskedRecorder::recording());
         let recorder = handler(&recorder);
+        let foreground = a_game_in_front();
 
-        for action in handlers_for(&recorder).handled() {
+        for action in handlers_for(&recorder, &foreground).handled() {
             assert!(
-                command_for(recorder.as_ref(), action).is_ok(),
+                command_for(recorder.as_ref(), &foreground, action).is_ok(),
                 "{action} has a handler and no command, so pressing its key would do nothing",
             );
         }
@@ -484,8 +653,12 @@ mod tests {
     /// [`handlers_for`] registering a closure against the wrong action — and
     /// that is not a dead key but a key that does something other than what its
     /// row on the settings screen says it does.
-    fn pressed(recorder: &Arc<AskedRecorder>, action: HotkeyAction) -> Vec<Command> {
-        let mut handlers = handlers_for(&handler(recorder));
+    fn pressed(
+        recorder: &Arc<AskedRecorder>,
+        foreground: &Foreground,
+        action: HotkeyAction,
+    ) -> Vec<Command> {
+        let mut handlers = handlers_for(&handler(recorder), foreground);
 
         handlers
             .press(action, a_combination())
@@ -502,7 +675,7 @@ mod tests {
     fn the_handler_registered_for_save_replay_saves_out_of_whatever_is_running() {
         let recorder = Arc::new(AskedRecorder::recording());
 
-        match pressed(&recorder, HotkeyAction::SaveReplay).as_slice() {
+        match pressed(&recorder, &a_game_in_front(), HotkeyAction::SaveReplay).as_slice() {
             [Command::SaveReplay(request)] => {
                 assert_eq!(
                     request,
@@ -519,7 +692,7 @@ mod tests {
     fn the_handler_registered_for_add_bookmark_bookmarks_whatever_is_running() {
         let recorder = Arc::new(AskedRecorder::recording());
 
-        match pressed(&recorder, HotkeyAction::AddBookmark).as_slice() {
+        match pressed(&recorder, &a_game_in_front(), HotkeyAction::AddBookmark).as_slice() {
             [Command::AddBookmark(request)] => assert_eq!(
                 request.recording_id, None,
                 "a key press means whatever is running, because it cannot mean anything else",
@@ -532,7 +705,7 @@ mod tests {
     fn the_handler_registered_for_take_screenshot_takes_a_screenshot() {
         let recorder = Arc::new(AskedRecorder::recording());
 
-        match pressed(&recorder, HotkeyAction::TakeScreenshot).as_slice() {
+        match pressed(&recorder, &a_game_in_front(), HotkeyAction::TakeScreenshot).as_slice() {
             [Command::TakeScreenshot(request)] => assert_eq!(
                 request.pid, None,
                 "a key press names no window: the picture comes from a frame already captured",
@@ -547,7 +720,7 @@ mod tests {
     fn the_handler_registered_for_toggle_recording_stops_the_recording_that_is_running() {
         let recorder = Arc::new(AskedRecorder::recording());
 
-        match pressed(&recorder, HotkeyAction::ToggleRecording).as_slice() {
+        match pressed(&recorder, &a_game_in_front(), HotkeyAction::ToggleRecording).as_slice() {
             [Command::StopRecording(stop)] => assert_eq!(
                 stop.recording_id, None,
                 "a toggle stops whatever is running, which is all a key press can mean",
@@ -556,23 +729,175 @@ mod tests {
         }
     }
 
-    /// AGENTS.md section 54: the half that is not built refuses by name rather
-    /// than guessing at a window.
+    /// The other half, and the whole of issue #416: a press with nothing
+    /// running records what the user was looking at.
+    ///
+    /// Through the handler `handlers_for` registered rather than through
+    /// [`command_for`], for the reason [`pressed`] gives: what is being asserted
+    /// is that pressing *this* key sends *this* command.
     #[test]
-    fn a_toggle_press_with_nothing_recording_is_refused_in_words_that_say_why() {
+    fn the_handler_registered_for_toggle_recording_starts_a_recording_of_what_is_in_front() {
+        let recorder = Arc::new(AskedRecorder::idle());
+
+        match pressed(&recorder, &a_game_in_front(), HotkeyAction::ToggleRecording).as_slice() {
+            [Command::StartRecording(request)] => {
+                assert_eq!(
+                    request.pid,
+                    Some(A_GAME),
+                    "a toggle with nothing running records the window the user is in",
+                );
+                // The window's `recording_request` builds exactly this, and the
+                // agreement is the third acceptance criterion. A press that
+                // named the window by title or by executable would resolve
+                // differently — a title matches on a substring — and a press
+                // that left `replay` false would start a recording the replay
+                // hotkey then refuses to save from.
+                assert_eq!(
+                    request,
+                    &StartRecording {
+                        pid: Some(A_GAME),
+                        replay: true,
+                        ..StartRecording::default()
+                    },
+                    "the hotkey has to ask for the same recording the Record button asks for",
+                );
+            }
+            other => panic!("a toggle while idle must send one `start_recording`, not {other:?}"),
+        }
+    }
+
+    /// AGENTS.md section 54, and issue #416's second acceptance criterion: with
+    /// nothing sensible in front, the press refuses and says what was there
+    /// instead rather than recording something nobody chose.
+    #[test]
+    fn a_toggle_press_with_nothing_worth_recording_in_front_says_what_was_there_instead() {
         let recorder = Arc::new(AskedRecorder::idle());
         let asked = handler(&recorder);
 
-        let refusal = command_for(asked.as_ref(), HotkeyAction::ToggleRecording)
-            .expect_err("nothing is being recorded, so there is nothing to stop");
-        assert_eq!(refusal.code, ErrorCode::NotRecording);
+        // Every way the foreground can fail to be a target, each with the word
+        // a user would recognise in it. `Clipped` is the one issue #416 calls
+        // out by name: recording the Clipped window because somebody pressed
+        // the key while looking at it is worse than refusing.
+        let refusals = [
+            (NotRecordable::Nothing, "no window has the foreground"),
+            (
+                NotRecordable::ShellSurface {
+                    class: "Shell_TrayWnd".to_owned(),
+                },
+                "taskbar",
+            ),
+            (
+                NotRecordable::Clipped {
+                    process_name: "clipped-desktop.exe".to_owned(),
+                },
+                "Clipped's own window",
+            ),
+            (NotRecordable::NoProcess, "no process"),
+        ];
+
+        for (reason, expected) in refusals {
+            let foreground = nothing_in_front(reason.clone());
+
+            let refusal = command_for(asked.as_ref(), &foreground, HotkeyAction::ToggleRecording)
+                .expect_err("there is nothing in front to record");
+            assert_eq!(refusal.code, ErrorCode::TargetNotFound, "{reason:?}");
+            assert!(
+                refusal.message.contains(expected),
+                "the refusal has to say what was in front instead of {expected:?}: {}",
+                refusal.message,
+            );
+
+            perform(
+                &asked,
+                &foreground,
+                HotkeyAction::ToggleRecording,
+                a_combination(),
+            );
+        }
+
         assert!(
-            refusal.message.contains("which window to record"),
-            "the refusal has to name what is missing rather than say something failed: {}",
+            recorder.asked().is_empty(),
+            "a press that cannot become a command must send nothing rather than guess at a window",
+        );
+    }
+
+    /// A watching recorder is not a recording one, and a key that refused every
+    /// press while nothing was being recorded would be a key that does nothing.
+    #[test]
+    fn a_toggle_press_while_watching_for_games_records_what_is_in_front_too() {
+        let recorder = Arc::new(AskedRecorder::watching());
+
+        // Issue #421 left this refusing, because the only sentence available
+        // then was "start it from the window": the recorder could not say which
+        // window itself. It can now, so the press does what it does when the
+        // recorder is idle — the game somebody reaches for the keyboard over is
+        // the one the catalogue did not recognise.
+        match pressed(&recorder, &a_game_in_front(), HotkeyAction::ToggleRecording).as_slice() {
+            [Command::StartRecording(request)] => assert_eq!(request.pid, Some(A_GAME)),
+            other => panic!("a toggle while watching must start a recording, not {other:?}"),
+        }
+    }
+
+    /// A window that is in front and cannot be captured is a different answer
+    /// from no window at all, and it is the one `resolve_window` would give.
+    #[test]
+    fn a_toggle_press_at_a_window_that_cannot_be_captured_is_refused_with_that_reason() {
+        let recorder = Arc::new(AskedRecorder::idle());
+        let asked = handler(&recorder);
+        let foreground = nothing_in_front(NotRecordable::NotCapturable {
+            process_name: Some("player.exe".to_owned()),
+            exclusion: clipped_windows::Exclusion::ContentProtected,
+        });
+
+        let refusal = command_for(asked.as_ref(), &foreground, HotkeyAction::ToggleRecording)
+            .expect_err("a window excluded from capture is not something to record");
+
+        assert_eq!(
+            refusal.code,
+            ErrorCode::TargetNotCapturable,
+            "a window that is there and cannot be recorded has its own code, because the two ask \
+             different things of the user",
+        );
+        assert!(
+            refusal.message.contains("player.exe") && refusal.message.contains("record black"),
+            "{}",
+            refusal.message,
+        );
+    }
+
+    /// What a press does when Windows itself will not answer.
+    ///
+    /// Refused, and said out loud. Guessing past it — recording the last thing
+    /// seen, or the first window in the list — is recording something the user
+    /// did not choose.
+    #[test]
+    fn a_toggle_press_windows_will_not_answer_is_refused_rather_than_guessed_at() {
+        let recorder = Arc::new(AskedRecorder::idle());
+        let asked = handler(&recorder);
+        // Which failure it is does not matter and cannot be chosen from here:
+        // the constructors are `clipped_windows`'s own. What matters is that
+        // Windows would not describe the window it had just named as the
+        // foreground one, and that the press then sends nothing.
+        let foreground: Foreground = Arc::new(|| {
+            Err(WindowsError::WindowGone {
+                handle: clipped_windows::WindowHandle::from_raw(0x1234),
+            })
+        });
+
+        let refusal = command_for(asked.as_ref(), &foreground, HotkeyAction::ToggleRecording)
+            .expect_err("a foreground nobody can read is not a target");
+        assert!(
+            refusal.message.contains("would not say what is in front"),
+            "{}",
             refusal.message,
         );
 
-        perform(&asked, HotkeyAction::ToggleRecording, a_combination());
+        perform(
+            &asked,
+            &foreground,
+            HotkeyAction::ToggleRecording,
+            a_combination(),
+        );
         assert!(
             recorder.asked().is_empty(),
             "a press that cannot become a command must send nothing rather than guess at one",
@@ -709,9 +1034,11 @@ mod tests {
     /// leaves `Ctrl`+`F10` taken from the rest of the suite.
     fn a_registration() -> Registration {
         let recorder = Arc::new(AskedRecorder::idle());
-        let (service, _events) =
-            HotkeyService::start(&Bindings::defaults(), handlers_for(&handler(&recorder)))
-                .expect("the hotkey service starts");
+        let (service, _events) = HotkeyService::start(
+            &Bindings::defaults(),
+            handlers_for(&handler(&recorder), &a_game_in_front()),
+        )
+        .expect("the hotkey service starts");
         let registration = service.registration().clone();
         service.stop();
         registration
