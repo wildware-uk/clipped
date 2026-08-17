@@ -116,6 +116,16 @@ impl Harness {
             .spawn()
             .expect("the plugin starts");
 
+        // Printed so that a run which hangs can be matched against the machine's
+        // process list afterwards. The suite runs four of these at once, each
+        // holding a loopback port, and a log saying only "a plugin did not exit"
+        // names none of them (issue #549).
+        eprintln!(
+            "clipped-cs2-plugin under test: process {} on port {}",
+            child.id(),
+            self.port
+        );
+
         let attach = HostCommand::Attach {
             contract: CONTRACT,
             session: SessionDetails {
@@ -241,13 +251,125 @@ impl Running {
         }
     }
 
-    /// Sends `detach`, closes the pipe, and waits.
+    /// Sends `detach`, closes the pipe, and waits — for [`PATIENCE`], not for
+    /// ever.
+    ///
+    /// # Panics
+    ///
+    /// If the plugin is still running [`PATIENCE`] after being detached. See
+    /// [`wait_for_exit`] for why that bound is the whole point of this
+    /// function.
     fn detach(mut self) -> std::process::ExitStatus {
         if let Some(stdin) = self.child.stdin.as_mut() {
             let _ = stdin.write_all(HostCommand::Detach.to_line().as_bytes());
         }
         drop(self.child.stdin.take());
-        self.child.wait().expect("the plugin exits")
+
+        let pid = self.child.id();
+        match wait_for_exit(&mut self.child, PATIENCE) {
+            Ok(status) => status,
+            Err(problem) => panic!(
+                "{problem} after being detached (process {pid}). \
+                 The last thing it said: {}",
+                self.last_words()
+            ),
+        }
+    }
+
+    /// Everything the plugin wrote that no assertion consumed.
+    ///
+    /// The reader thread is still draining its standard output into the channel
+    /// while [`detach`](Self::detach) waits, so a plugin that printed a
+    /// `problem` on its way out has already said why — and until this existed
+    /// that line was dropped on the floor, leaving a timeout whose message was
+    /// only ever "it did not exit".
+    ///
+    /// Not an assertion, and deliberately not one: it is whatever is there, and
+    /// on the run that produced [issue
+    /// #549](https://github.com/wildware-uk/clipped/issues/549) there may be
+    /// nothing at all. "nothing" is itself worth printing, because it rules the
+    /// plugin's own error path out.
+    fn last_words(&self) -> String {
+        let mut lines = Vec::new();
+        while let Ok(line) = self.reports.try_recv() {
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            "nothing — it printed no report between the last assertion and the deadline".to_owned()
+        } else {
+            lines.join(" | ")
+        }
+    }
+}
+
+/// How often to ask whether a child has finished.
+///
+/// The same interval [`connect`] retries on. There is no way to wait on a
+/// process handle *with a deadline* through [`std::process`], so this polls;
+/// twenty-five milliseconds is far below the bound it is enforcing and far
+/// above the cost of asking.
+const POLL: Duration = Duration::from_millis(25);
+
+/// Waits for `child` to exit of its own accord, for at most `patience`.
+///
+/// # Why this exists rather than [`Child::wait`]
+///
+/// [`Child::wait`] has no deadline, so a child that never exits is waited on
+/// for ever. Every other wait in this file is bounded and fails with a sentence
+/// naming what did not happen — [`PATIENCE`] in `next_report`, in `connect`, and
+/// the window `no_event_within` spends — and `detach` was the one that was not.
+///
+/// It cost six hours. On [run
+/// 31953786367](https://github.com/wildware-uk/clipped/actions/runs/31953786367)
+/// the plugin did not exit after being detached, and the job was killed by
+/// GitHub's six-hour limit with a log whose last line was "has been running for
+/// over 60 seconds". Nothing said *what* had not happened, no other test in the
+/// suite got to run, and the fault was intermittent — the same test passes in
+/// six seconds ([issue
+/// #549](https://github.com/wildware-uk/clipped/issues/549)).
+///
+/// This is the shape the product already uses:
+/// `clipped_plugins::PluginProcess` asks a plugin to stop, gives it a grace
+/// period it measures, and then kills it. A test harness that waits for ever on
+/// the same cooperation was the outlier.
+///
+/// # What it does when the patience runs out
+///
+/// Kills the child and reports. Killing matters as much as the deadline: this
+/// suite starts several plugin processes, each holding a loopback port, and
+/// leaving one behind would make the *next* test fail for a reason that has
+/// nothing to do with it.
+///
+/// # Errors
+///
+/// The sentence to fail with, naming what did not happen. The status is
+/// returned as an [`Ok`] whatever it is — a plugin that exits with 101 is a
+/// different fault from one that never exits, and it is the caller's to
+/// assert.
+fn wait_for_exit(
+    child: &mut Child,
+    patience: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        match child
+            .try_wait()
+            .expect("a child this test spawned can be asked")
+        {
+            Some(status) => return Ok(status),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                // Reap it, so this does not leave a zombie behind the very
+                // failure it is reporting. Bounded because the process is
+                // already being terminated, which is the distinction this
+                // whole function is about.
+                let _ = child.wait();
+                return Err(format!(
+                    "the plugin was still running {patience:?} later, and was killed"
+                ));
+            }
+            None => thread::sleep(POLL),
+        }
     }
 }
 
@@ -462,4 +584,145 @@ fn uninstall_takes_back_exactly_what_install_wrote() {
         .output()
         .expect("status runs");
     assert!(String::from_utf8_lossy(&after.stdout).contains("Not installed"));
+}
+
+/// A child that will not exit on its own within any reasonable test's patience.
+///
+/// `ping -n 30 127.0.0.1` is thirty seconds of a program that is on every
+/// Windows installation and ignores its standard input entirely, which is
+/// exactly the shape being guarded against: a child that has been asked to stop
+/// and has not.
+fn a_child_that_will_not_stop() -> Child {
+    Command::new("cmd")
+        .args(["/c", "ping", "-n", "30", "127.0.0.1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cmd.exe is on every Windows installation")
+}
+
+#[test]
+fn a_plugin_that_will_not_exit_is_given_up_on_rather_than_waited_on() {
+    // The bound that was missing, measured rather than read off the source.
+    // Without it this call does not return for thirty seconds — and in the run
+    // that produced issue #549, not for six hours.
+    let mut child = a_child_that_will_not_stop();
+    drop(child.stdin.take());
+
+    let patience = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let outcome = wait_for_exit(&mut child, patience);
+    let waited = started.elapsed();
+
+    let problem = outcome.expect_err("a child that ignores its input does not exit");
+    assert!(
+        problem.contains("still running") && problem.contains("killed"),
+        "the failure has to say what did not happen and what was done about it: {problem}"
+    );
+    assert!(
+        waited < patience * 10,
+        "the wait is bounded by the patience it was given, and took {waited:?}"
+    );
+}
+
+#[test]
+fn a_child_that_will_not_stop_is_not_left_behind_when_it_is_given_up_on() {
+    // The other half, and the reason the deadline alone is not enough: this
+    // suite runs several plugin processes, each holding a loopback port. One
+    // left running makes the *next* test fail for a reason of its own.
+    let mut child = a_child_that_will_not_stop();
+    drop(child.stdin.take());
+
+    let _ = wait_for_exit(&mut child, Duration::from_millis(200));
+
+    // Reaped: a second ask answers immediately with the status it was killed
+    // with, rather than blocking on a process that is still running.
+    let status = child
+        .try_wait()
+        .expect("a child this test spawned can be asked");
+    assert!(
+        status.is_some(),
+        "the child was not killed and reaped, so it is still running"
+    );
+    assert!(
+        !status.expect("just asserted").success(),
+        "a killed process did not exit successfully"
+    );
+}
+
+#[test]
+fn a_child_that_does_stop_is_reported_rather_than_killed() {
+    // The ordinary path, which the two tests above would still pass if this
+    // function killed everything it was given.
+    let mut child = Command::new("cmd")
+        .args(["/c", "exit", "3"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cmd.exe is on every Windows installation");
+
+    let status = wait_for_exit(&mut child, PATIENCE).expect("it exits on its own");
+
+    assert_eq!(
+        status.code(),
+        Some(3),
+        "the status is the child's own, not one this function invented"
+    );
+}
+
+/// A `Running` over a child that has already finished, with `lines` waiting to
+/// be read.
+///
+/// The point is `last_words`, which needs a channel and a `Child` and nothing
+/// else: the plugin it nominally describes never runs.
+fn already_finished(lines: &[&str]) -> Running {
+    let child = Command::new("cmd")
+        .args(["/c", "exit", "0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cmd.exe is on every Windows installation");
+
+    let (sender, reports) = mpsc::channel();
+    for line in lines {
+        sender
+            .send((*line).to_owned())
+            .expect("the receiver is alive");
+    }
+    Running { child, reports }
+}
+
+#[test]
+fn what_a_hung_plugin_last_said_reaches_the_failure_message() {
+    // The whole value of the timeout is the sentence it fails with, and a
+    // plugin that printed a `problem` on its way out has already said why. That
+    // line used to be discarded.
+    let running = already_finished(&[
+        r#"{"report":"alive"}"#,
+        r#"{"report":"problem","message":"the port was taken"}"#,
+    ]);
+
+    let said = running.last_words();
+
+    assert!(said.contains("the port was taken"), "{said}");
+    assert!(
+        said.contains("alive"),
+        "everything unread is reported, not only the last line: a heartbeat before the problem \
+         is how long it kept going: {said}"
+    );
+}
+
+#[test]
+fn a_plugin_that_said_nothing_is_reported_as_having_said_nothing() {
+    // Not an empty string. "It printed nothing" rules out the plugin's own
+    // error path, which is a different fault from "it printed a problem", and a
+    // message that trailed off after a colon would say neither.
+    let said = already_finished(&[]).last_words();
+
+    assert!(
+        said.contains("nothing"),
+        "an empty channel has to be reported in words: {said}"
+    );
+    assert!(!said.trim().is_empty());
 }
