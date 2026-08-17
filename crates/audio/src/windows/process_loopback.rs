@@ -19,6 +19,16 @@
 //! endpoint has the game's audio on two tracks, which is worse than one honest
 //! track and a note saying separation was unavailable (ADR 0003).
 //!
+//! And it needs them scoped to the **same process**, which is what
+//! [`ProcessLoopbackCapture::open_pair`] is for. Two captures opened
+//! separately each resolve a surviving process tree from their own
+//! [`ProcessTree`], on their own schedule, so a game whose launcher exits
+//! partway through a recording can leave them on different trees for the rest
+//! of it — and a process in one and not the other is a process whose audio is
+//! on both tracks or on neither. `decide_scope` is the rule that stops that,
+//! and it agrees through one atomic rather than a lock, because both sides are
+//! read on capture threads (AGENTS.md section 20).
+//!
 //! Everything after the activation is `endpoint_capture.rs`: the same packet
 //! loop, the same timeline that keeps a track as long as its recording, the
 //! same conversion to `f32`, the same handling of a stream that fails
@@ -80,7 +90,9 @@
 //! (ADR 0003's second consequence, `docs/audio-routing.md`).
 
 use core::num::{NonZeroU16, NonZeroU32};
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
+use std::sync::Arc;
 
 use clipped_windows::{ProcessTree, WindowsError};
 use windows::Win32::Media::Audio::{
@@ -121,16 +133,19 @@ const STEREO_MASK: u32 = 0x3;
 /// How the capture is described in a log line while it is being opened.
 ///
 /// A process-scoped client is not on a device, so the `device` field of the
-/// shared engine's log lines would otherwise be empty for it.
-fn describe(root: u32) -> String {
-    format!("the game's process tree, rooted at process {root}")
+/// shared engine's log lines would otherwise be empty for it. It names the
+/// *side* as well as the tree, because a recording runs both at once and a
+/// pair of lines that describe themselves identically is a pair of lines
+/// nobody can tell apart (issue #27).
+fn describe(root: u32, scope: TreeScope) -> String {
+    match scope {
+        TreeScope::Only => format!("the game's process tree, rooted at process {root}"),
+        TreeScope::Except => {
+            format!("everything except the game's process tree, rooted at process {root}")
+        }
+    }
 }
 
-/// Which processes a capture is scoped to, and how that is kept current.
-///
-/// The [`CaptureSource`] arm of a process-scoped capture. It owns the tree, the
-/// format that was accepted, and the decision to re-scope; the engine owns
-/// everything that happens to the samples afterwards.
 /// Which side of a process tree a capture takes.
 ///
 /// Windows offers both, and a session needs **both or neither**: a recording
@@ -166,8 +181,122 @@ impl TreeScope {
             Self::Except => "everything but the process tree",
         }
     }
+
+    /// How this side reads in a stream's identifier.
+    ///
+    /// Short and stable, because it ends up in the `device` identifier of the
+    /// engine's log lines rather than in prose.
+    pub(super) const fn identity_word(self) -> &'static str {
+        match self {
+            Self::Only => "only",
+            Self::Except => "except",
+        }
+    }
+
+    /// Which track's `audio_source` this side's log lines carry.
+    ///
+    /// The two sides go to two different tracks, so they are two different
+    /// kinds even though they are one activation with one constant changed:
+    /// `docs/logging.md`'s closed list of `audio_source` values exists so that
+    /// somebody reading a user's log months later can filter to one track, and
+    /// a pair that both said `game` would make that impossible in exactly the
+    /// recording it matters for.
+    pub(super) const fn kind(self) -> SourceKind {
+        match self {
+            Self::Only => SourceKind::GameAudio,
+            Self::Except => SourceKind::OtherSystemAudio,
+        }
+    }
 }
 
+/// What a capture should do about the process its activation names.
+///
+/// Separated from the tree, the atomic and the reopen so that the rule can be
+/// tested on a machine with no audio device, no game and no process table
+/// (`decide_scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rescope {
+    /// The activation still names a living member. Nothing to do.
+    Stay,
+    /// This capture had followed the other side onto a process it could not
+    /// then see, and can now see it. Still nothing to do to the stream — but
+    /// this capture may lead again.
+    CaughtUp,
+    /// The other side of the pair has already chosen; take its choice.
+    Follow(u32),
+    /// This capture chose, and has published the choice for the other side.
+    Lead(u32),
+    /// The game and everything it started have exited.
+    Ended,
+}
+
+/// Which process both sides of a pair should be scoped to next.
+///
+/// Windows takes one root per activation, and the two sides of one recording
+/// have to name the **same** root or the recording is wrong in one of two ways:
+/// scoped to different trees, a process in one but not the other has its audio
+/// on both tracks, or on neither. Nothing forces agreement on its own — the two
+/// captures run on two threads, each with its own [`ProcessTree`] reading the
+/// process table on its own schedule, so a root that exits while two children
+/// live can be resolved differently by each of them, and neither ever
+/// reconsiders once it is scoped to something alive.
+///
+/// `scoping` is what they agree through: one `u32` naming the process the pair
+/// is scoped to, read and written with no lock, which is what makes this safe
+/// to call from a capture thread (AGENTS.md section 20).
+///
+/// The rule, in order:
+///
+/// 1. If the cell no longer says what this capture is scoped to, the other side
+///    has moved. **Follow it**, even if this capture's own tree has not yet
+///    caught up with the process it moved to: being briefly scoped to something
+///    this side cannot see is a track that is briefly silent, while disagreeing
+///    is a track with the wrong audio on it.
+/// 2. A capture that is following does not lead. That is what makes this
+///    terminate: without it, two captures whose trees disagree about a process
+///    would each keep moving away from the other's choice.
+/// 3. Otherwise, a capture whose activation names a dead process picks the
+///    lowest-numbered living member and publishes it — and if the other side
+///    published first, in the window between the read and the write, that one
+///    wins.
+///
+/// `members` must be in ascending order, which is what
+/// [`ProcessTree::members`] documents.
+fn decide_scope(scoping: &AtomicU32, scoped_to: u32, following: bool, members: &[u32]) -> Rescope {
+    // Relaxed throughout: the process identifier is the whole message. Nothing
+    // else is published alongside it, so there is no other write for an
+    // acquire-release pair to order against.
+    let agreed = scoping.load(Ordering::Relaxed);
+    if agreed != scoped_to {
+        return Rescope::Follow(agreed);
+    }
+
+    let alive = members.binary_search(&scoped_to).is_ok();
+    if following {
+        return if alive {
+            Rescope::CaughtUp
+        } else {
+            Rescope::Stay
+        };
+    }
+    if alive {
+        return Rescope::Stay;
+    }
+
+    let Some(&successor) = members.first() else {
+        return Rescope::Ended;
+    };
+    match scoping.compare_exchange(scoped_to, successor, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) => Rescope::Lead(successor),
+        Err(theirs) => Rescope::Follow(theirs),
+    }
+}
+
+/// Which processes a capture is scoped to, and how that is kept current.
+///
+/// The [`CaptureSource`] arm of a process-scoped capture. It owns the tree, the
+/// format that was accepted, and the decision to re-scope; the engine owns
+/// everything that happens to the samples afterwards.
 #[derive(Debug)]
 pub(super) struct ProcessLoopbackSource {
     /// The game, as the session identified it. Never changes: it is what the
@@ -178,6 +307,18 @@ pub(super) struct ProcessLoopbackSource {
     scoped_to: u32,
     /// Which side of the tree this capture takes.
     scope: TreeScope,
+    /// The process both sides of a pair are scoped to, shared with the other
+    /// side when there is one (`decide_scope`, issue #27).
+    ///
+    /// A capture opened on its own owns this alone, so it always agrees with
+    /// itself and behaves exactly as it did before there was a pair.
+    scoping: Arc<AtomicU32>,
+    /// Whether [`Self::scoped_to`] came from the other side of the pair rather
+    /// than from this capture's own tree, and has not yet been seen alive here.
+    ///
+    /// What stops two captures whose trees disagree from moving away from each
+    /// other for ever; see `decide_scope`.
+    following: bool,
     /// The membership this capture is really about, maintained live
     /// (issue #25).
     tree: ProcessTree,
@@ -198,13 +339,21 @@ pub(super) struct ProcessLoopbackSource {
 impl ProcessLoopbackSource {
     /// Builds a source scoped to `root` and everything it started.
     ///
+    /// `scoping` is the cell this capture agrees with the other side of its
+    /// pair through, and is shared with it when there is one. It must already
+    /// hold `root`.
+    ///
     /// # Errors
     ///
     /// [`AudioError::ProcessUnavailable`] when the process cannot be followed:
     /// it has already exited, or it runs at a higher integrity level than
     /// Clipped. Either way there is no tree to scope a capture to, so it is a
     /// failure rather than an empty capture.
-    pub(super) fn new(root: u32, scope: TreeScope) -> Result<Self, AudioError> {
+    pub(super) fn new(
+        root: u32,
+        scope: TreeScope,
+        scoping: Arc<AtomicU32>,
+    ) -> Result<Self, AudioError> {
         let tree = ProcessTree::rooted_at(root).map_err(|error| match error {
             WindowsError::ProcessUnavailable { process_id } => {
                 AudioError::ProcessUnavailable { process_id }
@@ -219,17 +368,24 @@ impl ProcessLoopbackSource {
             root,
             scoped_to: root,
             scope,
+            scoping,
+            following: false,
             tree,
             format: None,
             change: None,
             ended: false,
-            description: describe(root),
+            description: describe(root, scope),
         })
     }
 
     /// How this capture is named in a log line.
     pub(super) fn description(&self) -> &str {
         &self.description
+    }
+
+    /// Which track this capture's log lines belong to.
+    pub(super) const fn kind(&self) -> SourceKind {
+        self.scope.kind()
     }
 
     /// The process the current activation is scoped to.
@@ -259,7 +415,7 @@ impl ProcessLoopbackSource {
                     // audio — if they make any — is not in this track, and the
                     // only way anybody finds out is a log line.
                     tracing::debug!(
-                        audio_source = %SourceKind::GameAudio.audio_source(),
+                        audio_source = %self.scope.kind().audio_source(),
                         refused = ?change.refused(),
                         "some of the game's processes cannot be opened, so they are not part \
                          of the tree this track is scoped to"
@@ -272,7 +428,7 @@ impl ProcessLoopbackSource {
                 // failed is not a game that has exited.
                 tracing::warn!(
                     %error,
-                    audio_source = %SourceKind::GameAudio.audio_source(),
+                    audio_source = %self.scope.kind().audio_source(),
                     "could not read which processes the game consists of; the capture stays \
                      scoped where it is"
                 );
@@ -285,59 +441,108 @@ impl ProcessLoopbackSource {
     }
 
     /// Decides whether the process the activation names is still the right one.
+    ///
+    /// The decision itself is `decide_scope`, which is where the rule and the
+    /// reasoning are; this is what it costs the stream.
     fn consider_rescoping(&mut self) {
-        if self.tree.contains(self.scoped_to) {
-            return;
-        }
-
-        let Some(&successor) = self.tree.members().first() else {
-            // The game and everything it started have gone. The capture is left
-            // exactly as it is: the track becomes silence of the right length,
-            // because that is what a stream with nothing rendering into it
-            // produces, and stopping is the caller's decision rather than this
-            // crate's (AGENTS.md section 17).
-            if !self.ended {
-                self.ended = true;
-                tracing::info!(
-                    audio_source = %SourceKind::GameAudio.audio_source(),
-                    root = self.root,
-                    "the game and every process it started have exited; this track is silence \
-                     from here"
-                );
+        let source = self.scope.kind().audio_source();
+        match decide_scope(
+            &self.scoping,
+            self.scoped_to,
+            self.following,
+            self.tree.members(),
+        ) {
+            Rescope::Stay => {}
+            Rescope::CaughtUp => {
+                // The process the other side chose is now a member here too.
+                // Nothing happens to the stream — it is already scoped there —
+                // but this capture may lead the next move.
+                self.following = false;
             }
-            return;
-        };
-
-        let members = self.tree.members();
-        if members.len() > 1 {
-            // One activation, one root. A game that leaves two unrelated
-            // processes behind cannot be captured by one client, and saying so
-            // is better than a track that quietly lost half the game.
-            tracing::warn!(
-                audio_source = %SourceKind::GameAudio.audio_source(),
-                scoping_to = successor,
-                members = ?members,
-                "the process this capture was scoped to has exited and more than one process \
-                 of the game is still running. Windows scopes a capture to one process tree, \
-                 so audio from a process that did not descend from the one named here is not \
-                 in this track (issue #311)"
-            );
-        } else {
-            tracing::info!(
-                audio_source = %SourceKind::GameAudio.audio_source(),
-                scoping_to = successor,
-                "the process this capture was scoped to has exited and the game is still \
-                 running, so the capture is re-scoping onto what is left of it"
-            );
+            Rescope::Ended => {
+                // The game and everything it started have gone. The capture is
+                // left exactly as it is: the track becomes silence of the right
+                // length, because that is what a stream with nothing rendering
+                // into it produces, and stopping is the caller's decision
+                // rather than this crate's (AGENTS.md section 17).
+                if !self.ended {
+                    self.ended = true;
+                    tracing::info!(
+                        audio_source = %source,
+                        root = self.root,
+                        // Not the same outcome for the two sides, and only one
+                        // of them is known. The including side has nothing left
+                        // to include, so its track is silence. What an already
+                        // open excluding stream delivers once the tree it
+                        // excludes is empty has not been measured on hardware
+                        // and is not claimed here (AGENTS.md section 54);
+                        // `docs/audio-routing.md` records it as an open
+                        // question. What *is* certain is that a reopen from
+                        // here produces no stream at all, because `open_stream`
+                        // refuses an empty tree.
+                        this_track_now = match self.scope {
+                            TreeScope::Only => "is silence from here",
+                            TreeScope::Except =>
+                                "excludes a tree with nothing left in it; if this stream is \
+                                 reopened from here it will be silence",
+                        },
+                        "the game and every process it started have exited"
+                    );
+                }
+            }
+            Rescope::Lead(successor) => {
+                let members = self.tree.members();
+                if members.len() > 1 {
+                    // One activation, one root. A game that leaves two
+                    // unrelated processes behind cannot be captured by one
+                    // client, and saying so is better than a track that quietly
+                    // lost half the game.
+                    tracing::warn!(
+                        audio_source = %source,
+                        scoping_to = successor,
+                        members = ?members,
+                        "the process this capture was scoped to has exited and more than one \
+                         process of the game is still running. Windows scopes a capture to one \
+                         process tree, so audio from a process that did not descend from the \
+                         one named here is not in this track (issue #311)"
+                    );
+                } else {
+                    tracing::info!(
+                        audio_source = %source,
+                        scoping_to = successor,
+                        "the process this capture was scoped to has exited and the game is \
+                         still running, so the capture is re-scoping onto what is left of it"
+                    );
+                }
+                self.rescope_to(successor, false);
+            }
+            Rescope::Follow(successor) => {
+                tracing::info!(
+                    audio_source = %source,
+                    scoping_to = successor,
+                    "the other side of this recording's process-loopback pair re-scoped, so \
+                     this capture is following it onto the same process; both sides have to \
+                     name one tree or the same audio lands on two tracks (issue #27)"
+                );
+                self.rescope_to(successor, true);
+            }
         }
+    }
 
+    /// Moves the activation onto `successor` and asks the engine to reopen.
+    ///
+    /// `followed` records where the choice came from, which is what stops two
+    /// captures whose trees disagree from chasing each other; see
+    /// `decide_scope`.
+    fn rescope_to(&mut self, successor: u32, followed: bool) {
         self.scoped_to = successor;
+        self.following = followed;
         self.description = format!(
-            "the game's process tree, rooted at process {} and captured through process {}",
-            self.root, successor
+            "{}, captured through process {successor}",
+            describe(self.root, self.scope)
         );
         self.change = Some(Reopen {
-            reason: "the process the game's audio was captured through exited",
+            reason: "the process this capture's audio was scoped through exited",
             // Paced by processes exiting rather than by a call that fails on
             // every look, so this cannot become a loop.
             from_failed_call: false,
@@ -377,9 +582,16 @@ impl ProcessLoopbackSource {
         self.format = Some(format);
 
         Ok(Some(StreamParts {
-            kind: SourceKind::GameAudio,
+            kind: self.scope.kind(),
             identity: EndpointIdentity {
-                id: format!("process-loopback:{}", self.scoped_to),
+                // The side is part of the identity: a recording runs both, and
+                // two streams sharing one identifier is two streams a log
+                // cannot tell apart (issue #27).
+                id: format!(
+                    "process-loopback:{}:{}",
+                    self.scope.identity_word(),
+                    self.scoped_to
+                ),
                 name: self.description.clone(),
             },
             format,
@@ -474,7 +686,7 @@ fn initialise(
         match initialise_with(&client, *format) {
             Ok(wake) => {
                 tracing::debug!(
-                    audio_source = %SourceKind::GameAudio.audio_source(),
+                    audio_source = %scope.kind().audio_source(),
                     format = %format,
                     wake = ?wake,
                     // Which side of the tree, because a recording with both
@@ -643,7 +855,11 @@ impl ProcessLoopbackCapture {
     /// shape this crate asks for, and [`AudioError::Platform`] when Windows
     /// refuses something outright.
     pub fn open(root_process: u32) -> Result<Self, AudioError> {
-        Self::open_scoped(root_process, TreeScope::Only)
+        Self::open_scoped(
+            root_process,
+            TreeScope::Only,
+            Self::own_scoping(root_process),
+        )
     }
 
     /// Everything the machine played **except** `root_process` and its tree.
@@ -653,18 +869,77 @@ impl ProcessLoopbackCapture {
     /// the whole endpoint has the game's audio on two tracks
     /// ([issue #27](https://github.com/wildware-uk/clipped/issues/27)).
     ///
+    /// **A recording should open [`open_pair`](Self::open_pair) rather than
+    /// this and [`open`](Self::open) separately.** Two captures opened here can
+    /// re-scope onto different processes of the same game, which puts that
+    /// game's audio back onto two tracks by another route; `open_pair` is the
+    /// same two captures with one agreement between them. This is for a caller
+    /// that wants the excluding side alone.
+    ///
     /// # Errors
     ///
     /// Exactly [`open`](Self::open)'s: this is the same activation with one
     /// constant changed, so a machine that cannot do one cannot do the other.
     pub fn open_excluding(root_process: u32) -> Result<Self, AudioError> {
-        Self::open_scoped(root_process, TreeScope::Except)
+        Self::open_scoped(
+            root_process,
+            TreeScope::Except,
+            Self::own_scoping(root_process),
+        )
+    }
+
+    /// Both sides of one tree, opened together and kept scoped to one process.
+    ///
+    /// **This is what a recording opens.** `open` and `open_excluding` on their
+    /// own are two independent captures, and a recording that opens both of
+    /// them separately has a defect that only appears when a game's launcher
+    /// exits partway through: each capture then resolves the surviving tree
+    /// from its **own** `ProcessTree`, on its own schedule, and there is
+    /// nothing to stop them landing on different processes. A process in one
+    /// side's tree and not the other's has its audio on both tracks — the
+    /// doubling `open_excluding` exists to prevent — or on neither.
+    ///
+    /// The pair shares one cell naming the process both are scoped to, so that
+    /// a re-scope by either side moves the other; see `decide_scope` for the
+    /// rule and why it terminates. The two captures are otherwise independent
+    /// and are meant to be read on a thread each, which is what a session does
+    /// with them.
+    ///
+    /// Returned in track order: everything the tree played, then everything
+    /// else.
+    ///
+    /// # Errors
+    ///
+    /// [`open`](Self::open)'s, for either side. A machine that cannot activate
+    /// one side cannot activate the other, so a failure here means neither
+    /// capture exists and the caller takes the documented fallback — one
+    /// system-audio track, with the separation stated as unavailable (ADR
+    /// 0003).
+    pub fn open_pair(root_process: u32) -> Result<(Self, Self), AudioError> {
+        let scoping = Self::own_scoping(root_process);
+        let only = Self::open_scoped(root_process, TreeScope::Only, Arc::clone(&scoping))?;
+        // A failure here drops `only`, which releases its client: both sides or
+        // neither, at the point they are opened as well as in what they record.
+        let except = Self::open_scoped(root_process, TreeScope::Except, scoping)?;
+        Ok((only, except))
+    }
+
+    /// The agreement cell of a capture that has nobody to agree with.
+    ///
+    /// A lone capture always reads back what it wrote, so it behaves exactly as
+    /// it did before pairs existed.
+    fn own_scoping(root_process: u32) -> Arc<AtomicU32> {
+        Arc::new(AtomicU32::new(root_process))
     }
 
     /// [`open`](Self::open) and [`open_excluding`](Self::open_excluding), which
     /// differ only in which side of the tree they take.
-    fn open_scoped(root_process: u32, scope: TreeScope) -> Result<Self, AudioError> {
-        let source = ProcessLoopbackSource::new(root_process, scope)?;
+    fn open_scoped(
+        root_process: u32,
+        scope: TreeScope,
+        scoping: Arc<AtomicU32>,
+    ) -> Result<Self, AudioError> {
+        let source = ProcessLoopbackSource::new(root_process, scope, scoping)?;
         let capture = EndpointCapture::open(CaptureSource::ProcessTree(source))?
             // The tree was built a moment ago and had a member in it, so there
             // is only one way to be here: every process of the game exited
@@ -1355,7 +1630,7 @@ mod tests {
         // opened on any machine, which makes it the only deterministic negative
         // case available (AGENTS.md section 25). It needs no audio hardware, so
         // it runs in the pull-request CI job.
-        let error = ProcessLoopbackSource::new(0, TreeScope::Only)
+        let error = ProcessLoopbackSource::new(0, TreeScope::Only, Arc::new(AtomicU32::new(0)))
             .expect_err("the idle process cannot be followed");
 
         assert!(
@@ -1391,9 +1666,285 @@ mod tests {
         // about this capture, and "which game" is the only thing that makes
         // those lines worth reading when two captures are running.
         assert_eq!(
-            describe(4_242),
+            describe(4_242, TreeScope::Only),
             "the game's process tree, rooted at process 4242"
         );
+    }
+
+    #[test]
+    fn the_two_sides_of_one_tree_do_not_describe_themselves_identically() {
+        // A recording runs both at once, and every line the shared engine
+        // writes about either of them carries `describe` as its `device` field.
+        // Two captures that name themselves the same way is a log in which the
+        // one question worth asking — which track did this audio go to — cannot
+        // be answered (AGENTS.md section 35).
+        let only = describe(4_242, TreeScope::Only);
+        let except = describe(4_242, TreeScope::Except);
+
+        assert_ne!(only, except, "the two sides have to be tellable apart");
+        assert!(
+            except.contains("except"),
+            "the excluding side has to say so in words: {except}"
+        );
+        assert_eq!(
+            TreeScope::Only.kind().audio_source().to_string(),
+            "game",
+            "the including side is the game's track"
+        );
+        assert_eq!(
+            TreeScope::Except.kind().audio_source().to_string(),
+            "other_system",
+            "the excluding side is the other-system-audio track, not a second game track"
+        );
+    }
+
+    /// The rule `decide_scope` is written against, with none of the machinery.
+    ///
+    /// Two captures, one shared cell, and a list of members each — which is
+    /// everything the decision depends on. No audio device, no game, no process
+    /// table.
+    mod agreeing_on_one_tree {
+        use super::*;
+
+        /// A pair, as a session opens it: both sides scoped to the same root
+        /// and neither following the other.
+        struct Pair {
+            scoping: Arc<AtomicU32>,
+            /// `(scoped_to, following)` for the including and excluding sides.
+            only: (u32, bool),
+            except: (u32, bool),
+        }
+
+        impl Pair {
+            fn rooted_at(root: u32) -> Self {
+                Self {
+                    scoping: Arc::new(AtomicU32::new(root)),
+                    only: (root, false),
+                    except: (root, false),
+                }
+            }
+
+            /// Applies one refresh of the including side against `members`.
+            fn only_sees(&mut self, members: &[u32]) -> Rescope {
+                let decision = decide_scope(&self.scoping, self.only.0, self.only.1, members);
+                apply(decision, &mut self.only);
+                decision
+            }
+
+            /// Applies one refresh of the excluding side against `members`.
+            fn except_sees(&mut self, members: &[u32]) -> Rescope {
+                let decision = decide_scope(&self.scoping, self.except.0, self.except.1, members);
+                apply(decision, &mut self.except);
+                decision
+            }
+        }
+
+        /// What `consider_rescoping` does with a decision, in the two fields
+        /// the decision depends on.
+        fn apply(decision: Rescope, side: &mut (u32, bool)) {
+            match decision {
+                Rescope::Stay | Rescope::Ended => {}
+                Rescope::CaughtUp => side.1 = false,
+                Rescope::Lead(successor) => *side = (successor, false),
+                Rescope::Follow(successor) => *side = (successor, true),
+            }
+        }
+
+        #[test]
+        fn a_capture_on_its_own_is_unaffected_by_any_of_this() {
+            // `open` and `open_excluding` each own their cell, so the agreement
+            // machinery has to be invisible to them: a lone capture re-scopes
+            // when the process it names dies and does nothing otherwise,
+            // exactly as it did before pairs existed.
+            let scoping = Arc::new(AtomicU32::new(4_242));
+
+            assert_eq!(
+                decide_scope(&scoping, 4_242, false, &[4_242, 4_243]),
+                Rescope::Stay,
+                "the process it names is alive, so nothing moves"
+            );
+            assert_eq!(
+                decide_scope(&scoping, 4_242, false, &[4_243, 4_244]),
+                Rescope::Lead(4_243),
+                "the process it names has gone, so it takes the lowest survivor"
+            );
+            assert_eq!(
+                decide_scope(&scoping, 4_243, false, &[]),
+                Rescope::Ended,
+                "nothing of the game is left"
+            );
+        }
+
+        #[test]
+        fn the_side_that_notices_first_decides_for_both() {
+            // The defect this exists for. The launcher exits leaving two
+            // children; each side refreshes its own tree on its own schedule,
+            // so they can see different memberships. Without the shared cell
+            // the including side scopes to 100 and the excluding side to 200,
+            // and everything 100's subtree plays is then on *both* tracks —
+            // the doubling `open_excluding` exists to prevent (issue #27).
+            let mut pair = Pair::rooted_at(1);
+
+            // The including side refreshes first and sees both children.
+            assert_eq!(pair.only_sees(&[100, 200]), Rescope::Lead(100));
+
+            // The excluding side refreshes a moment later, by which time 100
+            // has gone as well. Left to itself it would take 200.
+            assert_eq!(pair.except_sees(&[200]), Rescope::Follow(100));
+
+            assert_eq!(
+                pair.only.0, pair.except.0,
+                "both sides have to name one process or the same audio lands on two tracks"
+            );
+        }
+
+        #[test]
+        fn a_side_whose_own_tree_still_looks_healthy_follows_the_pair_anyway() {
+            // The case the shared cell exists for, on its own. This capture's
+            // tree still lists the process it is scoped to as alive, so nothing
+            // about its own state says anything is wrong — and the other side
+            // has already moved. A capture that consulted only its own tree
+            // would stay here, and the two would then be scoped to two
+            // different trees for the rest of the recording, which is the same
+            // audio on both tracks or on neither (issue #27).
+            let scoping = Arc::new(AtomicU32::new(200));
+
+            assert_eq!(
+                decide_scope(&scoping, 100, false, &[100, 200]),
+                Rescope::Follow(200),
+                "the pair's choice outranks a healthy-looking tree of this side's own"
+            );
+        }
+
+        #[test]
+        fn two_sides_deciding_at_once_do_not_both_lead() {
+            // What the compare-exchange buys, and the only thing that does:
+            // both sides look while the cell still names the dead root, so
+            // neither sees the other's move, and both go on to publish. One
+            // wins and the other is told the winner's process.
+            //
+            // Publishing with a plain `store` would still *converge* — the
+            // loser would notice on its next refresh and follow — so what this
+            // catches is the reopen in between: a stream thrown away and
+            // activated again, which is a gap in one of the two tracks that a
+            // recording did not have to have.
+            //
+            // Threads rather than two calls in a row, because the window is
+            // between the load and the write inside one call and cannot be
+            // reached from a single thread. The assertion holds whether or not
+            // a given round happens to race, so this cannot fail spuriously;
+            // 500 rounds behind a spin barrier is what makes it race often
+            // enough to catch the regression.
+            const ROUNDS: usize = 500;
+
+            for _ in 0..ROUNDS {
+                let scoping = Arc::new(AtomicU32::new(1));
+                let ready = Arc::new(AtomicU32::new(0));
+                let leads = Arc::new(AtomicU32::new(0));
+
+                // The two sides see different survivors, which is the whole
+                // reason they have to agree: left alone, one would take 100 and
+                // the other 200.
+                let sides: [Vec<u32>; 2] = [vec![100, 200], vec![200]];
+                let racing: Vec<_> = sides
+                    .into_iter()
+                    .map(|members| {
+                        let scoping = Arc::clone(&scoping);
+                        let ready = Arc::clone(&ready);
+                        let leads = Arc::clone(&leads);
+                        std::thread::spawn(move || {
+                            ready.fetch_add(1, Ordering::SeqCst);
+                            while ready.load(Ordering::SeqCst) < 2 {
+                                core::hint::spin_loop();
+                            }
+                            if matches!(
+                                decide_scope(&scoping, 1, false, &members),
+                                Rescope::Lead(_)
+                            ) {
+                                leads.fetch_add(1, Ordering::SeqCst);
+                            }
+                        })
+                    })
+                    .collect();
+
+                for side in racing {
+                    side.join().expect("deciding a scope cannot panic");
+                }
+
+                assert!(
+                    leads.load(Ordering::SeqCst) <= 1,
+                    "both sides led the same move, so both reopened their stream and one of \
+                     them did so for nothing"
+                );
+            }
+        }
+
+        #[test]
+        fn a_follower_does_not_lead_back_and_the_pair_settles() {
+            // What makes the rule terminate. The excluding side follows onto a
+            // process its own tree has never listed — a tree up to a rescan
+            // interval stale, or a process Windows refused it. Without the
+            // "a follower does not lead" rule it would immediately publish its
+            // own choice, the including side would follow that, and the two
+            // would chase each other for the rest of the recording, reopening a
+            // stream each time.
+            let mut pair = Pair::rooted_at(1);
+
+            assert_eq!(pair.only_sees(&[100, 200]), Rescope::Lead(100));
+            assert_eq!(pair.except_sees(&[200]), Rescope::Follow(100));
+
+            // Ten more refreshes of the excluding side, still never seeing 100.
+            for _ in 0..10 {
+                assert_eq!(
+                    pair.except_sees(&[200]),
+                    Rescope::Stay,
+                    "a follower stays where the pair agreed rather than publishing its own"
+                );
+            }
+            assert_eq!(pair.only_sees(&[100]), Rescope::Stay);
+            assert_eq!(pair.scoping.load(Ordering::Relaxed), 100);
+        }
+
+        #[test]
+        fn a_follower_that_catches_up_can_lead_the_next_move() {
+            // The other half of that rule: `following` is a state to leave, not
+            // a demotion. Once the excluding side can see the process the pair
+            // agreed on, it is as entitled as the other to notice the next
+            // death first — which matters because it is the side that goes on
+            // recording after the game exits, and a side that could never lead
+            // would leave the pair waiting on a capture that has stopped
+            // caring.
+            let mut pair = Pair::rooted_at(1);
+
+            assert_eq!(pair.only_sees(&[100, 200]), Rescope::Lead(100));
+            assert_eq!(pair.except_sees(&[200]), Rescope::Follow(100));
+            assert_eq!(
+                pair.except_sees(&[100, 200]),
+                Rescope::CaughtUp,
+                "its tree now lists the process the pair agreed on"
+            );
+
+            // 100 dies. This time the excluding side notices first.
+            assert_eq!(pair.except_sees(&[200]), Rescope::Lead(200));
+            assert_eq!(pair.only_sees(&[100, 200]), Rescope::Follow(200));
+            assert_eq!(
+                pair.only.0, pair.except.0,
+                "the pair is still on one process"
+            );
+        }
+
+        #[test]
+        fn the_game_ending_does_not_split_the_pair() {
+            // Both sides see the tree empty. Neither publishes anything, so the
+            // cell still names the last process they agreed on and a side that
+            // refreshes late does not find a disagreement to act on.
+            let mut pair = Pair::rooted_at(1);
+
+            assert_eq!(pair.only_sees(&[]), Rescope::Ended);
+            assert_eq!(pair.except_sees(&[]), Rescope::Ended);
+            assert_eq!(pair.scoping.load(Ordering::Relaxed), 1);
+            assert_eq!(pair.only.0, pair.except.0);
+        }
     }
 
     #[test]

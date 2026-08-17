@@ -21,12 +21,6 @@ tracing.workspace = true
 # is layer 2, so this follows the dependency direction.
 clipped-logging.workspace = true
 
-# The synthetic-recording example encodes real video with the pinned build's
-# software encoder before handing it to the muxer, so it needs the FFI directly.
-# It is the only test target here that does: reading finished files back is
-# `clipped-media-validation`'s job now, and `crates/muxer/tests/support` only
-# starts the example and collects its output. Cargo builds examples with the
-# dev-dependencies, which is why the FFI is listed twice.
 [build-dependencies]
 # Places the pinned FFmpeg DLLs beside the binaries this build produces, so
 # that nothing has to be on PATH. Shared with clipped-encoder, which links
@@ -34,7 +28,6 @@ clipped-logging.workspace = true
 clipped-ffmpeg-runtime.workspace = true
 
 [dev-dependencies]
-rusty_ffmpeg.workspace = true
 # The synthetic-recording example takes command-line arguments, and every
 # executable in this workspace presents the same argument syntax and the same
 # usage errors (the root manifest says why).
@@ -46,6 +39,28 @@ clap.workspace = true
 # that produces media uses it, and it is tested against files that are broken as
 # well as files that are not (tests/media, docs/testing.md).
 clipped-media-validation.workspace = true
+# The synthetic-recording example encodes its test pattern with the real
+# software encoder rather than talking to `libopenh264` itself, so that the
+# stream the muxer's own tests write is what a recording session actually
+# produces (issue #159). `clipped-encoder` is layer 1 and this crate is layer
+# 2, so a dev-dependency on it still points down
+# (tests/integration/tests/workspace_layering.rs counts dev-dependencies too).
+clipped-encoder.workspace = true
+# `SoftwareEncoder` reads frames out of a Direct3D 11 texture rather than
+# system memory, so the example needs a device to hold one on and a way to
+# upload pixels into it — the same two things
+# `crates/encoder/src/software/tests.rs` needs for the same reason. Hardware
+# where there is any, the WARP software rasteriser otherwise, which is why
+# nothing here is gated behind a GPU being present the way an actual hardware
+# *encoder* would be (AGENTS.md section 58): WARP ships with Windows, so
+# `crates/muxer/tests/synthetic_recording.rs` and
+# `crates/muxer/tests/abrupt_termination.rs` can keep running by default.
+# Dual MIT/Apache-2.0.
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }
 
 [lints]
 workspace = true

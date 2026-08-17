@@ -27,7 +27,16 @@ fn manifest() -> PluginManifest {
 fn the_manifest_says_who_this_is_and_what_it_runs() {
     let manifest = manifest();
 
-    assert_eq!(manifest.contract(), CONTRACT);
+    // Accepted by this build, not necessarily on its newest contract. A
+    // manifest declaring an older version is read exactly as it always was
+    // (`ContractVersion::is_supported`), which is what lets a plugin using none
+    // of contract 2's vocabulary stay as it is rather than being reissued for
+    // a field it does not use.
+    assert!(
+        manifest.contract().is_supported(),
+        "this build supports up to contract {CONTRACT}, and plugin.json declares {}",
+        manifest.contract()
+    );
     assert_eq!(
         manifest.id().as_str(),
         "league-of-legends",

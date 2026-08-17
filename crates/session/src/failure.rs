@@ -227,7 +227,9 @@ impl RecordingFailure {
                 footage: FootageKept::Nothing,
             },
 
-            SessionError::Capture(_) | SessionError::NoCaptureBackend(_) => Self {
+            SessionError::Capture(_)
+            | SessionError::NoCaptureBackend(_)
+            | SessionError::CaptureExhausted(_) => Self {
                 kind: FailureKind::CaptureLost,
                 headline: "Capture stopped".to_owned(),
                 detail: error.to_string(),

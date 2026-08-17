@@ -21,7 +21,17 @@ fn manifest() -> PluginManifest {
 #[test]
 fn the_manifest_is_one_this_build_of_the_host_can_read() {
     let manifest = manifest();
-    assert_eq!(manifest.contract(), CONTRACT);
+    // That this build *can read* it, which is what the test is called, and not
+    // that it declares the newest contract. Those stopped being the same
+    // question when the contract gained a second version (#343): a manifest on
+    // an older one is accepted deliberately, so a plugin using none of the
+    // later vocabulary never has to be reissued. Asserting equality would make
+    // every future bump an edit to every bundled manifest.
+    assert!(
+        manifest.contract().is_supported(),
+        "this build supports up to contract {CONTRACT}, and plugin.json declares {}",
+        manifest.contract()
+    );
     assert_eq!(manifest.id().as_str(), PLUGIN_ID);
     assert_eq!(manifest.name(), "Dota 2");
     assert!(

@@ -204,7 +204,6 @@ describe('the export dialog', () => {
           inputs: [],
           gain_db: 0,
           muted: false,
-          soloed: false,
           fade_in: 0,
           fade_out: 0,
         },

@@ -70,7 +70,13 @@ use clipped_storage::Database;
 use clipped_waveform::{ServiceOptions as WaveformOptions, WaveformCache, WaveformService};
 
 /// The file the library index lives in, under Clipped's per-user directory.
-const LIBRARY_FILE: &str = "library.db";
+///
+/// `pub(crate)` rather than private: `crate::recover`'s `--discard` indexes a
+/// recovered fragment before it sends it to the trash (issue #451), and it
+/// opens the same database this module does. Naming a second `"library.db"`
+/// literal there would be the two answers to one question AGENTS.md
+/// section 55 warns about.
+pub(crate) const LIBRARY_FILE: &str = "library.db";
 
 /// The recording library, as this process reads it for the window.
 #[derive(Debug)]

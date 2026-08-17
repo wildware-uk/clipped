@@ -18,10 +18,16 @@
 //! crosses the crate boundary rather than four.
 //!
 //! The sample rate and the channel count are passed through untouched and
-//! reported in [`AudioFormat`]. Resampling belongs to the stage that has to
-//! reconcile several capture clocks at once
-//! ([issue #30](https://github.com/wildware-uk/clipped/issues/30)), and
-//! downmixing is a decision about what the user hears, which this crate is not
+//! reported in [`AudioFormat`]. What a *format* declares never changes here —
+//! a 44.1 kHz endpoint stays a 44.1 kHz track — even though
+//! [`crate::resample`] now nudges the number of frames a source's own samples
+//! occupy, continuously and by a fraction of a percent, to keep that source's
+//! clock aligned with the reference clock
+//! ([issue #30](https://github.com/wildware-uk/clipped/issues/30)). Converting
+//! between two endpoints that genuinely disagree about the rate — a recording
+//! that has to keep running when the default device moves from 48 kHz to
+//! 44.1 kHz — is not that, and is still refused; see `docs/audio-routing.md`.
+//! Downmixing is a decision about what the user hears, which this crate is not
 //! entitled to make on its own (AGENTS.md section 21).
 
 use core::fmt;

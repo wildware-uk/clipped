@@ -151,7 +151,7 @@ pub use server::{
 };
 pub use status::{
     ActiveRecording, BookmarkSummary, EndReason, ExportSummary, RecorderStatus, RecordingSummary,
-    ReplaySummary, ScreenshotSummary,
+    ReplaySummary, ScreenshotSummary, SessionRecording, SessionSummary, Watching,
 };
 pub use supervisor::{
     ensure_recorder, wait_for_recorder_to_exit, Attachment, AttachmentOrigin, RecorderCallError,

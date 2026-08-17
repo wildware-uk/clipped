@@ -852,6 +852,80 @@ fn a_recording_that_ends_while_the_game_runs_is_followed_by_another() {
 }
 
 #[test]
+fn a_recording_the_user_stopped_is_not_followed_by_another_of_the_same_process() {
+    // The test above is the behaviour this one has to switch off. A stop that
+    // reaches an automatic recording — the tray's Stop, or the toggle hotkey —
+    // ends the file and then, because the game is still running, the manager
+    // treats it exactly as a window that went and starts another recording
+    // seconds later. That is a control that undoes itself (AGENTS.md section
+    // 27, issue #421).
+    let mut harness = Harness::new("stopped-by-user");
+    let first = started(&mut harness, 11, t(0));
+
+    assert!(
+        harness.manager.asked_to_stop_recording(),
+        "there is an open session, so there is something to tell"
+    );
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::Stopped),
+        t(20),
+    );
+
+    for second in [22, 26, 60, 300] {
+        let actions = harness.poll(t(second));
+        assert!(
+            !starts_a_recording(&actions),
+            "the user stopped the recording, so nothing should start at t+{second}: {actions:?}"
+        );
+    }
+    assert!(
+        harness.manager.active_session().is_some(),
+        "the game is still running, so the sitting is still the sitting"
+    );
+}
+
+#[test]
+fn a_stop_the_user_asked_for_does_not_outlive_the_process_it_was_asked_of() {
+    // The clearing half, and the reason the flag is on the session's subject
+    // rather than on the session. Somebody who stopped recording one match has
+    // said nothing about the next one, so a relaunch inside the grace period —
+    // which is one sitting with two recordings in it — records again.
+    let mut harness = Harness::new("stopped-then-relaunched");
+    let first = started(&mut harness, 11, t(0));
+
+    harness.manager.asked_to_stop_recording();
+    harness.finished(
+        &first,
+        recorded(Path::new("one.mkv"), EndReason::Stopped),
+        t(20),
+    );
+    harness.observe(&exit(11, "test-game.exe"), t(25));
+
+    let relaunched = harness.observe(&launch(&[(12, "test-game.exe")]), t(30));
+    let second = one_start(&relaunched);
+    assert_eq!(
+        second.recording.session, first.session,
+        "a relaunch inside the grace is the same sitting"
+    );
+    assert_eq!(second.recording.index, 2);
+}
+
+#[test]
+fn a_stop_asked_for_with_no_session_open_says_there_was_nothing_to_tell() {
+    // `serve` answers `stop_recording` for a recording the window started as
+    // well as one detection started, and tells the manager either way. It has
+    // to be able to tell them apart, because a manual recording is not a
+    // session this manager knows anything about.
+    let mut harness = Harness::new("stopped-with-nothing-open");
+
+    assert!(
+        !harness.manager.asked_to_stop_recording(),
+        "no game has launched, so there is no automatic session to stop"
+    );
+}
+
+#[test]
 fn a_recording_that_found_no_window_is_not_tried_again_for_the_same_process() {
     // Otherwise a process that matched the catalogue and never opens a window
     // would have the driver searching the desktop for it, over and over, for

@@ -157,6 +157,27 @@ fn a_plugins_own_invention_is_not_clipped_until_somebody_says_so() {
 }
 
 #[test]
+fn the_users_own_label_is_not_clipped_until_they_say_so_either() {
+    // A different reason from the test above, and worth keeping apart from it.
+    // Nobody distrusts the name here — the user typed it. What a default `on`
+    // would cost is the library: the signals this kind exists for (issue #345)
+    // can fire many times a minute, which no game event does.
+    let rules = defaults();
+    let labelled = EventKind::UserLabelled(
+        clipped_events::UserLabel::new("my ultimate").expect("prose is a label"),
+    );
+
+    assert!(
+        !rules.rule_for(&labelled).enabled().get(),
+        "a mark the user put on a timeline is not by itself a request for a clip"
+    );
+    assert!(
+        !rules.rule_for(&labelled).lead().get().is_zero(),
+        "and it must still carry a real window, so wanting the clips is one change"
+    );
+}
+
+#[test]
 fn every_kind_has_an_answer_including_ones_this_build_cannot_name() {
     // `rule_for` must total: the vocabulary is open, and a lookup that could
     // fail would make every consumer decide what to do about a kind it has

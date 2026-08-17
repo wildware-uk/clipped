@@ -102,6 +102,21 @@ use crate::transport::{Endpoint, TransportError};
 /// The subcommand the recorder is started with.
 const SERVE: &str = "serve";
 
+/// What makes that recorder record games as they launch.
+///
+/// A supervisor starts a recorder because a window opened and none was
+/// listening, and the recorder it starts is the one that will still be running
+/// long after that window closes (ADR 0002). A recorder that watched for games
+/// only when it had been started at login would record nothing for anybody who
+/// has not turned that on — which is everybody until they do, since
+/// `start-at-login` is opt-in
+/// ([issue #421](https://github.com/wildware-uk/clipped/issues/421)).
+///
+/// It is a flag rather than the recorder's default so that a `serve` started by
+/// hand, or by a test, does not begin recording whatever game is running on the
+/// machine (AGENTS.md section 25).
+const WATCH_FOR_GAMES: &str = "--watch-for-games";
+
 /// How long a probe waits to find out whether a recorder is already listening.
 ///
 /// Zero: the endpoint either exists or it does not, and `connect` answers that
@@ -156,6 +171,22 @@ pub struct SupervisorSettings {
     pub startup_timeout: Duration,
     /// What to do when a recorder stops without being asked to.
     pub restart: RestartPolicy,
+    /// Whether a recorder started here also records games as they launch.
+    ///
+    /// True, because that is what Clipped is for: the recorder started when the
+    /// window opens is the one still running long after it closes (ADR 0002),
+    /// and it is the only process that can record a game nobody asked it to
+    /// ([issue #421](https://github.com/wildware-uk/clipped/issues/421)).
+    ///
+    /// Settable so that a test can decline it. A supervisor test starts a real
+    /// recorder on a real machine, and one that watched for games would create
+    /// the recordings folder of whoever is running the suite and could start
+    /// recording a game they had open (AGENTS.md section 25).
+    ///
+    /// It has no effect on a recorder that was *already* listening, which the
+    /// supervisor attaches to rather than starts: what that one is doing was
+    /// decided when it started.
+    pub watch_for_games: bool,
 }
 
 impl SupervisorSettings {
@@ -169,6 +200,7 @@ impl SupervisorSettings {
             client,
             startup_timeout: Duration::from_secs(10),
             restart: RestartPolicy::default(),
+            watch_for_games: true,
         }
     }
 }
@@ -589,10 +621,11 @@ fn start_and_wait(settings: &SupervisorSettings) -> Result<Attachment, Superviso
         });
     }
 
-    let mut child = platform::spawn_detached(
-        &settings.executable,
-        &[SERVE, "--endpoint", settings.endpoint.name()],
-    )?;
+    let mut arguments = vec![SERVE, "--endpoint", settings.endpoint.name()];
+    if settings.watch_for_games {
+        arguments.push(WATCH_FOR_GAMES);
+    }
+    let mut child = platform::spawn_detached(&settings.executable, &arguments)?;
     let started_process_id = child.id();
 
     tracing::info!(

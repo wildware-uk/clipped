@@ -1,5 +1,5 @@
 import type { LibraryRecording, LibrarySession } from '@clipped/shared';
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 
 import {
   footageSeconds,
@@ -11,6 +11,7 @@ import {
 } from './library';
 import type { Favourites, FavouriteTarget } from './favourites';
 import { canActOn, fileName, type RecordingActions } from './recordingActions';
+import { useSessionWindow } from './virtualWindow';
 
 /**
  * The list of sittings, shared by Home and Library.
@@ -55,6 +56,17 @@ import { canActOn, fileName, type RecordingActions } from './recordingActions';
  * The deck draws a grid of them. Thumbnails are generated beside the recordings
  * (#57) and this window has no file-system permission to load one, so there is
  * nothing to draw and no placeholder is drawn in their place.
+ *
+ * # Large libraries scroll smoothly
+ *
+ * Issue #60's second acceptance criterion. `useSessionWindow` (`virtualWindow.ts`)
+ * trims which sessions are actually mounted to what the measured shell viewport
+ * needs, plus a small overscan either side, with two spacer rows standing in for
+ * whatever was skipped so the scrollbar keeps roughly the right size. It is a
+ * no-op — every session renders, exactly as before — until there is a real
+ * `.clipped-shell__main` to measure, which is why every case in
+ * `LibraryScreen.test.tsx` and `HomeScreen.test.tsx` still sees every session it
+ * always saw: jsdom has no layout engine and reports a viewport of zero.
  */
 
 /** What a session list is given. */
@@ -80,9 +92,19 @@ export interface SessionListProps {
 }
 
 /** The sittings, one row each, and their recordings under them. */
-export function SessionList({ sessions, label, actions, favourites }: SessionListProps): ReactNode {
+export function SessionList({
+  sessions,
+  label,
+  actions,
+  favourites,
+}: SessionListProps): ReactNode {
+  const table = useRef<HTMLTableElement>(null);
+  const showsRecordings = actions !== undefined;
+  const window_ = useSessionWindow(table, sessions, showsRecordings);
+  const visible = sessions.slice(window_.start, window_.end);
+
   return (
-    <table className="clipped-table" aria-label={label}>
+    <table className="clipped-table" aria-label={label} ref={table}>
       <thead>
         <tr>
           <th scope="col">Game</th>
@@ -93,7 +115,22 @@ export function SessionList({ sessions, label, actions, favourites }: SessionLis
           {favourites !== undefined && <th scope="col">Keep</th>}
         </tr>
       </thead>
-      {sessions.map((session) => (
+      {/*
+       * Stands in for the sessions skipped above `window_.start`, so the
+       * scrollbar reads roughly the length a fully-mounted table would have
+       * had. `aria-hidden` keeps it out of the accessibility tree entirely —
+       * an empty row would otherwise be a row nobody can make sense of, and
+       * every row-index assertion in the existing suites counts real sessions
+       * only.
+       */}
+      {window_.topSpacerPx > 0 && (
+        <tbody aria-hidden="true">
+          <tr style={{ height: `${String(window_.topSpacerPx)}px` }}>
+            <td colSpan={5} />
+          </tr>
+        </tbody>
+      )}
+      {visible.map((session) => (
         <tbody key={session.session_id}>
           <tr>
             {/*
@@ -131,6 +168,13 @@ export function SessionList({ sessions, label, actions, favourites }: SessionLis
             ))}
         </tbody>
       ))}
+      {window_.bottomSpacerPx > 0 && (
+        <tbody aria-hidden="true">
+          <tr style={{ height: `${String(window_.bottomSpacerPx)}px` }}>
+            <td colSpan={5} />
+          </tr>
+        </tbody>
+      )}
     </table>
   );
 }

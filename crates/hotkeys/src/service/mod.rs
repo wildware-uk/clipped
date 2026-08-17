@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 
 use crate::action::{HotkeyAction, ACTIONS};
-use crate::bindings::Bindings;
+use crate::bindings::{BindError, Bindings};
 use crate::dispatch::{Dispatcher, Handlers, HotkeyEvent};
 use crate::hotkey::Hotkey;
 
@@ -31,6 +31,18 @@ use crate::hotkey::Hotkey;
 #[derive(Debug)]
 pub struct HotkeyService {
     registration: Registration,
+    /// What [`start`](Self::start) or the last successful
+    /// [`rebind`](Self::rebind) asked for. Kept so a rebind can validate a new
+    /// combination against every *other* action the same way
+    /// [`Bindings::bind`] would (see [`RebindError::AlreadyBound`]), and so
+    /// [`registration`](Self::registration) can be recomputed afterwards
+    /// without re-deriving what every other action is bound to.
+    bindings: Bindings,
+    /// Which actions [`start`](Self::start) was given a handler for. Rebinding never
+    /// changes this — only which combination points at an action, never
+    /// whether anything performs it — so it is captured once and reused by
+    /// every [`rebind`](Self::rebind) call's [`Registration::of`].
+    handled: BTreeSet<HotkeyAction>,
     /// [`None`] once [`stop`](Self::stop) has taken it.
     running: Option<platform::HotkeyLoop>,
 }
@@ -82,6 +94,8 @@ impl HotkeyService {
         Ok((
             Self {
                 registration,
+                bindings: bindings.clone(),
+                handled,
                 running: Some(running),
             },
             events,
@@ -97,6 +111,94 @@ impl HotkeyService {
     #[must_use]
     pub const fn registration(&self) -> &Registration {
         &self.registration
+    }
+
+    /// Points `action` at `hotkey` while the service keeps running, or — with
+    /// `hotkey` of [`None`] — releases whatever it was bound to and leaves it
+    /// unbound. ([Issue #233](https://github.com/wildware-uk/clipped/issues/233).)
+    ///
+    /// `RegisterHotKey` and `UnregisterHotKey` are bound to the thread that
+    /// calls them, and that is the message-loop thread [`start`](Self::start)
+    /// created, not the thread calling this (`src/service/windows.rs`). This
+    /// posts the request to that thread and waits for it to be carried out
+    /// there, the same way [`stop`](Self::stop) does for ending the loop.
+    ///
+    /// **A refusal never costs `action` the combination it already had.** The
+    /// new combination is registered under an identifier of its own before
+    /// the old one is released, so a rebind Windows refuses leaves the
+    /// previous registration exactly as it was — still registered, still
+    /// delivering presses. That is the same thing [`start`](Self::start)
+    /// already does for every *other* binding when one of them conflicts,
+    /// extended to the one being changed: one taken combination costs the
+    /// user that combination, never the one it is replacing.
+    /// [`registration`](Self::registration) reflects the outcome either way —
+    /// updated to the new combination on success, and left completely
+    /// untouched on a refusal, because nothing about the working registration
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// [`RebindError::AlreadyBound`] if a *different* Clipped action already
+    /// holds `hotkey` — checked before Windows is asked at all, the same rule
+    /// [`Bindings::bind`] enforces for a fresh set of bindings.
+    /// [`RebindError::Conflict`] if Windows refused `hotkey`; the [`Conflict`]
+    /// it carries is the same shape [`registration`](Self::registration)
+    /// would report from [`start`](Self::start). [`RebindError::ServiceUnavailable`]
+    /// if the hotkey thread could not be reached at all, which only the same
+    /// failure [`stop`](Self::stop) already tolerates and logs can cause.
+    pub fn rebind(
+        &mut self,
+        action: HotkeyAction,
+        hotkey: Option<Hotkey>,
+    ) -> Result<(), RebindError> {
+        let mut candidate = self.bindings.clone();
+        if let Some(hotkey) = hotkey {
+            candidate
+                .bind(action, hotkey)
+                .map_err(RebindError::AlreadyBound)?;
+        } else {
+            candidate.unbind(action);
+        }
+
+        let running = self
+            .running
+            .as_ref()
+            .expect("running is only taken by stop, which consumes the service");
+        running
+            .rebind(action, hotkey)
+            .map_err(|failure| match failure {
+                Some(cause) => RebindError::Conflict(Conflict {
+                    action,
+                    hotkey: hotkey.expect("Windows only refuses a combination that was asked for"),
+                    cause,
+                }),
+                None => RebindError::ServiceUnavailable,
+            })?;
+
+        // Only reached once Windows has accepted `hotkey` (or there was
+        // nothing to ask for `None`): commit the new bindings and drop
+        // `action` from whatever conflicts the current report holds, since
+        // whatever it held before is no longer what is registered.
+        self.bindings = candidate;
+        let mut refused = self.refused();
+        refused.remove(&action);
+        self.registration = Registration::of(&self.bindings, &self.handled, &refused);
+        Ok(())
+    }
+
+    /// Every action currently reported as a conflict, and why — rebuilt from
+    /// [`registration`](Self::registration) rather than kept as separate
+    /// state, so there is one place that can disagree with what
+    /// [`registration`](Self::registration) shows rather than two.
+    fn refused(&self) -> BTreeMap<HotkeyAction, ConflictCause> {
+        self.registration
+            .statuses()
+            .iter()
+            .filter_map(|status| match status.state() {
+                BindingState::Conflict(conflict) => Some((status.action(), conflict.cause())),
+                BindingState::Bound | BindingState::Unbound => None,
+            })
+            .collect()
     }
 
     /// Gives every combination back to Windows and waits for the handler that
@@ -377,6 +479,55 @@ impl core::error::Error for HotkeyError {
     }
 }
 
+/// Why [`HotkeyService::rebind`] could not point an action at a new
+/// combination.
+///
+/// Unlike [`HotkeyError`], every variant here leaves the service running: a
+/// rebind that fails is a service that kept doing exactly what it was doing
+/// before the call, which is the property the whole type documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebindError {
+    /// A different Clipped action already holds the combination. Refused
+    /// before Windows was ever asked, exactly as [`Bindings::bind`] refuses a
+    /// fresh set of bindings for the same reason.
+    AlreadyBound(BindError),
+    /// Windows refused the combination. The action's previous binding, if it
+    /// had one, is untouched and still delivering presses — see
+    /// [`HotkeyService::rebind`] for why a refusal here cannot cost it.
+    Conflict(Conflict),
+    /// The hotkey thread could not be reached. This is not a conflict:
+    /// nobody refused the combination, the request never arrived. The only
+    /// way that happens outside a normal [`HotkeyService::stop`] is the
+    /// message loop's own `GetMessageW` failing and ending the thread on its
+    /// own (`src/service/windows.rs`), which every registration the service
+    /// held is gone with, the same as if [`HotkeyService::stop`] had just
+    /// been called.
+    ServiceUnavailable,
+}
+
+impl fmt::Display for RebindError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyBound(error) => write!(formatter, "{error}"),
+            Self::Conflict(conflict) => write!(formatter, "{conflict}"),
+            Self::ServiceUnavailable => formatter.write_str(
+                "the hotkey service could not be reached to change this binding; restarting \
+                 the recorder will register whatever is saved",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for RebindError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::AlreadyBound(error) => Some(error),
+            Self::Conflict(error) => Some(error),
+            Self::ServiceUnavailable => None,
+        }
+    }
+}
+
 /// What happened to one binding when it was registered.
 ///
 /// The platform module's answer, before it becomes an [`ActionStatus`]. It does
@@ -395,9 +546,9 @@ pub(crate) struct RegistrationOutcome {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{BindingState, Conflict, ConflictCause, Registration};
+    use super::{BindingState, Conflict, ConflictCause, RebindError, Registration};
     use crate::action::HotkeyAction;
-    use crate::bindings::Bindings;
+    use crate::bindings::{BindError, Bindings};
 
     fn conflict(cause: ConflictCause) -> Conflict {
         Conflict {
@@ -519,6 +670,53 @@ mod tests {
         assert_ne!(
             BindingState::Unbound,
             BindingState::Conflict(conflict(ConflictCause::AlreadyRegistered)),
+        );
+    }
+
+    /// [`RebindError`] wraps two existing message types rather than writing
+    /// its own, so this holds that the wrapping does not drop anything a
+    /// caller needs — the same failure mode
+    /// `a_taken_combination_names_the_hotkey_the_action_and_what_to_do` above
+    /// guards for [`Conflict`] on its own.
+    #[test]
+    fn a_conflict_from_a_rebind_reads_the_same_as_one_from_a_fresh_start() {
+        let error = RebindError::Conflict(conflict(ConflictCause::AlreadyRegistered));
+
+        let message = error.to_string();
+        assert!(message.contains("Ctrl+F10"), "{message}");
+        assert!(message.contains("Save replay"), "{message}");
+        assert!(
+            message.contains("Choose a different combination"),
+            "{message}",
+        );
+    }
+
+    /// The other case [`HotkeyService::rebind`] can refuse before Windows is
+    /// asked anything at all: a *different* Clipped action already holds the
+    /// combination.
+    #[test]
+    fn an_already_bound_rebind_names_the_combination_and_the_action_holding_it() {
+        let bind_error = BindError::AlreadyBound {
+            hotkey: "Ctrl+F10".parse().expect("Ctrl+F10 is a hotkey"),
+            action: HotkeyAction::SaveReplay,
+        };
+        let error = RebindError::AlreadyBound(bind_error);
+
+        let message = error.to_string();
+        assert!(message.contains("Ctrl+F10"), "{message}");
+        assert!(message.contains("Save replay"), "{message}");
+    }
+
+    /// The one `RebindError` variant nothing refused: the hotkey thread
+    /// itself could not be reached. AGENTS.md section 45 asks for something
+    /// actionable, and "restart" is the one thing that is always true of it.
+    #[test]
+    fn a_service_that_cannot_be_reached_says_a_restart_will_register_it() {
+        let message = RebindError::ServiceUnavailable.to_string();
+
+        assert!(
+            message.contains("restart"),
+            "the message must say what to do next: {message}",
         );
     }
 }
