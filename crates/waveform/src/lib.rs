@@ -39,11 +39,20 @@
 //!
 //! # Position in the architecture
 //!
-//! Layer 1: it depends on `clipped-logging` and on the FFmpeg binding, and on
-//! nothing else in this workspace. It names `rusty_ffmpeg` directly because
-//! there is no lower-layer route to a demuxer — `clipped-muxer` owns the safe
-//! wrappers and sits at layer 2 — which is the case
-//! `docs/adr/0004-ffmpeg-dependency-strategy.md` permits.
+//! Layer 1: it depends on `clipped-logging`, on `clipped-background` and on
+//! the FFmpeg binding, and on nothing else in this workspace. It names
+//! `rusty_ffmpeg` directly because there is no lower-layer route to a
+//! demuxer — `clipped-muxer` owns the safe wrappers and sits at layer 2 —
+//! which is the case `docs/adr/0004-ffmpeg-dependency-strategy.md` permits.
+//!
+//! [`Pace`], [`Continue`], [`Unpaced`] and [`WaveformService`]'s queue, thread
+//! and suspension mechanism come from `clipped-background`
+//! ([issue #293](https://github.com/wildware-uk/clipped/issues/293)): the
+//! thumbnail module of `clipped-library` needed exactly the same background
+//! worker, and `crates/background/src/lib.rs` is where that is explained in
+//! full. This crate's own half is what remains specific to a waveform:
+//! demuxing and decoding a recording's audio (`src/analyse.rs`), and the
+//! `.cwf` cache format (`src/cache.rs`, `src/format.rs`).
 //!
 //! # Where things are written
 //!
@@ -95,19 +104,14 @@ mod format;
 mod peaks;
 mod samples;
 mod service;
-mod source;
 mod waveform;
 
-#[cfg(windows)]
-mod windows;
-
-pub use analyse::{analyse, analyse_paced, Continue, Pace, Unpaced};
+pub use analyse::{analyse, analyse_paced};
 pub use cache::{PruneReport, WaveformCache, DEFAULT_BUDGET_BYTES, ENTRY_EXTENSION};
+pub use clipped_background::{
+    Continue, Pace, RequestOutcome, SourceIdentity, Unpaced, WorkerPriority, UNKNOWN_MODIFIED,
+};
 pub use error::WaveformError;
 pub use peaks::{Peak, BASE_BUCKET, MAX_BASE_BUCKETS, OVERVIEW_BUCKETS};
-pub use service::{
-    Completion, RequestOutcome, ServiceOptions, WaveformService, WorkerPriority,
-    DEFAULT_QUEUE_CAPACITY,
-};
-pub use source::{SourceIdentity, UNKNOWN_MODIFIED};
+pub use service::{Completion, ServiceOptions, WaveformService, DEFAULT_QUEUE_CAPACITY};
 pub use waveform::{TrackDescriptor, TrackWaveform, Waveform, WaveformState};

@@ -36,6 +36,16 @@ const LAYERS: &[&[&str]] = &[
     // no binary links it — so it sits at the bottom where any build script can
     // reach it.
     //
+    // `clipped-background` is here for the same reason `clipped-logging` is:
+    // it depends on nothing else in this workspace, which is what a layer-0
+    // crate is. `clipped-waveform` and the thumbnail module of
+    // `clipped-library` — both layer 1 — both need the one background worker
+    // it holds (issue #293), and it does not itself depend on
+    // `clipped-logging`: it computes its own cache-key digest with the same
+    // algorithm rather than reaching sideways for one, which would have put
+    // it above layer 0 (`crates/background/src/lib.rs`, "Why this is
+    // layer 0").
+    //
     // `clipped-ipc` belongs here for the reason `clipped-events` does: it is
     // shared vocabulary. It is the protocol boundary between the recorder and
     // the desktop application (docs/ipc.md), so it has to be usable from both
@@ -66,6 +76,7 @@ const LAYERS: &[&[&str]] = &[
         "clipped-edit",
         "clipped-media-validation",
         "clipped-ffmpeg-runtime",
+        "clipped-background",
     ],
     // Subsystems built directly on a platform or persistence layer.
     //
