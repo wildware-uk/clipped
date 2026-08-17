@@ -150,9 +150,7 @@ function Trash(): ReactNode {
    */
   const putBack = (restored: RestoredItem): string => {
     if (restored.file_restored) {
-      const renamed = restored.renamed
-        ? ', under a new name because something was in the way'
-        : '';
+      const renamed = restored.renamed ? ', under a new name because something was in the way' : '';
       return `Put ${restored.path} back${renamed}.`;
     }
     if (restored.path === undefined) {
