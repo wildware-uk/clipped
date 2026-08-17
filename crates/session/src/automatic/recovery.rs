@@ -193,48 +193,31 @@ pub fn adopt(recording: &InterruptedRecording, at: SystemTime) -> io::Result<()>
     close_recording(recording, INTERRUPTED, at)
 }
 
-/// Deletes `recording`'s file and records that it was discarded.
+/// Records `recording` as discarded, without touching its file.
 ///
-/// Deliberately not something that can be done to a whole directory at once:
-/// this is footage that cannot be made again, so the caller has to have named
-/// one recording (AGENTS.md section 56). The sidecar entry stays, with the
-/// [`DISCARDED`] outcome, because the record that a file existed and was thrown
-/// away is worth more than a gap.
+/// This module used to do both in one call, unlinking the file itself before
+/// writing the [`DISCARDED`] outcome. [Issue #451] moved the destination: a
+/// discarded fragment now goes to `clipped_library`'s trash, which is
+/// recoverable and swept by the user's own retention rather than gone the
+/// instant somebody names it. This crate does not own that trash — reusing it
+/// rather than building a second one is AGENTS.md section 55 — so disposing of
+/// the file is the caller's job (`clipped-recorder`'s `recover --discard`,
+/// `apps/recorder/src/recover.rs`), done *before* this is called, and this is
+/// left to do only the half that is this module's: writing what became of the
+/// recording into the session's own record.
+///
+/// Deliberately not something a caller can do to a whole directory at once —
+/// `InterruptedRecording` carries no bulk form of this — because a caller
+/// choosing to discard something still has to name it, even though the choice
+/// is recoverable now (AGENTS.md section 56).
+///
+/// [Issue #451]: https://github.com/wildware-uk/clipped/issues/451
 ///
 /// # Errors
 ///
-/// Whatever stopped the file being deleted or the sidecar being rewritten. A
-/// file that is already gone is not an error — the outcome is recorded and the
-/// caller is told nothing was deleted.
-pub fn discard(recording: &InterruptedRecording, at: SystemTime) -> io::Result<Discarded> {
-    let deleted = match fs::remove_file(recording.output()) {
-        Ok(()) => true,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
-    };
-
-    // The record is written after the deletion and not before, so a rewrite
-    // that fails leaves a sidecar saying the recording is still open — which
-    // offers it again — rather than one saying a file that is still there was
-    // discarded.
-    close_recording(recording, DISCARDED, at)?;
-    Ok(Discarded {
-        bytes: recording.bytes.filter(|_| deleted),
-    })
-}
-
-/// What discarding a recording actually did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Discarded {
-    bytes: Option<u64>,
-}
-
-impl Discarded {
-    /// How many bytes were freed, or [`None`] if there was no file to delete.
-    #[must_use]
-    pub const fn bytes_freed(&self) -> Option<u64> {
-        self.bytes
-    }
+/// Whatever stopped the sidecar being read or rewritten.
+pub fn record_discarded(recording: &InterruptedRecording, at: SystemTime) -> io::Result<()> {
+    close_recording(recording, DISCARDED, at)
 }
 
 /// Whether a path is a session sidecar.
@@ -667,15 +650,21 @@ mod tests {
     }
 
     #[test]
-    fn discarding_a_recording_deletes_the_file_and_says_so_in_the_record() {
+    fn recording_a_recording_as_discarded_leaves_its_file_exactly_where_it_was() {
+        // The behaviour this module is no longer responsible for, asserted by
+        // its absence: `record_discarded` writes the outcome and nothing else.
+        // Disposing of the file — now the trash, not `remove_file` — is
+        // `clipped-recorder recover`'s job (issue #451).
         let directory = TemporaryDirectory::new("discard");
         let sidecar = interrupted_session(directory.path(), "cs2-20260811-143205", 4096);
         let found = interrupted_recordings(directory.path()).expect("listed");
 
-        let discarded = discard(&found[0], at(1_786_459_085)).expect("the file can be discarded");
+        record_discarded(&found[0], at(1_786_459_085)).expect("the record can be closed");
 
-        assert_eq!(discarded.bytes_freed(), Some(4096));
-        assert!(!found[0].output().exists(), "the file should be gone");
+        assert!(
+            found[0].output().exists(),
+            "recording as discarded must never touch the footage"
+        );
         let file = read(&sidecar);
         assert_eq!(file["recordings"][0]["outcome"], Value::from(DISCARDED));
         assert_eq!(
@@ -683,21 +672,48 @@ mod tests {
             Value::from(found[0].output().display().to_string()),
             "the record of which file it was must stay: a gap is not a record"
         );
+        assert!(
+            file["recordings"][0]["ended_at"].is_string(),
+            "the entry should have an end time: {file}"
+        );
+        assert_eq!(
+            interrupted_recordings(directory.path())
+                .expect("listed")
+                .len(),
+            0,
+            "a discarded recording must not be offered again"
+        );
     }
 
     #[test]
-    fn discarding_a_recording_whose_file_is_already_gone_still_closes_the_record() {
+    fn recording_a_recording_as_discarded_leaves_the_sessions_history_explaining_what_happened() {
+        let directory = TemporaryDirectory::new("discard-events");
+        let sidecar = interrupted_session(directory.path(), "cs2-20260811-143205", 4096);
+        let found = interrupted_recordings(directory.path()).expect("listed");
+
+        record_discarded(&found[0], at(1_786_459_085)).expect("the record can be closed");
+
+        let file = read(&sidecar);
+        let events = file["events"].as_array().expect("the events are a list");
+        let last = events.last().expect("an event was appended");
+        assert_eq!(last["event"], Value::from("recording-ended"));
+        assert_eq!(last["outcome"], Value::from(DISCARDED));
+        assert_eq!(last["index"], Value::from(1));
+    }
+
+    #[test]
+    fn a_recording_whose_file_is_already_gone_can_still_be_recorded_as_discarded() {
+        // A caller may have already sent the file to the trash — or found
+        // nothing there to send — before this is called; either way, closing
+        // the record must not depend on the file still existing.
         let directory = TemporaryDirectory::new("discard-missing");
         interrupted_session(directory.path(), "cs2-20260811-143205", 0);
         let found = interrupted_recordings(directory.path()).expect("listed");
         fs::remove_file(found[0].output()).expect("the file can be removed");
 
-        let discarded = discard(&found[0], at(1_786_459_085)).expect(
-            "nothing to delete is not a \
-                                                                     failure",
-        );
+        record_discarded(&found[0], at(1_786_459_085))
+            .expect("closing the record does not depend on the file");
 
-        assert_eq!(discarded.bytes_freed(), None);
         assert!(interrupted_recordings(directory.path())
             .expect("listed")
             .is_empty());

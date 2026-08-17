@@ -206,6 +206,7 @@ pub fn render(detection: &Detection, cache: &CapabilityCache) -> String {
     }
 
     out.push_str(&automatic_lines(report));
+    out.push_str(&ffmpeg_lines());
     out.push_str(&footer(detection, cache));
     out
 }
@@ -349,6 +350,39 @@ fn automatic_lines(report: &CapabilityReport) -> String {
 }
 
 /// The legend, the standing caveat, and where the answer came from.
+/// Which FFmpeg this process is running against.
+///
+/// Reported here because this command exists to answer "what can this machine
+/// do, and what is it doing it with", and the FFmpeg is half that answer: it
+/// muxes every recording, remuxes every MP4 export, and decodes every thumbnail
+/// and waveform. A bug report that does not name it is missing the variable
+/// most likely to explain it
+/// ([issue #256](https://github.com/wildware-uk/clipped/issues/256)).
+///
+/// Read out of the libraries this process **loaded**, not from the pin
+/// `scripts/fetch-ffmpeg.ps1` recorded. Those are usually the same and
+/// deliberately need not be: `.cargo/config.toml` says an environment variable
+/// of the same name still wins, so somebody building against an FFmpeg of their
+/// own is a supported situation, and this is where they find out which one they
+/// got. It is also the answer the corresponding-source obligation turns on
+/// (`docs/licensing.md`, issue #123).
+///
+/// The identifier, the licence and the three library versions, and not the
+/// `configure` arguments: those run to about two thousand characters, which is
+/// not a line anybody reads in a terminal report. They are where somebody
+/// checking the licence position needs them — in the notices an installed copy
+/// carries, which `scripts/collect-notices.ps1` reads out of the same build.
+fn ffmpeg_lines() -> String {
+    let build = clipped_muxer::linkage::linked_build();
+    format!(
+        "
+FFmpeg
+
+  {build}
+"
+    )
+}
+
 fn footer(detection: &Detection, cache: &CapabilityCache) -> String {
     let mut out = String::new();
 
@@ -520,6 +554,66 @@ mod tests {
         }
         out.push_str(&automatic_lines(report));
         out
+    }
+
+    /// The report names the FFmpeg this process actually loaded, which is the
+    /// half of #256 a person reads rather than greps out of a log.
+    ///
+    /// Driven through the real [`render`] rather than through `ffmpeg_lines`
+    /// directly, and that is the whole point of it: a first version of this test
+    /// called the helper, and deleting the line that puts the section **into**
+    /// the report did not fail it. `rendered_report` above composes a report of
+    /// its own from the same private functions, so nothing else here asserts
+    /// what `render` actually assembles.
+    ///
+    /// Asserted against `linked_build()` rather than a version written down
+    /// here: a literal would need editing every time the pin moves, and it would
+    /// still pass on a build reporting a constant compiled in rather than what
+    /// was loaded — which is the failure this capability exists to prevent.
+    #[test]
+    fn the_report_names_the_ffmpeg_this_process_loaded() {
+        let detection = detect_cached(
+            &{
+                #[derive(Debug)]
+                struct NoMachine;
+                impl SystemProbe for NoMachine {
+                    fn adapters(&self) -> Result<Vec<Adapter>, ProbeError> {
+                        Ok(Vec::new())
+                    }
+                    fn encoders(&self) -> Result<EncoderObservations, ProbeError> {
+                        Ok(EncoderObservations::none())
+                    }
+                    fn encoder_limits(
+                        &self,
+                        _adapters: &[Adapter],
+                    ) -> Result<Vec<clipped_encoder::EncoderLimits>, ProbeError>
+                    {
+                        Ok(Vec::new())
+                    }
+                }
+                NoMachine
+            },
+            &CapabilityCache::disabled(),
+            Probing::WithoutSessions,
+        )
+        .expect("a machine with no adapters detects successfully");
+
+        let build = clipped_muxer::linkage::linked_build();
+        let report = render(&detection, &CapabilityCache::disabled());
+
+        assert!(
+            report.contains(build.identifier.as_ref()),
+            "the report should name the loaded build `{}`: {report}",
+            build.identifier
+        );
+        assert!(
+            report.contains(build.licence.as_ref()),
+            "the report should name the licence the build declares, which is what the              corresponding-source obligation turns on: {report}"
+        );
+        assert!(
+            !report.contains("--prefix="),
+            "the configure arguments are two thousand characters and belong in the notices,              not in a terminal report: {report}"
+        );
     }
 
     #[test]

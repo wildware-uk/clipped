@@ -1,4 +1,5 @@
-//! What the library is allowed to occupy, as the settings file holds it.
+//! Where the library lives and what it is allowed to occupy, as the settings
+//! file holds it.
 //!
 //! # Why this is a section of its own
 //!
@@ -7,8 +8,13 @@
 //! Counter-Strike, a microphone for Dota. A storage limit does not resolve that
 //! way and cannot, because a library is one thing however many games are in it.
 //! "What is this game's maximum library size" has no answer, and putting these
-//! three keys in that vocabulary would have forced one
+//! keys in that vocabulary would have forced one
 //! ([issue #111](https://github.com/wildware-uk/clipped/issues/111)).
+//!
+//! The recording directory joined them for the same reason and a second one:
+//! SPEC.md section 31 lists what a game may override, and where its recordings
+//! are written is not on it
+//! ([issue #307](https://github.com/wildware-uk/clipped/issues/307)).
 //!
 //! So they live beside `games`, `hotkeys` and `plugins` as a section of the
 //! document, in the shape [`super::plugins`] established: read into a value,
@@ -56,6 +62,21 @@ pub(crate) const MAXIMUM_AGE_DAYS: &str = "maximum_age_days";
 /// The key naming where deleted media waits out its retention.
 pub(crate) const TRASH_DIRECTORY: &str = "trash_directory";
 
+/// The key naming where recordings are written.
+///
+/// **Step 3 of the MVP definition** (SPEC.md section 45): a fresh user picks a
+/// microphone and a recording directory once, closes the window, and never
+/// configures capture again. Before
+/// [issue #307](https://github.com/wildware-uk/clipped/issues/307) there was
+/// nowhere for that answer to be saved — the directory was a per-run command
+/// line flag and otherwise the Clipped folder of the user's videos directory,
+/// so a settings screen had a control with nothing behind it.
+///
+/// It is in this section rather than the per-game vocabulary for the reason the
+/// limits are: SPEC.md section 31 lists what a game may override and where its
+/// recordings are written is not on it. One library, one place it lives.
+pub(crate) const RECORDING_DIRECTORY: &str = "recording_directory";
+
 /// Seconds in a day, for the one conversion this module makes.
 const DAY: u64 = 86_400;
 
@@ -76,15 +97,15 @@ const TRASH_SUFFIX: &str = ".trash";
 pub enum StorageProblem {
     /// A limit outside the bounds `clipped-library` sets.
     Limit(LimitError),
-    /// A trash directory that cannot be used.
-    TrashPath(TrashPathError),
+    /// A directory setting that cannot be used.
+    DirectoryPath(DirectoryPathError),
 }
 
 impl core::fmt::Display for StorageProblem {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Limit(error) => error.fmt(formatter),
-            Self::TrashPath(error) => error.fmt(formatter),
+            Self::DirectoryPath(error) => error.fmt(formatter),
         }
     }
 }
@@ -93,36 +114,42 @@ impl std::error::Error for StorageProblem {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Limit(error) => Some(error),
-            Self::TrashPath(error) => Some(error),
+            Self::DirectoryPath(error) => Some(error),
         }
     }
 }
 
-/// Why a trash directory was refused.
+/// Why a directory setting was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrashPathError {
+pub enum DirectoryPathError {
     /// The path is relative, so what it names depends on where Clipped was
-    /// started from — which is not a thing a user's deleted footage should
-    /// depend on.
+    /// started from — which is not a thing anybody's footage should depend on.
+    ///
+    /// Both directory settings in this section have the same rule, and this
+    /// error names which one was written rather than each having an error of
+    /// its own that says the same thing (AGENTS.md section 55).
     NotAbsolute {
+        /// The key that carried it, so the message can name the setting.
+        setting: &'static str,
         /// What was written.
         path: PathBuf,
     },
 }
 
-impl core::fmt::Display for TrashPathError {
+impl core::fmt::Display for DirectoryPathError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NotAbsolute { path } => write!(
+            Self::NotAbsolute { setting, path } => write!(
                 formatter,
-                "`{}` is not an absolute path, and where deleted recordings go must not depend                  on where Clipped was started from",
+                "`{}` is not an absolute path, and `{setting}` must not depend on where Clipped \
+                 was started from",
                 path.display()
             ),
         }
     }
 }
 
-impl std::error::Error for TrashPathError {}
+impl std::error::Error for DirectoryPathError {}
 
 /// Where deleted media goes when nothing says otherwise.
 ///
@@ -143,6 +170,7 @@ pub struct StorageSettings {
     minimum_free_space: Option<u64>,
     maximum_age_days: Option<u64>,
     trash_directory: Option<PathBuf>,
+    recording_directory: Option<PathBuf>,
     /// Keys this build could not read, kept so that writing the file back does
     /// not delete what a newer build stored.
     unknown: BTreeMap<String, Value>,
@@ -250,20 +278,66 @@ impl StorageSettings {
     ///
     /// # Errors
     ///
-    /// [`TrashPathError`] for a path that is not absolute. Everything else that
+    /// [`DirectoryPathError`] for a path that is not absolute. Everything else that
     /// can be wrong with it — a different volume from the media, an overlap
     /// with the recordings — is reported where it is discovered: `StorageRoots`
     /// refuses the overlap when the sweep builds them, and
     /// `Trash::send` reports a cross-volume rename against the item it could
     /// not move. Restating either here would be a second opinion that could
     /// disagree.
-    pub fn set_trash_directory(&mut self, path: Option<PathBuf>) -> Result<(), TrashPathError> {
+    pub fn set_trash_directory(&mut self, path: Option<PathBuf>) -> Result<(), DirectoryPathError> {
         if let Some(path) = &path {
             if !path.is_absolute() {
-                return Err(TrashPathError::NotAbsolute { path: path.clone() });
+                return Err(DirectoryPathError::NotAbsolute {
+                    setting: TRASH_DIRECTORY,
+                    path: path.clone(),
+                });
             }
         }
         self.trash_directory = path;
+        Ok(())
+    }
+
+    /// Where recordings are written, where the user has chosen.
+    ///
+    /// [`None`] means the caller's own default — the Clipped folder of the
+    /// user's videos directory, which is what `apps/recorder` resolves. A
+    /// setting that is not set does not become a path here, because this crate
+    /// does not know a user's videos directory and inventing one would put two
+    /// answers to the same question in the workspace (AGENTS.md section 55).
+    #[must_use]
+    pub fn recording_directory(&self) -> Option<&Path> {
+        self.recording_directory.as_deref()
+    }
+
+    /// Sets where recordings are written.
+    ///
+    /// # Errors
+    ///
+    /// [`DirectoryPathError`] for a path that is not absolute, for the reason a
+    /// trash directory must be absolute: a recording written relative to
+    /// wherever the recorder happened to be started from is a recording nobody
+    /// can find twice, and the recorder is started by the shell's `Run` key with
+    /// a working directory the user never chose.
+    ///
+    /// Whether the directory exists, is writable, or is on a volume with room
+    /// is deliberately **not** checked here. A settings file is read at start-up
+    /// and a drive can be unplugged after it; the answer that matters is the one
+    /// at the moment a recording starts, and that is where it is reported
+    /// (`crate::disk`, `SessionError::OutputDirectory`).
+    pub fn set_recording_directory(
+        &mut self,
+        path: Option<PathBuf>,
+    ) -> Result<(), DirectoryPathError> {
+        if let Some(path) = &path {
+            if !path.is_absolute() {
+                return Err(DirectoryPathError::NotAbsolute {
+                    setting: RECORDING_DIRECTORY,
+                    path: path.clone(),
+                });
+            }
+        }
+        self.recording_directory = path;
         Ok(())
     }
 
@@ -310,7 +384,13 @@ pub(crate) fn read(
             (TRASH_DIRECTORY, _) => match value.as_str() {
                 Some(path) => settings
                     .set_trash_directory(Some(PathBuf::from(path)))
-                    .map_err(|error| (TRASH_DIRECTORY, StorageProblem::TrashPath(error)))?,
+                    .map_err(|error| (TRASH_DIRECTORY, StorageProblem::DirectoryPath(error)))?,
+                None => settings.keep_unrecognised(key, value),
+            },
+            (RECORDING_DIRECTORY, _) => match value.as_str() {
+                Some(path) => settings
+                    .set_recording_directory(Some(PathBuf::from(path)))
+                    .map_err(|error| (RECORDING_DIRECTORY, StorageProblem::DirectoryPath(error)))?,
                 None => settings.keep_unrecognised(key, value),
             },
             _ => settings.keep_unrecognised(key, value),
@@ -338,6 +418,12 @@ pub(crate) fn write(settings: &StorageSettings) -> Map<String, Value> {
             Value::from(path.to_string_lossy().into_owned()),
         );
     }
+    if let Some(path) = &settings.recording_directory {
+        object.insert(
+            RECORDING_DIRECTORY.to_owned(),
+            Value::from(path.to_string_lossy().into_owned()),
+        );
+    }
     for (key, value) in &settings.unknown {
         object.insert(key.clone(), value.clone());
     }
@@ -354,6 +440,58 @@ mod tests {
             Value::Object(object) => Some(object),
             other => panic!("the fixture is not an object: {other}"),
         }
+    }
+
+    /// Step 3 of the MVP definition needs somewhere to save the answer, and the
+    /// answer has to survive being written and read again (issue #307).
+    #[test]
+    fn the_recording_directory_survives_a_round_trip() {
+        let settings = read(object(r#"{"recording_directory": "D:\\Clips"}"#))
+            .expect("an absolute path is accepted");
+
+        assert_eq!(
+            settings.recording_directory(),
+            Some(Path::new(r"D:\Clips")),
+            "the directory a settings screen saved is the directory that is read back"
+        );
+        assert_eq!(
+            write(&settings).get(RECORDING_DIRECTORY),
+            Some(&Value::from(r"D:\Clips")),
+            "and writing the file back does not lose it"
+        );
+    }
+
+    /// The recorder is started by the shell's `Run` key, with a working
+    /// directory nobody chose, so a relative path names somewhere different
+    /// every time.
+    #[test]
+    fn a_relative_recording_directory_is_refused_and_names_the_setting() {
+        let error = read(object(r#"{"recording_directory": "Clips"}"#))
+            .expect_err("a relative path is not a place");
+
+        assert_eq!(error.0, RECORDING_DIRECTORY);
+        assert!(
+            matches!(
+                &error.1,
+                StorageProblem::DirectoryPath(DirectoryPathError::NotAbsolute { setting, .. })
+                    if *setting == RECORDING_DIRECTORY
+            ),
+            "the refusal has to name which of the two directory settings was wrong, got {:?}",
+            error.1
+        );
+    }
+
+    /// The two directory settings are independent: setting one does not disturb
+    /// the other, and the message names whichever was written.
+    #[test]
+    fn the_two_directory_settings_do_not_share_a_value() {
+        let settings = read(object(
+            r#"{"recording_directory": "D:\\Clips", "trash_directory": "D:\\Bin"}"#,
+        ))
+        .expect("both are absolute");
+
+        assert_eq!(settings.recording_directory(), Some(Path::new(r"D:\Clips")));
+        assert_eq!(settings.trash_directory(), Some(Path::new(r"D:\Bin")));
     }
 
     #[test]

@@ -160,6 +160,19 @@ jobs:
       # Building the real one here would cost twenty minutes to answer a
       # question that does not depend on it. This job builds no installer and
       # produces no artefact, so the stand-in reaches nothing.
+      # The licence texts and third-party notices an installed copy is obliged to
+      # carry (issue #123). Produced here rather than by the staging script,
+      # which copies files: collecting them reads `cargo metadata` for several
+      # hundred crates and the FFmpeg build's own licence, and the CI job that
+      # checks the installer refuses without a recorder has neither.
+      - name: Collect the licence texts and notices
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/collect-notices.ps1
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'The notices could not be collected, so nothing may be distributed.' -ForegroundColor Red
+              exit 1
+          }
+
       - name: Stage the installer payload with a stand-in recorder
         run: |
           New-Item -ItemType Directory -Path stand-in -Force | Out-Null
@@ -297,6 +310,16 @@ jobs:
       # recorder into the bundle and refuses if it is not there.
       - name: Build the recorder
         run: cargo build --release --locked -p clipped-recorder
+
+      # As in the gates job: the notices are produced before anything stages
+      # them, and `npm run build:app` refuses without them (issue #123).
+      - name: Collect the licence texts and notices
+        run: |
+          & powershell -ExecutionPolicy Bypass -File scripts/collect-notices.ps1
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host 'The notices could not be collected, so nothing may be distributed.' -ForegroundColor Red
+              exit 1
+          }
 
       - name: Build the installer
         run: npm run build:app

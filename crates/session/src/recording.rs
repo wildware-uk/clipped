@@ -58,8 +58,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use clipped_capture::{
-    registered_backend, registered_declarations, select, Acquisition, CaptureBackend, CaptureClock,
-    CaptureConfig, CaptureError, CaptureMethod, CaptureMethodSetting, CapturedFrame, FrameFormat,
+    registered_backends, Acquisition, CaptureBackend, CaptureClock, CaptureConfig, CaptureError,
+    CaptureFallback, CaptureMethod, CaptureMethodSetting, CapturedFrame, FrameFormat,
 };
 use clipped_encoder::{Codec, Resolution, SourceFrame, SourceTexture, SurfaceKind, VideoEncoder};
 use clipped_logging::{RedactedPath, SessionContext, SessionId};
@@ -101,17 +101,25 @@ pub(crate) fn record(
     stop: &dyn crate::StopSignal,
     outputs: &crate::RecordingOutputs<'_>,
 ) -> Result<RecordingReport, SessionError> {
-    let method = choose_backend(settings)?;
-    let mut backend = registered_backend(method)
-        .ok_or_else(|| SessionError::BackendNotRegistered {
-            method: method.to_string(),
-        })?
-        .create()?;
+    // `CaptureFallback` rather than one chosen backend: it tries the method
+    // selection preferred, and moves on to the next candidate when that one
+    // cannot be created or cannot initialise against this target. Before
+    // [issue #285](https://github.com/wildware-uk/clipped/issues/285) that was
+    // built and called by nothing, so a preferred backend that failed to start
+    // ended the recording before it began, on a machine where another backend
+    // would have worked.
+    let target = settings.target().target()?;
+    let config = CaptureConfig::default().with_capture_cursor(settings.capture_cursor());
+    let started = CaptureFallback::start(
+        registered_backends(),
+        &target,
+        &config,
+        CaptureMethodSetting::Automatic,
+    )
+    .map_err(SessionError::from)?;
 
-    let format = backend.initialise(
-        &settings.target().target()?,
-        &CaptureConfig::default().with_capture_cursor(settings.capture_cursor()),
-    )?;
+    let (fallback, mut backend, format) = started.into_parts();
+    let method = fallback.current_method();
     tracing::info!(
         capture_backend = method.log_value(),
         width = format.size().width(),
@@ -128,16 +136,6 @@ pub(crate) fn record(
     // slow with the report (AGENTS.md section 58).
     backend.shut_down();
     outcome
-}
-
-/// Which backend will capture this target.
-fn choose_backend(settings: &RecordingSettings) -> Result<CaptureMethod, SessionError> {
-    let selection = select(
-        &registered_declarations(),
-        &settings.target().properties()?,
-        CaptureMethodSetting::Automatic,
-    )?;
-    Ok(selection.method())
 }
 
 /// Everything from the first frame to the finished file.

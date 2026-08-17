@@ -1,5 +1,5 @@
 import type { LibraryRecording, LibrarySession } from '@clipped/shared';
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 
 import {
   footageSeconds,
@@ -9,7 +9,9 @@ import {
   missingCount,
   presentBytes,
 } from './library';
+import type { Favourites, FavouriteTarget } from './favourites';
 import { canActOn, fileName, type RecordingActions } from './recordingActions';
+import { useSessionWindow } from './virtualWindow';
 
 /**
  * The list of sittings, shared by Home and Library.
@@ -41,11 +43,30 @@ import { canActOn, fileName, type RecordingActions } from './recordingActions';
  * explanation, and a disabled control that says why is what AGENTS.md sections
  * 27 and 45 ask for.
  *
+ * # Favouriting is offered for a recording whose file has gone
+ *
+ * Deliberately, and unlike the three above. A favourite is a statement about
+ * what to keep, and the moment it matters most is a recording somebody is about
+ * to go looking for: marking it protects the row from automatic cleanup
+ * (`docs/library.md`) whether or not the file is where the index last saw it.
+ * The three actions need the file; this does not.
+ *
  * # No thumbnails
  *
  * The deck draws a grid of them. Thumbnails are generated beside the recordings
  * (#57) and this window has no file-system permission to load one, so there is
  * nothing to draw and no placeholder is drawn in their place.
+ *
+ * # Large libraries scroll smoothly
+ *
+ * Issue #60's second acceptance criterion. `useSessionWindow` (`virtualWindow.ts`)
+ * trims which sessions are actually mounted to what the measured shell viewport
+ * needs, plus a small overscan either side, with two spacer rows standing in for
+ * whatever was skipped so the scrollbar keeps roughly the right size. It is a
+ * no-op — every session renders, exactly as before — until there is a real
+ * `.clipped-shell__main` to measure, which is why every case in
+ * `LibraryScreen.test.tsx` and `HomeScreen.test.tsx` still sees every session it
+ * always saw: jsdom has no layout engine and reports a viewport of zero.
  */
 
 /** What a session list is given. */
@@ -60,12 +81,25 @@ export interface SessionListProps {
    * Absent draws the sittings alone, which is what Home wants.
    */
   readonly actions?: RecordingActions;
+  /**
+   * Marking a sitting or a recording as one to keep (issue #58).
+   *
+   * Absent draws no stars at all. Home passes none for the same reason it
+   * passes no actions: it is a summary of what has been recorded lately, and
+   * the Library is where a sitting is acted on.
+   */
+  readonly favourites?: Favourites;
 }
 
 /** The sittings, one row each, and their recordings under them. */
-export function SessionList({ sessions, label, actions }: SessionListProps): ReactNode {
+export function SessionList({ sessions, label, actions, favourites }: SessionListProps): ReactNode {
+  const table = useRef<HTMLTableElement>(null);
+  const showsRecordings = actions !== undefined;
+  const window_ = useSessionWindow(table, sessions, showsRecordings);
+  const visible = sessions.slice(window_.start, window_.end);
+
   return (
-    <table className="clipped-table" aria-label={label}>
+    <table className="clipped-table" aria-label={label} ref={table}>
       <thead>
         <tr>
           <th scope="col">Game</th>
@@ -73,9 +107,25 @@ export function SessionList({ sessions, label, actions }: SessionListProps): Rea
           <th scope="col">Footage</th>
           <th scope="col">Size</th>
           <th scope="col">Files</th>
+          {favourites !== undefined && <th scope="col">Keep</th>}
         </tr>
       </thead>
-      {sessions.map((session) => (
+      {/*
+       * Stands in for the sessions skipped above `window_.start`, so the
+       * scrollbar reads roughly the length a fully-mounted table would have
+       * had. `aria-hidden` keeps it out of the accessibility tree entirely —
+       * an empty row would otherwise be a row nobody can make sense of, and
+       * every row-index assertion in the existing suites counts real sessions
+       * only.
+       */}
+      {window_.topSpacerPx > 0 && (
+        <tbody aria-hidden="true">
+          <tr style={{ height: `${String(window_.topSpacerPx)}px` }}>
+            <td colSpan={5} />
+          </tr>
+        </tbody>
+      )}
+      {visible.map((session) => (
         <tbody key={session.session_id}>
           <tr>
             {/*
@@ -88,6 +138,18 @@ export function SessionList({ sessions, label, actions }: SessionListProps): Rea
             <td>{formatDuration(footageSeconds(session))}</td>
             <td>{formatBytes(presentBytes(session))}</td>
             <td>{describeFiles(session)}</td>
+            {favourites !== undefined && (
+              <td>
+                <FavouriteButton
+                  favourites={favourites}
+                  target={{ kind: 'session', sessionId: session.session_id }}
+                  asRead={session.favourite}
+                  of={`the ${session.game_name ?? 'unrecognised'} sitting from ${formatMoment(
+                    session.started_at,
+                  )}`}
+                />
+              </td>
+            )}
           </tr>
           {actions !== undefined &&
             session.recordings.map((recording) => (
@@ -96,10 +158,18 @@ export function SessionList({ sessions, label, actions }: SessionListProps): Rea
                 recording={recording}
                 actions={actions}
                 session={session}
+                {...(favourites === undefined ? {} : { favourites })}
               />
             ))}
         </tbody>
       ))}
+      {window_.bottomSpacerPx > 0 && (
+        <tbody aria-hidden="true">
+          <tr style={{ height: `${String(window_.bottomSpacerPx)}px` }}>
+            <td colSpan={5} />
+          </tr>
+        </tbody>
+      )}
     </table>
   );
 }
@@ -109,10 +179,12 @@ function RecordingRow({
   recording,
   actions,
   session,
+  favourites,
 }: {
   readonly recording: LibraryRecording;
   readonly actions: RecordingActions;
   readonly session: LibrarySession;
+  readonly favourites?: Favourites;
 }): ReactNode {
   const available = canActOn(recording);
   const busy =
@@ -176,7 +248,55 @@ function RecordingRow({
           {busy === 'Exporting' ? 'Exporting…' : 'Export MP4'}
         </button>
       </td>
+      {favourites !== undefined && (
+        <td>
+          <FavouriteButton
+            favourites={favourites}
+            target={{ kind: 'recording', id: recording.recording_id }}
+            asRead={recording.favourite}
+            of={of}
+          />
+        </td>
+      )}
     </tr>
+  );
+}
+
+/**
+ * The star, as a toggle rather than as two buttons.
+ *
+ * `aria-pressed` is what carries the state to a screen reader, and the glyph
+ * changes shape as well as weight — a filled star against a hollow one — so the
+ * mark survives being read in monochrome (AGENTS.md section 46). The label names
+ * the thing rather than saying "Favourite", because a table of forty rows
+ * otherwise announces forty identical buttons.
+ */
+function FavouriteButton({
+  favourites,
+  target,
+  asRead,
+  of,
+}: {
+  readonly favourites: Favourites;
+  readonly target: FavouriteTarget;
+  readonly asRead: boolean;
+  readonly of: string;
+}): ReactNode {
+  const marked = favourites.isFavourite(target, asRead);
+  const changing = favourites.isChanging(target);
+
+  return (
+    <button
+      type="button"
+      aria-pressed={marked}
+      disabled={changing}
+      aria-label={marked ? `Stop keeping ${of}` : `Keep ${of}`}
+      onClick={() => {
+        favourites.set(target, !marked);
+      }}
+    >
+      <span aria-hidden="true">{marked ? '★' : '☆'}</span> {marked ? 'Kept' : 'Keep'}
+    </button>
   );
 }
 

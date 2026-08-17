@@ -47,11 +47,14 @@ impl RunningPlugin {
 
         // The line the host writes, built by the host's own type so that this
         // test cannot drift from the wire it is testing.
-        let attach = read_command(
-            r#"{"command":"attach","contract":1,
-                "session":{"session":"plugin-contract-test",
-                           "process":{"executable":"League of Legends.exe","process_id":1}}}"#,
-        )
+        // The version comes from `CONTRACT` rather than a literal, so that a
+        // bump does not leave this test sending an older contract than the
+        // host does while asserting it sent the host's own.
+        let attach = read_command(&format!(
+            r#"{{"command":"attach","contract":{CONTRACT},
+                "session":{{"session":"plugin-contract-test",
+                           "process":{{"executable":"League of Legends.exe","process_id":1}}}}}}"#,
+        ))
         .expect("the attach line is what the host sends");
         assert!(matches!(attach, HostCommand::Attach { contract, .. } if contract == CONTRACT));
         child

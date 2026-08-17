@@ -52,6 +52,7 @@ The contract:
 - [What a plugin is](#what-a-plugin-is)
 - [The manifest](#the-manifest)
 - [Network access, consent, and what enforcement can promise](#network-access-consent-and-what-enforcement-can-promise)
+- [Filesystem access, and what changed in contract 2](#filesystem-access-and-what-changed-in-contract-2)
 - [Discovery](#discovery)
 - [The lifecycle](#the-lifecycle)
 - [The wire](#the-wire)
@@ -514,7 +515,7 @@ is where a contributor looks before proposing in-process plugins again.
 
 ```json
 {
-  "contract": 1,
+  "contract": 2,
   "id": "counter-strike-2",
   "name": "Counter-Strike 2",
   "version": "0.1.0",
@@ -527,6 +528,13 @@ is where a contributor looks before proposing in-process plugins again.
       "direction": "listen",
       "endpoint": "127.0.0.1:3212",
       "purpose": "receives Counter-Strike 2 game state"
+    }
+  ],
+  "filesystem": [
+    {
+      "scope": "game-installation",
+      "access": "write",
+      "purpose": "writes the Game State Integration configuration Counter-Strike 2 reads at start-up"
     }
   ]
 }
@@ -541,6 +549,7 @@ is where a contributor looks before proposing in-process plugins again.
 | `executable` | One file name, inside the plugin's own directory. Not a path: `..\..\Windows\System32\cmd.exe` would make a plugin directory a way to run anything on the machine under a name the user consented to. |
 | `supports` | The executables this plugin has an integration for, compared without regard to case. |
 | `network` | What it will do with the network. Absent means none, which means none is permitted. |
+| `filesystem` | What it will do with the filesystem, beyond running its own executable from its own directory. Absent means none, which means none is permitted — the same rule `network` follows. Contract 2 and later only; see [Filesystem access, and what changed in contract 2](#filesystem-access-and-what-changed-in-contract-2). |
 
 Two rules about reading it are worth stating because they are the **opposite**
 of the event model's:
@@ -605,6 +614,76 @@ Making that stronger is [issue #280](https://github.com/wildware-uk/clipped/issu
 a job object or an AppContainer around the child, which is possible *because* a
 plugin is a process. When it lands, that constant and this section change
 together.
+
+## Filesystem access, and what changed in contract 2
+
+`plugins/dota2` writes a configuration file into the user's Dota 2 installation
+directory, because that is how Valve's Game State Integration is configured.
+Contract 1 had no typed way to say so — the disclosure lived in the manifest's
+`description`, which is honest but cannot be validated, cannot be summarised
+the way `NetworkAccess::summary` is, and does not lapse consent the way a
+change to `network` does
+([issue #343](https://github.com/wildware-uk/clipped/issues/343)). Contract 2
+adds `filesystem`, the same shape as `network` and consented to alongside it:
+
+```text
+Writes to the game's own installation directory — writes the Game State
+Integration configuration Counter-Strike 2 reads at start-up
+```
+
+**The scope is a closed enumeration, not a path.** A manifest naming a path it
+wants to write to would be a string the host has to trust and cannot check: it
+has no way to confirm that the string a plugin supplied really is the game's
+installation directory, or a directory at all, without asking the plugin —
+which is exactly the thing being declared. `FilesystemScope` is
+`game-installation` or `plugin-data` instead, so a declaration is checkable and says
+what a user needs to know rather than a string that means nothing until the
+plugin runs. `FilesystemAccessLevel` is `read`, `write` or `read-write`. Both
+are validated and rendered the same way `network`'s grants are
+(`clipped_plugins::FilesystemAccess`).
+
+**It is a contract version bump**, for the reason
+[Versioning the contract](#versioning-the-contract) states of every new
+manifest field: a build that has never heard of `filesystem` would refuse a
+manifest that used it as malformed JSON rather than as "needs a newer
+Clipped". `ContractVersion::is_supported` reads a declared contract as "at
+most this build's own" rather than an exact match, specifically so that this
+bump costs nothing to a manifest that has not touched the new field — a
+plugin still declaring `"contract": 1` and no `filesystem` is read exactly as
+it always was, and its `ConsentToken` does not move
+(`clipped_plugins::ConsentToken::of`). Only a manifest that starts using
+`filesystem` has any reason to declare `"contract": 2`.
+
+**It is not enforcement.** Everything [above](#network-access-consent-and-what-enforcement-can-promise)
+says about a network declaration applies here without a word changed: a
+plugin is a separate process, and a separate process can open any file its
+user account can reach whatever its manifest says. Declaring, validating and
+consenting to a filesystem grant is the vocabulary and the consent surface —
+what a plugin says it needs, shown to the user before they agree to it — and
+it is not a sandbox. [Issue #280](https://github.com/wildware-uk/clipped/issues/280)
+is where a plugin is held to *either* declaration by an AppContainer or a job
+object, and it applies to both at once, because the mechanism does not care
+which syscall it is confining.
+
+**What this is not.** It does not hand a plugin a directory to use.
+[Issue #381](https://github.com/wildware-uk/clipped/issues/381) is the other
+end of the same subject: giving a plugin the game's installation directory and
+a per-plugin state directory in `attach`, instead of letting it go and find
+them, which is a change to the wire and not to the manifest. The two do not
+conflict — a plugin can declare that it writes to `game-installation` under
+this field while still having to locate that directory itself until #381
+lands — but #381 is what would make the declaration and the capability line
+up exactly, since a plugin that is *handed* the one directory it declared it
+would write to is a plugin whose declaration a sandbox could hold it to
+precisely. Building #381 is out of scope here.
+
+**Status.** The type, its validation, its rendering and its effect on the
+consent token are implemented in `crates/plugins` and covered by tests. The
+bundled plugins have not adopted it yet: `plugins/dota2/plugin.json` and
+`plugins/cs2/plugin.json` still carry the disclosure in `description` alone,
+because moving them to `"contract": 2` and a typed `filesystem` grant is a
+change to `plugins/`, outside `crates/plugins`, and is left as a follow-up
+tracked on #343 rather than bundled into the contract change itself.
 
 ## Discovery
 
@@ -875,7 +954,9 @@ running plugin is negotiated with once, at start-up. Tying them together would
 mean a plugin that added a wire message forcing a migration of every event in a
 user's library.
 
-Today there is one contract version. Within a version:
+There have been two contract versions: 2 added `filesystem`
+([Filesystem access, and what changed in contract 2](#filesystem-access-and-what-changed-in-contract-2)).
+Within a version:
 
 - Adding a field to a *report* costs nothing: unknown fields on the wire are
   ignored, as [ipc.md](ipc.md) sets out for the control protocol.
@@ -886,6 +967,19 @@ Today there is one contract version. Within a version:
 
 A plugin declaring a contract this build does not speak is not started, and the
 message says which is behind.
+
+**A bump costs nothing to a manifest that does not use the new field.**
+`ContractVersion::is_supported` accepts any declared version up to and
+including the one this build speaks, not only an exact match, because a
+version bump only ever *adds* to a manifest's vocabulary — it never removes or
+repurposes a field an earlier manifest relied on. A plugin whose manifest has
+not changed since contract 1 keeps declaring `"contract": 1` forever, and this
+build reads it exactly as it always did; only a manifest that starts using a
+field contract 1 did not have — `filesystem` today — has a reason to declare
+`"contract": 2`. This is why the bump that added `filesystem` did not have to
+touch every bundled manifest to keep them working, though bundled manifests
+that go on to declare filesystem access do need to say so
+(see [Status](#filesystem-access-and-what-changed-in-contract-2)).
 
 ## The League of Legends plugin
 
@@ -1415,5 +1509,12 @@ application is the thing most likely to be misread (AGENTS.md section 7):
   declaration in the application.
 - **No sandbox** ([issue #280](https://github.com/wildware-uk/clipped/issues/280)).
   See above; the wording the user is shown says so.
+- **The bundled plugins do not yet declare filesystem access as a typed
+  field.** [Filesystem access, and what changed in contract 2](#filesystem-access-and-what-changed-in-contract-2)
+  adds the vocabulary; `plugins/dota2/plugin.json` and `plugins/cs2/plugin.json`
+  still carry the one thing each writes into a game's own directory in
+  `description` alone, because moving them to it is a change in `plugins/`
+  rather than `crates/plugins` and is left as the remaining step of
+  [issue #343](https://github.com/wildware-uk/clipped/issues/343).
 - **No ADR** ([issue #279](https://github.com/wildware-uk/clipped/issues/279)).
   The decision is argued here in the meantime.

@@ -1,20 +1,24 @@
-//! The process table, read directly, and the poller that falls back to it.
+//! The process table, and the poller that falls back to it.
 //!
-//! Two jobs, one mechanism. `CreateToolhelp32Snapshot` gives the whole process
-//! table in one call, which is what the watcher needs *once* at start so that a
-//! game already running has a name to report when it exits — and it is also
-//! the only way left to notice a process starting when WMI cannot be reached,
-//! which is what the fallback poller does with it.
+//! Two jobs, one mechanism. `clipped_windows::process_table` gives the whole
+//! process table in one call, which is what the watcher needs *once* at start
+//! so that a game already running has a name to report when it exits — and it
+//! is also the only way left to notice a process starting when WMI cannot be
+//! reached, which is what the fallback poller does with it.
+//!
+//! The read itself is not this crate's: `clipped-windows` owns
+//! `CreateToolhelp32Snapshot` and the handle discipline around it, so that
+//! Windows' process table is read from exactly one place in the workspace
+//! (AGENTS.md section 55). This module is left with the two things that are
+//! this watcher's own — resolving a baseline's executable paths, and diffing
+//! the table on a poll — plus the error type conversion the rest of the
+//! watcher expects.
 
 use std::collections::HashSet;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-use clipped_windows::process_image_path;
-use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE};
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-};
+use clipped_windows::{process_image_path, ProcessTableEntry};
 
 use super::super::config::WatchConfig;
 use super::super::error::SourceError;
@@ -22,93 +26,19 @@ use super::super::process::ProcessSnapshot;
 use super::super::source::{SourceEvent, SourceMessage};
 use super::stop::Stop;
 
-/// One row of the process table: everything it holds that the watcher wants.
-///
-/// Deliberately not a [`ProcessSnapshot`]: the table has no executable path in
-/// it, and finding one costs a call per process. The poller resolves paths only
-/// for processes it has not seen before, which on an idle machine is none of
-/// them.
-#[derive(Clone, Debug)]
-pub(crate) struct TableRow {
-    pub(crate) pid: u32,
-    pub(crate) parent_pid: u32,
-    pub(crate) name: String,
-}
-
-/// A snapshot handle, closed when this value is dropped.
-///
-/// The handle from `CreateToolhelp32Snapshot` is a kernel object like any
-/// other: leaking one leaks the copy of the process table behind it, and the
-/// poller takes one every interval for as long as Clipped runs (AGENTS.md
-/// section 58).
-struct SnapshotHandle(HANDLE);
-
-impl SnapshotHandle {
-    /// Takes a snapshot of the process table.
-    fn take() -> Result<Self, SourceError> {
-        // SAFETY: the call takes two integers and returns either a handle or an
-        // error. The handle it returns is owned by the value built from it here
-        // and closed exactly once, in `Drop`.
-        let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
-            .map_err(|error| SourceError::new("CreateToolhelp32Snapshot", error))?;
-        Ok(Self(handle))
-    }
-}
-
-impl Drop for SnapshotHandle {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` came from `CreateToolhelp32Snapshot`, is not a
-        // pseudo-handle, and cannot already have been closed: the field is
-        // private, the type is not `Copy`, and `Drop` runs once.
-        //
-        // The result is discarded deliberately. There is nothing a caller could
-        // do about a handle that will not close, and this call fails only for a
-        // handle that was never valid (AGENTS.md section 15 allows an ignored
-        // failure that is documented).
-        let _ = unsafe { CloseHandle(self.0) };
-    }
-}
-
 /// Every process running now, by identifier, parent and name.
+///
+/// A thin wrapper over [`clipped_windows::process_table`] that turns its
+/// [`clipped_windows::WindowsError`] into this watcher's own error type, so
+/// that nothing else in the crate needs to know the read is platform code.
 ///
 /// # Errors
 ///
 /// [`SourceError`] when Windows will not produce the process table at all,
 /// which is the machine being in trouble rather than an ordinary condition.
-/// Individual rows are never dropped: the enumeration either works or does not.
-pub(crate) fn process_table() -> Result<Vec<TableRow>, SourceError> {
-    let snapshot = SnapshotHandle::take()?;
-
-    let mut entry = PROCESSENTRY32W {
-        dwSize: u32::try_from(size_of::<PROCESSENTRY32W>())
-            .expect("PROCESSENTRY32W is far smaller than u32::MAX"),
-        ..Default::default()
-    };
-
-    // SAFETY: `entry` is a live, correctly sized `PROCESSENTRY32W` — the API
-    // rejects the call outright if `dwSize` is wrong — and `snapshot.0` is a
-    // handle this scope owns and has not closed.
-    if let Err(error) = unsafe { Process32FirstW(snapshot.0, &mut entry) } {
-        return Err(SourceError::new("Process32FirstW", error));
-    }
-
-    let mut rows = Vec::with_capacity(256);
-    loop {
-        rows.push(TableRow {
-            pid: entry.th32ProcessID,
-            parent_pid: entry.th32ParentProcessID,
-            name: executable_name(&entry.szExeFile),
-        });
-
-        // SAFETY: as above; `entry` is reused, which is what this API expects.
-        match unsafe { Process32NextW(snapshot.0, &mut entry) } {
-            Ok(()) => {}
-            Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => break,
-            Err(error) => return Err(SourceError::new("Process32NextW", error)),
-        }
-    }
-
-    Ok(rows)
+pub(crate) fn process_table() -> Result<Vec<ProcessTableEntry>, SourceError> {
+    clipped_windows::process_table()
+        .map_err(|error| SourceError::new("clipped_windows::process_table", error))
 }
 
 /// Every process running now, with its executable path where Windows gives one.
@@ -131,19 +61,13 @@ pub(crate) fn baseline() -> Result<Vec<ProcessSnapshot>, SourceError> {
 /// Protected and higher-integrity processes refuse to be opened at all, which
 /// is ordinary rather than a fault — see `clipped_windows::process_image_path`
 /// — and leaves the snapshot with a name and no path.
-fn resolve(row: &TableRow) -> ProcessSnapshot {
+fn resolve(row: &ProcessTableEntry) -> ProcessSnapshot {
     ProcessSnapshot::new(
-        row.pid,
-        row.parent_pid,
-        process_image_path(row.pid),
-        &row.name,
+        row.pid(),
+        row.parent_pid(),
+        process_image_path(row.pid()),
+        row.name(),
     )
-}
-
-/// The name out of a `PROCESSENTRY32W`, up to its terminator.
-fn executable_name(raw: &[u16]) -> String {
-    let end = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
-    String::from_utf16_lossy(&raw[..end])
 }
 
 /// Polls the process table and reports what changed.
@@ -185,9 +109,9 @@ pub(crate) fn poll(
         // processes, and comparing two lists of that size by scanning is
         // fifty thousand comparisons every interval for nothing (AGENTS.md
         // section 18).
-        let live: HashSet<u32> = current.iter().map(|row| row.pid).collect();
+        let live: HashSet<u32> = current.iter().map(ProcessTableEntry::pid).collect();
 
-        for row in current.iter().filter(|row| !known.contains(&row.pid)) {
+        for row in current.iter().filter(|row| !known.contains(&row.pid())) {
             if events
                 .send(SourceMessage::Event(SourceEvent::Started(resolve(row))))
                 .is_err()
@@ -218,15 +142,15 @@ mod tests {
         let rows = process_table().expect("the process table can always be read");
         let own = rows
             .iter()
-            .find(|row| row.pid == std::process::id())
+            .find(|row| row.pid() == std::process::id())
             .expect("a process is in its own process table");
 
         assert!(
-            own.name.to_lowercase().ends_with(".exe"),
+            own.name().to_lowercase().ends_with(".exe"),
             "expected an executable name, got {}",
-            own.name
+            own.name()
         );
-        assert_ne!(own.parent_pid, own.pid);
+        assert_ne!(own.parent_pid(), own.pid());
     }
 
     #[test]
@@ -250,17 +174,5 @@ mod tests {
                     .map(|name| name.to_string_lossy().into_owned()))
                 .expect("the running executable has a name")
         );
-    }
-
-    #[test]
-    fn a_name_stops_at_its_terminator() {
-        let mut raw = [0_u16; 8];
-        for (slot, unit) in raw.iter_mut().zip("game.exe".encode_utf16()) {
-            *slot = unit;
-        }
-
-        assert_eq!(executable_name(&raw), "game.exe");
-        assert_eq!(executable_name(&[b'a' as u16, 0, b'b' as u16]), "a");
-        assert_eq!(executable_name(&[]), "");
     }
 }

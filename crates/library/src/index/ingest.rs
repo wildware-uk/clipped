@@ -54,7 +54,22 @@ use crate::events::{Placement, RecordedSegment, SessionRecordings};
 /// The words `clips.origin` may hold.
 const CLIP_ORIGINS: &[&str] = &["manual", "replay-buffer", "highlight"];
 /// The words `recordings.outcome` may hold.
-const RECORDING_OUTCOMES: &[&str] = &["recorded", "no-window", "failed"];
+///
+/// The first three are `clipped_session::report`'s; the last two are
+/// `clipped_session::automatic::recovery`'s `INTERRUPTED` and `DISCARDED` --
+/// what a recording is marked when `clipped-recorder recover` decides what
+/// became of footage a killed recorder left (issue #451). Widened to match
+/// `crates/storage/migrations/0006_recovered_recording_outcomes.sql`'s CHECK
+/// constraint, which is the schema-level half of this same vocabulary; the
+/// two have to agree; a word here that the database still refused would fail
+/// the write instead of degrading it.
+const RECORDING_OUTCOMES: &[&str] = &[
+    "recorded",
+    "no-window",
+    "failed",
+    "interrupted",
+    "discarded",
+];
 /// The words `recordings.end_reason` may hold.
 const RECORDING_END_REASONS: &[&str] = &["stopped", "target-lost", "target-resized"];
 /// The words `sessions.end_reason` may hold.

@@ -607,6 +607,7 @@ mod tests {
             target: "process cs2.exe".to_owned(),
             elapsed_ms: 90_000,
             replay_seconds: None,
+            session: None,
         }
     }
 

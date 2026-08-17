@@ -191,6 +191,7 @@ fn main() {
             library_trash,
             restore_from_trash,
             empty_trash,
+            set_favourite,
             record_target,
             recorder_status,
             recorder_hotkeys,
@@ -462,6 +463,35 @@ fn empty_trash(
     }))? {
         clipped_ipc::Reply::TrashEmptied { emptied } => Ok(emptied),
         _ => Err(wrong_reply("empty_trash")),
+    }
+}
+
+/// Marks one thing a favourite, or clears the mark (issue #58).
+///
+/// The target takes two fields because the schema does: a sitting is addressed
+/// by the identifier the recorder generated, which is text, and a recording or
+/// clip by the integer key the index gave it. `kind` says which to read.
+///
+/// `favourite` is the state to be in rather than a toggle, so two windows open
+/// on one library cannot disagree about which way a star points.
+#[tauri::command(async)]
+fn set_favourite(
+    link: tauri::State<'_, RecorderLink>,
+    kind: String,
+    session_id: String,
+    id: i64,
+    favourite: bool,
+) -> Result<clipped_ipc::FavouriteMark, RecorderProblem> {
+    match link.call(&clipped_ipc::Command::SetFavourite(
+        clipped_ipc::SetFavourite {
+            kind,
+            session_id,
+            id,
+            favourite,
+        },
+    ))? {
+        clipped_ipc::Reply::Favourited { mark } => Ok(mark),
+        _ => Err(wrong_reply("set_favourite")),
     }
 }
 
@@ -1100,6 +1130,7 @@ mod tests {
             // The window does not ask for a replay buffer, so a recording it
             // started keeps none (#427).
             replay_seconds: None,
+            session: None,
         })
     }
 

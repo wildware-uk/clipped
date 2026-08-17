@@ -4,7 +4,10 @@
 `crates/hotkeys` registers combinations, reports the ones another application
 already owns, and delivers presses to handlers without making anything wait;
 `clipped-recorder serve` is what starts it
-([issue #232](https://github.com/wildware-uk/clipped/issues/232)). The screen
+([issue #232](https://github.com/wildware-uk/clipped/issues/232)), and with
+`--watch-for-games` that is also the process recording the game — so a press
+reaches a recording nobody had to start
+([issue #421](https://github.com/wildware-uk/clipped/issues/421)). The screen
 that *binds* a combination is still
 [issue #54](https://github.com/wildware-uk/clipped/issues/54), and changing one
 without restarting the recorder is
@@ -111,11 +114,13 @@ The part worth reading carefully is the **ordering**, because it is what makes
 "exactly one process registers" true rather than hoped for:
 
 ```text
-clipped-recorder serve
+clipped-recorder serve --watch-for-games
   |
   |-- Listener::bind(endpoint)   <- a second recorder fails here and exits
   |
   |-- register the hotkeys       <- so only one process ever reaches this
+  |
+  |-- watch for games            <- and it is the process that records them
   |
   '-- ready endpoint=...
 ```
@@ -127,6 +132,23 @@ could ask Windows for a combination. There is no hotkey lock of its own, because
 there is nothing left for one to decide.
 `a_second_recorder_never_reaches_the_first_ones_hotkeys` in
 `apps/recorder/tests/ipc_protocol.rs` is what holds that ordering in place.
+
+The fourth line is what makes the keys worth having. `serve` did not watch for
+games until [issue #421](https://github.com/wildware-uk/clipped/issues/421):
+`clipped-recorder watch` did, in a process of its own, which served no protocol
+and registered no hotkey — so the recordings a user is most likely to want to
+bookmark, the ones nobody had to start, were the ones nothing could bookmark.
+Giving `watch` a control endpoint instead was the alternative, and it is the one
+this ADR forbids: two recorders watching for games would be two processes both
+wanting the combinations, and the endpoint would no longer be what decides which
+gets them. So the watcher moved into the process that already had them
+(`docs/sessions.md`). `watch` stays as the terminal-facing command, with nothing
+able to reach what it records.
+
+A press reaches an automatic recording through the same `add_bookmark` a button
+sends, against the same recording state, so there is one implementation of what
+a bookmark is whichever way the recording started
+(`RecordingState::adopt`).
 
 ## What a press does
 
@@ -158,6 +180,20 @@ support bundle needs in order to answer "the hotkey does nothing"
 | `take_screenshot` | `take_screenshot`, naming no target | Refused: there is no window to photograph |
 | `toggle_recording` | `stop_recording`, naming no recording | Refused: a key press does not say which window to record ([#416](https://github.com/wildware-uk/clipped/issues/416)) |
 | everything else | nothing: no handler is registered | Reported as unhandled, naming the milestone and the issue |
+
+"Whatever is running" is the point of the middle column, and it includes a
+recording detection started. Two of those rows behave a little differently
+against one:
+
+- **`save_replay`** is refused, because an automatic recording keeps no rolling
+  window — that costs about 140 MiB a minute and nothing has decided to spend it
+  ([#427](https://github.com/wildware-uk/clipped/issues/427)). The refusal is the
+  same one a window-started recording without a buffer gets.
+- **`toggle_recording`** stops the file *and* tells the sitting, so that the
+  session does not start a fresh recording of the game five seconds later. A
+  stop that undid itself would be worse than a key that did nothing (AGENTS.md
+  section 27). The sitting stays open — the game is still running, and a
+  relaunch still joins it — and recording resumes when the game restarts.
 
 ## Where a conflict is shown
 
