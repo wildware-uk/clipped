@@ -291,13 +291,13 @@ The first frame on every connection is a `hello`. It is answered by exactly one
 closing.
 
 ```json
-{"type":"hello","protocol_version":1,
+{"type":"hello","protocol_version":2,
  "client":{"name":"clipped-desktop","version":"0.1.0"},
  "role":"control"}
 ```
 
 ```json
-{"type":"welcome","protocol_version":1,
+{"type":"welcome","protocol_version":2,
  "recorder":{"name":"clipped-recorder","version":"0.1.0"},
  "role":"control",
  "features":["recording","status_events","bookmarks","screenshots"]}
@@ -315,7 +315,7 @@ An `events` connection adds the streams it wants, and its `welcome` says which
 it will get:
 
 ```json
-{"type":"hello","protocol_version":1,
+{"type":"hello","protocol_version":2,
  "client":{"name":"clipped-desktop","version":"0.1.0"},
  "role":"events","streams":["status","errors"]}
 ```
@@ -331,7 +331,14 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`, `hotkeys`, `replay`.
+`shutdown`, `library`, `export`, `hotkeys`, `replay`, `automatic`.
+
+`automatic` is the clearest case of why a feature is not a version. Protocol 2
+says a recorder can *describe* an automatic sitting; `automatic` says it
+*makes* them. A recorder that serves a window and records only what it is asked
+to speaks protocol 2 and reports `idle` for ever, and a window that drew
+"Watching for games" from the version number alone would be saying something
+untrue about a recorder that will never record on its own.
 
 `shutdown` is announced by the *server* rather than by the recording engine
 behind it, because it is the accept loop a shutdown ends and the accept loop
@@ -429,6 +436,41 @@ does without; a state it cannot read is a lie it would otherwise tell. Adding
 one is a version bump, and the handshake is then what stops the two ever
 meeting.
 
+### Version 2, which is that rule being applied
+
+Protocol 2 is the first bump, and it is the case the paragraph above was
+written for: `status` gained a third state, `watching` — a recorder that is
+going to record the next game to start, which used to answer `idle` and so was
+indistinguishable from one that will never record anything.
+
+Three things came with it, and none of them would have needed a bump on their
+own:
+
+- `active_recording` gained `session`, the sitting a recording belongs to. That
+  is where the **game** is; `target` is a capture selector, and a window cannot
+  turn `process 4242` into "Counter-Strike 2" without the catalogue that lives
+  in the recorder.
+- `watching` carries the same `session`, because a game that exits keeps its
+  sitting open for a restart grace period. A window reading the game off the
+  *recording* would blank the name for those seconds and then bring it back.
+- `session_ended` is a new event, carrying the sitting's files rather than an
+  identifier to look up. It fires when the sitting ends, which may be before
+  the library has indexed anything.
+
+**`SUPPORTED_PROTOCOL_VERSIONS` is `[2]`, not `[1, 2]`,** which is a deliberate
+departure from the transitional advice above — ship a recorder accepting both,
+then a UI asking for the newer, then drop the older. That path is available
+only when a recorder can honestly serve both versions at once, and this
+recorder cannot. Serving version 1 would be a promise never to say `watching`,
+and a watching recorder has no way to keep it: the state is not an optional
+field it can omit, it is what the recorder *is* at that moment. A recorder that
+answered `idle` to a version 1 client while watching would be telling that
+client the one lie this whole change exists to stop.
+
+So the two builds refuse each other at the handshake, in both directions, with
+a message naming the versions and which side is behind. That is the wanted
+outcome and the reason `hello` and `refused` are frozen.
+
 ### An unknown command: refused by name
 
 `unknown_command`, naming the command. Deliberately not a parse failure: a
@@ -478,6 +520,19 @@ Sent on a `control` connection:
 
 `id` is chosen by the client and quoted in the response. `params` may be omitted
 when a command's parameters are all optional.
+
+`status` is a tagged union on `state`, with three tags and no catch-all:
+
+| `state` | Means | Carries |
+| --- | --- | --- |
+| `idle` | Nothing is being recorded, and nothing will be until something asks | nothing |
+| `watching` | Nothing is being recorded, and the next game to start will be | `session`, when a sitting is waiting out its restart grace |
+| `recording` | A recording is in progress | `recording_id`, `output`, `target`, `elapsed_ms`, and optionally `replay_seconds` and `session` |
+
+`session` appears on both `watching` and `recording` and is the same shape in
+each, so a window that wants to keep showing one game across the moment a
+recording stops reads it from the status rather than matching on the state
+twice. It is absent for a recording that is not part of a sitting.
 
 | Command | Parameters | Reply | This build |
 | --- | --- | --- | --- |
@@ -1252,13 +1307,33 @@ Sent on an `events` connection, unprompted:
 ```
 
 ```json
+{"type":"event","event":"status_changed",
+ "status":{"state":"watching",
+           "session":{"session_id":"cs2-20260811-201400","game_id":"cs2",
+                      "game_name":"Counter-Strike 2",
+                      "started_at":"2026-08-11T20:14:00+01:00"}}}
+```
+
+```json
+{"type":"event","event":"session_ended",
+ "session":{"session_id":"cs2-20260811-201400","game_id":"cs2",
+            "game_name":"Counter-Strike 2",
+            "started_at":"2026-08-11T20:14:00+01:00",
+            "ended_at":"2026-08-11T22:03:00+01:00",
+            "end_reason":"disk_full",
+            "recordings":[{"session_index":1,
+                           "output":"D:\\clips\\cs2-20260811-201400-01.mkv",
+                           "outcome":"recorded","duration_ms":1800000}]}}
+```
+
+```json
 {"type":"event","event":"recording_failed","recording_id":"r-1",
  "error":{"code":"recording_failed","message":"the encoder stopped accepting frames"}}
 ```
 
 | Stream | Events | This build |
 | --- | --- | --- |
-| `status` | `status_changed` | yes |
+| `status` | `status_changed`, `session_ended` | yes |
 | `errors` | `recording_failed` | yes |
 | `metrics` | live throughput, dropped frames, encoder load | no — M14, [#100](https://github.com/wildware-uk/clipped/issues/100) |
 
@@ -1280,6 +1355,15 @@ rather than a delta, a client that missed one recovers on the next.
 `target` is the selector the user gave — `process `cs2.exe`` — and never the
 window title. A title is user content and the most reliable way to put somebody's
 document name into a screenshot of a bug report (AGENTS.md section 13).
+
+**`session_ended` carries the sitting itself, not an identifier to look up.** A
+sitting ends the moment the game does, and the library may not have indexed a
+thing by then — a client sent only an identifier would have nothing to show and
+no way to know when it would. It is the same `session` shape the status carries,
+with the two fields only an ended sitting has: `ended_at`, and `end_reason` when
+there is one to give. Whether a sitting is over is therefore the presence of
+`ended_at` rather than a separate type, which is the answer `library_sessions`
+had already settled on for the same question.
 
 ## Errors
 
@@ -1403,7 +1487,7 @@ function Read-Frame($pipe) {
     [Text.Encoding]::UTF8.GetString($payload)
 }
 
-Send-Frame $pipe @{ type = 'hello'; protocol_version = 1; role = 'control'
+Send-Frame $pipe @{ type = 'hello'; protocol_version = 2; role = 'control'
                     client = @{ name = 'powershell'; version = '0' } }
 Read-Frame $pipe
 
