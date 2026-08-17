@@ -198,6 +198,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipped-background"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "clipped-capture"
 version = "0.1.0"
 dependencies = [
@@ -339,6 +347,7 @@ name = "clipped-library"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipped-background",
  "clipped-edit",
  "clipped-events",
  "clipped-ffmpeg-runtime",
@@ -497,13 +506,13 @@ dependencies = [
 name = "clipped-waveform"
 version = "0.1.0"
 dependencies = [
+ "clipped-background",
  "clipped-ffmpeg-runtime",
  "clipped-logging",
  "clipped-media-validation",
  "rusty_ffmpeg",
  "tracing",
  "tracing-subscriber",
- "windows",
 ]
 
 [[package]]

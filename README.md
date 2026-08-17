@@ -160,7 +160,7 @@ without being placed in a layer.
 
 | Layer | Crates | Depends on |
 | --- | --- | --- |
-| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime` | nothing in this workspace |
+| 0 | `clipped-windows`, `clipped-events`, `clipped-storage`, `clipped-logging`, `clipped-ipc`, `clipped-hotkeys`, `clipped-edit`, `clipped-media-validation`, `clipped-ffmpeg-runtime`, `clipped-background` | nothing in this workspace |
 | 1 | `clipped-capture`, `clipped-audio`, `clipped-encoder`, `clipped-library`, `clipped-game-detection`, `clipped-plugins`, `clipped-waveform` | layer 0 |
 | 2 | `clipped-muxer`, `clipped-league-plugin`, `clipped-cs2-plugin`, `clipped-dota2-plugin` (plugins, see below) | layers 0–1 |
 | 3 | `clipped-replay`, `clipped-export` | layers 0–2 |
@@ -260,6 +260,19 @@ kind of reason. It copies the pinned FFmpeg DLLs beside the binaries a build
 produces, so that nothing has to be on `PATH`, and it is named only by the
 `[build-dependencies]` of the crates that link FFmpeg — `clipped-muxer` and
 `clipped-encoder`. No binary links it, and it depends on nothing at all.
+
+`clipped-background` (`crates/background`) holds the one background worker
+`clipped-waveform` and the thumbnail module of `clipped-library` both need — a
+low-priority thread reading from a bounded queue, suspendable for the
+duration of a recording — which each implemented for itself until
+[issue #293](https://github.com/wildware-uk/clipped/issues/293) (AGENTS.md
+section 55). It sits at layer 0 rather than depending on `clipped-logging`
+for the digest its cache keys need: two layer-0 crates may not depend on each
+other, since neither would then be the workspace's lowest layer, so it
+computes the same digest algorithm a second time instead
+(`crates/background/src/lib.rs` explains the trade-off). It knows nothing
+about waveforms, thumbnails, FFmpeg or a cache format; what to do with a path
+taken off its queue is a closure its two callers each supply.
 
 `clipped-logging` owns where diagnostics go and how much is recorded: it
 installs the process-wide `tracing` subscriber, resolves the log level from the

@@ -40,8 +40,9 @@
 use core::time::Duration;
 use std::path::PathBuf;
 
+use clipped_background::SourceIdentity;
+
 use crate::peaks::{Level, Peak, MAX_BASE_BUCKETS};
-use crate::source::SourceIdentity;
 use crate::waveform::{TrackDescriptor, TrackWaveform, Waveform};
 
 /// What every entry starts with.
