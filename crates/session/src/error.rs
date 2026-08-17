@@ -90,6 +90,26 @@ pub enum SessionError {
     },
     /// Encoding failed part way through the recording.
     Encode(EncodeError),
+    /// A replacement capture backend took over and the encoder opened against
+    /// its graphics device cannot carry on into the same file.
+    ///
+    /// A backend replaced mid-recording brings its own Direct3D device with it,
+    /// so the encoder session — which is opened against one device and can only
+    /// bind textures belonging to it — has to be opened again
+    /// (`crate::windows::device`). The file's video track fixes its codec and
+    /// its out-of-band parameter sets in the header (ADR 0001), and a second
+    /// encoder that would produce a different stream cannot be written into it:
+    /// a player would decode the frames after the change against a codec header
+    /// that describes something else.
+    ///
+    /// Everything up to the change is in a finalised, playable file. This is
+    /// the failure the recording reports instead of continuing.
+    EncoderCannotFollowCapture {
+        /// The capture method that took over.
+        method: String,
+        /// Why the encoder opened against it cannot be carried into this file.
+        reason: String,
+    },
     /// An audio source the caller asked for could not be opened.
     ///
     /// Refused before the recording starts rather than skipped, because a
@@ -199,6 +219,13 @@ impl fmt::Display for SessionError {
                 "encoding stopped part way through the recording: {error}. \
                  The file was closed, so everything encoded before this point still plays"
             ),
+            Self::EncoderCannotFollowCapture { method, reason } => write!(
+                formatter,
+                "{method} took over the capture and the recording could not be carried into the \
+                 same file: {reason}. A file's video track declares one codec and one set of \
+                 codec parameters in its header and cannot change either part way through, so \
+                 the recording was finished at that point — everything before it plays"
+            ),
             Self::Audio { track, source } => write!(
                 formatter,
                 "the {track} track could not be recorded: {source}. Turn that source off to \
@@ -269,6 +296,7 @@ impl Error for SessionError {
             | Self::BackendNotRegistered { .. }
             | Self::NoGraphicsDevice
             | Self::NoEncoder { .. }
+            | Self::EncoderCannotFollowCapture { .. }
             | Self::NoFrames
             | Self::NotEnoughDiskSpace { .. }
             | Self::WriterLost => None,

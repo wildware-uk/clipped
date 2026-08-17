@@ -16,7 +16,7 @@ use core::fmt;
 use core::time::Duration;
 use std::path::{Path, PathBuf};
 
-use clipped_capture::{CaptureMethod, SyncState};
+use clipped_capture::{CaptureMethod, MethodChange, SyncState};
 use clipped_encoder::{Codec, EncoderKind};
 
 /// Why a recording ended.
@@ -371,6 +371,7 @@ pub struct RecordingReport {
     pub(crate) duration: Duration,
     pub(crate) end_reason: EndReason,
     pub(crate) audio_tracks: Vec<AudioTrackReport>,
+    pub(crate) capture_changes: Vec<MethodChange>,
 }
 
 impl RecordingReport {
@@ -388,10 +389,31 @@ impl RecordingReport {
         self.output.as_deref()
     }
 
-    /// Which capture backend produced the frames.
+    /// Which capture backend produced the frames **at the end**.
+    ///
+    /// Not necessarily the one selection chose at the start: a backend that
+    /// fails or goes black mid-recording is restarted or replaced, and this is
+    /// the method that was actually running when the file was finished
+    /// ([issue #285](https://github.com/wildware-uk/clipped/issues/285)).
+    /// [`capture_changes`](Self::capture_changes) is the account of how it got
+    /// there, and is empty for the ordinary recording where nothing changed.
     #[must_use]
     pub const fn capture_method(&self) -> CaptureMethod {
         self.capture_method
+    }
+
+    /// Every capture backend restart and replacement, in the order they
+    /// happened.
+    ///
+    /// Empty for a recording whose backend never faltered, which is nearly all
+    /// of them. Each entry carries the method before, the method after, what
+    /// triggered it and the failure in the words the failure used, because
+    /// "Desktop Duplication" in a recording that started on Windows Graphics
+    /// Capture is otherwise a fact with no explanation attached
+    /// (`docs/capture-pipeline.md`, SPEC.md section 36).
+    #[must_use]
+    pub fn capture_changes(&self) -> &[MethodChange] {
+        &self.capture_changes
     }
 
     /// Which encoder family encoded them.
@@ -668,6 +690,7 @@ mod tests {
             duration: Duration::from_millis(6_000),
             end_reason: EndReason::Stopped,
             audio_tracks: Vec::new(),
+            capture_changes: Vec::new(),
         }
     }
 

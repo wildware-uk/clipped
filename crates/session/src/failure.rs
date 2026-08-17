@@ -227,6 +227,22 @@ impl RecordingFailure {
                 footage: FootageKept::Nothing,
             },
 
+            // Filed under the encoder rather than under capture, because
+            // capture recovered: another backend took over and is running. What
+            // could not follow it is the encoder, and the advice is about that.
+            SessionError::EncoderCannotFollowCapture { .. } => Self {
+                kind: FailureKind::EncoderUnavailable,
+                headline: "The recording could not continue after the capture method changed"
+                    .to_owned(),
+                detail: error.to_string(),
+                actions: vec![
+                    "Start recording again".to_owned(),
+                    "Choose a capture method rather than Automatic if this keeps happening"
+                        .to_owned(),
+                ],
+                footage: FootageKept::UpToTheFailure,
+            },
+
             SessionError::Capture(_)
             | SessionError::NoCaptureBackend(_)
             | SessionError::CaptureExhausted(_) => Self {
@@ -684,6 +700,13 @@ mod tests {
                 matched: 0,
                 available: 3,
             },
+            SessionError::EncoderCannotFollowCapture {
+                method: "Desktop Duplication".to_owned(),
+                reason: "the Software (CPU) encoder opened against its graphics device produces \
+                         a different H.264 stream from the one this recording's video track \
+                         describes"
+                    .to_owned(),
+            },
         ];
 
         for error in &errors {
@@ -702,6 +725,34 @@ mod tests {
                 failure.headline()
             );
         }
+    }
+
+    #[test]
+    fn a_capture_that_changed_method_mid_recording_says_the_footage_before_it_was_kept() {
+        // The one thing somebody in this situation needs told. Capture recovered
+        // and the encoder could not follow it, so the recording stopped — but
+        // everything up to that moment is in a finalised file. Reporting
+        // `FootageKept::Nothing`, which is what the nearest existing failure
+        // says, would tell them their session was lost when it is on the disk
+        // in front of them (issue #285, AGENTS.md section 56).
+        let failure = RecordingFailure::of(
+            &SessionError::EncoderCannotFollowCapture {
+                method: "Desktop Duplication".to_owned(),
+                reason: "the NVIDIA NVENC encoder opened against its graphics device produces a \
+                         different H.264 stream from the one this recording's video track \
+                         describes"
+                    .to_owned(),
+            },
+            &output(),
+        );
+
+        assert_eq!(failure.footage(), FootageKept::UpToTheFailure);
+        assert_eq!(failure.kind(), FailureKind::EncoderUnavailable);
+        assert!(
+            failure.detail().contains("Desktop Duplication"),
+            "the method that took over is what makes the message act-on-able: {}",
+            failure.detail()
+        );
     }
 
     #[test]
