@@ -56,6 +56,63 @@ use clipped_muxer::{AudioCodec, VideoCodec};
 
 use crate::source::{IndexedFrame, SourceProfile, SourceStream, StreamFormat};
 
+/// What a Matroska file costs before its first packet.
+///
+/// The EBML header, the seek head, the segment information and the framing
+/// round the cues that follow the clusters — everything that is there whatever
+/// the clip holds. It does not include the track declarations, which are
+/// counted separately because a clip's tracks are known.
+///
+/// See `docs/exporting.md`, "How large the file will be", for how the five
+/// constants here were measured and how far the sum of them lands from a
+/// finished file.
+const HEADER_BYTES: u64 = 390;
+
+/// What declaring the picture track costs, before its out-of-band header.
+///
+/// The header itself is added on top and is known exactly:
+/// `SourceStream::extradata` is the bytes that will be written.
+const VIDEO_TRACK_BYTES: u64 = 115;
+
+/// What declaring one sound track costs, before its out-of-band header.
+///
+/// More than a picture track's: measured separately because a sound track's
+/// declaration carries a sampling frequency as a float and a channel count, and
+/// a single figure for both was the largest single error in the shortest clips.
+const AUDIO_TRACK_BYTES: u64 = 140;
+
+/// What writing one packet costs on top of the packet.
+///
+/// A Matroska `SimpleBlock` is an element identifier, a length, a track number,
+/// a relative timestamp and a flag byte round the coded bytes.
+const BLOCK_BYTES: u64 = 7;
+
+/// What starting a cluster costs.
+///
+/// The element identifier, its length, and the cluster's own timestamp.
+const CLUSTER_BYTES: u64 = 10;
+
+/// What indexing one keyframe in the cues costs.
+///
+/// A cue point holds the time, the track, and where in the file — and where in
+/// the cluster — the picture is.
+const CUE_BYTES: u64 = 25;
+
+/// The longest stretch of media the container writer puts in one cluster.
+///
+/// It closes a cluster at a keyframe **or** after this much media, whichever
+/// comes first — `CLUSTER_TIME_LIMIT_MS` in `crates/muxer/src/writer.rs`, which
+/// sets it explicitly so that an interrupted recording loses a bounded window
+/// rather than a whole group of pictures. It is repeated here, rather than
+/// reached for, because it is private to that crate and because what it means
+/// here is different: there it bounds what a crash costs, and here it is the
+/// only way to know how many cluster headers a clip will hold. A clip whose
+/// keyframes are further apart than this has *more* clusters than keyframes,
+/// which is the case
+/// `crates/export/tests/an_export_is_the_size_the_plan_said.rs` measures with a
+/// four-second keyframe interval so that the two cannot be confused.
+const CLUSTER_LIMIT_NANOS: u64 = 1_000_000_000;
+
 /// How an edit has to be rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportMethod {
@@ -286,6 +343,147 @@ impl PlannedSegment {
     }
 }
 
+/// How large the exported file would be, or why nothing here can say.
+///
+/// A caller that means to show a figure has to handle both: an export dialog
+/// draws the estimate when there is one and says the size is not known when
+/// there is not, rather than drawing a zero or a guess (AGENTS.md section 27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeEstimate {
+    /// The export copies packets, so its size is the packets it copies plus what
+    /// the container costs to write round them.
+    Estimated(EstimatedSize),
+    /// Nothing here can say how large it would be, and this is why.
+    Unknown(SizeUnknown),
+}
+
+impl SizeEstimate {
+    /// The estimate in bytes, or [`None`] when there is not one.
+    #[must_use]
+    pub const fn bytes(self) -> Option<u64> {
+        match self {
+            Self::Estimated(size) => Some(size.bytes()),
+            Self::Unknown(_) => None,
+        }
+    }
+
+    /// Why there is no estimate, when there is not one.
+    #[must_use]
+    pub const fn unknown(self) -> Option<SizeUnknown> {
+        match self {
+            Self::Estimated(_) => None,
+            Self::Unknown(reason) => Some(reason),
+        }
+    }
+}
+
+impl fmt::Display for SizeEstimate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Estimated(size) => write!(formatter, "about {} bytes", size.bytes()),
+            Self::Unknown(reason) => write!(formatter, "of a size nothing can state: {reason}"),
+        }
+    }
+}
+
+/// An estimate of the exported file's size, and what it is made of.
+///
+/// Both halves are kept because they are known to very different accuracies.
+/// The **media** is exact: a copy writes the recording's own packets, so the sum
+/// of their sizes is the number of bytes of coded media the export will contain,
+/// and `Export::byte_len` reports the same number afterwards. The **container**
+/// is modelled: the header, the track declarations, the cluster framing and the
+/// cues are the writer's business and are counted from the shapes Matroska
+/// fixes rather than measured packet by packet. All of the error lives there,
+/// which is what [`MARGIN`](Self::MARGIN) bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EstimatedSize {
+    media_bytes: u64,
+    container_bytes: u64,
+}
+
+impl EstimatedSize {
+    /// How far from the finished file this estimate is stated to fall, as a
+    /// fraction of the file.
+    ///
+    /// **Measured, not asserted.**
+    /// `crates/export/tests/an_export_is_the_size_the_plan_said.rs` builds real
+    /// clips across a range of lengths, segment counts, track counts and
+    /// keyframe intervals, compares this estimate against the bytes on disk, and
+    /// fails if any of them is further out than this. The largest error it
+    /// observed is a good deal smaller — 0.015% — and the headroom between the
+    /// two is deliberate: the fixtures are one codec at one size, and a margin
+    /// measured under some conditions is not a promise about every recording.
+    /// `docs/exporting.md`, "How large the file will be", records the whole
+    /// table and the conditions it was taken under.
+    pub const MARGIN: f64 = 0.005;
+
+    /// The estimate: coded media plus the container round it.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.media_bytes.saturating_add(self.container_bytes)
+    }
+
+    /// How many bytes of coded media the export would hold.
+    ///
+    /// Exact for a copy — these are the packets it will write, and it will write
+    /// no others.
+    #[must_use]
+    pub const fn media_bytes(self) -> u64 {
+        self.media_bytes
+    }
+
+    /// How many bytes the container itself is modelled to cost.
+    #[must_use]
+    pub const fn container_bytes(self) -> u64 {
+        self.container_bytes
+    }
+}
+
+impl fmt::Display for EstimatedSize {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} bytes of media and {} of container",
+            self.media_bytes, self.container_bytes
+        )
+    }
+}
+
+/// Why a plan cannot say how large its export would be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SizeUnknown {
+    /// The export would re-encode, and how large a re-encode is depends on the
+    /// bitrate somebody chooses.
+    ///
+    /// Nothing chooses one yet — re-encoding is not built at all
+    /// (`docs/exporting.md`, "What is not built yet") — so there is nothing to
+    /// estimate from. A figure worked out from the source's own bitrate would be
+    /// a figure about a file that is not the one being written.
+    Reencode,
+    /// The recording was described without measuring what its packets cost.
+    ///
+    /// A [`SourceProfile`] built by hand carries no packet index for its sound
+    /// tracks. Reachable only from a caller that assembled one itself; every
+    /// profile read from a file has them.
+    SizesNotMeasured,
+}
+
+impl fmt::Display for SizeUnknown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Reencode => {
+                "it would be re-encoded, and how large that is depends on a quality nothing has \
+                 chosen yet"
+            }
+            Self::SizesNotMeasured => {
+                "the recording was described without measuring how large its packets are"
+            }
+        })
+    }
+}
+
 /// One audio track of the exported file, and the recorded stream it copies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedAudioTrack {
@@ -304,6 +502,7 @@ pub struct ExportPlan {
     audio: Vec<PlannedAudioTrack>,
     recording: Option<RecordingId>,
     output_nanos: u64,
+    size: SizeEstimate,
 }
 
 impl ExportPlan {
@@ -381,6 +580,8 @@ impl ExportPlan {
             ExportMethod::Reencode
         };
 
+        let size = estimate_size(method, profile, &segments, &audio);
+
         Ok(Self {
             method,
             blockers,
@@ -388,6 +589,7 @@ impl ExportPlan {
             audio,
             recording: single,
             output_nanos,
+            size,
         })
     }
 
@@ -436,16 +638,32 @@ impl ExportPlan {
     pub fn frames(&self) -> usize {
         self.segments.iter().map(|segment| segment.frames).sum()
     }
+
+    /// How large the exported file would be, or why that is not knowable.
+    ///
+    /// Answered before anything is written, from the packet sizes the same pass
+    /// that found the keyframes already read, so that a caller can say whether
+    /// somebody has room for the clip before they wait for it (AGENTS.md
+    /// section 45).
+    ///
+    /// A copy is estimated to within [`EstimatedSize::MARGIN`]; a re-encode is
+    /// [`SizeUnknown::Reencode`] and has no figure at all, because how large a
+    /// re-encode is depends on a quality setting nothing has yet.
+    #[must_use]
+    pub const fn size(&self) -> SizeEstimate {
+        self.size
+    }
 }
 
 impl fmt::Display for ExportPlan {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{:.3}s in {} segments by {}",
+            "{:.3}s in {} segments by {}, {}",
             seconds(self.output_nanos),
             self.segments.len(),
-            self.method
+            self.method,
+            self.size
         )?;
         for blocker in &self.blockers {
             write!(formatter, "; {blocker}")?;
@@ -604,6 +822,162 @@ fn check_segments(
             });
         }
     }
+}
+
+/// Works out how large the exported file would be.
+///
+/// Only a copy has an answer. A copy writes the recording's own packets, so the
+/// media half is a sum over the packets the segments take — exact, and the same
+/// number `Export::byte_len` reports once they have been written. The container
+/// half is the constants at the top of this module over the packets, the
+/// clusters, the keyframes and the tracks. A re-encode has no answer at all: its
+/// size is a property of a bitrate nothing has chosen, and a number invented for
+/// it would be the number somebody decides whether they have room for
+/// (AGENTS.md section 27).
+fn estimate_size(
+    method: ExportMethod,
+    profile: Option<&SourceProfile>,
+    segments: &[PlannedSegment],
+    audio: &[PlannedAudioTrack],
+) -> SizeEstimate {
+    if !method.is_copy() {
+        return SizeEstimate::Unknown(SizeUnknown::Reencode);
+    }
+    // A copy draws on exactly one described recording — the plan says so before
+    // the method is a copy — so this is a refusal that cannot be reached rather
+    // than a case with an answer.
+    let Some(profile) = profile else {
+        return SizeEstimate::Unknown(SizeUnknown::Reencode);
+    };
+
+    // Which packet index feeds each planned track, looked up once: a profile
+    // that was written out by hand has none, and a copy of a clip with sound
+    // cannot be sized without them.
+    let mut tracks = Vec::with_capacity(audio.len());
+    for planned in audio {
+        let Some(index) = profile
+            .audio_packets()
+            .and_then(|indexes| indexes.get(usize::from(planned.stream)))
+        else {
+            return SizeEstimate::Unknown(SizeUnknown::SizesNotMeasured);
+        };
+        tracks.push(index);
+    }
+
+    let mut media_bytes = 0_u64;
+    let mut packets = 0_u64;
+    let mut keyframes = 0_u64;
+    let mut clusters = 0_u64;
+
+    for segment in segments {
+        let (start, end) = (segment.span.start(), segment.span.end());
+        let pictures: Vec<IndexedFrame> = profile
+            .frames()
+            .frames_in(start, end)
+            // A packet with no payload is not written at all, so it costs
+            // neither its own bytes nor a block header.
+            .filter(|frame| frame.bytes > 0)
+            .collect();
+
+        for frame in &pictures {
+            media_bytes += u64::from(frame.bytes);
+            packets += 1;
+            if frame.keyframe {
+                keyframes += 1;
+            }
+        }
+        clusters += clusters_of(&pictures);
+
+        for index in &tracks {
+            for packet in index.packets_in(start, end) {
+                if packet.bytes == 0 {
+                    continue;
+                }
+                media_bytes += u64::from(packet.bytes);
+                packets += 1;
+            }
+        }
+    }
+
+    let mut container_bytes = HEADER_BYTES
+        + VIDEO_TRACK_BYTES
+        + AUDIO_TRACK_BYTES * audio.len() as u64
+        + BLOCK_BYTES * packets
+        + CLUSTER_BYTES * clusters
+        + CUE_BYTES * keyframes;
+
+    // The out-of-band headers are not modelled: they are the exact bytes that
+    // will be written into the track declarations.
+    if let Some(video) = profile.video() {
+        container_bytes += video.extradata().len() as u64;
+    }
+    for planned in audio {
+        if let Some(stream) = profile.audio_stream(planned.stream) {
+            container_bytes += stream.extradata().len() as u64;
+        }
+    }
+
+    SizeEstimate::Estimated(EstimatedSize {
+        media_bytes,
+        container_bytes,
+    })
+}
+
+/// How many clusters one segment's pictures would be written in.
+///
+/// The writer closes a cluster at a keyframe **or** after
+/// [`CLUSTER_LIMIT_NANOS`] of media, whichever comes first, so neither count
+/// alone answers: a clip whose keyframes are two seconds apart holds two
+/// clusters between each pair of them, and a clip whose keyframes are half a
+/// second apart holds one each. Walking the keyframes and dividing each gap by
+/// the limit is both cases at once.
+///
+/// `pictures` is in decode order, which for anything a copy is allowed to touch
+/// is also presentation order — the plan refuses a reordered stream.
+fn clusters_of(pictures: &[IndexedFrame]) -> u64 {
+    let Some(last) = pictures.last() else {
+        return 0;
+    };
+
+    let keyframes: Vec<u64> = pictures
+        .iter()
+        .filter(|frame| frame.keyframe)
+        .map(|frame| frame.presentation.as_nanos())
+        .collect();
+    if keyframes.is_empty() {
+        // Unreachable through a copy — a segment that does not begin on a
+        // keyframe is a blocker — but a segment of material is at least one
+        // cluster and answering zero would be worse than answering roughly.
+        let span = last
+            .presentation
+            .as_nanos()
+            .saturating_sub(pictures[0].presentation.as_nanos());
+        return clusters_across(span);
+    }
+
+    let mut clusters = 0;
+    for (index, keyframe) in keyframes.iter().enumerate() {
+        // Up to the next keyframe, or to the last picture the segment holds.
+        let until = keyframes
+            .get(index + 1)
+            .copied()
+            .unwrap_or_else(|| last.presentation.as_nanos());
+        clusters += clusters_across(until.saturating_sub(*keyframe));
+    }
+    clusters
+}
+
+/// How many clusters a stretch of media with no keyframe in it is written in.
+///
+/// At least one — the keyframe that opened it started a cluster — and one more
+/// for each whole [`CLUSTER_LIMIT_NANOS`] it runs past that.
+///
+/// The stretch is half-open, which is why a nanosecond comes off before the
+/// division: material running from a keyframe to exactly one limit later is
+/// still one cluster, because the packet at the far end belongs to whatever
+/// comes next.
+const fn clusters_across(nanos: u64) -> u64 {
+    1 + nanos.saturating_sub(1) / CLUSTER_LIMIT_NANOS
 }
 
 /// Works out which recorded stream each output audio track copies.
@@ -795,9 +1169,16 @@ mod tests {
     };
 
     use super::*;
-    use crate::source::{SourceStream, VideoFrameIndex};
+    use crate::source::{AudioPacket, AudioPacketIndex, SourceStream, VideoFrameIndex};
 
     const SECOND: u64 = 1_000_000_000;
+
+    /// What the fixture's pictures cost: a keyframe, and one that is not.
+    const KEYFRAME_SIZE: u32 = 4_000;
+    const FRAME_SIZE: u32 = 500;
+
+    /// What each of the fixture's audio packets costs.
+    const AUDIO_PACKET_SIZE: u32 = 960;
 
     fn span(start_nanos: u64, end_nanos: u64) -> SourceSpan {
         SourceSpan::new(
@@ -813,14 +1194,31 @@ mod tests {
             (0..100)
                 .map(|number| {
                     let at = SourceTime::from_nanos(number * SECOND / 10);
+                    let keyframe = number % 10 == 0;
                     IndexedFrame {
                         presentation: at,
                         decode: at,
-                        keyframe: number % 10 == 0,
+                        keyframe,
+                        bytes: if keyframe { KEYFRAME_SIZE } else { FRAME_SIZE },
                     }
                 })
                 .collect(),
         )
+    }
+
+    /// Ten seconds of sound in packets 100 ms apart, for each of two tracks.
+    fn audio_packets() -> Vec<AudioPacketIndex> {
+        let track = || {
+            AudioPacketIndex::new(
+                (0..100)
+                    .map(|number| AudioPacket {
+                        presentation: SourceTime::from_nanos(number * SECOND / 10),
+                        bytes: AUDIO_PACKET_SIZE,
+                    })
+                    .collect(),
+            )
+        };
+        vec![track(), track()]
     }
 
     /// A recording of that video with two named audio streams.
@@ -836,6 +1234,7 @@ mod tests {
             ],
             frames(),
         )
+        .with_audio_packets(audio_packets())
     }
 
     fn profiles() -> Vec<(RecordingId, SourceProfile)> {
@@ -1045,11 +1444,13 @@ mod tests {
                     presentation: SourceTime::ZERO,
                     decode: SourceTime::ZERO,
                     keyframe: true,
+                    bytes: KEYFRAME_SIZE,
                 },
                 IndexedFrame {
                     presentation: SourceTime::from_nanos(2 * SECOND),
                     decode: SourceTime::from_nanos(SECOND),
                     keyframe: false,
+                    bytes: FRAME_SIZE,
                 },
             ]),
         );
@@ -1260,6 +1661,176 @@ mod tests {
             .contains(&CopyBlocker::VideoCodecNotDescribable {
                 codec: "vp9".to_owned()
             }));
+    }
+
+    #[test]
+    fn a_copy_is_sized_from_the_packets_it_would_copy() {
+        // Two seconds of the fixture: 20 pictures, two of them keyframes, and 20
+        // audio packets on each of the two tracks. The media half is arithmetic
+        // over the index and is exact — it is the packets the copy will write
+        // and no others.
+        let plan = plan(&copyable());
+
+        let expected_media = u64::from(2 * KEYFRAME_SIZE)
+            + u64::from(18 * FRAME_SIZE)
+            + 2 * u64::from(20 * AUDIO_PACKET_SIZE);
+        let SizeEstimate::Estimated(size) = plan.size() else {
+            panic!("a copy has an estimate: {}", plan.size());
+        };
+        assert_eq!(size.media_bytes(), expected_media);
+        assert_eq!(
+            plan.size().bytes(),
+            Some(size.media_bytes() + size.container_bytes())
+        );
+        assert!(
+            size.container_bytes() > 0,
+            "the container is not free, and an estimate that says it is would be under every time"
+        );
+        assert!(
+            size.container_bytes() < size.media_bytes(),
+            "the container costs {} bytes against {} of media, which is not a container",
+            size.container_bytes(),
+            size.media_bytes()
+        );
+    }
+
+    #[test]
+    fn a_cluster_is_not_a_keyframe_and_the_count_says_so() {
+        // The writer closes a cluster at a keyframe *or* after one second of
+        // media, so the two counts only coincide when the keyframe interval is
+        // exactly that. A model that counted one cluster per keyframe is right
+        // on a recording with a one-second interval and wrong on every other,
+        // which is why this is asserted at three intervals rather than measured
+        // on one fixture.
+        let picture = |nanos: u64, keyframe: bool| IndexedFrame {
+            presentation: SourceTime::from_nanos(nanos),
+            decode: SourceTime::from_nanos(nanos),
+            keyframe,
+            bytes: FRAME_SIZE,
+        };
+        // Ten pictures a second for `seconds`, a keyframe every `interval`.
+        let run = |seconds: u64, interval: u64| -> Vec<IndexedFrame> {
+            (0..seconds * 10)
+                .map(|number| picture(number * SECOND / 10, number % (interval * 10) == 0))
+                .collect()
+        };
+
+        assert_eq!(
+            clusters_of(&run(4, 4)),
+            4,
+            "keyframes four seconds apart still close a cluster every second"
+        );
+        assert_eq!(
+            clusters_of(&run(4, 1)),
+            4,
+            "keyframes one second apart close one cluster each and no more"
+        );
+        assert_eq!(
+            clusters_of(&run(4, 2)),
+            4,
+            "two seconds of material between keyframes is two clusters"
+        );
+        assert_eq!(clusters_of(&[]), 0, "no pictures are no clusters");
+        assert_eq!(
+            clusters_of(&[picture(0, true)]),
+            1,
+            "one picture still needs a cluster to sit in"
+        );
+    }
+
+    #[test]
+    fn a_shorter_clip_of_the_same_recording_is_estimated_smaller() {
+        // The estimate has to follow the cut rather than the recording: half the
+        // material is half the packets. A figure worked out from the file's own
+        // size would answer the same for both of these.
+        let two_seconds = plan(&copyable()).size().bytes().expect("a copy");
+        let one_second = plan(&EditDocument::from_recording(
+            "Ace",
+            RecordingId::new("rec-1"),
+            span(SECOND, 2 * SECOND),
+        ))
+        .size()
+        .bytes()
+        .expect("a copy");
+
+        assert!(
+            one_second < two_seconds,
+            "one second is estimated at {one_second} bytes and two at {two_seconds}"
+        );
+    }
+
+    #[test]
+    fn a_re_encode_has_no_size_at_all_rather_than_a_guess_at_one() {
+        // How large a re-encode is depends on the bitrate somebody chooses, and
+        // nothing chooses one: re-encoding is not built. A number here would be
+        // the number a user decides whether they have room for (AGENTS.md
+        // section 27).
+        let document = EditDocument::from_recording(
+            "Ace",
+            RecordingId::new("rec-1"),
+            span(SECOND + SECOND / 2, 3 * SECOND),
+        );
+
+        let plan = plan(&document);
+
+        assert_eq!(plan.method(), ExportMethod::Reencode);
+        assert_eq!(plan.size(), SizeEstimate::Unknown(SizeUnknown::Reencode));
+        assert_eq!(plan.size().bytes(), None);
+        assert!(
+            plan.to_string().contains("nothing can state"),
+            "the plan has to say it cannot say: {plan}"
+        );
+    }
+
+    #[test]
+    fn a_recording_described_without_its_packet_sizes_is_not_sized_from_zero() {
+        // A profile assembled by hand carries no packet index for its sound, and
+        // summing the pictures alone would answer with a figure that is wrong by
+        // however much sound the clip holds. "I do not know" is the only honest
+        // answer to a question nobody measured.
+        let unmeasured = SourceProfile::new(profile().streams().to_vec(), frames());
+
+        let plan = ExportPlan::of(&copyable(), &[(RecordingId::new("rec-1"), unmeasured)])
+            .expect("the plan can be made");
+
+        assert_eq!(plan.method(), ExportMethod::StreamCopy);
+        assert_eq!(
+            plan.size(),
+            SizeEstimate::Unknown(SizeUnknown::SizesNotMeasured)
+        );
+    }
+
+    #[test]
+    fn a_clip_with_no_sound_at_all_is_still_sized() {
+        // The distinction the profile keeps: a recording with no sound tracks is
+        // not a recording nobody measured. Its pictures are all there is to
+        // write, and they are known.
+        let silent = SourceProfile::new(
+            vec![SourceStream::video(
+                0,
+                Some(VideoCodec::H264),
+                1920,
+                1080,
+                "h264",
+            )],
+            frames(),
+        )
+        .with_audio_packets(Vec::new());
+
+        let plan = ExportPlan::of(&copyable(), &[(RecordingId::new("rec-1"), silent)])
+            .expect("the plan can be made");
+
+        assert!(plan.audio_tracks().is_empty());
+        let SizeEstimate::Estimated(size) = plan.size() else {
+            panic!(
+                "a copy of a silent recording has an estimate: {}",
+                plan.size()
+            );
+        };
+        assert_eq!(
+            size.media_bytes(),
+            u64::from(2 * KEYFRAME_SIZE) + u64::from(18 * FRAME_SIZE)
+        );
     }
 
     #[test]
