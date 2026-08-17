@@ -109,8 +109,9 @@ use clipped_plugins::{
     discover, InstalledPlugin, ObservedProcess, SessionDetails, SupervisionEvent, SupervisionPolicy,
 };
 use clipped_session::automatic::{
-    AutomaticSettings, RecordingId, RecordingOutcome, RecordingOutcomeSummary, RecordingRequest,
-    Session, SessionAction, SessionManager,
+    rfc3339, AutomaticSettings, GameIdentity, RecordingId, RecordingOutcome,
+    RecordingOutcomeSummary, RecordingRequest, Session, SessionAction, SessionManager,
+    SessionRecording,
 };
 use clipped_session::config::{
     Configuration, ConfigurationError, ConfigurationStore, NotStarted, PluginConsents,
@@ -124,7 +125,7 @@ use clipped_windows::WindowInfo;
 use crate::cli::{RecordArgs, WatchArgs, DEFAULT_WINDOW_TIMEOUT_SECONDS};
 use crate::config::{CaptureTarget, RecordingConfig};
 use crate::record::{choose_window, settings_for, RecordError};
-use crate::serve::{Adopted, RecorderService, RecordingState};
+use crate::serve::{Adopted, RecorderService, RecordingState, WatchingForGames};
 use crate::shutdown::{install_ctrl_c_handler, CtrlCError, ShutdownSignal};
 
 /// How long the loop waits on the watcher before letting the clock move on.
@@ -352,9 +353,26 @@ impl AutomaticRecorder {
 
         let plugins = installed_plugins();
         let signal = stop.clone();
+        // Claimed here rather than on the thread below, and that is what makes
+        // `serve --watch-for-games` answer `watching` to a window that connects
+        // the instant it sees the ready line: this call happens before that line
+        // is printed, and the thread's first pass may not (issue #584). What is
+        // being claimed is settled by now — there is somewhere to record to and
+        // a thread about to watch — and the guard is handed to that thread, so
+        // detection failing to start takes the claim down with it.
+        let watching = recordings.watch_for_games();
         let thread = thread::Builder::new()
             .name("clipped-automatic-recorder".to_owned())
-            .spawn(move || watch_for_games(&directory, catalogue, plugins, &recordings, &signal))
+            .spawn(move || {
+                watch_for_games(
+                    &directory,
+                    catalogue,
+                    plugins,
+                    &recordings,
+                    &signal,
+                    watching,
+                );
+            })
             .expect("a thread can be started to watch for games on");
 
         Self {
@@ -389,12 +407,19 @@ impl Drop for AutomaticRecorder {
 }
 
 /// The loop, on the automatic recorder's own thread.
+///
+/// `watching` is this recorder's claim to be watching for games, and it is taken
+/// by value because the loop ending is the end of the claim: detection that
+/// could not be started, detection that stopped, and a shutdown all drop it
+/// here, and the recorder answers `idle` again — which is the truth, because
+/// none of the three will record the next game to launch (issue #584).
 fn watch_for_games(
     directory: &Path,
     catalogue: Catalogue,
     plugins: Vec<InstalledPlugin>,
     recordings: &Arc<RecordingState>,
     signal: &ShutdownSignal,
+    watching: WatchingForGames,
 ) {
     let mut watcher = match ProcessWatcher::start(WatchConfig::default()) {
         Ok(watcher) => watcher,
@@ -431,7 +456,14 @@ fn watch_for_games(
 
     announce(directory, &watcher, &driver.manager);
 
-    if let Some(reason) = driver.watch(&mut watcher, signal) {
+    let stopped = driver.watch(&mut watcher, signal);
+
+    // Before the reporting below, and after every path out of the loop: from
+    // this line on nothing will record a game that launches, and `get_status`
+    // answers `idle` again rather than promising one (issue #584).
+    drop(watching);
+
+    if let Some(reason) = stopped {
         tracing::error!(
             reason,
             "games are no longer being recorded automatically, because detection stopped"
@@ -879,6 +911,15 @@ impl Driver {
         let mut detection_stopped: Option<String> = None;
 
         loop {
+            // The sitting this recorder is in, before anything in this pass can
+            // change it, so that what the protocol reports is never more than
+            // one pass — about a second — behind what the manager holds. A
+            // status is a copy of the recorder's state and can be stale by the
+            // time it is drawn whatever this does (`clipped_ipc::status`); what
+            // it must not be is *absent*, which is what it was before issue
+            // #584.
+            self.report_the_sitting();
+
             // First of all, and before the recording that is running can be
             // collected: `stop_recording` raises the flag *before* it raises
             // the stop signal, so a pass that sees the recording finished has
@@ -936,6 +977,37 @@ impl Driver {
                 }
             }
         }
+    }
+
+    /// Puts the sitting this recorder is in on the status the protocol reports,
+    /// or takes it off when there is none.
+    ///
+    /// A sitting outlives the recording it is made of: a game that exits keeps
+    /// its sitting open for the restart grace, so the same game launching again
+    /// rejoins it rather than fragmenting one sitting into two. During that
+    /// period this recorder is watching *and* in a sitting, and a window that
+    /// dropped the game's name for those few seconds would flicker between
+    /// "Counter-Strike 2" and "watching for games" and back — which is what
+    /// `clipped_ipc::Watching::session` exists to prevent (issue #241).
+    ///
+    /// Reported while a recording is running as well as between recordings,
+    /// deliberately. It is invisible then — a recorder that is recording reports
+    /// `recording` — but it means the sitting is already there the instant the
+    /// recording ends, rather than arriving on the pass after it and blanking
+    /// the game's name in between.
+    ///
+    /// Nothing happens under `watch`, which serves no protocol and hands its
+    /// recordings nowhere.
+    fn report_the_sitting(&self) {
+        let Some(recordings) = self.recordings.as_ref() else {
+            return;
+        };
+
+        recordings.sitting_is(
+            self.manager
+                .active_session()
+                .map(|session| Box::new(sitting_of(session))),
+        );
     }
 
     /// Tells the session manager that somebody stopped the recording, if they
@@ -1252,6 +1324,90 @@ impl Driver {
             self.session_epoch,
             SupervisionPolicy::default(),
         )
+    }
+}
+
+/// One sitting, as the control protocol describes one.
+///
+/// The live counterpart of what the library will hold once the sitting has been
+/// written down and indexed, and it deliberately carries the same field names
+/// for the same facts: they are the same facts about the same sitting a few
+/// seconds apart (`clipped_ipc::SessionSummary`). Everything the recorder learns
+/// afterwards — a row identifier, a size on disk, a favourite — is absent,
+/// because none of it is known while the recording is still being written.
+///
+/// The mapping is here, in the recorder, for the reason
+/// `crate::library`'s is: `clipped-session` is a domain crate that does not link
+/// the protocol, and the process that owns the state is the one that answers for
+/// it ([ADR 0002](../../../docs/adr/0002-separate-recorder-process.md)).
+fn sitting_of(session: &Session) -> clipped_ipc::SessionSummary {
+    clipped_ipc::SessionSummary {
+        session_id: session.id().as_str().to_owned(),
+        game_id: attributed(session.game()).map(|(game_id, _)| game_id.to_owned()),
+        game_name: attributed(session.game()).map(|(_, name)| name.to_owned()),
+        // The same stamp the sidecar carries, from the same formatter, so that
+        // a window which saw this sitting live recognises it when the library
+        // hands it back (AGENTS.md section 55).
+        started_at: rfc3339(session.started_at()),
+        // Absent, because a sitting on a *status* is one the recorder is still
+        // in: the manager holds it until it closes it, and closing it is what
+        // hands it over. It is mapped rather than written as `None` so that
+        // this says what the session says.
+        ended_at: session.ended_at().map(rfc3339),
+        // A `Session` has no end reason to give — the reason travels with the
+        // action that ends the sitting, and the sitting as it ends belongs to
+        // `clipped_ipc::Event::SessionEnded`, which this recorder does not send
+        // yet (issue #241's second acceptance criterion). Inventing one here
+        // would be a screen saying why a sitting ended that has not.
+        end_reason: None,
+        recordings: session.recordings().iter().map(file_of).collect(),
+    }
+}
+
+/// The game a sitting is filed under, when the catalogue attributed one.
+///
+/// [`None`] for a tie and for a window the catalogue claims nothing about, which
+/// is what `game_id` and `game_name` being absent means on the wire: the sitting
+/// is filed under no game rather than under a guess (`docs/sessions.md`).
+/// Deliberately not [`GameIdentity::slug`] and
+/// [`GameIdentity::display_name`], which answer `unattributed` and "an
+/// unidentified window" — words for a log line, and a name a screen would draw
+/// as though the catalogue had said it.
+const fn attributed(game: &GameIdentity) -> Option<(&String, &String)> {
+    match game {
+        GameIdentity::Known { game_id, name } => Some((game_id, name)),
+        GameIdentity::Ambiguous { .. } | GameIdentity::Unidentified => None,
+    }
+}
+
+/// One file of a sitting, as the protocol describes it.
+fn file_of(recording: &SessionRecording) -> clipped_ipc::SessionRecording {
+    clipped_ipc::SessionRecording {
+        session_index: recording.index(),
+        output: recording.output().to_string_lossy().into_owned(),
+        // Absent while it is still being written, which is the answer for the
+        // last file of a sitting that is still open. A recording that produced
+        // nothing is listed all the same, carrying `no-window` or `failed`: a
+        // sitting whose recording failed is not a sitting with one fewer
+        // recording (AGENTS.md section 27).
+        outcome: recording
+            .outcome()
+            .map(|outcome| outcome.token().to_owned()),
+        duration_ms: recording.outcome().and_then(recorded_length),
+    }
+}
+
+/// How long a finished recording covers, for one that produced a file.
+///
+/// The span between the first and last timestamps written, which is what a
+/// player would show — not the wall-clock time between starting and stopping,
+/// which is longer by however long the encoder took to produce its first frame.
+fn recorded_length(outcome: &RecordingOutcomeSummary) -> Option<u64> {
+    match outcome {
+        RecordingOutcomeSummary::Recorded { duration, .. } => {
+            Some(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        }
+        RecordingOutcomeSummary::NoWindow { .. } | RecordingOutcomeSummary::Failed { .. } => None,
     }
 }
 
@@ -2081,6 +2237,161 @@ name = "test-game.exe"
             id: LaunchId::ALREADY_RUNNING,
             processes: vec![ProcessSnapshot::new(pid, 4, None, image_name)],
         })
+    }
+
+    /// The exit of a process that was launched by [`launch`].
+    ///
+    /// The fields are `clipped_game_detection`'s own and public, because an exit
+    /// is remembered rather than looked up: by the time anything learns a
+    /// process has gone there is nothing left to ask about it.
+    fn exit(pid: u32, image_name: &str) -> WatchEvent {
+        WatchEvent::Exited(clipped_game_detection::ProcessExit {
+            process: ProcessSnapshot::new(pid, 4, None, image_name),
+            launch: LaunchId::ALREADY_RUNNING,
+        })
+    }
+
+    /// A driver that hands its recordings to `service`, over the one game in
+    /// [`GAMES`].
+    fn a_driver(directory: &TestDirectory, service: &Arc<RecorderService>) -> Driver {
+        Driver::new(
+            Catalogue::parse(GAMES, EntrySource::Seed).expect("the fixture is a valid catalogue"),
+            Launchers::none(),
+            AutomaticSettings::new(directory.recordings()),
+            load_configuration(Some(&directory.settings_file())),
+            RecordingPlan::from(&args()),
+            Vec::new(),
+            Some(Arc::clone(service.recordings())),
+        )
+    }
+
+    /// Issue #584's second acceptance criterion, and the reason
+    /// `Watching::session` is on the wire at all.
+    ///
+    /// The manager is driven through the real events — a launch, the game
+    /// exiting, and the poll that closes the sitting once its restart grace has
+    /// run out — because those are the three moments the answer changes, and
+    /// each is a wall-clock reading this test hands over rather than waits for.
+    /// What is asserted is what a window would draw at each of them.
+    #[test]
+    fn the_sitting_a_watching_recorder_is_in_travels_on_its_status_until_the_grace_runs_out() {
+        let directory = TestDirectory::new("watching-sitting");
+        let service = a_recorder(&directory);
+        let watching = service.recordings().watch_for_games();
+        let driver = &mut a_driver(&directory, &service);
+
+        driver.report_the_sitting();
+        assert_eq!(
+            service.status(),
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            "a recorder watching for anything at all is `watching` and nothing more: an empty \
+             sitting invented to fill the field would be a game name a window could draw",
+        );
+
+        let launched = SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_458_725);
+        // The manager is driven directly rather than through `Driver::apply`,
+        // which would try to record: what this test is about is the sitting the
+        // manager holds, and making a recording of it would need a desktop, a
+        // GPU and an encoder. The recording it asks for is reported finished
+        // below, which is the half the sitting's policy actually turns on.
+        let asked = driver
+            .manager
+            .observe(&launch(4242, "test-game.exe"), launched)
+            .into_iter()
+            .find_map(|action| match action {
+                SessionAction::StartRecording(request) => Some(request.recording),
+                _ => None,
+            })
+            .expect("a launch of a game in the catalogue asks for a recording");
+        driver.report_the_sitting();
+
+        let sitting = the_sitting(&service);
+        assert_eq!(
+            (sitting.game_id.as_deref(), sitting.game_name.as_deref()),
+            (Some("test-game"), Some("Test Game")),
+            "the game is the whole reason a sitting is on the wire: `target` is a capture \
+             selector and a window cannot turn one into a name without the catalogue",
+        );
+        assert_eq!(
+            sitting.ended_at, None,
+            "a sitting on a status is one the recorder is still in",
+        );
+        assert_eq!(
+            sitting.recordings.len(),
+            1,
+            "the file this sitting has asked for is part of it: {:?}",
+            sitting.recordings,
+        );
+        assert_eq!(
+            sitting.recordings[0].outcome, None,
+            "and it is still being written, which is what an absent outcome means",
+        );
+
+        // The game goes, and the recording it was of ends. This is the restart
+        // grace, and the whole of what the field exists for: the recorder is
+        // watching *and* in a sitting, and a window that dropped the name for
+        // those seconds would flicker between "Test Game" and "watching for
+        // games" and back.
+        let exited = launched + Duration::from_secs(60);
+        let _ = driver.manager.observe(&exit(4242, "test-game.exe"), exited);
+        let _ = driver.manager.recording_finished(
+            &asked,
+            RecordingOutcome::Failed {
+                detail: "the stand-in engine in this test records nothing".to_owned(),
+            },
+            exited,
+        );
+        driver.report_the_sitting();
+
+        let in_the_grace = the_sitting(&service);
+        assert_eq!(
+            in_the_grace.session_id, sitting.session_id,
+            "the same sitting, so that a relaunch inside the grace rejoins what is on screen",
+        );
+        assert_eq!(in_the_grace.game_name.as_deref(), Some("Test Game"));
+        assert_eq!(
+            (
+                in_the_grace.recordings[0].outcome.as_deref(),
+                in_the_grace.recordings[0].duration_ms,
+            ),
+            (Some("failed"), None),
+            "a recording that produced no file is listed all the same, and says so: a sitting              whose recording failed is not a sitting with one fewer recording",
+        );
+
+        // And out the other side of it. `DEFAULT_RESTART_GRACE` is a minute and
+        // `DEFAULT_SUSPEND_GAP` is ninety seconds, so this reading closes the
+        // sitting by the grace rather than by the suspend rule.
+        let _ = driver.manager.poll(
+            exited + clipped_session::automatic::DEFAULT_RESTART_GRACE + Duration::from_secs(1),
+        );
+        driver.report_the_sitting();
+        assert_eq!(
+            service.status(),
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            "once the sitting is over the recorder is watching for anything again, and a window \
+             that went on showing the game would be naming one nobody is playing",
+        );
+
+        // And the claim goes back when the watcher does, which is what stops a
+        // recorder whose detection has stopped promising to record the next
+        // game to launch.
+        drop(watching);
+        assert_eq!(
+            service.status(),
+            RecorderStatus::Idle,
+            "nothing is watching now, and `idle` is what a recorder that will record nothing by \
+             itself answers",
+        );
+    }
+
+    /// The sitting on the recorder's status, or the reason there is none.
+    fn the_sitting(service: &Arc<RecorderService>) -> clipped_ipc::SessionSummary {
+        match service.status() {
+            RecorderStatus::Watching(watching) => *watching
+                .session
+                .expect("a recorder in a sitting carries it on its status"),
+            other => panic!("expected a watching recorder, got {other:?}"),
+        }
     }
 
     /// The recording a launch of `test-game.exe` asks for, with the settings

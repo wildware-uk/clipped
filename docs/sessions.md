@@ -53,7 +53,7 @@ there has ever been of it (`apps/recorder/src/serve.rs`):
 | `add_bookmark`, and `Ctrl`+`F9` | Marks the moment, in the recording's own bookmark file (`docs/bookmarks.md`) |
 | `take_screenshot` | Writes a still from a frame the recording already captured |
 | `stop_recording` | Finishes the file, and the sitting starts no further recording of a game that is still running — pressing stop is not undone five seconds later |
-| `get_status` | Reports it, so the window shows what is being recorded and offers no control that would be refused |
+| `get_status` | Reports it, so the window shows what is being recorded and offers no control that would be refused. Between recordings it reports `watching` and carries the sitting that is still open, which is what stops a window blanking the game's name across a restart grace ([#584]) |
 | `save_replay` | Refused: an automatic recording keeps no replay buffer. Whether it should is [#427] |
 
 [#37]: https://github.com/wildware-uk/clipped/issues/37
@@ -68,6 +68,7 @@ there has ever been of it (`apps/recorder/src/serve.rs`):
 [#421]: https://github.com/wildware-uk/clipped/issues/421
 [#427]: https://github.com/wildware-uk/clipped/issues/427
 [#561]: https://github.com/wildware-uk/clipped/issues/561
+[#584]: https://github.com/wildware-uk/clipped/issues/584
 
 ## What a session is
 
@@ -877,10 +878,12 @@ Recordings and session records go to `%USERPROFILE%\Videos\Clipped` unless
 `--output-directory` says otherwise. Ctrl+C stops watching, finishing any
 recording first. See [recorder-cli.md](recorder-cli.md) for the options.
 
-The desktop application cannot drive this yet, and cannot see a session even when
-the recorder is running one: the IPC protocol describes a recording by its
-capture target and has no vocabulary for a game, a session or a recorder that is
-watching. That is [#241].
+The desktop application cannot drive `watch` — it serves no protocol — but it can
+see what `serve --watch-for-games` is doing. [#241] gave the protocol the
+vocabulary: a recorder watching for a game answers `watching` rather than `idle`,
+and carries the sitting it is in while it is in one, so a window keeps the game's
+name across the restart grace instead of blanking it for those seconds
+([ipc.md](ipc.md), [#584]).
 
 ## How to test it
 

@@ -110,8 +110,8 @@ use clipped_game_detection::launcher::Launchers;
 use clipped_ipc::{
     features, ActiveRecording, AddBookmark, BookmarkSummary, Command, CommandHandler, EndReason,
     Endpoint, EventPublisher, HotkeyBinding, ProtocolError, RecorderStatus, RecordingSummary,
-    ReplaySummary, Reply, SaveReplay, ScreenshotSummary, Server, ServerError, StartRecording,
-    StopRecording, TakeScreenshot, TransportError,
+    ReplaySummary, Reply, SaveReplay, ScreenshotSummary, Server, ServerError, SessionSummary,
+    StartRecording, StopRecording, TakeScreenshot, TransportError, Watching,
 };
 use clipped_ipc::{ErrorCode, PeerIdentity};
 use clipped_logging::RedactedPath;
@@ -879,6 +879,33 @@ pub(crate) struct RecordingState {
     /// restarted, which is the trade
     /// [`Launchers`](clipped_game_detection::launcher::Launchers) documents.
     launchers: Launchers,
+    /// What the launch watcher is doing, when this recorder has one.
+    ///
+    /// [`None`] is what a plain `serve` reports for ever, and it is why this is
+    /// an `Option` of a `Watching` rather than a `Watching` with an empty
+    /// sitting: the question `get_status` answers is whether **this** recorder
+    /// will record a game on its own, not whether the build could
+    /// ([issue #584](https://github.com/wildware-uk/clipped/issues/584)). A
+    /// `serve --watch-for-games` whose detection could not be started answers
+    /// [`None`] too, because it will not record anything either.
+    ///
+    /// # Locks
+    ///
+    /// **The inner of this state's two locks.** A thread that holds both takes
+    /// [`Self::current`] first, and [`Self::status`] is the reason there is an
+    /// order to keep at all: it answers about a recording and a watcher in one
+    /// breath. [`WatchingForGames`] is the only writer and lets this one go
+    /// before it asks for a status to publish, so nothing ever wants
+    /// `current` while holding this.
+    ///
+    /// It is held for a clone or a store of a small value and never across a
+    /// file, a capture, a lookup or an event publication (AGENTS.md section
+    /// 20). The writer is the launch watcher's own thread
+    /// (`crate::watch::watch_for_games`), which writes once per pass of a loop
+    /// that turns over about once a second; the readers are connection threads
+    /// answering `get_status`. Neither is a capture thread and neither waits on
+    /// the other for longer than a `memcpy`.
+    watching: Mutex<Option<Watching>>,
 }
 
 /// A recording that has been started.
@@ -1059,6 +1086,9 @@ impl RecordingState {
             settings,
             catalogue,
             launchers,
+            // Nothing is watching until something says it is, which is what a
+            // `serve` with no `--watch-for-games` reports for its whole life.
+            watching: Mutex::new(None),
         }
     }
 
@@ -1213,7 +1243,12 @@ impl RecordingState {
             asked_to_stop: Some(Arc::clone(asked_to_stop)),
             outcome: None,
         });
-        let status = status_of(current.as_ref());
+        // The watcher's state read under `current`, which is the order every
+        // thread that takes both of this state's locks uses. It cannot change
+        // the answer here — a recording has just been stored, and a recorder
+        // that is recording is recording — but reading it is what keeps
+        // [`status_of`] the one place that decides.
+        let status = status_of(current.as_ref(), self.watching_now());
         drop(current);
 
         tracing::info!(
@@ -1230,6 +1265,115 @@ impl RecordingState {
             screenshots,
             released: false,
         })
+    }
+
+    /// Reports that this recorder is watching for games, until the guard is
+    /// dropped.
+    ///
+    /// **This is the producer of [`RecorderStatus::Watching`]**, and the whole
+    /// of [issue #584](https://github.com/wildware-uk/clipped/issues/584). The
+    /// state, the tray's rendering of it and the hotkey's refusal in it were all
+    /// built on top of a recorder that could never enter it, so a recorder
+    /// waiting for a game to launch answered `idle` — the same word as one that
+    /// will never record anything, which is exactly what
+    /// [issue #241](https://github.com/wildware-uk/clipped/issues/241) added the
+    /// state to stop.
+    ///
+    /// It is claimed by [`crate::watch::AutomaticRecorder::start`] the moment
+    /// it has somewhere to record to and a thread to watch on — before the
+    /// ready line, so a window connecting the instant it sees one is told what
+    /// this recorder is rather than told `idle` and corrected a moment later.
+    /// Detection that then fails to start drops the guard, and the recorder goes
+    /// back to answering `idle`, because it will not record anything either
+    /// (`crate::watch::watch_for_games`).
+    pub(crate) fn watch_for_games(self: &Arc<Self>) -> WatchingForGames {
+        self.watching_is(Some(Watching::default()));
+        tracing::info!("this recorder is watching for games, and says so when it is asked");
+        WatchingForGames {
+            state: Arc::clone(self),
+        }
+    }
+
+    /// The sitting the launch watcher is holding, or [`None`] for one watching
+    /// for anything at all.
+    ///
+    /// A sitting outlives the recording it is made of: a game that exits keeps
+    /// its sitting open for the restart grace, so that the same game launching
+    /// again rejoins it (`docs/sessions.md`). Carrying it here is what stops a
+    /// window blanking the game's name for those few seconds and then filling it
+    /// in again — the flicker [`Watching::session`] exists to prevent.
+    ///
+    /// **Nothing is invented for a watcher with no sitting.** An absent sitting
+    /// is absent from the wire, so a recorder waiting for its first game of the
+    /// day is `{"state":"watching"}` and nothing more (`docs/ipc.md`).
+    ///
+    /// Ignored when nothing is watching, which is a driver reporting after its
+    /// guard has gone rather than something to complain about.
+    pub(crate) fn sitting_is(&self, session: Option<Box<SessionSummary>>) {
+        let changed = {
+            let mut watching = self.watching_lock();
+            match watching.as_mut() {
+                None => false,
+                Some(held) if held.session == session => false,
+                Some(held) => {
+                    held.session = session;
+                    true
+                }
+            }
+        };
+
+        if changed {
+            self.publish_what_the_watcher_changed();
+        }
+    }
+
+    /// Stores what the watcher is doing and tells every subscriber, if it moved.
+    fn watching_is(&self, watching: Option<Watching>) {
+        let changed = {
+            let mut held = self.watching_lock();
+            let changed = *held != watching;
+            *held = watching;
+            changed
+        };
+
+        if changed {
+            self.publish_what_the_watcher_changed();
+        }
+    }
+
+    /// Tells every subscriber what this recorder is doing now.
+    ///
+    /// Called with no lock of this state held, because [`Self::status`] takes
+    /// both of them.
+    ///
+    /// **Silent while a recording is running**, deliberately: a status event
+    /// carries the whole state, and the whole state of a recording recorder is
+    /// the recording. Publishing every change the watcher makes underneath one
+    /// would be a stream of identical `recording` events, and the sitting that
+    /// changed becomes visible the moment the recording ends — which is the
+    /// moment it matters, and the publication [`Self::finish`] already makes.
+    fn publish_what_the_watcher_changed(&self) {
+        let status = self.status();
+        if status.is_recording() {
+            return;
+        }
+        self.events
+            .publish(&clipped_ipc::Event::StatusChanged { status });
+    }
+
+    /// What the watcher is doing, as [`status_of`] needs it.
+    ///
+    /// Read through a poisoned lock for the reason [`Self::status`] is: what is
+    /// behind it is an owned value a panic cannot leave half written, and the
+    /// worst a poisoned read can be is out of date.
+    fn watching_now(&self) -> Option<Watching> {
+        self.watching_lock().clone()
+    }
+
+    fn watching_lock(&self) -> MutexGuard<'_, Option<Watching>> {
+        self.watching
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Asks for the library index to be brought up to date, on its own thread.
@@ -1351,7 +1495,12 @@ impl RecordingState {
         ));
 
         *current = Some(running);
-        let status = status_of(current.as_ref());
+        // The watcher's state read under `current`, which is the order every
+        // thread that takes both of this state's locks uses. It cannot change
+        // the answer here — a recording has just been stored, and a recorder
+        // that is recording is recording — but reading it is what keeps
+        // [`status_of`] the one place that decides.
+        let status = status_of(current.as_ref(), self.watching_now());
         drop(current);
 
         self.events
@@ -1703,6 +1852,11 @@ impl RecordingState {
 
     /// What the recorder is doing.
     ///
+    /// Two questions in one answer — what is being recorded, and whether
+    /// anything is watching for a game to record — which is why it takes both
+    /// of this state's locks, and takes them in that order. Nothing else takes
+    /// them the other way round (see [`Self::watching`]).
+    ///
     /// Deliberately reads through a poisoned lock. A panic while the state was
     /// held does not stop the recording thread — `clipped_session::record` is
     /// running on a thread of its own and the file is still growing — so
@@ -1719,7 +1873,8 @@ impl RecordingState {
             );
             poisoned.into_inner()
         });
-        status_of(current.as_ref())
+        let watching = self.watching_now();
+        status_of(current.as_ref(), watching)
     }
 
     /// Records a thread's outcome and tells every subscriber what changed.
@@ -1809,6 +1964,26 @@ impl RecordingState {
         self.current
             .lock()
             .map_err(|_| poisoned("reading the recording state"))
+    }
+}
+
+/// This recorder's claim to be watching for games, for as long as it is
+/// watching.
+///
+/// A guard rather than a pair of calls, for the reason [`Adopted`] is one: the
+/// clearing half is what must not be forgotten. A recorder left claiming to be
+/// watching after its watcher thread has gone — because detection stopped,
+/// because the loop returned, or because it panicked — would tell every window
+/// that the next game to launch will be recorded, and nothing would record it
+/// (AGENTS.md sections 27 and 54).
+#[derive(Debug)]
+pub(crate) struct WatchingForGames {
+    state: Arc<RecordingState>,
+}
+
+impl Drop for WatchingForGames {
+    fn drop(&mut self) {
+        self.state.watching_is(None);
     }
 }
 
@@ -1949,7 +2124,13 @@ fn session_outcome(outcome: &Result<RecordingReport, String>) -> RecordingOutcom
 }
 
 /// The status a recording state describes.
-fn status_of(running: Option<&Running>) -> RecorderStatus {
+///
+/// `watching` is what the launch watcher is doing, and is [`None`] when nothing
+/// is watching — a plain `serve`, or one whose detection could not be started.
+/// It is only ever the answer when nothing is being recorded: a recorder that is
+/// both watching and recording is **recording**, because that is the thing a
+/// window has to be able to see and stop.
+fn status_of(running: Option<&Running>, watching: Option<Watching>) -> RecorderStatus {
     match running {
         Some(running) if running.outcome.is_none() => RecorderStatus::Recording(ActiveRecording {
             recording_id: running.id.clone(),
@@ -1965,11 +2146,26 @@ fn status_of(running: Option<&Running>) -> RecorderStatus {
                 .map(|replay| u32::try_from(replay.window().as_secs()).unwrap_or(u32::MAX)),
             // A recording `serve` was asked for directly is not part of a
             // sitting the recorder is driving, so there is no game name to
-            // give and `target` is the whole of what is known about it. The
-            // watcher is what fills this in, which is issue #421.
+            // give and `target` is the whole of what is known about it.
+            //
+            // **Nothing fills this in, including for a recording the watcher
+            // started**, and that is a gap rather than a decision: issue #421
+            // handed the recording over without its sitting, and it is the
+            // first acceptance criterion of
+            // [issue #241](https://github.com/wildware-uk/clipped/issues/241) —
+            // still open — that a window be able to name the game a recording
+            // is of. Issue #584 built the other half of that criterion: the
+            // sitting a *watching* recorder is in, which this state now holds
+            // and could hand to an adopted recording here.
             session: None,
         }),
-        _ => RecorderStatus::Idle,
+        // Nothing is being recorded, so what this recorder is depends on
+        // whether it will record the next game to launch by itself. Those are
+        // two different answers to "what are you doing", and answering `idle`
+        // to both is the defect issue #584 is about — a recorder about to
+        // record a game, and one that will never record anything, told a
+        // window the same thing.
+        _ => watching.map_or(RecorderStatus::Idle, RecorderStatus::Watching),
     }
 }
 
@@ -2643,6 +2839,84 @@ mod tests {
             running.progress.reached(position);
         }
         running
+    }
+
+    /// The distinction issue #584 is about, in the one place that decides it.
+    ///
+    /// Three answers from one state, and the middle one is the one that did not
+    /// exist: a recorder watching for a game to launch answered `idle`, which is
+    /// what a recorder that will never record anything answers.
+    #[test]
+    fn watching_for_games_is_a_different_answer_from_idle_and_from_recording() {
+        let directory = scratch("watching-or-idle");
+        let output = directory.join("clipped-cs2.mkv");
+        let state = idle_state(&directory);
+
+        assert_eq!(
+            state.status(),
+            RecorderStatus::Idle,
+            "nothing is watching and nothing is recording, which is what a plain `serve` is for \
+             its whole life",
+        );
+
+        let watching = state.watch_for_games();
+        assert_eq!(
+            state.status(),
+            RecorderStatus::Watching(Watching { session: None }),
+            "and now the next game to launch will be recorded, which a window cannot be told by \
+             the same word as `idle`",
+        );
+
+        // A recorder that is watching *and* recording is recording: that is the
+        // thing a window has to be able to see and stop, and it is the answer
+        // whether the recording was asked for or started by the watcher itself.
+        let running = started_recording(&state, &output, Some(Duration::from_secs(30)));
+        *state.current.lock().expect("a fresh lock") = Some(running);
+        assert!(
+            matches!(state.status(), RecorderStatus::Recording(_)),
+            "a watching recorder that is recording reports the recording: {:?}",
+            state.status(),
+        );
+
+        drop(watching);
+        assert!(
+            matches!(state.status(), RecorderStatus::Recording(_)),
+            "and the watcher going does not change what is being recorded",
+        );
+
+        *state.current.lock().expect("a fresh lock") = None;
+        assert_eq!(
+            state.status(),
+            RecorderStatus::Idle,
+            "with the watcher gone and nothing recording, this recorder will record nothing by \
+             itself, and `idle` is the honest word for that",
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A sitting reported by a driver whose recorder is not watching is not put
+    /// on a status.
+    ///
+    /// `watch` serves no protocol, and a driver that outlived its guard — a
+    /// shutdown, or detection that stopped — has nothing to say either. The
+    /// alternative is a recorder claiming a sitting while answering `idle`,
+    /// which no client could read at all: an idle status has nowhere to carry
+    /// one.
+    #[test]
+    fn a_sitting_reported_with_nothing_watching_is_ignored_rather_than_stored() {
+        let directory = scratch("sitting-unwatched");
+        let state = idle_state(&directory);
+
+        state.sitting_is(Some(Box::new(SessionSummary {
+            session_id: "test-game-20260811-143205".to_owned(),
+            game_name: Some("Test Game".to_owned()),
+            ..SessionSummary::default()
+        })));
+
+        assert_eq!(state.status(), RecorderStatus::Idle);
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

@@ -838,6 +838,119 @@ mod tests {
         }
     }
 
+    /// The same press against a **real** recorder that is really watching.
+    ///
+    /// The test above proves what the arm does; this proves a press can reach
+    /// it. Until issue #584 no recorder could report
+    /// [`RecorderStatus::Watching`] at all, so that arm had been dead code since
+    /// it landed and a stand-in recorder was the only thing that had ever
+    /// entered it. What makes this the real path is that the status comes from
+    /// `crate::serve`'s own state, through the same `CommandHandler::status`
+    /// [`command_for`] calls.
+    ///
+    /// The assertion that would fail without the producer is the **status**, not
+    /// the command: issue #583 decided that a toggle while watching does what a
+    /// toggle while idle does, so the two arms send the same request and the
+    /// command alone cannot tell them apart. What can is which state the press
+    /// read, and whether the foreground was asked at all — a foreground is only
+    /// resolved by the two arms that start a recording.
+    #[test]
+    fn a_toggle_press_reaches_the_watching_arm_of_a_recorder_that_is_really_watching() {
+        let directory = scratch("watching-toggle");
+        let service = a_recorder(&directory);
+        let watching = service.recordings().watch_for_games();
+        let recorder = Arc::clone(&service) as Arc<dyn CommandHandler>;
+
+        assert_eq!(
+            recorder.status(),
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            "a recorder watching for games has to say so, or a press reads `idle` and this test \
+             is about a different arm",
+        );
+
+        // Asked only from `start_what_is_in_front`, which only the `Idle` and
+        // `Watching` arms reach: a refusing arm would leave this `false`.
+        let asked = Arc::new(Mutex::new(false));
+        let seen = Arc::clone(&asked);
+        let foreground: Foreground = Arc::new(move || {
+            *seen.lock().expect("nothing panicked") = true;
+            Ok(ForegroundTarget::Recordable(Box::new(WindowInfo::new(
+                clipped_windows::WindowHandle::from_raw(0x1234),
+                "Counter-Strike 2".to_owned(),
+                A_GAME,
+                Some("cs2.exe".to_owned()),
+                WindowGeometry::new(
+                    PixelSize::new(2560, 1440),
+                    DEFAULT_DPI,
+                    clipped_windows::MonitorHandle::from_raw(1),
+                ),
+                false,
+                None,
+            ))))
+        });
+
+        match command_for(
+            recorder.as_ref(),
+            &foreground,
+            HotkeyAction::ToggleRecording,
+        ) {
+            Ok(Command::StartRecording(request)) => assert_eq!(
+                request.pid,
+                Some(A_GAME),
+                "a toggle while watching records what is in front, exactly as one while idle does",
+            ),
+            other => panic!("a toggle while watching must start a recording, not {other:?}"),
+        }
+
+        // And through the handler the registration wires up, which is what a
+        // key press actually goes through. The recorder refuses the request —
+        // there is no window belonging to process 4242 on this machine — and
+        // the refusal is logged rather than thrown, which is what a press with
+        // no client to answer does.
+        handlers_for(&recorder, &foreground)
+            .press(HotkeyAction::ToggleRecording, a_combination())
+            .expect("this build performs Start or stop recording, so its key has a handler");
+
+        assert!(
+            *asked.lock().expect("nothing panicked"),
+            "a press while watching has to ask what is in front: an arm that refused would send \
+             nothing and record nothing while nothing was being recorded",
+        );
+        assert_eq!(
+            recorder.status(),
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            "and a refused press leaves the recorder watching, rather than claiming a recording \
+             it did not start",
+        );
+
+        drop(watching);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A recorder over a library, a settings file and a games file of this
+    /// test's own, never the ones belonging to whoever is running the suite
+    /// (AGENTS.md section 25).
+    fn a_recorder(directory: &std::path::Path) -> Arc<crate::serve::RecorderService> {
+        Arc::new(crate::serve::RecorderService::with_library(
+            clipped_ipc::EventPublisher::new(),
+            crate::library::LibraryReader::at(Some(directory.join("library.db"))),
+            crate::library::LibraryIndexer::at(
+                Some(directory.join("library.db")),
+                vec![directory.to_path_buf()],
+            ),
+            clipped_game_detection::catalogue::Catalogue::default(),
+        ))
+    }
+
+    /// A directory of this test's own.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("clipped-hotkeys-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
+        directory
+    }
+
     /// A window that is in front and cannot be captured is a different answer
     /// from no window at all, and it is the one `resolve_window` would give.
     #[test]

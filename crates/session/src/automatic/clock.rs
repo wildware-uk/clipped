@@ -56,7 +56,15 @@ pub(crate) fn stamp_at(when: SystemTime, offset: UtcOffset) -> String {
 ///
 /// RFC 3339, carrying the offset, so that a reader can tell what the local time
 /// was without also having to know where the machine was.
-pub(crate) fn rfc3339(when: SystemTime) -> String {
+///
+/// Public because a sitting the recorder is *in* travels over the control
+/// protocol as well as into a sidecar
+/// (`clipped_ipc::SessionSummary::started_at`), and the two have to be the same
+/// point written the same way: a window that saw a sitting start and then found
+/// it in the library must be able to recognise it as the same sitting
+/// (AGENTS.md section 55, `docs/ipc.md`).
+#[must_use]
+pub fn rfc3339(when: SystemTime) -> String {
     OffsetDateTime::from(when)
         .to_offset(local_offset())
         .format(&Rfc3339)

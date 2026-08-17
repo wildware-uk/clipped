@@ -147,6 +147,7 @@ use clipped_game_detection::{LaunchGroup, ProcessExit, ProcessSnapshot, WatchEve
 
 use crate::config::{Configuration, GameKey, ResolvedSettings};
 
+pub use clock::rfc3339;
 pub use manual::{ManualSession, RecordedProcess};
 pub use session::{
     GameIdentity, RecordingOutcomeSummary, Session, SessionClip, SessionEndReason, SessionEvent,

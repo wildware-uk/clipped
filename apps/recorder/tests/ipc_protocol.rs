@@ -1671,6 +1671,97 @@ fn a_recording_driven_entirely_over_the_protocol_produces_a_playable_file() {
 }
 
 #[test]
+#[ignore = "needs a GPU, an encoder and a desktop session; see tests/record_end_to_end.rs"]
+fn a_watching_recorder_moves_through_all_three_states_over_the_protocol() {
+    // The third state, against the recorder the product actually runs: one that
+    // watches for games *and* serves the protocol. The two states that need no
+    // hardware are asserted by
+    // `a_recorder_watching_for_games_is_told_apart_from_one_that_is_not`, which
+    // runs in CI; this is the one that needs an encoder and a desktop.
+    //
+    // The assertion at the end is the one only this shape can make: a recorder
+    // that has just finished a recording goes back to **watching**, not to
+    // idle. Nothing else in the suite exercises a status that has to be worked
+    // out from two things at once.
+    let home = scratch_home("three-states");
+    let output = home.join("over-ipc.mkv");
+    let pattern = support::PatternApp::start(SOURCE_FPS, 120);
+
+    let recorder =
+        ServedRecorder::started_with("three-states", Some(&home), &["--watch-for-games"]);
+    let mut client = recorder.client();
+
+    let watching = RecorderStatus::Watching(clipped_ipc::Watching { session: None });
+    assert_eq!(
+        status_of(&mut client),
+        watching,
+        "nothing has launched and nothing was asked for",
+    );
+
+    let started = client
+        .call(&IpcCommand::StartRecording(StartRecording {
+            pid: Some(pattern.process_id()),
+            output: Some(output.to_string_lossy().into_owned()),
+            overwrite: true,
+            microphone: Some("none".to_owned()),
+            system_audio: Some("none".to_owned()),
+            ..StartRecording::default()
+        }))
+        .expect("the recording starts");
+    let recording_id = match started {
+        Reply::RecordingStarted { recording_id, .. } => recording_id,
+        other => panic!("expected a started recording, got {other:?}"),
+    };
+
+    std::thread::sleep(RECORD_FOR);
+
+    match status_of(&mut client) {
+        RecorderStatus::Recording(active) => assert_eq!(
+            active.recording_id, recording_id,
+            "a recorder that is watching and recording is recording: that is the thing a window \
+             has to be able to see and stop",
+        ),
+        other => panic!("the recorder should say it is recording, not {other:?}"),
+    }
+
+    let summary = match client
+        .call(&IpcCommand::StopRecording(StopRecording {
+            recording_id: Some(recording_id),
+        }))
+        .expect("the recording stops")
+    {
+        Reply::RecordingStopped { summary } => summary,
+        other => panic!("expected a summary, got {other:?}"),
+    };
+    assert!(
+        summary.frames_encoded > 0,
+        "a recording of no frames is not a recording: {summary:?}"
+    );
+
+    assert_eq!(
+        status_of(&mut client),
+        watching,
+        "and back to watching rather than to idle: this recorder will still record the next game \
+         that launches, and a window told `idle` would draw a recorder that had stopped watching",
+    );
+
+    drop(client);
+    recorder.stop();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// What the recorder says it is doing.
+fn status_of(client: &mut Client) -> RecorderStatus {
+    match client
+        .call(&IpcCommand::GetStatus)
+        .expect("status is answered")
+    {
+        Reply::Status { status } => status,
+        other => panic!("expected a status, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_real_recorder_indexes_the_recordings_folder_at_start_up_and_answers_from_it() {
     // Issue #402's second half, against the real process rather than against a
     // service built in a test: `serve` has to *call* the thing that fills the
@@ -2079,9 +2170,15 @@ fn a_recorder_watching_for_games_serves_the_protocol_and_stops_cleanly() {
         .call(&IpcCommand::GetStatus)
         .expect("status is answered")
     {
-        // Nothing has launched, so nothing is being recorded. A recorder that
-        // reported otherwise would be claiming a recording it is not making.
-        Reply::Status { status } => assert_eq!(status, RecorderStatus::Idle),
+        // Nothing has launched, so nothing is being recorded — and this
+        // recorder will record the next game that does, which `idle` cannot
+        // say. It answered `idle` here until issue #584, which is what
+        // `a_recorder_watching_for_games_is_told_apart_from_one_that_is_not`
+        // below is about.
+        Reply::Status { status } => assert_eq!(
+            status,
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+        ),
         other => panic!("expected a status, got {other:?}"),
     }
 
@@ -2130,6 +2227,142 @@ fn a_recorder_that_was_not_asked_to_watch_for_games_does_not() {
     );
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_recorder_watching_for_games_is_told_apart_from_one_that_is_not() {
+    // Issue #584. `RecorderStatus::Watching` was put on the wire by issue #241,
+    // refused by name in `hotkeys.rs` by issue #421 and drawn by the tray — and
+    // no recorder could enter it, so a recorder waiting for a game to launch
+    // answered `idle`: the same word as one that will never record anything.
+    // Issue #241 exists to stop exactly that.
+    //
+    // Both halves are here, in one test, because the distinction is the point.
+    // A build that answered `watching` to everything would pass the first half
+    // perfectly well and would tell every `serve` somebody started at a
+    // terminal that it was about to record a game.
+    let watching_home = scratch_home("watching-status");
+    let watching = ServedRecorder::started_with(
+        "watching-status",
+        Some(&watching_home),
+        &["--watch-for-games"],
+    );
+
+    let mut client = watching.client();
+    match client
+        .call(&IpcCommand::GetStatus)
+        .expect("status is answered")
+    {
+        Reply::Status { status } => assert_eq!(
+            status,
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            "a recorder that will record the next game to launch says so, and carries no sitting \
+             until it is in one",
+        ),
+        other => panic!("expected a status, got {other:?}"),
+    }
+
+    // And as it actually goes down the pipe. `Watching::session` is
+    // `skip_serializing_if`, so a recorder watching for anything at all is
+    // `{"state":"watching"}` and nothing more — an empty sitting invented to
+    // fill the field would be a game name with nothing behind it, and a parsed
+    // reply cannot show the difference.
+    let frame = status_on_the_wire(&watching);
+    assert!(
+        frame.contains(r#""status":{"state":"watching"}"#),
+        "the status on the wire is not the watching state with no sitting: {frame}",
+    );
+
+    // The tray reads this rather than asking: a status subscription opens with
+    // the state the recorder is in, which for a recorder started at login is
+    // the only status event there will be for hours.
+    let mut events = EventClient::subscribe(
+        watching.endpoint(),
+        CLIENT_NAME,
+        "0.0.0",
+        vec![EventStream::Status],
+        PATIENCE,
+    )
+    .expect("the status stream is delivered");
+    match events.next_event().expect("an event arrives") {
+        Event::StatusChanged { status } => assert_eq!(
+            status,
+            RecorderStatus::Watching(clipped_ipc::Watching { session: None }),
+            "a window that attaches to a watching recorder is told what it is, or it draws \
+             \"not recording\" over a recorder that is about to record",
+        ),
+        other => panic!("expected an opening status event, got {other:?}"),
+    }
+
+    drop(events);
+    drop(client);
+    watching.stop();
+    let _ = std::fs::remove_dir_all(&watching_home);
+
+    // The other direction, and what makes the half above mean anything.
+    let idle_home = scratch_home("idle-status");
+    let idle = ServedRecorder::start_under("idle-status", Some(&idle_home));
+    let mut client = idle.client();
+    match client
+        .call(&IpcCommand::GetStatus)
+        .expect("status is answered")
+    {
+        Reply::Status { status } => assert_eq!(
+            status,
+            RecorderStatus::Idle,
+            "nothing asked this recorder to watch for games, so it will record nothing until \
+             something asks it to",
+        ),
+        other => panic!("expected a status, got {other:?}"),
+    }
+
+    drop(client);
+    idle.stop();
+    let _ = std::fs::remove_dir_all(&idle_home);
+}
+
+/// The `get_status` reply exactly as it appears on the pipe.
+///
+/// Every other test here uses `clipped-ipc`'s own client, which is the right
+/// tool for almost everything. This exists because one of the watching state's
+/// properties is about what is *not* in the JSON, and a parsed reply cannot show
+/// an absent field.
+fn status_on_the_wire(recorder: &ServedRecorder) -> String {
+    let mut connection =
+        connect(recorder.endpoint(), PATIENCE).expect("the recorder accepts a connection");
+    write_message(
+        &mut connection,
+        &ClientMessage::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client: PeerIdentity {
+                name: CLIENT_NAME.to_owned(),
+                version: "0.0.0".to_owned(),
+            },
+            role: ConnectionRole::Control,
+            streams: Vec::new(),
+        }),
+    )
+    .expect("the handshake is written");
+    match read_message::<_, ServerMessage>(&mut connection).expect("the handshake is answered") {
+        ServerMessage::Welcome(_) => {}
+        other => panic!("expected a welcome, got {other:?}"),
+    }
+
+    write_message(
+        &mut connection,
+        &ClientMessage::Request(
+            IpcCommand::GetStatus
+                .to_request(1)
+                .expect("a status request can be built"),
+        ),
+    )
+    .expect("the request is sent");
+
+    let mut length = [0_u8; 4];
+    std::io::Read::read_exact(&mut connection, &mut length).expect("a reply arrives");
+    let mut payload = vec![0_u8; u32::from_le_bytes(length) as usize];
+    std::io::Read::read_exact(&mut connection, &mut payload).expect("the whole reply arrives");
+    String::from_utf8(payload).expect("this protocol is JSON, which is UTF-8")
 }
 
 /// A home directory of this test's own, for a recorder that must not touch the
