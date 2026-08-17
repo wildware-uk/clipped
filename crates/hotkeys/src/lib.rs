@@ -5,8 +5,9 @@
 //!
 //! - The set of actions a hotkey can trigger (SPEC.md section 34) and the
 //!   combinations bound to them, defaulting to the two SPEC.md names.
-//! - Registering those combinations with Windows, and reporting each one that
-//!   another application already owns.
+//! - Registering those combinations with Windows, reporting each one that
+//!   another application already owns, and changing one while the service
+//!   keeps running ([`HotkeyService::rebind`]).
 //! - Delivering a press to a handler without making any other thread wait.
 //!
 //! # Not responsible for
@@ -114,9 +115,14 @@
 //! `apps/recorder/src/hotkeys.rs`,
 //! [ADR 0009](../../../docs/adr/0009-the-recorder-registers-global-hotkeys.md)).
 //! The screen that *binds* a combination is
-//! [issue #54](https://github.com/wildware-uk/clipped/issues/54), and changing
-//! one without restarting the service is
-//! [issue #233](https://github.com/wildware-uk/clipped/issues/233).
+//! [issue #54](https://github.com/wildware-uk/clipped/issues/54).
+//! [`HotkeyService::rebind`] is the capability [issue
+//! #233](https://github.com/wildware-uk/clipped/issues/233) asked for: a
+//! running service can be told to change a binding without being restarted.
+//! What still lives outside this crate is *persisting* the change —
+//! `crates/session/src/config/hotkeys.rs` models the settings-file side of a
+//! binding, and wiring a caller's `rebind` call to it is that issue's
+//! remaining half.
 
 mod action;
 mod bindings;
@@ -131,5 +137,6 @@ pub use dispatch::{
 };
 pub use hotkey::{Hotkey, InvalidHotkey, Key, Modifiers};
 pub use service::{
-    ActionStatus, BindingState, Conflict, ConflictCause, HotkeyError, HotkeyService, Registration,
+    ActionStatus, BindingState, Conflict, ConflictCause, HotkeyError, HotkeyService, RebindError,
+    Registration,
 };

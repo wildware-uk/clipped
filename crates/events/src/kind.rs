@@ -12,6 +12,15 @@ use serde::{Deserialize, Serialize};
 /// anybody deciding what to do about the overflow.
 pub const MAX_IDENTIFIER_BYTES: usize = 64;
 
+/// The longest a user-typed event label may be, in bytes.
+///
+/// A label is prose a person typed, not an identifier — see [`UserLabel`] —
+/// so it is bounded separately from [`MAX_IDENTIFIER_BYTES`] and at the same
+/// figure `docs/bookmarks.md` already uses for a bookmark's own label, on the
+/// grounds that they are the same kind of field shown back to the same person
+/// and there is no reason for the two limits to disagree.
+pub const MAX_USER_LABEL_BYTES: usize = 200;
+
 /// What happened, in terms nothing above this crate has to translate.
 ///
 /// # The vocabulary is closed on purpose
@@ -27,7 +36,7 @@ pub const MAX_IDENTIFIER_BYTES: usize = 64;
 /// [`EventPayload`](crate::EventPayload), where it is available to whoever
 /// knows what it means and ignorable by everyone else.
 ///
-/// # …except for one variant, which is why the dot matters
+/// # …except for two variants, which is why the dot matters
 ///
 /// [`Custom`](Self::Custom) is how a plugin says something this list does not
 /// cover, and an open variant in a shared vocabulary is also how that
@@ -53,6 +62,14 @@ pub const MAX_IDENTIFIER_BYTES: usize = 64;
 ///    [`Custom`](Self::Custom), because the rule is syntactic and needs no
 ///    table. `docs/plugin-api.md` records the promotion path for a custom
 ///    event that turns out to be universal.
+///
+/// [`UserLabelled`](Self::UserLabelled) is the third case, and it is not a
+/// plugin's word at all: it is what the *user* typed for something Clipped
+/// itself produced — an input binding they named, a fingerprint match they
+/// labelled. It is marked with its own prefix rather than a namespace, for the
+/// reason [`UserLabel`] gives, and issue #345 is the record of why it needed a
+/// place separate from both [`Custom`](Self::Custom) and the closed
+/// vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum EventKind {
@@ -88,6 +105,10 @@ pub enum EventKind {
     /// Something this vocabulary does not cover, named by the plugin that
     /// reports it. See the type documentation for what constrains it.
     Custom(CustomName),
+    /// Something Clipped itself produced, labelled with a person's own words
+    /// rather than a plugin's or the project's. See [`UserLabel`] for the
+    /// syntax and why it is not [`Custom`](Self::Custom).
+    UserLabelled(UserLabel),
     /// A kind this build has never heard of, kept exactly as it arrived.
     ///
     /// Only ever produced by *reading*. A newer build may store an event whose
@@ -120,6 +141,7 @@ impl EventKind {
             Self::Goal => "goal",
             Self::Achievement => "achievement",
             Self::Custom(name) => name.as_str(),
+            Self::UserLabelled(label) => label.as_str(),
             Self::Unrecognised(tag) => tag,
         }
     }
@@ -153,6 +175,17 @@ impl From<String> for EventKind {
             "score" => Self::Score,
             "goal" => Self::Goal,
             "achievement" => Self::Achievement,
+            // A tag carrying `USER_LABEL_PREFIX` is checked before the
+            // namespace rule, because it is syntactically disjoint from a
+            // `CustomName` — no dot required, no lowercase-ascii-segment rule —
+            // and would otherwise fall through to `NotNamespaced` and be
+            // misread as a malformed custom name rather than what it is.
+            _ if tag.starts_with(USER_LABEL_PREFIX) => {
+                match UserLabel::new(&tag[USER_LABEL_PREFIX.len()..]) {
+                    Ok(label) => Self::UserLabelled(label),
+                    Err(_) => Self::Unrecognised(tag),
+                }
+            }
             // A namespaced name is somebody's own word, whether or not this
             // build has met it. One that does not survive validation is kept
             // verbatim rather than repaired: an event nobody can explain is
@@ -170,6 +203,7 @@ impl From<EventKind> for String {
         match kind {
             EventKind::Unrecognised(tag) => tag,
             EventKind::Custom(name) => name.into_string(),
+            EventKind::UserLabelled(label) => label.into_string(),
             ref standard => standard.as_str().to_owned(),
         }
     }
@@ -365,6 +399,149 @@ impl fmt::Display for InvalidCustomName {
 
 impl core::error::Error for InvalidCustomName {}
 
+/// The marker that opens a user-typed event label on the wire.
+///
+/// Not a namespace: [`CustomName`] requires two or more dot-separated
+/// segments, each starting with a lowercase ASCII letter, because its
+/// namespace is an *identifier* — the reporting plugin's own name, compared
+/// and looked up by other code. A user's label is prose: "My Ultimate!",
+/// "clutch", a fingerprint the user typed with capitals and an accent in it.
+/// Forcing it through `CustomName`'s syntax would mean either inventing a
+/// namespace nobody asked the user for, or slugging their words into
+/// something that no longer reads back as what they wrote — and issue #345's
+/// acceptance criterion is that the label round-trips *intact*, not
+/// normalised. So [`UserLabel`] is marked with a prefix a `CustomName` can
+/// never produce (it contains neither a dot nor a colon), rather than being
+/// squeezed into the namespace rule that exists for a different problem.
+pub const USER_LABEL_PREFIX: &str = "user:";
+
+/// Text the user typed to label something Clipped itself produced.
+///
+/// An input binding they named "my ultimate", a fingerprint match they typed
+/// a name for: the host knows something happened and *that* a person named
+/// it, but the name itself is not the host's to invent, and it is not a
+/// plugin's namespace either — see [`USER_LABEL_PREFIX`] for why it is not
+/// [`CustomName`].
+///
+/// # Syntax
+///
+/// ```text
+/// user:<label>
+/// ```
+///
+/// `<label>` may be anything a person can type: any case, spaces,
+/// punctuation, any script — the one thing this crate rules out is a control
+/// character, for the same reason a bookmark's label does
+/// (`docs/bookmarks.md`): it is displayed, and a stray newline or escape
+/// sequence in the middle of a UI label is a rendering bug waiting to be
+/// filed. It is bounded by [`MAX_USER_LABEL_BYTES`], for the reason every
+/// user-supplied string in this workspace is bounded
+/// (`crates/plugins/src/manifest.rs`, `MAX_PROBLEM_BYTES`): it is stored and
+/// shown, and an unbounded one is a cost paid forever.
+///
+/// # Who may produce one
+///
+/// Nothing in this crate checks that — `EventKind` has no producer boundary
+/// of its own, unlike [`EventSource`](crate::EventSource) or
+/// [`CustomName`], because it does not know who is calling it. **The
+/// producer boundary belongs to whoever turns untrusted input into a
+/// [`GameEvent`](crate::GameEvent).** For a plugin's report that is
+/// `crates/plugins/src/report.rs::ReportedEvent::into_event`, and it must
+/// refuse a [`UserLabelled`](EventKind::UserLabelled) kind exactly as it
+/// already refuses [`Unrecognised`](EventKind::Unrecognised): a plugin
+/// producing one would be a plugin claiming a person said something they
+/// never typed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UserLabel(String);
+
+impl UserLabel {
+    /// A label from the text a person typed, unprefixed.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidUserLabel`] describing which rule the text broke.
+    pub fn new(label: &str) -> Result<Self, InvalidUserLabel> {
+        if label.is_empty() {
+            return Err(InvalidUserLabel::Empty);
+        }
+        if label.len() > MAX_USER_LABEL_BYTES {
+            return Err(InvalidUserLabel::TooLong {
+                label: label.to_owned(),
+                bytes: label.len(),
+            });
+        }
+        if label.chars().any(char::is_control) {
+            return Err(InvalidUserLabel::ControlCharacter {
+                label: label.to_owned(),
+            });
+        }
+        Ok(Self(format!("{USER_LABEL_PREFIX}{label}")))
+    }
+
+    /// The text the person typed, without the wire prefix.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.0[USER_LABEL_PREFIX.len()..]
+    }
+
+    /// The wire string: [`USER_LABEL_PREFIX`] followed by the label.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The wire string, consuming the wrapper.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for UserLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Why a user label was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidUserLabel {
+    /// The person typed nothing.
+    Empty,
+    /// It is longer than [`MAX_USER_LABEL_BYTES`].
+    TooLong {
+        /// The text offered.
+        label: String,
+        /// How long it was.
+        bytes: usize,
+    },
+    /// It contains a control character.
+    ControlCharacter {
+        /// The text offered.
+        label: String,
+    },
+}
+
+impl fmt::Display for InvalidUserLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("a user label cannot be empty"),
+            Self::TooLong { label, bytes } => write!(
+                f,
+                "the user label `{label}` is {bytes} bytes, over the \
+                 {MAX_USER_LABEL_BYTES}-byte limit"
+            ),
+            Self::ControlCharacter { label } => write!(
+                f,
+                "the user label `{label}` contains a control character, and a label is \
+                 displayed as written"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for InvalidUserLabel {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +712,87 @@ mod tests {
             message.contains("<plugin>.<name>"),
             "the message should say what a valid name looks like: {message}"
         );
+    }
+
+    #[test]
+    fn a_user_label_keeps_the_text_a_person_typed_intact() {
+        // The acceptance criterion issue #345 states directly: the label
+        // round-trips, not a normalised or slugged version of it. Mixed case,
+        // punctuation, a space and a non-ASCII character all have to survive.
+        let label = UserLabel::new("My Ultimate! (é)").expect("a well-formed label");
+        assert_eq!(label.label(), "My Ultimate! (é)");
+        assert_eq!(label.as_str(), "user:My Ultimate! (é)");
+
+        let kind = EventKind::from(label.as_str().to_owned());
+        let EventKind::UserLabelled(read_back) = &kind else {
+            panic!("a `user:`-prefixed tag is a user-labelled kind, not {kind:?}");
+        };
+        assert_eq!(read_back.label(), "My Ultimate! (é)");
+        assert!(kind.is_recognised());
+        assert_eq!(String::from(kind), "user:My Ultimate! (é)");
+    }
+
+    #[test]
+    fn a_user_label_is_not_a_custom_name() {
+        // The type-level half of issue #345's first constraint: a user's
+        // label and a plugin's namespaced word are different variants, and a
+        // label cannot be mistaken for a namespace because it has neither a
+        // dot nor the lowercase-ascii-segment syntax `CustomName` requires.
+        let kind = EventKind::from("user:clutch".to_owned());
+        assert!(matches!(kind, EventKind::UserLabelled(_)));
+        assert!(
+            CustomName::new("user:clutch").is_err(),
+            "`user:clutch` has no dot, so it cannot be a namespaced custom name at all"
+        );
+
+        // And the reverse: a namespaced custom name is never read as a label,
+        // even one whose namespace happens to be `user` with a dot rather
+        // than a colon.
+        let namespaced = EventKind::from("user.something".to_owned());
+        assert!(matches!(namespaced, EventKind::Custom(_)));
+    }
+
+    #[test]
+    fn an_empty_or_oversized_label_is_refused_at_the_point_it_is_typed() {
+        assert_eq!(UserLabel::new(""), Err(InvalidUserLabel::Empty));
+
+        let long = "a".repeat(MAX_USER_LABEL_BYTES + 1);
+        assert!(matches!(
+            UserLabel::new(&long),
+            Err(InvalidUserLabel::TooLong { .. })
+        ));
+        let limit = "a".repeat(MAX_USER_LABEL_BYTES);
+        assert!(UserLabel::new(&limit).is_ok(), "the limit itself is fine");
+
+        let refusal = UserLabel::new("bad\u{7}label").expect_err("a control character");
+        assert!(matches!(refusal, InvalidUserLabel::ControlCharacter { .. }));
+        assert!(
+            refusal.to_string().contains("control character"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_user_label_from_storage_is_kept_rather_than_refused() {
+        // The read-path rule this crate already applies to a malformed
+        // `CustomName` (`a_malformed_namespaced_name_is_kept_rather_than_repaired`),
+        // applied to the other open kind: an event already in a user's
+        // library is not deleted to enforce a rule it has already broken.
+        let empty = EventKind::from("user:".to_owned());
+        assert_eq!(empty, EventKind::Unrecognised("user:".to_owned()));
+
+        let oversized_source = format!("user:{}", "a".repeat(MAX_USER_LABEL_BYTES + 1));
+        let kind = EventKind::from(oversized_source.clone());
+        assert_eq!(kind, EventKind::Unrecognised(oversized_source.clone()));
+        assert_eq!(String::from(kind), oversized_source);
+    }
+
+    #[test]
+    fn a_build_without_this_feature_reads_a_user_label_as_unrecognised() {
+        // What an older build sees, simulated: `user:clutch` fails `CustomName`
+        // (no dot) exactly as it would if this build had never heard of the
+        // `user:` prefix, so it falls back to `Unrecognised` and the mark
+        // survives on a timeline that build cannot yet label correctly.
+        assert!(CustomName::new("user:clutch").is_err());
     }
 }

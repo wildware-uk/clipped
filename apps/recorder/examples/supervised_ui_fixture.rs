@@ -299,6 +299,13 @@ impl Arguments {
             },
         );
 
+        // A fixture starts a real recorder on whatever machine is running the
+        // suite. One that watched for games would create that person's
+        // recordings folder and could start recording a game they had open,
+        // which is what AGENTS.md section 25 rules out — and what these tests
+        // are about is the supervisor, not what the recorder records.
+        settings.watch_for_games = false;
+
         if let Some(attempts) = self.restart_attempts {
             settings.restart.attempts = attempts;
         }

@@ -88,7 +88,7 @@ describe('a stored edit document', () => {
   it('takes the model’s own defaults for what a document may leave out', () => {
     const document = read(
       JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         title: 'Bare',
         sources: [{ id: 0, recording: 'rec-1' }],
         segments: [{ source: 0, span: { start: 0, end: 1_000_000_000 } }],
@@ -107,7 +107,7 @@ describe('a stored edit document', () => {
 
   it('reads the empty clip, which a user who deleted everything has', () => {
     const document = read(
-      JSON.stringify({ schema_version: 1, title: 'Empty', sources: [], segments: [] }),
+      JSON.stringify({ schema_version: 2, title: 'Empty', sources: [], segments: [] }),
     );
 
     expect(document.segments).toEqual([]);
@@ -140,16 +140,16 @@ describe('a document that will not load', () => {
   /*
    * The row of the compatibility table that matters most: a document from a
    * build that knows more than this one. Refusing by *version* is why the
-   * version is read out of the raw JSON before anything else — a version-2
+   * version is read out of the raw JSON before anything else — a version-3
    * document may have a shape this build cannot deserialise at all, and it
    * still has to be refused as a version rather than as a parse failure.
    */
   it('refuses a document from a newer Clipped, and says nothing has been changed', () => {
     const problem = refusal(
-      JSON.stringify({ schema_version: 2, tone_map: 'hlg', anything: [1, 2, 3] }),
+      JSON.stringify({ schema_version: 3, tone_map: 'hlg', anything: [1, 2, 3] }),
     );
 
-    expect(problem).toMatch(/format 2/);
+    expect(problem).toMatch(/format 3/);
     expect(problem).toMatch(/Update Clipped/);
     expect(problem).toMatch(/Nothing has been changed/);
   });
@@ -158,6 +158,25 @@ describe('a document that will not load', () => {
     expect(refusal(JSON.stringify({ schema_version: 0, sources: [], segments: [] }))).toMatch(
       /cannot convert/,
     );
+  });
+
+  /*
+   * The real case rather than a hypothetical one: format 1 is what every
+   * document on disk before this build was, and `crates/edit` still opens it —
+   * converting `soloed` away in memory (`SOLO_IS_NOT_AN_EDIT`,
+   * `crates/edit/src/schema.rs`) and telling its caller it did. This window is
+   * not that caller: it cannot store the result, so it refuses rather than
+   * silently opening a document with `soloed` dropped out from under it.
+   */
+  it('refuses a genuine format 1 document, carrying soloed, rather than converting it', () => {
+    const versionOne = JSON.parse(storedDocument()) as Record<string, unknown>;
+    versionOne.schema_version = 1;
+    const tracks = versionOne.audio_tracks as Record<string, unknown>[];
+    for (const track of tracks) {
+      track.soloed = false;
+    }
+
+    expect(refusal(JSON.stringify(versionOne))).toMatch(/cannot convert/);
   });
 
   /*
@@ -199,7 +218,7 @@ describe('a document that will not load', () => {
   });
 
   it('refuses a document with no segments field at all, which the model has no default for', () => {
-    expect(refusal(JSON.stringify({ schema_version: 1, title: 'x', sources: [] }))).toMatch(
+    expect(refusal(JSON.stringify({ schema_version: 2, title: 'x', sources: [] }))).toMatch(
       /no "segments"/,
     );
   });

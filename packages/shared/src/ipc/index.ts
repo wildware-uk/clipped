@@ -91,6 +91,9 @@ export type {
   RequestMessage,
   ResponseMessage,
   ServerMessage,
+  SessionEndedEvent,
+  SessionRecording,
+  SessionSummary,
   StartRecordingParams,
   StatusChangedEvent,
   StatusReply,
@@ -99,6 +102,7 @@ export type {
   UnrecognisedErrorDetail,
   UnrecognisedEvent,
   UnsupportedProtocolVersionDetail,
+  WatchingStatus,
   WelcomeMessage,
   EndReason,
 } from './protocol';

@@ -1154,6 +1154,7 @@ mod tests {
             // The window does not ask for a replay buffer, so a recording it
             // started keeps none (#427).
             replay_seconds: None,
+            session: None,
         })
     }
 

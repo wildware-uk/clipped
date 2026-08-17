@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-//!     "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve
+//!     "Clipped Recorder" = "C:\…\clipped-recorder.exe" serve --watch-for-games
 //! ```
 //!
 //! `HKEY_CURRENT_USER` rather than `HKEY_LOCAL_MACHINE`: this is one person's
@@ -149,9 +149,17 @@ impl LoginEntry {
 ///
 /// Quoted because an installation path contains spaces far more often than not,
 /// and Windows parses this value as a command line.
+///
+/// `--watch-for-games` is what makes a recorder started at login do the thing
+/// the product is for: record games as they launch (SPEC.md sections 2 and 7).
+/// It is a flag rather than the default because a `serve` started by hand or by
+/// a test must not begin recording whatever is running on the machine, and this
+/// is one of the two places a shipped build asks for it — the other is
+/// `clipped_ipc::supervisor`, which starts a recorder when the window opens and
+/// none is listening ([issue #421](https://github.com/wildware-uk/clipped/issues/421)).
 #[must_use]
 pub fn login_command(executable: &Path) -> String {
-    format!("\"{}\" serve", executable.display())
+    format!("\"{}\" serve --watch-for-games", executable.display())
 }
 
 /// Runs `clipped-recorder start-at-login`.
@@ -521,10 +529,15 @@ mod tests {
         // than not, and Windows parses this value as a command line: without the
         // quotes, `C:\Program Files\Clipped\clipped-recorder.exe` starts
         // `C:\Program.exe`.
+        //
+        // And `--watch-for-games`, because a recorder started at login that
+        // did not watch for games would be a Clipped that records nothing
+        // until somebody opens its window and presses a button — which is the
+        // opposite of what it is for (issue #421).
         let command = login_command(Path::new(r"C:\Program Files\Clipped\clipped-recorder.exe"));
         assert_eq!(
             command,
-            r#""C:\Program Files\Clipped\clipped-recorder.exe" serve"#
+            r#""C:\Program Files\Clipped\clipped-recorder.exe" serve --watch-for-games"#
         );
         assert_eq!(
             executable_in(&command),

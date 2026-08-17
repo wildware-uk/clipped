@@ -17,13 +17,15 @@ import {
  * to be the same on both sides. `plan.rs`'s own tests assert that a speed, a
  * crop or a rotation is `SegmentTransformed`; that text over the picture is
  * `Overlays { overlays: 1 }`; that a track at the level it was recorded is
- * copied and each of the other four things is a `MixReason`; that a track
- * silenced by another's solo is a mix rather than a missing track; and that
- * joining two recordings is `SeveralRecordings { recordings: 2 }`. Every one of
- * those is asserted below against the port, with the crate's own shape of
- * document. A test written from the port's own output would prove only that it
- * agrees with itself, and the failure that matters is a dialog telling somebody
- * their clip will be copied and an export then refusing it.
+ * copied and each of the other four things is a `MixReason`; that a muted
+ * track is a mix rather than a missing track, and a solo left on elsewhere
+ * never is, because an export is never handed one ([issue
+ * #85](https://github.com/wildware-uk/clipped/issues/85)); and that joining two
+ * recordings is `SeveralRecordings { recordings: 2 }`. Every one of those is
+ * asserted below against the port, with the crate's own shape of document. A
+ * test written from the port's own output would prove only that it agrees with
+ * itself, and the failure that matters is a dialog telling somebody their clip
+ * will be copied and an export then refusing it.
  *
  * The rest of the plan — the keyframe at each cut, the codecs, the picture
  * order, the shape — needs the recording, which this window cannot open
@@ -73,7 +75,6 @@ function track(changes: Record<string, unknown> = {}): Record<string, unknown> {
     inputs: [{ source: 0, stream: 0 }],
     gain_db: 0,
     muted: false,
-    soloed: false,
     fade_in: 0,
     fade_out: 0,
     ...changes,
@@ -212,18 +213,20 @@ describe('what the document settles about copying a clip', () => {
     expect(describeBlocker(document, blockers[0] as DocumentBlocker).what).toBe(sentence);
   });
 
-  it('reports the track another track’s solo silenced, and says why it is silent', () => {
-    // `plan.rs`: `a_track_silenced_by_another_ones_solo_is_a_mix_rather_than_a_missing_track`.
-    // Silence has to be produced; dropping the track would write a file with
-    // fewer tracks than the clip has.
+  it('is unmoved by which track the editor happens to be soloing, because soloing is not saved', () => {
+    // `plan.rs`: `a_silenced_track_is_a_mix_rather_than_a_missing_track`, whose
+    // own comment says it: "muting is the only way a track is silent in an
+    // export; soloing moved out of the document in #85, so an export is never
+    // handed one." A document has nowhere left to carry a solo at all — this
+    // is the proof that the port does not go looking for one anyway.
     const document = clip({
-      audio_tracks: [track(), track({ name: 'Microphone', soloed: true })],
+      audio_tracks: [track(), track({ name: 'Microphone', muted: true })],
     });
 
     const blockers = blockersOf(document);
-    expect(blockers).toEqual([{ kind: 'trackNeedsMixing', track: 0, reason: 'silenced' }]);
+    expect(blockers).toEqual([{ kind: 'trackNeedsMixing', track: 1, reason: 'silenced' }]);
     expect(describeBlocker(document, blockers[0] as DocumentBlocker).what).toBe(
-      'The “Game” track is silent because another track is soloed.',
+      'The “Microphone” track is muted.',
     );
   });
 

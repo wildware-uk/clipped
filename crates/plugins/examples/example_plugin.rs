@@ -27,7 +27,7 @@
 //!
 //! ```text
 //! cargo run -p clipped-plugins --example example_plugin
-//! {"command":"attach","contract":1,"session":{"session":"by-hand","process":{"executable":"cs2.exe","process_id":1}}}
+//! {"command":"attach","contract":2,"session":{"session":"by-hand","process":{"executable":"cs2.exe","process_id":1}}}
 //! ```
 
 use std::io::{self, BufRead, Write};

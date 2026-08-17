@@ -70,7 +70,12 @@ function New-Fixture {
         [Parameter(Mandatory)] [string] $Name,
         [switch] $WithRecorder,
         [string[]] $Libraries = @(),
-        [string[]] $Programs = @()
+        [string[]] $Programs = @(),
+        # Every fixture has its notices, because every real build does: they are
+        # what `scripts/collect-notices.ps1` leaves behind and what an installed
+        # copy is obliged to carry. The switch is for the one case that proves
+        # the obligation is enforced (issue #123).
+        [switch] $WithoutLicences
     )
 
     $root = Join-Path $fixtureRoot $Name
@@ -90,10 +95,19 @@ function New-Fixture {
         Set-Content -LiteralPath (Join-Path $ffmpegBin $program) -Value $program -Encoding Ascii
     }
 
+    $licences = Join-Path $root 'licences'
+    if (-not $WithoutLicences) {
+        New-Item -ItemType Directory -Path (Join-Path $licences 'ffmpeg') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $licences 'LICENSE.txt') -Value 'MPL-2.0, for the purposes of this test' -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $licences 'THIRD-PARTY-NOTICES.md') -Value '# Notices' -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $licences 'ffmpeg\LGPL-3.0.txt') -Value 'LGPL' -Encoding Ascii
+    }
+
     return [pscustomobject]@{
         Recorder  = $recorder
         FfmpegDir = (Join-Path $root 'ffmpeg')
         Payload   = (Join-Path $root 'payload')
+        Licences  = $licences
     }
 }
 
@@ -115,7 +129,8 @@ function Invoke-Stage {
         $output = & powershell -ExecutionPolicy Bypass -File $stageScript `
             -RecorderExecutable $Fixture.Recorder `
             -FfmpegDir $FfmpegDir `
-            -PayloadDirectory $Fixture.Payload 2>&1 | Out-String
+            -PayloadDirectory $Fixture.Payload `
+            -LicenceDirectory $Fixture.Licences 2>&1 | Out-String
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previous
@@ -219,6 +234,21 @@ try {
         -Contains @('scripts/fetch-ffmpeg.ps1') `
         -ExpectedStaged @()
 
+    # Issue #123: an installed copy carries FFmpeg's LGPL libraries and the
+    # notices of several hundred crates, and distributing the first without the
+    # second is not something the licences permit. So it is a refusal, in the
+    # same shape as a missing recorder, rather than a warning nobody reads.
+    $noLicences = New-Fixture -Name 'no-licences' -WithRecorder -Libraries @('avcodec-62.dll') -WithoutLicences
+    Assert-Case `
+        -Name 'missing notices stop the build, naming the script that produces them' `
+        -Result (Invoke-Stage -Fixture $noLicences) `
+        -ExpectedExitCode 1 `
+        -Contains @(
+        $noLicences.Licences,
+        'scripts/collect-notices.ps1'
+    ) `
+        -ExpectedStaged @()
+
     Write-Host 'What travels with the recorder'
 
     $complete = New-Fixture -Name 'complete' `
@@ -275,6 +305,26 @@ try {
             -Result (Invoke-Stage -Fixture $againstTheRealBuild -FfmpegDir $realFfmpegDir) `
             -ExpectedExitCode 0 `
             -ExpectedStaged (@('clipped-recorder.exe') + $realLibraries)
+    }
+
+    Write-Host 'What an installed copy is obliged to carry'
+
+    $withLicences = New-Fixture -Name 'with-licences' -WithRecorder -Libraries @('avcodec-62.dll')
+    $carried = Invoke-Stage -Fixture $withLicences
+    $stagedLicences = Join-Path $withLicences.Payload 'licences'
+    $problems = @()
+    if ($carried.ExitCode -ne 0) { $problems += "exit code was $($carried.ExitCode), expected 0" }
+    foreach ($expected in @('LICENSE.txt', 'THIRD-PARTY-NOTICES.md', 'ffmpeg\LGPL-3.0.txt')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $stagedLicences $expected) -PathType Leaf)) {
+            $problems += "the installer payload has no $expected"
+        }
+    }
+    if ($problems.Count -eq 0) {
+        Write-Host '  PASS  the licence texts and notices reach the payload'
+    } else {
+        Write-Host '  FAIL  the licence texts and notices reach the payload' -ForegroundColor Red
+        foreach ($problem in $problems) { Write-Host "        $problem" -ForegroundColor Red }
+        $script:failureCount++
     }
 } finally {
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue

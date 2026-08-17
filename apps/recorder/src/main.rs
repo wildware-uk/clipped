@@ -23,6 +23,28 @@ fn main() -> ExitCode {
     // alive (docs/logging.md).
     let _diagnostics = start_diagnostics();
 
+    // The first thing in every log, because it is the variable most likely to
+    // explain a bug report nobody can reproduce, and because the
+    // corresponding-source obligation turns on which build was shipped
+    // (`docs/licensing.md`, issue #123). Read out of the libraries this process
+    // actually loaded rather than from a constant compiled in, so a machine
+    // running an FFmpeg of its own — which `.cargo/config.toml` deliberately
+    // allows — says so instead of repeating the pin
+    // ([issue #256](https://github.com/wildware-uk/clipped/issues/256)).
+    //
+    // After logging is started and before anything else runs, so that a
+    // recording which fails on its first frame still has this line above the
+    // failure.
+    let ffmpeg = clipped_muxer::linkage::linked_build();
+    tracing::info!(
+        build = %ffmpeg.identifier,
+        licence = %ffmpeg.licence,
+        avformat = %ffmpeg.avformat,
+        avcodec = %ffmpeg.avcodec,
+        avutil = %ffmpeg.avutil,
+        "the FFmpeg this process loaded"
+    );
+
     match clipped_recorder::run(&cli) {
         Ok(()) => ExitCode::from(clipped_recorder::EXIT_SUCCESS),
         Err(error) => {

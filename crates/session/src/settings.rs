@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use clipped_capture::{CaptureTarget, FrameSize, TargetHandle, TargetKind, TargetProperties};
 use clipped_encoder::{Codec, EncoderKind};
+use clipped_windows::WindowHandle;
 
 use crate::error::SessionError;
 
@@ -109,6 +110,37 @@ impl CaptureTargetSettings {
     #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// The process whose audio is *this recording's* game audio, if there is one.
+    ///
+    /// A window belongs to a process and a monitor does not, so a full-screen
+    /// recording of a display has no answer here and gets the unscoped system
+    /// track instead (`crate::audio`). Resolved when it is asked for rather than
+    /// stored, because a handle can stop naming a window between two lines and
+    /// the answer is wanted at the moment the audio sources are opened, not at
+    /// the moment the settings were built.
+    #[must_use]
+    pub(crate) fn game_process(&self) -> Option<u32> {
+        match self.kind {
+            // `WindowHandle::as_u64` is `self.0 as u64` over an `isize`, so the
+            // exact inverse is the same cast back. `isize::try_from` is not: it
+            // refuses anything above `isize::MAX`, which is every handle whose
+            // top bit is set, and those are handles a recording has to work for.
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "round-trips the widening WindowHandle::as_u64 performed"
+            )]
+            TargetKind::Window => {
+                clipped_windows::window_process(WindowHandle::from_raw(self.handle as isize))
+            }
+            // A monitor belongs to no process, and `TargetKind` is
+            // `#[non_exhaustive]`: a kind added later has no process either
+            // until somebody decides it does. Both answer "record the whole
+            // endpoint", which is the unscoped behaviour that predates this and
+            // is wrong only in being coarse.
+            TargetKind::Monitor | _ => None,
+        }
     }
 
     /// The properties backend selection reasons over.

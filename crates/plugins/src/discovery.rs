@@ -215,13 +215,16 @@ impl InstalledPlugin {
         self.manifest.supports().matches(process)
     }
 
-    /// The consent token for what it declares **now**.
+    /// The consent token for what it declares **now** — network and
+    /// filesystem together.
     ///
-    /// Show the declaration ([`NetworkAccess::summary`](crate::NetworkAccess::summary)),
-    /// and store this alongside the fact that the user enabled it.
+    /// Show the declaration
+    /// ([`NetworkAccess::summary`](crate::NetworkAccess::summary),
+    /// [`FilesystemAccess::summary`](crate::FilesystemAccess::summary)), and
+    /// store this alongside the fact that the user enabled it.
     #[must_use]
     pub fn consent_token(&self) -> ConsentToken {
-        self.manifest.network().consent_token()
+        self.manifest.consent_token()
     }
 
     /// Turns a plugin the user has allowed into one that may be started.
@@ -384,6 +387,8 @@ impl core::error::Error for ConsentLapsed {}
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
     use crate::fixture::TemporaryDirectory;
     use crate::manifest::tests::EXAMPLE;
@@ -520,5 +525,48 @@ mod tests {
             lapsed.to_string().contains("allowed again"),
             "the message should say what happens next: {lapsed}"
         );
+    }
+
+    #[test]
+    fn a_plugin_that_starts_writing_into_a_game_directory_needs_consent_again() {
+        // The filesystem half of the same property: a plugin that starts
+        // declaring it will write into the game's own directory — the gap
+        // #343 exists to close — is not started on consent to the version of
+        // it that made no such claim.
+        let root = TemporaryDirectory::new("consent-filesystem");
+        root.install("cs2fs", EXAMPLE, Some("clipped-cs2-plugin.exe"));
+        let plugin = discover(root.path()).installed.remove(0);
+
+        let allowed = plugin.consent_token();
+        assert!(plugin.clone().enable(&allowed).is_ok());
+        assert!(
+            plugin.manifest().filesystem().is_empty(),
+            "the baseline declares no filesystem access"
+        );
+
+        // The plugin updates, and now writes into Counter-Strike 2's own
+        // installation directory as well as talking to the network it already
+        // declared.
+        let mut document: Value = serde_json::from_str(EXAMPLE).expect("EXAMPLE parses");
+        document.as_object_mut().expect("an object").insert(
+            "filesystem".to_owned(),
+            serde_json::json!([{
+                "scope": "game-installation",
+                "access": "write",
+                "purpose": "writes the Game State Integration configuration"
+            }]),
+        );
+        root.install(
+            "cs2fs",
+            &document.to_string(),
+            Some("clipped-cs2-plugin.exe"),
+        );
+        let updated = discover(root.path()).installed.remove(0);
+        assert!(!updated.manifest().filesystem().is_empty());
+
+        let lapsed = updated
+            .enable(&allowed)
+            .expect_err("consent to a plugin that touched no files is not consent to one that now writes into a game");
+        assert_eq!(lapsed.consented_to, allowed);
     }
 }
