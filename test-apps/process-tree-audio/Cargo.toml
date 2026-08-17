@@ -23,11 +23,12 @@ path = "src/main.rs"
 # `--help` looks the same wherever a contributor meets it. Dual MIT/Apache-2.0.
 clap.workspace = true
 
-# The render stream this application plays its tone through. `video-pattern`
-# already owns the one copy of "open the default output endpoint in shared mode
-# and feed it", written to be shared (AGENTS.md section 55); a second copy here
-# would be the fourth in the workspace and the first that nobody would notice
-# drifting.
+# The tone this application plays. `video-pattern` owns the one copy of "open
+# the default output endpoint in shared mode and hold a sine on it", written to
+# be shared (AGENTS.md section 55): it started here and moved down there when
+# the video subject needed the same loop for `--steady-tone`, so that the two
+# test applications cannot drift apart in what they play or how loudly. The
+# frequencies a test asks for live with it, for the same reason.
 [target.'cfg(windows)'.dependencies]
 clipped-video-pattern.workspace = true
 

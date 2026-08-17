@@ -25,7 +25,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
 use clap::Parser;
-use clipped_process_tree_audio::{tone, AMPLITUDE, FREQUENCY};
+use clipped_video_pattern::steady_tone::{self, AMPLITUDE, FREQUENCY};
 
 /// A controlled subject for process-scoped audio capture tests.
 #[derive(Debug, Parser)]
@@ -146,7 +146,7 @@ fn play(options: &Options, limit: Option<Duration>) -> Result<(), Box<dyn std::e
     });
 
     let frequency = options.frequency;
-    let played = tone::play(
+    let played = steady_tone::play(
         frequency,
         options.amplitude,
         limit,

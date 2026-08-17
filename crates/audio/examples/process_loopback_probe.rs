@@ -37,8 +37,12 @@
 //!
 //! Read that against `scoped to`, which is the process both sides are scoped
 //! through: they must always show the same number. This is a probe rather than
-//! a test — the measurement automated on real hardware is
-//! [issue #34](https://github.com/wildware-uk/clipped/issues/34).
+//! a test: the same claim, automated on real hardware and measured per frequency
+//! rather than as a peak, is `tests/audio/track_isolation.rs`
+//! ([issue #34](https://github.com/wildware-uk/clipped/issues/34)). What the
+//! probe still answers that the test does not is what a *real* game and a *real*
+//! browser do, which is worth watching for a few seconds before believing a
+//! machine.
 //!
 //! Nothing it captures is written anywhere.
 

@@ -574,9 +574,12 @@ fn a_recording_with_both_sources_has_a_named_track_for_each_and_the_right_sound_
 /// declares three tracks, puts each source on its own, and writes a file in
 /// which they are separable. It is not measured against Windows: whether
 /// `ProcessLoopbackCapture`'s include and exclude modes really partition the
-/// machine's audio is the system half of #34, needs the test applications of
-/// [#136](https://github.com/wildware-uk/clipped/issues/136), and is what the
-/// manual procedure in `docs/testing.md` covers. A session that routed two
+/// machine's audio is the system half of #34, and it is
+/// `tests/audio/track_isolation.rs` — a real recording of a real window, which
+/// needs a GPU, a display and an output endpoint and therefore cannot live
+/// here. The microphone leg of that is still the manual procedure in
+/// `docs/testing.md`, because a simulated microphone needs a virtual capture
+/// device rather than a program. A session that routed two
 /// sources to one track passes every structural assertion above the tone ones
 /// and fails here, which is the whole reason the tones exist.
 #[test]
