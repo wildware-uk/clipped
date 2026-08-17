@@ -66,6 +66,7 @@ import type {
   PluginDeclaration,
   SettingEntry,
   SettingsView,
+  StartAtLogin,
   PluginState,
   RefusedPlugin,
   LibraryGame,
@@ -420,6 +421,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'settings', settings: readSettingsView(reply['settings']) };
     case 'audio_devices':
       return { reply: 'audio_devices', devices: readAudioDevices(reply['devices']) };
+    case 'start_at_login':
+      return { reply: 'start_at_login', start_at_login: readStartAtLogin(reply['start_at_login']) };
     case 'shutting_down': {
       const finalising = reply['finalising'];
       return {
@@ -542,6 +545,24 @@ function readAudioDevice(value: JsonValue | undefined): AudioDevice {
   return {
     name: stringField(device, 'name', 'an audio device'),
     is_default: booleanField(device, 'is_default', 'an audio device'),
+  };
+}
+
+function readStartAtLogin(value: JsonValue | undefined): StartAtLogin {
+  const state = object(value, 'the start-at-login arrangement');
+  const what = 'the start-at-login arrangement';
+  const command = optionalStringField(state, 'command', what);
+  const missing = optionalStringField(state, 'missing_executable', what);
+  return {
+    enabled: booleanField(state, 'enabled', what),
+    location: stringField(state, 'location', what),
+    // Absent means there is no entry at all, which is the switch being off
+    // rather than a gap in the frame.
+    ...(command === undefined ? {} : { command }),
+    // Present exactly when the entry names an executable that is no longer
+    // there — a Clipped that moved. Dropping it here would draw a startup
+    // arrangement that will never run as a working one (AGENTS.md section 27).
+    ...(missing === undefined ? {} : { missing_executable: missing }),
   };
 }
 

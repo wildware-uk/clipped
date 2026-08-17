@@ -110,6 +110,23 @@ export interface CommandAnswers {
    */
   readonly audioDevices?: () => unknown;
   /**
+   * What `start_at_login` answers: whether the recorder starts at sign-in.
+   *
+   * The default is a rejection, for the reason `audioDevices`' is: "Clipped
+   * does not start at sign-in" and "nobody could find out" are opposite
+   * answers, and a stub that quietly said the first would let a screen that
+   * draws them the same way pass.
+   */
+  readonly startAtLogin?: () => unknown;
+  /**
+   * What `set_start_at_login` answers, given the switch it was sent.
+   *
+   * The answer is the arrangement as it now stands, which is what the switch
+   * redraws from — so a stub that returns the previous state is a registry that
+   * refused nothing and changed nothing, and the screen has to show that.
+   */
+  readonly setStartAtLogin?: (args: Record<string, unknown>) => unknown;
+  /**
    * Which folder the directory dialog says to record into, given what it was
    * opened with.
    *
@@ -292,6 +309,16 @@ export function stubRecorderLinkRuntime(
       }
       if (command === 'audio_devices') {
         return answered(commands.audioDevices);
+      }
+      if (command === 'start_at_login') {
+        return answered(commands.startAtLogin);
+      }
+      if (command === 'set_start_at_login') {
+        return answered(
+          commands.setStartAtLogin === undefined
+            ? undefined
+            : () => commands.setStartAtLogin?.(args),
+        );
       }
       if (command === 'plugin:dialog|open') {
         return answered(

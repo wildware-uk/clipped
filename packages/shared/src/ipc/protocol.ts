@@ -126,6 +126,7 @@ export const FEATURES = [
   'hotkeys',
   'replay',
   'settings',
+  'startup',
   'automatic',
 ] as const;
 
@@ -166,6 +167,8 @@ export const COMMANDS = [
   'get_settings',
   'apply_settings',
   'get_audio_devices',
+  'get_start_at_login',
+  'set_start_at_login',
   'shutdown',
 ] as const;
 
@@ -256,6 +259,7 @@ export const REPLIES = [
   'hotkeys',
   'settings',
   'audio_devices',
+  'start_at_login',
   'shutting_down',
 ] as const;
 
@@ -1436,6 +1440,51 @@ export interface AudioDevicesReply {
   readonly devices: AudioDevices;
 }
 
+/**
+ * Whether the recorder starts when this user signs in, and what is arranged.
+ *
+ * Not a setting: it is a `Run` value Windows reads at sign-in rather than a key
+ * in `settings.json`, and the recorder is what reads and writes it because the
+ * value names the executable to run and that executable is the recorder
+ * (issue #308).
+ */
+export interface StartAtLogin {
+  /**
+   * Whether Windows has an entry for Clipped under this account.
+   *
+   * The switch's position, and nothing more: an entry that is there and names
+   * an executable that is gone is still `true`, because that is what Windows
+   * will try to run.
+   */
+  readonly enabled: boolean;
+  /** Where the entry is, spelled the way a registry editor spells it. */
+  readonly location: string;
+  /** The command line Windows would run. Absent exactly when `enabled` is false. */
+  readonly command?: string;
+  /**
+   * The executable the entry names, when it is no longer there.
+   *
+   * A Clipped that moved or was reinstalled. Absent when the entry is missing
+   * and when it is fine, so its presence is exactly the case to act on — and
+   * the action is turning the switch on again from this installation.
+   */
+  readonly missing_executable?: string;
+}
+
+/** Turn starting at login on, or off. */
+export type SetStartAtLoginParams = {
+  /** `true` writes the entry, `false` removes it. */
+  readonly enabled: boolean;
+};
+
+/** Whether the recorder starts at sign-in, as it now stands. */
+export interface StartAtLoginReply {
+  /** The tag. */
+  readonly reply: 'start_at_login';
+  /** The arrangement: whether it is on, what would run, and whether that exists. */
+  readonly start_at_login: StartAtLogin;
+}
+
 /** Every action a global hotkey can perform, and where each one stands. */
 export interface HotkeysReply {
   /** The tag. */
@@ -1491,6 +1540,7 @@ export type Reply =
   | HotkeysReply
   | SettingsReply
   | AudioDevicesReply
+  | StartAtLoginReply
   | ShuttingDownReply;
 
 /** Nothing is being recorded, and nothing will be until something asks. */

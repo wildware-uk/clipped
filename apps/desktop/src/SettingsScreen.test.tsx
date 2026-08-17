@@ -110,6 +110,26 @@ const MICROPHONES = {
   ],
 };
 
+/** A startup arrangement, as `get_start_at_login` answers. */
+const RUN_VALUE = String.raw`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\Clipped Recorder`;
+
+/** Nothing arranged: the state every machine is in until somebody asks. */
+const NOT_AT_LOGIN = { enabled: false, location: RUN_VALUE };
+
+/** Arranged, and the recorder it names is where it says it is. */
+const AT_LOGIN = {
+  enabled: true,
+  location: RUN_VALUE,
+  command: String.raw`"C:\Program Files\Clipped\clipped-recorder.exe" serve --watch-for-games`,
+};
+
+/** What the window sent to `set_start_at_login`, in order. */
+function switched(runtime: StubbedRuntime): readonly unknown[] {
+  return runtime.invocations
+    .filter((invocation) => invocation.command === 'set_start_at_login')
+    .map((invocation) => invocation.args['enabled']);
+}
+
 /** What the window sent to `apply_recorder_settings`, in order. */
 function saved(runtime: StubbedRuntime): readonly Record<string, unknown>[] {
   return runtime.invocations
@@ -336,6 +356,40 @@ describe('the Settings screen', () => {
   });
 
   /*
+   * And the list follows the machine. Issue #308 asks for a list that "changes
+   * when a device is plugged in or removed", and the recorder enumerates the
+   * endpoints on every request so that it can be asked twice — but a window
+   * that asked once at mount would offer whatever happened to be plugged in
+   * when the screen opened, for as long as it stayed open. Coming back to the
+   * window is the moment worth asking again: it is what somebody does after
+   * plugging a headset in.
+   */
+  it('asks for the microphones again when the window comes back to the front', async () => {
+    const user = userEvent.setup();
+    let plugged = false;
+    renderScreen({
+      audioDevices: () =>
+        plugged
+          ? {
+              microphones: [...MICROPHONES.microphones, { name: 'Elgato Wave', is_default: false }],
+            }
+          : MICROPHONES,
+    });
+
+    await openSection(user, 'Audio');
+    const before = within(await screen.findByLabelText('Microphone')).getAllByRole('option');
+    expect(before.map((option) => option.textContent)).not.toContain('Elgato Wave');
+
+    plugged = true;
+    window.dispatchEvent(new Event('focus'));
+
+    await waitFor(() => {
+      const after = within(screen.getByLabelText('Microphone')).getAllByRole('option');
+      expect(after.map((option) => option.textContent)).toContain('Elgato Wave');
+    });
+  });
+
+  /*
    * A machine whose microphones could not be enumerated is a machine that was
    * asked and could not answer, which is not the same as one with no
    * microphone — and only one of the two means "plug something in".
@@ -473,7 +527,7 @@ describe('the Settings screen', () => {
     ['Storage', 'Maximum usage, minimum free space, maximum age', /by hand/, /#95/],
     ['Storage', 'Per-game settings', /section per game/, /#63/],
     ['Notifications', 'A recording failed', /went wrong/, /#252/],
-    ['Startup', 'Start the recorder when I sign in', /start-at-login/, /#308/],
+    ['Startup', 'Start Clipped’s window when I sign in', /the switch above/, /#308/],
   ])(
     'says, in %s, how "%s" is set today and what it is waiting for',
     async (section, label, today, needs) => {
@@ -486,4 +540,138 @@ describe('the Settings screen', () => {
       expect(needsCell).toMatch(needs);
     },
   );
+});
+
+/*
+ * Starting at sign-in (issue #308). It is not a setting — no key in
+ * `settings.json` carries it, and `apply_settings` does not reach it — so none
+ * of the cases above touch it, and it fails in ways none of them would catch.
+ *
+ * The property that matters most is that the switch **writes the entry**. A
+ * switch labelled "start the recorder when I sign in" that only moved on screen
+ * is precisely the control AGENTS.md section 27 exists to forbid, and it is the
+ * shape this screen carried until now: the row used to print the command and
+ * ask somebody to go and run it in a terminal.
+ */
+describe('the start-at-login switch', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('is drawn where the recorder says the registry is, not where the window guesses', async () => {
+    const user = userEvent.setup();
+    renderScreen({ startAtLogin: () => AT_LOGIN });
+
+    await openSection(user, 'Startup');
+    const toggle = await screen.findByLabelText(/Start the recorder when I sign in/);
+
+    expect(toggle).toBeChecked();
+    // And the value itself, because there is nowhere else to see what will
+    // actually run short of opening a registry editor.
+    expect(pane()).toHaveTextContent('CurrentVersion');
+    expect(pane()).toHaveTextContent('serve --watch-for-games');
+  });
+
+  it('asks the recorder to write the entry when it is turned on', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      startAtLogin: () => NOT_AT_LOGIN,
+      setStartAtLogin: (args) => (args['enabled'] === true ? AT_LOGIN : NOT_AT_LOGIN),
+    });
+
+    await openSection(user, 'Startup');
+    const toggle = await screen.findByLabelText(/Start the recorder when I sign in/);
+    expect(toggle).not.toBeChecked();
+
+    await user.click(toggle);
+
+    // The whole of this issue: something arrived at the other end. Nothing in
+    // this window can write a `Run` value, so if this array is empty the switch
+    // is a light that turns itself on.
+    await waitFor(() => {
+      expect(switched(runtime)).toEqual([true]);
+    });
+    expect(await screen.findByLabelText(/Start the recorder when I sign in/)).toBeChecked();
+  });
+
+  it('asks the recorder to remove the entry when it is turned off', async () => {
+    const user = userEvent.setup();
+    const runtime = renderScreen({
+      startAtLogin: () => AT_LOGIN,
+      setStartAtLogin: () => NOT_AT_LOGIN,
+    });
+
+    await openSection(user, 'Startup');
+    await user.click(await screen.findByLabelText(/Start the recorder when I sign in/));
+
+    await waitFor(() => {
+      expect(switched(runtime)).toEqual([false]);
+    });
+    expect(await screen.findByLabelText(/Start the recorder when I sign in/)).not.toBeChecked();
+  });
+
+  /*
+   * The state that is neither on nor off: Windows will run the entry and the
+   * program it names is gone, which is what a moved or reinstalled Clipped
+   * leaves behind. Drawn as off, somebody turns it on and is told nothing
+   * changed; drawn as plainly on, nothing starts at sign-in and nothing ever
+   * says why.
+   */
+  it('says when the entry points at a Clipped that is no longer there', async () => {
+    const user = userEvent.setup();
+    renderScreen({
+      startAtLogin: () => ({
+        ...AT_LOGIN,
+        missing_executable: String.raw`C:\Old\Clipped\clipped-recorder.exe`,
+      }),
+    });
+
+    await openSection(user, 'Startup');
+    const toggle = await screen.findByLabelText(/Start the recorder when I sign in/);
+
+    expect(toggle, 'Windows will still try it, so the switch is on').toBeChecked();
+    expect(pane()).toHaveTextContent('no longer at');
+    expect(pane()).toHaveTextContent(String.raw`C:\Old\Clipped\clipped-recorder.exe`);
+  });
+
+  /*
+   * And the switch stays where the registry is when a change is refused. A
+   * switch that moved anyway would be telling somebody their machine is
+   * arranged in a way it is not.
+   */
+  it('leaves the switch where it was when the recorder refuses to change it', async () => {
+    const user = userEvent.setup();
+    renderScreen({
+      startAtLogin: () => NOT_AT_LOGIN,
+      setStartAtLogin: () => {
+        throw { code: 'internal', message: 'the registry refused while writing' };
+      },
+    });
+
+    await openSection(user, 'Startup');
+    await user.click(await screen.findByLabelText(/Start the recorder when I sign in/));
+
+    await waitFor(() => {
+      expect(pane()).toHaveTextContent('the registry refused while writing');
+    });
+    expect(await screen.findByLabelText(/Start the recorder when I sign in/)).not.toBeChecked();
+  });
+
+  /*
+   * A recorder that cannot be asked is not a recorder that does not start at
+   * sign-in, and only one of those two is fixed by pressing a switch
+   * (AGENTS.md section 27). The default stub rejects, which is what this uses.
+   */
+  it('says it could not be read rather than drawing the switch off', async () => {
+    const user = userEvent.setup();
+    renderScreen();
+
+    await openSection(user, 'Startup');
+
+    await waitFor(() => {
+      expect(pane()).toHaveTextContent('could not be read');
+    });
+    expect(screen.queryByLabelText(/Start the recorder when I sign in/)).toBeNull();
+  });
 });

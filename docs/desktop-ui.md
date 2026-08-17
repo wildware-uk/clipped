@@ -773,10 +773,37 @@ would have been accepted — and what was typed stays on screen to be corrected
 sent: a value the recorder refused, or one another window changed a moment
 earlier, must not be drawn as saved.
 
-The microphone list is the machine's, asked for when the screen opens. A device
-that is configured and not in the list is kept on offer as "not connected",
-because dropping it would silently change what is recorded; a list that could
-not be asked for is *said*, rather than drawn as a machine with no microphone.
+The microphone list is the machine's, asked for when the screen opens and again
+whenever the window comes back to the front — because the answer goes stale in
+the one way that matters, which is somebody plugging in the headset they are
+about to choose. The recorder enumerates the endpoints on every request so that
+it can be asked twice; the previous list stays on screen while the new one
+arrives, rather than blanking a control somebody may be using. A device that is
+configured and not in the list is kept on offer as "not connected", because
+dropping it would silently change what is recorded; a list that could not be
+asked for is *said*, rather than drawn as a machine with no microphone.
+
+### The two things on this screen that are not settings
+
+The **hotkey list**, which is where every global hotkey stands and the only
+place a conflict is visible (#232); and the **start-at-login switch**, which is
+one `Run` value under this account that Windows reads at sign-in rather than a
+key in `settings.json` (#308). Neither goes through `apply_settings`.
+
+The switch is the recorder's, not this window's, and it has to be: the value is
+a command line naming the executable Windows runs, and that executable is the
+recorder — a window writing a path it worked out from its own location would
+leave a startup entry pointing at nothing, which fails silently, once, at a
+sign-in nobody is watching. So the window asks (`get_start_at_login`,
+`set_start_at_login`), and turning it on here does exactly what
+`clipped-recorder start-at-login enable` does, through the same code.
+
+It has three positions, not two. On, off, and **on but pointing at a Clipped
+that is no longer there** — a moved or reinstalled installation. That third one
+is drawn as on, because Windows will still try it, with the missing path named
+and the repair offered: turning it off and on again writes the copy in use now.
+Reading it never changes it, so opening this screen writes nothing
+([privacy.md](privacy.md)).
 
 ### What each pane still only accounts for
 
@@ -791,7 +818,7 @@ saved, or nothing behind it:
 | Storage | The limits and the trash directory, which the file carries and the screen SPEC.md section 27 draws is #95; and per-game overrides, which the file carries and #63 draws |
 | Hotkeys | Binding a combination (#54). The section **shows where every hotkey stands** — what registered, what another application took, and what nothing performs — which is the only place a conflict is visible (#232) |
 | Notifications | The four switches in `notifications.json`, which is a second store until [#252](https://github.com/wildware-uk/clipped/issues/252) folds it into the settings file |
-| Startup | `clipped-recorder start-at-login enable`, which is not configuration and which no protocol command reaches — [#308](https://github.com/wildware-uk/clipped/issues/308) |
+| Startup | the window's own Run value. The recorder's is a switch on this screen ([#308](https://github.com/wildware-uk/clipped/issues/308)); a second entry starting this window is deliberately not built, because what has to run at sign-in is the recorder |
 
 ### What is checked, and against what
 

@@ -46,6 +46,7 @@ const CLI_RS = source('apps/recorder/src/cli.rs');
 const POLICY_RS = source('apps/desktop/src-tauri/src/notification_policy.rs');
 const RECORDER_SETTINGS_RS = source('apps/recorder/src/settings.rs');
 const MESSAGE_RS = source('crates/ipc/src/message.rs');
+const SERVE_RS = source('apps/recorder/src/serve.rs');
 const NOTIFICATIONS_RS = source('apps/desktop/src-tauri/src/notifications.rs');
 const TAURI_CONF = source('apps/desktop/src-tauri/tauri.conf.json');
 
@@ -271,6 +272,60 @@ describe('the claim the whole screen rests on', () => {
   it('is that the recorder says so in its welcome', () => {
     expect(MESSAGE_RS, 'crates/ipc no longer declares a `settings` feature').toMatch(
       /SETTINGS = "settings";/,
+    );
+  });
+});
+
+describe('the claim the start-at-login switch rests on', () => {
+  /*
+   * That the recorder answers the two commands the switch is built out of
+   * (issue #308). Until it did, the Startup section printed
+   * `clipped-recorder start-at-login enable` and asked somebody to go and run
+   * it — because nothing in the protocol read or wrote that value, and a switch
+   * drawn over nothing is the control that silently does nothing of AGENTS.md
+   * section 27.
+   *
+   * Read out of `Command::from_request` for the reason the settings commands
+   * are: a command quietly renamed on the Rust side has to fail here rather
+   * than in a window nobody has opened.
+   */
+  it('is that the recorder reads and writes whether it starts at sign-in', () => {
+    const commands = quoted(
+      blockAfter('crates/ipc/src/command.rs', COMMAND_RS, 'pub fn from_request'),
+    ).filter((literal) => /^[a-z_]+$/.test(literal));
+
+    for (const command of ['get_start_at_login', 'set_start_at_login']) {
+      expect(commands, `${command} is not a command this recorder parses`).toContain(command);
+    }
+  });
+
+  /*
+   * And that a window can tell before it draws the switch. A recorder older
+   * than this window has the settings commands and neither of these, so the
+   * capability is what separates "Clipped does not start at sign-in" from
+   * "this recorder cannot be asked" — opposite answers, and the switch would
+   * be drawn identically for both.
+   */
+  it('is that the recorder says so in its welcome', () => {
+    expect(MESSAGE_RS, 'crates/ipc no longer declares a `startup` feature').toMatch(
+      /STARTUP = "startup";/,
+    );
+  });
+
+  /*
+   * And that the recorder writes it through the subcommand's own code rather
+   * than a second implementation of the same registry value (AGENTS.md section
+   * 55). Two implementations of "is Clipped set to start at login" is two
+   * answers to one question, and the settings screen would show whichever one
+   * happened to be wired up.
+   */
+  it('is that one module writes that registry value, and serve calls it', () => {
+    expect(
+      SERVE_RS,
+      'serve no longer answers get_start_at_login through crate::start_at_login',
+    ).toMatch(/Command::GetStartAtLogin[\s\S]*?start_at_login::current/);
+    expect(SERVE_RS, 'serve no longer answers set_start_at_login through it either').toMatch(
+      /Command::SetStartAtLogin[\s\S]*?start_at_login::set/,
     );
   });
 });
