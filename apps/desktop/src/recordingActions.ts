@@ -1,9 +1,12 @@
-import type { ExportSummary, LibraryRecording } from '@clipped/shared';
+import type { ExportProgress, ExportSummary, LibraryRecording } from '@clipped/shared';
+import { exportFraction } from '@clipped/shared';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { asProblem, formatBytes, type LibraryProblem } from './library';
+import { inTauriWindow } from './useRecorderLink';
 
 /**
  * Doing something with a recording the library listed (issue #399).
@@ -91,9 +94,58 @@ export async function chooseDestination(source: string): Promise<string | null> 
 /** What the last thing somebody asked for turned out to be. */
 export type ActionOutcome =
   | { readonly state: 'idle' }
-  | { readonly state: 'working'; readonly path: string; readonly what: string }
+  | {
+      readonly state: 'working';
+      readonly path: string;
+      readonly what: string;
+      /**
+       * How far a running export has got, once the recorder has said.
+       *
+       * `null` until the first `export_progress` event arrives, and `null` for
+       * ever against a recorder that does not have the `export_progress`
+       * feature — which is a recorder that copies the file exactly as it always
+       * did and says nothing while it does (issue #446). A screen draws an
+       * unbounded indication for `null` rather than a bar at nought, because a
+       * bar that never moves is a control that does nothing (AGENTS.md
+       * section 27).
+       *
+       * Also `null` for the two actions that are not exports: opening a file
+       * and showing it in Explorer are a shell call each and finish before
+       * there is anything to say about them.
+       */
+      readonly progress: ExportProgress | null;
+    }
   | { readonly state: 'done'; readonly message: string }
   | { readonly state: 'failed'; readonly problem: LibraryProblem };
+
+/**
+ * The name the Rust side emits recorder link events under.
+ *
+ * The same event `useRecorderLink` follows. Two subscriptions to one Tauri
+ * event rather than threading the link through the screen: they want different
+ * halves of it, and a subscription is a callback in a list.
+ */
+const LINK_EVENT = 'recorder-link';
+
+/** The one link event this file cares about. */
+interface ExportProgressEnvelope {
+  readonly event: 'export_progress';
+  readonly [key: string]: unknown;
+}
+
+/**
+ * How far through an export, in the words a status line uses.
+ *
+ * A percentage where the recording said how long it was, and the bytes copied
+ * where it did not — an interrupted recording keeps every packet it wrote and
+ * no total, and "0 %" would be a worse answer than none.
+ */
+export function describeExportProgress(progress: ExportProgress): string {
+  const fraction = exportFraction(progress);
+  return fraction === null
+    ? `${formatBytes(progress.bytes)} copied so far`
+    : `${Math.round(fraction * 100)}%`;
+}
 
 /** The three things a library row offers, and what the last one produced. */
 export interface RecordingActions {
@@ -115,13 +167,18 @@ export interface RecordingActions {
  * are a shell call — and a screen that kept a message against every row would
  * accumulate stale ones nobody dismissed.
  */
+/** How the outcome is set, including from inside a subscription. */
+type SetOutcome = (next: (outcome: ActionOutcome) => ActionOutcome) => void;
+
 export function useRecordingActions(): RecordingActions {
   const [outcome, setOutcome] = useState<ActionOutcome>({ state: 'idle' });
+
+  useExportProgress(setOutcome);
 
   /** Runs one action, reporting what it did or why it did not. */
   const run = useCallback(
     (recording: LibraryRecording, what: string, act: () => Promise<string | null>): void => {
-      setOutcome({ state: 'working', path: recording.path, what });
+      setOutcome({ state: 'working', path: recording.path, what, progress: null });
       act()
         .then((message) => {
           // `null` is "the person changed their mind", which is not an outcome
@@ -171,6 +228,52 @@ export function useRecordingActions(): RecordingActions {
   );
 
   return { outcome, open, reveal, exportToMp4 };
+}
+
+/**
+ * Folds `export_progress` events into whichever export is in flight.
+ *
+ * Matched on the **source**, because that is what this screen knows: a row's
+ * `path` is the recording, and the destination is inside the Save As dialog's
+ * answer, which nothing here kept. An event for a different recording is
+ * ignored rather than shown, which is what stops a second window's export
+ * moving this one's bar.
+ *
+ * Guarded on `state === 'working'` so that a late event — one already in the
+ * queue when the reply landed — cannot reopen a finished outcome and replace
+ * the sentence saying the file was written.
+ */
+function useExportProgress(setOutcome: SetOutcome): void {
+  useEffect(() => {
+    if (!inTauriWindow()) {
+      return;
+    }
+
+    let current = true;
+    const subscription = listen<ExportProgressEnvelope>(LINK_EVENT, ({ payload }) => {
+      if (!current || payload.event !== 'export_progress') {
+        return;
+      }
+      const progress = payload as unknown as ExportProgress;
+      setOutcome((outcome) =>
+        outcome.state === 'working' && outcome.path === progress.source
+          ? { ...outcome, progress }
+          : outcome,
+      );
+    });
+
+    return () => {
+      current = false;
+      subscription
+        // Wrapped rather than called bare: unsubscribing is a round trip to the
+        // Rust side and returns a promise, and a bare call leaves its rejection
+        // unhandled — which in a webview is a console error nobody reads.
+        .then((unlisten) => Promise.resolve<void>(unlisten()))
+        .catch(() => {
+          // Nothing to do: the listener is going away with the screen.
+        });
+    };
+  }, [setOutcome]);
 }
 
 /** The file at the end of a path, for a sentence about it. */

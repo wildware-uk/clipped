@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::Reply;
 use crate::error::ProtocolError;
-use crate::status::{RecorderStatus, SessionSummary};
+use crate::status::{ExportProgress, RecorderStatus, SessionSummary};
 
 /// The protocol version this build speaks.
 ///
@@ -221,6 +221,25 @@ pub mod features {
         /// [`ActiveRecording::replay_seconds`](crate::ActiveRecording), because
         /// it is a property of the recording rather than of the build.
         REPLAY = "replay";
+        /// The recorder says how far an export has got while it is running:
+        /// the `exports` event stream and
+        /// [`Event::ExportProgress`](crate::Event::ExportProgress).
+        ///
+        /// This one is checked before *subscribing*, not before drawing a
+        /// button, and that is why it has to exist. An event stream a recorder
+        /// does not have is refused **by name, and the refusal takes the whole
+        /// events connection with it** (`accepted_streams` in
+        /// `crate::server`) — so a window that asked a recorder built before
+        /// [issue #446](https://github.com/wildware-uk/clipped/issues/446) for
+        /// `exports` would lose its status subscription as well, and trade a
+        /// missing progress bar for a window that no longer knows whether
+        /// anything is recording.
+        ///
+        /// A recorder without it exports exactly as it always did and says
+        /// nothing while it does. That is the case a client must not read as
+        /// failure or as completion: silence here means "this recorder cannot
+        /// tell you", and the reply is still what says the copy finished.
+        EXPORT_PROGRESS = "export_progress";
         /// The recorder can read and change the settings, and can list this
         /// machine's microphones: `get_settings`, `apply_settings` and
         /// `get_audio_devices`.
@@ -367,6 +386,20 @@ pub enum EventStream {
     /// ([issue #100](https://github.com/wildware-uk/clipped/issues/100),
     /// AGENTS.md section 27).
     Metrics,
+    /// `exports` — how far a running export has got.
+    ///
+    /// A stream of its own rather than more traffic on [`Self::Status`], for
+    /// two reasons. A subscriber's queue is bounded and shared across the
+    /// streams it asked for, so progress from a copy of a two-hour recording
+    /// sharing a queue with `status_changed` would mean a slow reader losing
+    /// *status* to make room for percentages. And a client that does not want
+    /// it can then decline it, which is the whole point of a stream being
+    /// something a client asks for.
+    ///
+    /// Asking a recorder that does not have it refuses the whole events
+    /// connection, so a client asks only when the recorder advertises
+    /// [`features::EXPORT_PROGRESS`].
+    Exports,
     /// A stream this build does not have. Refused, by name.
     Other(String),
 }
@@ -379,6 +412,7 @@ impl EventStream {
             Self::Status => "status",
             Self::Errors => "errors",
             Self::Metrics => "metrics",
+            Self::Exports => "exports",
             Self::Other(name) => name,
         }
     }
@@ -390,6 +424,7 @@ impl From<String> for EventStream {
             "status" => Self::Status,
             "errors" => Self::Errors,
             "metrics" => Self::Metrics,
+            "exports" => Self::Exports,
             _ => Self::Other(stream),
         }
     }
@@ -517,6 +552,29 @@ pub enum Event {
         /// What failed.
         error: ProtocolError,
     },
+    /// A running export has got this far.
+    ///
+    /// An event and not a field on the reply, because the reply arrives when
+    /// the MP4's index has been written — which is the moment there is nothing
+    /// left to report ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+    /// A four-second recording copies in milliseconds and needs none of this; a
+    /// two-hour one is gigabytes, and a window with no indication that anything
+    /// is happening reads as a hang and invites somebody to kill the recorder
+    /// mid-write.
+    ///
+    /// Being an event is also what makes it safe to add. A client that does not
+    /// subscribe to `exports` never sees one, and a recorder too old to send
+    /// one is silent rather than answering something untrue — which a new
+    /// optional field on `export_recording`'s reply could not have managed
+    /// (`docs/ipc.md`, "An unknown field inside a known version: ignored").
+    ///
+    /// **Silence is not completion.** The reply is still the only thing that
+    /// says an export finished, and the last progress event of a copy is not a
+    /// promise that there will not be another.
+    ExportProgress {
+        /// How far it has got, and which export it is.
+        export: ExportProgress,
+    },
     /// An event this build has never heard of, kept exactly as it arrived.
     ///
     /// Only ever produced by *reading*: a newer recorder may send an event that
@@ -545,6 +603,7 @@ impl Event {
         match self {
             Self::StatusChanged { .. } | Self::SessionEnded { .. } => Some(EventStream::Status),
             Self::RecordingFailed { .. } => Some(EventStream::Errors),
+            Self::ExportProgress { .. } => Some(EventStream::Exports),
             Self::Other(_) => None,
         }
     }
@@ -696,6 +755,89 @@ mod tests {
             Some(EventStream::Status),
             "a sitting ending is the end of what the status stream has been describing, and a \
              client subscribed to it must not have to ask for a second stream to see one"
+        );
+        assert_eq!(
+            Event::ExportProgress {
+                export: exemplar_progress(Some(6_540_000)),
+            }
+            .stream(),
+            Some(EventStream::Exports),
+            "export progress routed onto `status` would reach every window watching for a \
+             recording, down the same 64-deep queue, at up to a hundred events per copy"
+        );
+    }
+
+    /// An export part-way through, measured or not.
+    fn exemplar_progress(total_ms: Option<u64>) -> ExportProgress {
+        ExportProgress {
+            source: r"D:\clips\match.mkv".to_owned(),
+            destination: r"D:\clips\match.mp4".to_owned(),
+            written_ms: 1_308_000,
+            total_ms,
+            packets: 117_624,
+            bytes: 1_962_240_822,
+        }
+    }
+
+    #[test]
+    fn the_exports_stream_survives_the_round_trip_through_its_wire_name() {
+        // A stream is named on the wire in the `hello` a client sends, and it is
+        // the one vocabulary where being unrecognised is refused rather than
+        // ignored. A misspelling here would reach a recorder as
+        // `EventStream::Other` and take the whole events connection with it.
+        assert_eq!(EventStream::Exports.as_str(), "exports");
+        assert_eq!(
+            EventStream::from("exports".to_owned()),
+            EventStream::Exports
+        );
+        assert_eq!(
+            String::from(EventStream::Exports),
+            "exports",
+            "a client serialising this as anything else would be asking for a stream no recorder \
+             has"
+        );
+        assert!(
+            matches!(
+                EventStream::from("export".to_owned()),
+                EventStream::Other(name) if name == "export"
+            ),
+            "a name that is not this one must not be quietly read as this one"
+        );
+    }
+
+    #[test]
+    fn an_export_progress_event_keeps_an_absent_total_absent_across_the_wire() {
+        // `total_ms` absent and `total_ms: 0` are different answers — "this
+        // recording never said how long it was" and "it is nought long" — and a
+        // client draws an unbounded indication for the first. A
+        // `skip_serializing_if` lost in a refactor would turn every interrupted
+        // recording's export into a bar sitting at nought for the whole copy.
+        let unmeasured = Event::ExportProgress {
+            export: exemplar_progress(None),
+        };
+
+        let json = serde_json::to_string(&unmeasured).expect("it serialises");
+        assert!(
+            !json.contains("total_ms"),
+            "an absent total reached the wire, so a reader cannot tell it from a measured one: \
+             {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Event>(&json).expect("and deserialises"),
+            unmeasured
+        );
+
+        let measured = Event::ExportProgress {
+            export: exemplar_progress(Some(6_540_000)),
+        };
+        let json = serde_json::to_string(&measured).expect("it serialises");
+        assert!(
+            json.contains("\"total_ms\":6540000"),
+            "a measured export lost the denominator a bar is drawn against: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Event>(&json).expect("and deserialises"),
+            measured
         );
     }
 

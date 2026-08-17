@@ -507,6 +507,10 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_export(), &[]),
         ),
         (
+            "export_progress".to_owned(),
+            structure_of(&exemplar_export_progress(), &[]),
+        ),
+        (
             "open_playback".to_owned(),
             structure_of(&exemplar_open_playback(), &[]),
         ),
@@ -1438,6 +1442,21 @@ fn samples() -> Vec<Sample> {
                 ),
             }),
         ),
+        (
+            "an export part-way through a recording that said how long it was",
+            ServerMessage::Event(Event::ExportProgress {
+                export: exemplar_export_progress(),
+            }),
+        ),
+        (
+            "an export of a recording that never said how long it was",
+            ServerMessage::Event(Event::ExportProgress {
+                export: crate::status::ExportProgress {
+                    total_ms: None,
+                    ..exemplar_export_progress()
+                },
+            }),
+        ),
     ] {
         samples.push(server_sample(
             name,
@@ -1713,6 +1732,19 @@ fn event_discriminant(event: &Event) -> String {
             session.end_reason.as_deref().unwrap_or("unstated")
         ),
         Event::RecordingFailed { .. } => "recording_failed".to_owned(),
+        // Whether the recording said how long it was is part of the path,
+        // because it is the one thing a window draws differently: a total is a
+        // percentage and no total is an unbounded indication, and a mirror that
+        // read a missing `total_ms` as zero would otherwise reach the same
+        // answer as one that kept it absent.
+        Event::ExportProgress { export } => format!(
+            "export_progress.{}",
+            if export.total_ms.is_some() {
+                "measured"
+            } else {
+                "unmeasured"
+            }
+        ),
         // Deliberately not the tag it arrived with: this build cannot know
         // whether two events it has never heard of are the same kind of thing.
         Event::Other(_) => "unrecognised".to_owned(),
@@ -1802,7 +1834,8 @@ fn event_tag(event: &Event) -> Option<String> {
     match event {
         Event::StatusChanged { .. }
         | Event::SessionEnded { .. }
-        | Event::RecordingFailed { .. } => Some(tag_of(event, "event")),
+        | Event::RecordingFailed { .. }
+        | Event::ExportProgress { .. } => Some(tag_of(event, "event")),
         Event::Other(_) => None,
     }
 }
@@ -2321,6 +2354,23 @@ fn exemplar_export() -> ExportSummary {
     }
 }
 
+/// An export part-way through, with every optional field present so the schema
+/// sees them.
+///
+/// Deliberately part-way through and not at the end: an exemplar at 100 % would
+/// serialise the same shape but would stop anybody reading the schema from
+/// seeing that this arrives while the copy is still running.
+fn exemplar_export_progress() -> crate::status::ExportProgress {
+    crate::status::ExportProgress {
+        source: r"D:\clips\cs2-20260811-201400-1.mkv".to_owned(),
+        destination: r"D:\clips\cs2-20260811-201400-1.mp4".to_owned(),
+        written_ms: 2_616_000,
+        total_ms: Some(6_540_000),
+        packets: 235_248,
+        bytes: 3_924_481_644,
+    }
+}
+
 /// A bookmark, with every optional field present so the schema sees them.
 fn exemplar_bookmark() -> crate::status::BookmarkSummary {
     crate::status::BookmarkSummary {
@@ -2401,12 +2451,14 @@ fn every_event_stream() -> Vec<EventStream> {
         EventStream::Status,
         EventStream::Errors,
         EventStream::Metrics,
+        EventStream::Exports,
     ];
     for stream in &streams {
         match stream {
             EventStream::Status
             | EventStream::Errors
             | EventStream::Metrics
+            | EventStream::Exports
             | EventStream::Other(_) => {}
         }
     }
@@ -2612,12 +2664,16 @@ fn every_event() -> Vec<Event> {
                 "the encoder stopped accepting frames",
             ),
         },
+        Event::ExportProgress {
+            export: exemplar_export_progress(),
+        },
     ];
     for event in &events {
         match event {
             Event::StatusChanged { .. }
             | Event::SessionEnded { .. }
             | Event::RecordingFailed { .. }
+            | Event::ExportProgress { .. }
             | Event::Other(_) => {}
         }
     }
@@ -2924,6 +2980,7 @@ mod tests {
             "event.status_changed",
             "event.session_ended",
             "event.recording_failed",
+            "event.export_progress",
             "recorder_status.idle",
             "recorder_status.watching",
             "recorder_status.recording",

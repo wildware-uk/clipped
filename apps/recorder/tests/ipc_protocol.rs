@@ -2406,3 +2406,182 @@ fn a_recording_whose_file_has_gone_is_refused_with_something_a_person_can_act_on
     drop(client);
     recorder.stop();
 }
+
+#[test]
+fn an_export_says_how_far_it_has_got_while_it_runs_and_ends_where_the_reply_does() {
+    // Issue #446, over a real recorder process, a real named pipe and a real
+    // file. The reply to `export_recording` arrives when the MP4's index has
+    // been written, so anything a window can draw during the copy has to have
+    // come down the events connection while the control connection was blocked
+    // — which is what this drives both halves of.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-export-progress");
+    let source = directory.file("match.mkv");
+    let destination = directory.file("match.mp4");
+    recording_to_export(tools.ffmpeg(), &source);
+
+    let recorder = ServedRecorder::start("export-progress");
+
+    // The recorder has to *say* it can do this before a window may ask, because
+    // asking for a stream a recorder does not have is refused by name and the
+    // refusal takes the whole events connection with it. A recorder that
+    // published progress without advertising it would leave every window
+    // choosing between no progress and no status.
+    let mut control = recorder.client();
+    assert!(
+        control
+            .welcome()
+            .features
+            .iter()
+            .any(|feature| feature == clipped_ipc::features::EXPORT_PROGRESS),
+        "this recorder publishes export progress and does not advertise it, so no window could \
+         safely subscribe: {:?}",
+        control.welcome().features
+    );
+
+    let events = EventClient::subscribe(
+        recorder.endpoint(),
+        CLIENT_NAME,
+        "0.0.0",
+        vec![EventStream::Exports],
+        PATIENCE,
+    )
+    .expect("the exports stream is delivered");
+    assert_eq!(events.streams(), [EventStream::Exports]);
+
+    // Read on a thread of its own, because the export below blocks this one
+    // until the copy has finished. That is the whole point: if progress only
+    // arrived with the reply there would be nothing for this thread to have
+    // missed. The loop ends when the recorder closes the connection at
+    // shutdown.
+    let reader = std::thread::spawn(move || {
+        let mut events = events;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.next_event() {
+            match event {
+                Event::ExportProgress { export } => seen.push(export),
+                other => panic!("the exports stream carried something else: {other:?}"),
+            }
+        }
+        seen
+    });
+
+    let summary = match export(&mut control, &source, &destination) {
+        Reply::RecordingExported { export } => export,
+        other => panic!("expected an export, got {other:?}"),
+    };
+
+    drop(control);
+    recorder.stop();
+    let seen = reader.join().expect("the events thread does not panic");
+
+    assert!(
+        seen.len() >= 2,
+        "a copy of a {EXPORT_FIXTURE_SECONDS}-second recording produced {} progress events; one \
+         is a bar that never moves, and none is the silence this ticket is about",
+        seen.len()
+    );
+
+    // Every event names the export it belongs to, because nothing else does:
+    // there is no request identifier on the event path, and a window matches
+    // these against the files it asked for.
+    for progress in &seen {
+        assert_eq!(progress.source, summary.source, "{progress:?}");
+        assert_eq!(progress.destination, summary.destination, "{progress:?}");
+    }
+
+    // It advances. A recorder that published the same figure repeatedly, or one
+    // that published a single event, would satisfy "an event arrived" and fail
+    // here.
+    for pair in seen.windows(2) {
+        assert!(
+            pair[1].written_ms > pair[0].written_ms && pair[1].packets > pair[0].packets,
+            "export progress went backwards or stood still: {:?} then {:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // And the last thing said during the copy agrees with the reply that ended
+    // it. A bar that stopped at 80 % and was then replaced by "exported" leaves
+    // somebody wondering what happened to the other fifth.
+    let last = seen.last().expect("there is a progress event");
+    assert_eq!(
+        (last.written_ms, last.packets, last.bytes),
+        (summary.duration_ms, summary.packets, summary.bytes),
+        "the last progress event and the reply disagree about what was copied"
+    );
+    assert_eq!(
+        last.fraction()
+            .map(|fraction| (fraction * 100.0).round() as u32),
+        Some(100),
+        "the copy finished and the last event did not read as finished: {last:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(directory.path());
+}
+
+#[test]
+fn a_client_that_does_not_ask_for_export_progress_is_not_sent_any() {
+    // The other half of the compatibility claim. A window that subscribes to
+    // `status` — which is every window built before issue #446 — must not have
+    // its subscription changed by this feature existing, and must not receive
+    // events it has no case for.
+    let Some(tools) = clipped_media_validation::require_media_tools() else {
+        return;
+    };
+
+    let directory = clipped_media_validation::TemporaryDirectory::new("recorder-export-unasked");
+    let source = directory.file("match.mkv");
+    let destination = directory.file("match.mp4");
+    recording_to_export(tools.ffmpeg(), &source);
+
+    let recorder = ServedRecorder::start("export-unasked");
+
+    let events = EventClient::subscribe(
+        recorder.endpoint(),
+        CLIENT_NAME,
+        "0.0.0",
+        vec![EventStream::Status],
+        PATIENCE,
+    )
+    .expect("the status stream is delivered");
+
+    let reader = std::thread::spawn(move || {
+        let mut events = events;
+        let mut seen = Vec::new();
+        while let Ok(event) = events.next_event() {
+            seen.push(event);
+        }
+        seen
+    });
+
+    let mut control = recorder.client();
+    match export(&mut control, &source, &destination) {
+        Reply::RecordingExported { .. } => {}
+        other => panic!("expected an export, got {other:?}"),
+    }
+
+    drop(control);
+    recorder.stop();
+    let seen = reader.join().expect("the events thread does not panic");
+
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, Event::ExportProgress { .. })),
+        "a `status` subscriber was sent export progress it never asked for: {seen:?}"
+    );
+    // And it still got what it did ask for, so the subscription was not broken
+    // in the course of not being sent the other thing.
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, Event::StatusChanged { .. })),
+        "a `status` subscriber received nothing at all: {seen:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(directory.path());
+}

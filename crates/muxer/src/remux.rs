@@ -80,6 +80,22 @@
 //! does not make the copy refuse, and it is what was asked for. The plan still
 //! lists every track of the source, so the caller can say what it made.
 //!
+//! # Saying how far it has got
+//!
+//! [`remux_to_mp4_with`] takes a [`RemuxOptions`] carrying a callback, and calls
+//! it as the copy runs. A four-second recording copies in milliseconds and needs
+//! none of this; a two-hour one is gigabytes, and a caller that could say
+//! nothing until the trailer was written would leave a window looking like a
+//! hang ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+//!
+//! The callback runs **on the copying thread**, between one packet and the next,
+//! which fixes what it may do: whatever it costs is added to the copy. It is
+//! called at most once per [`RemuxOptions::every`] of *source media* copied —
+//! media rather than wall clock, so there is no clock read per packet and the
+//! reports are spread evenly over the file rather than bunched wherever the disk
+//! was slow. Nothing here waits on the callback's reader, and nothing here takes
+//! a lock (AGENTS.md section 20).
+//!
 //! # The source is never touched
 //!
 //! `avformat_open_input` opens for reading and nothing here ever opens the
@@ -605,6 +621,157 @@ impl fmt::Display for RemuxSummary {
     }
 }
 
+/// How far a remux has got.
+///
+/// Deliberately measurements rather than a percentage: `fraction` is derived
+/// from them and is [`None`] when the source declares no duration, which a
+/// single `f64` could only have spelled as zero — and "nought per cent" and "no
+/// idea" are different things to draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemuxProgress {
+    /// How much of the recording's own timeline has been copied, in nanoseconds.
+    ///
+    /// Measured from the packets that were written, not from the file position:
+    /// this is the same figure [`RemuxSummary::duration`] ends up holding, so a
+    /// last report and the summary agree.
+    pub written_nanos: u64,
+    /// How long the recording says it is, in nanoseconds, where it says at all.
+    ///
+    /// [`None`] for a recording whose container declares no duration. That is
+    /// not a corrupt file: a recording interrupted by a power cut keeps every
+    /// packet it wrote and no total, which is the property ADR 0001 chose
+    /// Matroska for. A caller shows an unbounded indication for it rather than
+    /// inventing a denominator.
+    pub total_nanos: Option<u64>,
+    /// How many packets have been copied, across every carried track.
+    pub packets: u64,
+    /// How many bytes of coded media have been copied, before the container's
+    /// own overhead.
+    ///
+    /// The one figure that still advances when [`Self::total_nanos`] is [`None`],
+    /// which is what makes an unbounded indication honest rather than decorative.
+    pub bytes: u64,
+}
+
+impl RemuxProgress {
+    /// How far through, between zero and one, or [`None`] if the recording never
+    /// said how long it was.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f64> {
+        let total = self.total_nanos?;
+        if total == 0 {
+            return None;
+        }
+        // Clamped because a source's declared duration and the end of its last
+        // packet need not agree to the nanosecond, and a progress bar that reads
+        // 101 % is a bug report.
+        Some((self.written_nanos as f64 / total as f64).clamp(0.0, 1.0))
+    }
+}
+
+/// How much of the recording is copied between progress reports by default.
+///
+/// A quarter of a second of the *recording*, not of wall clock, matching
+/// `clipped_export::DEFAULT_PROGRESS_INTERVAL`: a copy runs many times faster
+/// than real time, so this is a handful of reports for a short recording and
+/// thousands for a long one. A caller sending each report somewhere that costs
+/// more than a function call — the IPC event stream, say — passes a coarser
+/// interval rather than accepting this one.
+pub const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// What a caller wants copied, and what it wants told while it happens.
+///
+/// Deliberately not `Clone` and not `Debug`-derived: it holds a callback, and
+/// the copy borrows it for the length of the run.
+pub struct RemuxOptions<'callback> {
+    audio: AudioTracks,
+    progress: Option<&'callback (dyn Fn(RemuxProgress) + Sync)>,
+    progress_interval: Duration,
+}
+
+impl Default for RemuxOptions<'_> {
+    fn default() -> Self {
+        Self {
+            audio: AudioTracks::All,
+            progress: None,
+            progress_interval: DEFAULT_PROGRESS_INTERVAL,
+        }
+    }
+}
+
+impl<'callback> RemuxOptions<'callback> {
+    /// Every sound track carried, and nothing reported.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Carries the sound tracks named. See [`remux_to_mp4_carrying`].
+    #[must_use]
+    pub const fn carrying(mut self, audio: AudioTracks) -> Self {
+        self.audio = audio;
+        self
+    }
+
+    /// Reports progress to `callback`, **on the copying thread**.
+    ///
+    /// Whatever the callback costs is added to the copy, so it may not wait on
+    /// anything (AGENTS.md section 20). The recorder's passes the report to
+    /// `EventPublisher::publish`, which is a `try_send` on a bounded queue and
+    /// drops rather than waiting for a window that has stopped reading.
+    #[must_use]
+    pub fn reporting_to(mut self, callback: &'callback (dyn Fn(RemuxProgress) + Sync)) -> Self {
+        self.progress = Some(callback);
+        self
+    }
+
+    /// Reports at most once per `interval` of the recording copied.
+    ///
+    /// Zero means every packet, which is what a test counting reports asks for
+    /// and what an interface should not.
+    #[must_use]
+    pub const fn every(mut self, interval: Duration) -> Self {
+        self.progress_interval = interval;
+        self
+    }
+
+    /// Which sound tracks this copy carries.
+    #[must_use]
+    pub const fn audio(&self) -> AudioTracks {
+        self.audio
+    }
+
+    /// How much of the recording is copied between reports.
+    #[must_use]
+    pub const fn progress_interval(&self) -> Duration {
+        self.progress_interval
+    }
+
+    /// Calls the callback, if there is one.
+    fn report(&self, progress: RemuxProgress) {
+        if let Some(callback) = self.progress {
+            callback(progress);
+        }
+    }
+
+    /// Whether anybody is listening, so the loop can skip the bookkeeping when
+    /// nobody is.
+    const fn reports(&self) -> bool {
+        self.progress.is_some()
+    }
+}
+
+impl fmt::Debug for RemuxOptions<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RemuxOptions")
+            .field("audio", &self.audio)
+            .field("reports_progress", &self.progress.is_some())
+            .field("progress_interval", &self.progress_interval)
+            .finish()
+    }
+}
+
 /// Copies `source` into `destination` as an MP4, without decoding anything.
 ///
 /// The coded packets are copied unchanged, so the result is the same picture and
@@ -650,7 +817,7 @@ impl fmt::Display for RemuxSummary {
 /// # }
 /// ```
 pub fn remux_to_mp4(source: &Path, destination: &Path) -> Result<RemuxSummary, RemuxError> {
-    remux_to_mp4_carrying(source, destination, AudioTracks::All)
+    remux_to_mp4_with(source, destination, &RemuxOptions::new())
 }
 
 /// Copies `source` into `destination` as an MP4, carrying the sound named.
@@ -680,10 +847,69 @@ pub fn remux_to_mp4_carrying(
     destination: &Path,
     audio: AudioTracks,
 ) -> Result<RemuxSummary, RemuxError> {
+    remux_to_mp4_with(source, destination, &RemuxOptions::new().carrying(audio))
+}
+
+/// Copies `source` into `destination` as an MP4, saying how far it has got.
+///
+/// The one entry point that takes everything: [`remux_to_mp4`] and
+/// [`remux_to_mp4_carrying`] are this with the options they name, so there is
+/// one copy of the copying and not three.
+///
+/// What it adds over those two is [`RemuxOptions::reporting_to`]. A four-second
+/// recording copies in milliseconds and needs no progress; a two-hour one is
+/// gigabytes, and a caller that said nothing until the trailer was written would
+/// leave a window looking like a hang
+/// ([issue #446](https://github.com/wildware-uk/clipped/issues/446)).
+///
+/// The callback runs on **this** thread, between one packet and the next. It is
+/// called at most once per [`RemuxOptions::every`] of the recording copied, and
+/// once more when the copy finishes so that the last report is the whole file
+/// rather than whatever the interval last happened to land on.
+///
+/// A copy that fails simply stops reporting. Nothing announces the failure
+/// through the callback — the [`Err`] is what says that, and it says it with a
+/// sentence — so a caller must not treat the last report it received as a
+/// finished export. A refusal that happens before any packet is copied, which
+/// is every refusal in the list below except a write that failed part-way,
+/// produces no report at all.
+///
+/// # Errors
+///
+/// Exactly [`remux_to_mp4_carrying`]'s. Reporting adds no failure of its own —
+/// the callback returns nothing and cannot refuse the copy.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use std::time::Duration;
+/// use clipped_muxer::{remux_to_mp4_with, RemuxOptions, RemuxProgress};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let say = |progress: RemuxProgress| match progress.fraction() {
+///     Some(fraction) => eprintln!("{:.0}%", fraction * 100.0),
+///     None => eprintln!("{} MB copied", progress.bytes / 1_000_000),
+/// };
+///
+/// let summary = remux_to_mp4_with(
+///     Path::new("recording.mkv"),
+///     Path::new("recording.mp4"),
+///     &RemuxOptions::new().reporting_to(&say).every(Duration::from_secs(1)),
+/// )?;
+/// println!("{summary}");
+/// # Ok(())
+/// # }
+/// ```
+pub fn remux_to_mp4_with(
+    source: &Path,
+    destination: &Path,
+    options: &RemuxOptions<'_>,
+) -> Result<RemuxSummary, RemuxError> {
     let started = Instant::now();
 
     let input = open_source(source)?;
-    let plan = Mp4Plan::read(&input, source, audio)?;
+    let plan = Mp4Plan::read(&input, source, options.audio())?;
 
     let blocking = plan.blocking();
     if !blocking.is_empty() {
@@ -705,10 +931,11 @@ pub fn remux_to_mp4_carrying(
         );
     }
 
-    let copied = write_mp4(&input, &plan, destination).map_err(|source| RemuxError::Output {
-        destination: destination.to_path_buf(),
-        source,
-    })?;
+    let copied =
+        write_mp4(&input, &plan, destination, options).map_err(|source| RemuxError::Output {
+            destination: destination.to_path_buf(),
+            source,
+        })?;
 
     let summary = RemuxSummary {
         plan,
@@ -871,6 +1098,19 @@ impl Copied {
         };
         Duration::try_from_secs_f64((last - first).max(0.0)).unwrap_or_default()
     }
+
+    /// This much copied, as a caller's callback is told it.
+    ///
+    /// `total` is the source's declared duration, read once before the loop
+    /// rather than per packet.
+    fn progress(&self, total: Option<Duration>) -> RemuxProgress {
+        RemuxProgress {
+            written_nanos: u64::try_from(self.duration().as_nanos()).unwrap_or(u64::MAX),
+            total_nanos: total.map(|total| u64::try_from(total.as_nanos()).unwrap_or(u64::MAX)),
+            packets: self.packets,
+            bytes: self.bytes,
+        }
+    }
 }
 
 /// One carried stream, and everything needed to move a packet across.
@@ -898,7 +1138,12 @@ struct StreamMap {
 ///
 /// Separated from [`remux_to_mp4`] so that every failure after the destination
 /// exists leaves through one place, which is where it is removed again.
-fn write_mp4(input: &InputContext, plan: &Mp4Plan, destination: &Path) -> Result<Copied, MuxError> {
+fn write_mp4(
+    input: &InputContext,
+    plan: &Mp4Plan,
+    destination: &Path,
+    options: &RemuxOptions<'_>,
+) -> Result<Copied, MuxError> {
     // `to_str` cannot fail: the constant is an ASCII literal. Written as a
     // fallback rather than an unwrap so that a remux never ends in a panic
     // (AGENTS.md section 15).
@@ -932,7 +1177,7 @@ fn write_mp4(input: &InputContext, plan: &Mp4Plan, destination: &Path) -> Result
 
     // The destination exists from here on, so a failure has to take it away
     // again.
-    copy_packets(input, &format, &mut streams, destination).inspect_err(|_| {
+    copy_packets(input, &format, &mut streams, destination, options).inspect_err(|_| {
         // The context, and with it the open file, was dropped by the call above;
         // Windows would refuse to remove it otherwise.
         if let Err(error) = std::fs::remove_file(destination) {
@@ -1088,6 +1333,7 @@ fn copy_packets(
     format: &OutputContext,
     streams: &mut StreamMap,
     destination: &Path,
+    options: &RemuxOptions<'_>,
 ) -> Result<Copied, MuxError> {
     write_header(format)?;
 
@@ -1109,6 +1355,20 @@ fn copy_packets(
 
     let slot = PacketSlot::allocate()?;
     let mut copied = Copied::default();
+
+    // Read once, before the loop. The source's declared length is the
+    // denominator of every report, and it does not change while the file is
+    // being read.
+    let total = input.duration();
+    // The point in the recording's own timeline at which the next report is due.
+    // Media rather than wall clock, so this loop reads no clock at all: a
+    // two-hour recording is millions of packets, and `Instant::now()` per packet
+    // to decide whether to say something would be the reporting charging the
+    // copy for itself (AGENTS.md sections 18 and 20). It starts at zero so the
+    // first packet reports, which is what tells a window the copy has begun
+    // rather than leaving it to infer it from silence.
+    let interval = options.progress_interval();
+    let mut report_due_at = Duration::ZERO;
 
     loop {
         // SAFETY: both pointers are live and exclusively owned. `av_read_frame`
@@ -1187,6 +1447,17 @@ fn copy_packets(
         copied.bytes += size.unsigned_abs();
         copied.first_seconds = Some(copied.first_seconds.map_or(start, |first| first.min(start)));
         copied.last_seconds = Some(copied.last_seconds.map_or(end, |last| last.max(end)));
+
+        // Guarded by `reports` so that a caller which asked for nothing pays for
+        // nothing beyond the branch — which is the common case, because both
+        // older entry points ask for nothing.
+        if options.reports() {
+            let written = copied.duration();
+            if written >= report_due_at {
+                options.report(copied.progress(total));
+                report_due_at = written.saturating_add(interval);
+            }
+        }
     }
 
     // SAFETY: the context is live and the header was written above, so the
@@ -1197,6 +1468,15 @@ fn copy_packets(
             operation: "writing the MP4's index",
             source: AvError::new(code),
         });
+    }
+
+    // One last report, after the trailer rather than before it, so that the
+    // final thing a caller was told is the file that now exists. Without it the
+    // last report is wherever the interval happened to land — 97 % of a
+    // two-hour recording, say — and a progress bar that stops short of the end
+    // and then vanishes reads as a copy that gave up.
+    if options.reports() {
+        options.report(copied.progress(input.duration()));
     }
 
     info!(

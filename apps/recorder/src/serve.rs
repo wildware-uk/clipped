@@ -152,6 +152,13 @@ fn features_of_this_build() -> Vec<String> {
         // asked to choose a file name for a file an older recorder was never
         // going to write (issue #399).
         features::EXPORT.to_owned(),
+        // And for this before it *subscribes* to the `exports` event stream.
+        // Unlike every other name in this list, the cost of guessing wrong is
+        // not an unusable button: an event stream a recorder does not have is
+        // refused by name and the refusal takes the whole events connection
+        // with it, so a window that assumed progress would lose its status
+        // subscription too (issue #446).
+        features::EXPORT_PROGRESS.to_owned(),
         // And for this before it draws a hotkey list, so that a recorder built
         // before issue #232 — which registered nothing at all — is told apart
         // from a machine on which every combination registered cleanly. The two
@@ -435,6 +442,14 @@ pub struct RecorderService {
     /// registered no hotkeys" and "every hotkey registered cleanly" are opposite
     /// answers (AGENTS.md section 27).
     hotkeys: OnceLock<Result<Vec<HotkeyBinding>, String>>,
+    /// Where an export says how far it has got (`crate::export`, issue #446).
+    ///
+    /// A second handle on the publisher [`RecordingState`] holds, rather than a
+    /// path through it: an export is not a recording and has no business
+    /// reaching through the recording state to say so. Cloning is what
+    /// [`EventPublisher`] is for — the subscriber list is shared, so both
+    /// handles publish to the same windows.
+    events: EventPublisher,
 }
 
 impl RecorderService {
@@ -508,7 +523,7 @@ impl RecorderService {
         let indexer = Arc::new(indexer);
         Self {
             recordings: Arc::new(RecordingState::new(
-                events,
+                events.clone(),
                 Arc::clone(&indexer),
                 Arc::clone(&settings),
                 catalogue,
@@ -518,6 +533,7 @@ impl RecorderService {
             library,
             indexer,
             hotkeys: OnceLock::new(),
+            events,
         }
     }
 
@@ -726,7 +742,7 @@ impl CommandHandler for RecorderService {
             // disk — and it still may not run on the recording thread, which is
             // the one thing that must never wait.
             Command::ExportRecording(request) => Ok(Reply::RecordingExported {
-                export: crate::export::export(&request)?,
+                export: crate::export::export(&request, &self.events)?,
             }),
             // A read of the recording, and at most one copy of it: the same
             // shape as an export and on the same thread, for the same reasons
