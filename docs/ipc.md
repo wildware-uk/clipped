@@ -651,6 +651,71 @@ twice. It is absent for a recording that is not part of a sitting.
 | `set_start_at_login` | `enabled` | `start_at_login` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 
+### `get_status`
+
+What the recorder is doing, in one of **three** states. It is also the payload of
+every `status_changed` event, so a client that subscribes and one that asks are
+reading the same thing.
+
+```json
+{"type":"response","id":7,"outcome":{"ok":{"reply":"status","status":{"state":"idle"}}}}
+```
+
+| `state` | What it means |
+| --- | --- |
+| `idle` | Nothing is being recorded, and nothing will be until something asks. |
+| `watching` | Nothing is being recorded, and **the next game to start will be**. |
+| `recording` | A recording is in progress; the rest of the object describes it. |
+
+**`watching` and `idle` are different answers, and that is the whole reason there
+are three.** A recorder started with `--watch-for-games` will record the next
+game that launches without anybody asking it to; a recorder that was not will
+record nothing until it is told to. Reporting both as `idle` made those
+indistinguishable, and a window cannot say what it does not know (AGENTS.md
+section 27, [#241](https://github.com/wildware-uk/clipped/issues/241)). Which one
+a recorder answers is a fact about **that recorder** rather than about the build:
+`serve --watch-for-games` says `watching` from the moment it announces its
+endpoint until its watcher stops, and a plain `serve` says `idle` for its whole
+life. A recorder whose game detection could not be started says `idle` too,
+because it will not record anything either
+([#584](https://github.com/wildware-uk/clipped/issues/584)).
+
+A recorder that is watching **and** recording answers `recording`. That is the
+thing a window has to be able to see and stop, and it is the answer whether the
+recording was asked for over this protocol or started by the watcher itself.
+
+```json
+{"type":"response","id":7,"outcome":{"ok":{"reply":"status","status":{"state":"watching"}}}}
+```
+
+That is the whole message for a recorder watching for anything at all: `session`
+is omitted rather than sent empty. When the recorder **is** in a sitting it
+carries it, which is what a `watching` status is for:
+
+```json
+{"type":"response","id":7,"outcome":{"ok":{"reply":"status","status":{
+  "state":"watching",
+  "session":{"session_id":"cs2-20260811-201400","game_id":"cs2",
+             "game_name":"Counter-Strike 2",
+             "started_at":"2026-08-11T20:14:00+01:00",
+             "recordings":[{"session_index":1,
+                            "output":"D:\\clips\\clipped-cs2-20260811-201400.mkv",
+                            "outcome":"recorded","duration_ms":6540000}]}}}}}
+```
+
+A game that exits keeps its sitting open for the restart grace, so that the same
+game launching again rejoins it rather than fragmenting one sitting into two
+([sessions.md](sessions.md)). For those seconds the recorder is watching *and* in
+a sitting, and a window that dropped the game's name meanwhile would flicker
+between "Counter-Strike 2" and "watching for games" and back. The sitting is the
+same object `library_sessions` returns a few seconds later, minus everything only
+the library knows — see `clipped_ipc::SessionSummary`.
+
+`state` is a **closed** enumeration: a client that met a state it had never heard
+of fails the message rather than guessing at it, which is why adding a fourth
+would be a protocol version bump. See
+[the compatibility policy](#an-unknown-field-inside-a-known-version-ignored).
+
 ### `save_replay`
 
 Keeps the last few seconds of what is being recorded, as a clip
@@ -2209,7 +2274,7 @@ cargo run -p clipped-ipc --bin protocol-schema
 | --- | --- |
 | `crates/ipc/src/*.rs` unit tests | Message round trips, the frozen handshake shape, unknown versions, unknown fields, unknown codes, unknown error details, unknown events, framing including a hostile length prefix, dispatch, event routing |
 | `crates/ipc/src/transport/windows.rs` tests | A real pipe: a round trip, endpoint exclusivity, connecting to nothing, stopping a blocked listener |
-| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C — and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
+| `apps/recorder/tests/ipc_protocol.rs` | The whole thing against a real `clipped-recorder serve` child process: handshake, commands, every rejection path, the connection cap, a client that vanishes, a second recorder, Ctrl+C, a recorder watching for games told apart from one that is not — including the bytes of the reply, since an absent sitting is what a parsed status cannot show — and an `export_recording` whose MP4 is decoded frame by frame and compared packet payload by packet payload against the recording it was copied from |
 | `apps/recorder/tests/supervision.rs` | Supervision against real processes that are really killed: a recorder outliving the process that started it, a second launch attaching rather than competing, a killed recorder reported and replaced, and a bounded restart policy |
 | `crates/ipc/src/schema.rs` tests | That the description of the protocol the TypeScript is checked against is derived rather than asserted — a tag is never reported as optional because a catch-all absorbed it, every sample records what the real deserialiser did with it — and that the committed schema is still what this build produces |
 | `apps/recorder/src/preview/tests.rs` | `open_preview` against thumbnail and waveform caches built for the test: that the picture is the picture of *that* recording, that "not made yet" and "there will not be one" stay apart, that a recording changed since its picture was made is not shown the old one, that peaks come back at the width the caller asked for, and what a page of twenty-five costs |
@@ -2220,9 +2285,13 @@ served. The interesting half of "a bad client is refused" is that a bad client
 cannot stop the recorder serving a good one, and a test that only checked the
 refusal would pass against a recorder that had closed its listener.
 
-One test in `ipc_protocol.rs` is `#[ignore]`d because it needs a GPU, an encoder
-and a desktop session: it starts, observes and stops a real recording entirely
-over the protocol and validates the file it produces.
+Two tests in `ipc_protocol.rs` are `#[ignore]`d because they need a GPU, an
+encoder and a desktop session: one starts, observes and stops a real recording
+entirely over the protocol and validates the file it produces, and the other
+drives a recorder that is *watching* through all three
+[`get_status`](#get_status) states and back to `watching` rather than to `idle`.
+Telling a watching recorder from an idle one needs neither, and that test runs in
+CI.
 
 ```text
 cargo test -p clipped-ipc
