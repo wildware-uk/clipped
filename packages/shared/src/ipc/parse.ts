@@ -54,6 +54,7 @@ import type {
   LibraryEventLane,
   RestoredItem,
   TrashEmptied,
+  FavouriteMark,
   TrashListing,
   TrashedItem,
   LibraryEventMark,
@@ -368,6 +369,8 @@ function readReply(value: JsonValue | undefined): Reply {
       return { reply: 'restored', restored: readRestoredItem(reply['restored']) };
     case 'trash_emptied':
       return { reply: 'trash_emptied', emptied: readTrashEmptied(reply['emptied']) };
+    case 'favourited':
+      return { reply: 'favourited', mark: readFavouriteMark(reply['mark']) };
     case 'plugins':
       return {
         reply: 'plugins',
@@ -804,6 +807,19 @@ function readTrashEmptied(value: JsonValue | undefined): TrashEmptied {
     refused: arrayField(emptied['refused'], 'a refusal list', (entry) =>
       typeof entry === 'string' ? entry : String(entry),
     ),
+  };
+}
+
+/** What a favourite mark is now. */
+function readFavouriteMark(value: JsonValue | undefined): FavouriteMark {
+  const mark = object(value, 'a favourite mark');
+  const what = 'a favourite mark';
+  return {
+    kind: stringField(mark, 'kind', what),
+    session_id: stringField(mark, 'session_id', what),
+    id: numberField(mark, 'id', what),
+    favourite: booleanField(mark, 'favourite', what),
+    changed: booleanField(mark, 'changed', what),
   };
 }
 

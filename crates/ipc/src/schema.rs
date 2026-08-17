@@ -571,6 +571,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibraryTrash(_) => Some("library_trash".to_owned()),
                 Command::RestoreFromTrash(_) => Some("restore_from_trash".to_owned()),
                 Command::EmptyTrash(_) => Some("empty_trash".to_owned()),
+                Command::SetFavourite(_) => Some("set_favourite".to_owned()),
                 Command::ExportRecording(_) => Some("export_recording".to_owned()),
                 Command::Shutdown(_) => Some("shutdown".to_owned()),
                 Command::Ping
@@ -594,6 +595,7 @@ fn commands() -> Vec<CommandSchema> {
                 Command::LibraryTrash(_) => Some("reply.library_trash".to_owned()),
                 Command::RestoreFromTrash(_) => Some("reply.restored".to_owned()),
                 Command::EmptyTrash(_) => Some("reply.trash_emptied".to_owned()),
+                Command::SetFavourite(_) => Some("reply.favourited".to_owned()),
                 Command::Plugins => Some("reply.plugins".to_owned()),
                 Command::ExportRecording(_) => Some("reply.recording_exported".to_owned()),
                 Command::GetHotkeys => Some("reply.hotkeys".to_owned()),
@@ -966,6 +968,24 @@ fn samples() -> Vec<Sample> {
                             r"D:\\Clips.trash\\locked.mkv: the file is open in another program"
                                 .to_owned(),
                         ],
+                    },
+                }),
+            }),
+        ),
+        (
+            "a sitting marked a favourite, which is what cleanup then protects",
+            ServerMessage::Response(Response {
+                id: 17,
+                outcome: Outcome::Ok(Reply::Favourited {
+                    mark: crate::library::FavouriteMark {
+                        // The kind that is addressed by text rather than by an
+                        // integer, so a sample carries the awkward half of the
+                        // target rather than only the easy one.
+                        kind: "session".to_owned(),
+                        session_id: "counter-strike-2-20260814-201500".to_owned(),
+                        id: 0,
+                        favourite: true,
+                        changed: true,
                     },
                 }),
             }),
@@ -1429,6 +1449,7 @@ fn reply_discriminant(reply: &Reply) -> String {
         // that is a property of the type rather than of the path.
         Reply::LibraryEvents { .. } => "library_events".to_owned(),
         Reply::LibraryTrash { .. } => "library_trash".to_owned(),
+        Reply::Favourited { .. } => "favourited".to_owned(),
         Reply::Restored { .. } => "restored".to_owned(),
         Reply::TrashEmptied { .. } => "trash_emptied".to_owned(),
         Reply::Plugins { .. } => "plugins".to_owned(),
@@ -2056,6 +2077,12 @@ fn every_built_command() -> Vec<Command> {
             items: 1,
             bytes: 2_147_483_648,
         }),
+        Command::SetFavourite(crate::library::SetFavourite {
+            kind: "recording".to_owned(),
+            session_id: String::new(),
+            id: 1,
+            favourite: true,
+        }),
         Command::Plugins,
         Command::ExportRecording(exemplar_export_recording()),
         Command::GetHotkeys,
@@ -2076,6 +2103,7 @@ fn every_built_command() -> Vec<Command> {
             | Command::LibraryTrash(_)
             | Command::RestoreFromTrash(_)
             | Command::EmptyTrash(_)
+            | Command::SetFavourite(_)
             | Command::Plugins
             | Command::ExportRecording(_)
             | Command::GetHotkeys
@@ -2310,6 +2338,15 @@ fn every_reply() -> Vec<Reply> {
                 ],
             },
         },
+        Reply::Favourited {
+            mark: crate::library::FavouriteMark {
+                kind: "recording".to_owned(),
+                session_id: String::new(),
+                id: 1,
+                favourite: true,
+                changed: true,
+            },
+        },
         Reply::Plugins {
             installed: vec![exemplar_plugin()],
             refused: vec![crate::plugins::RefusedPlugin {
@@ -2333,6 +2370,7 @@ fn every_reply() -> Vec<Reply> {
             | Reply::LibraryTrash { .. }
             | Reply::Restored { .. }
             | Reply::TrashEmptied { .. }
+            | Reply::Favourited { .. }
             | Reply::Plugins { .. }
             | Reply::Hotkeys { .. }
             | Reply::RecordingExported { .. }

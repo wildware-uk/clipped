@@ -66,6 +66,7 @@ import type {
   LibraryTrashReply,
   RestoredReply,
   TrashEmptiedReply,
+  FavouritedReply,
   PluginsReply,
   LibraryGamesReply,
   LibraryRecording,
@@ -493,6 +494,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     reply: 'required',
     emptied: 'required',
   }),
+  'reply.favourited': fields<FavouritedReply>({
+    reply: 'required',
+    mark: 'required',
+  }),
   'reply.plugins': fields<PluginsReply>({
     reply: 'required',
     installed: 'required',
@@ -639,6 +644,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'set_favourite',
+    params: 'set_favourite',
+    reply: 'reply.favourited',
+    available_in_this_build: true,
+  },
+  {
     name: 'plugins',
     params: null,
     reply: 'reply.plugins',
@@ -716,6 +727,11 @@ function replyDiscriminant(reply: Reply): string {
       // One discriminant: a refusal list that is empty is the same shape
       // carrying nothing, and it is always present.
       return 'trash_emptied';
+    case 'favourited':
+      // One discriminant: whether the mark changed is a field, not a shape, and
+      // a session and a recording differ only in which half of the target is
+      // filled in.
+      return 'favourited';
     case 'library_trash':
       // One discriminant, for the same reason: an empty trash is the same
       // shape carrying nothing, and there is no paging to lose.

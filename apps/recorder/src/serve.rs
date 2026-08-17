@@ -645,6 +645,12 @@ impl CommandHandler for RecorderService {
             Command::EmptyTrash(request) => Ok(Reply::TrashEmptied {
                 emptied: self.library.empty(&request)?,
             }),
+            // One row update, under the same argument again: a favourite mark
+            // is a single `UPDATE` against a primary key and touches no file at
+            // all (`clipped_library::favourites`).
+            Command::SetFavourite(request) => Ok(Reply::Favourited {
+                mark: self.library.set_favourite(&request, SystemTime::now())?,
+            }),
             // Also on the connection thread: reading a handful of manifests and
             // one settings file is bounded local work that shares nothing with
             // a recording, which is the same argument the library reads above

@@ -54,10 +54,12 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use clipped_ipc::{
-    ErrorCode, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents, LibraryGame,
-    LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions, ProtocolError,
-    RestoreFromTrash, RestoredItem, TrashEmptied, TrashListing, TrashedItem, MAX_FRAME_BYTES,
+    ErrorCode, FavouriteMark, LibraryClip, LibraryEventLane, LibraryEventMark, LibraryEvents,
+    LibraryGame, LibraryRecording, LibrarySession, LibrarySessionPage, LibrarySessions,
+    ProtocolError, RestoreFromTrash, RestoredItem, SetFavourite, TrashEmptied, TrashListing,
+    TrashedItem, MAX_FRAME_BYTES,
 };
+use clipped_library::favourites::Favourite;
 use clipped_library::index::{
     cursor_of, game_summaries, list_sessions, reconcile, GameSummary, IndexControl, IndexReport,
     IndexSettings, IndexedClip, IndexedRecording, IndexedSession, SessionListing,
@@ -99,6 +101,45 @@ fn trash_item(kind: &str, id: i64) -> Result<clipped_library::trash::TrashItem, 
         other => Err(ProtocolError::new(
             ErrorCode::InvalidParameters,
             format!("`{other}` is not something the trash holds; it holds `recording` and `clip`"),
+        )),
+    }
+}
+
+/// What a `set_favourite` request names, or why it names nothing.
+///
+/// The target takes two fields because the schema does — a sitting is keyed by
+/// text and a recording or clip by an integer — and exactly one of them is read.
+/// The half that is not read is *not* checked: a window echoing a whole row back
+/// may well fill in both, and refusing that would be refusing a request whose
+/// meaning is unambiguous.
+///
+/// What is refused is a target that names nothing. A `session` with no
+/// identifier and a `recording` with an identifier of zero are both requests to
+/// favourite something that does not exist, and answering "done" to one would be
+/// a window drawing a star it will lose on the next read.
+fn favourite_target(request: &SetFavourite) -> Result<Favourite, ProtocolError> {
+    let missing = |what: &str| {
+        ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "a `{}` is favourited by its {what}, and this request carries none",
+                request.kind
+            ),
+        )
+    };
+
+    match request.kind.as_str() {
+        "session" if request.session_id.is_empty() => Err(missing("session_id")),
+        "session" => Ok(Favourite::Session(request.session_id.clone())),
+        "recording" | "clip" if request.id == 0 => Err(missing("id")),
+        "recording" => Ok(Favourite::Recording(request.id)),
+        "clip" => Ok(Favourite::Clip(request.id)),
+        other => Err(ProtocolError::new(
+            ErrorCode::InvalidParameters,
+            format!(
+                "`{other}` is not something that can be favourited; Clipped favourites \
+                 `session`, `recording` and `clip`"
+            ),
         )),
     }
 }
@@ -431,6 +472,49 @@ impl LibraryReader {
                     .iter()
                     .map(|failure| format!("{}: {}", failure.item, failure.error))
                     .collect(),
+            })
+        })
+    }
+
+    /// Marks one thing a favourite, or clears the mark.
+    ///
+    /// [Issue #58](https://github.com/wildware-uk/clipped/issues/58). `at` is
+    /// when, and it is passed in rather than read here for the reason
+    /// `clipped_library::favourites` takes one: every write in that crate does,
+    /// so a test does not have to wait for a clock.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::InvalidParameters`] for a kind this build does not know or
+    /// a target that names nothing, and [`ErrorCode::LibraryUnavailable`] when
+    /// the index refuses.
+    pub fn set_favourite(
+        &self,
+        request: &SetFavourite,
+        at: SystemTime,
+    ) -> Result<FavouriteMark, ProtocolError> {
+        let what = favourite_target(request)?;
+
+        self.with_database_mut(|database| {
+            let changed = if request.favourite {
+                clipped_library::favourites::mark(database, &what, at)
+            } else {
+                clipped_library::favourites::unmark(database, &what)
+            }
+            .map_err(unreadable)?;
+
+            // Read back rather than assume. The two disagree for a target that
+            // is not there: nothing was written, and a window told "favourited"
+            // would draw a full star against a row that has none.
+            let favourite =
+                clipped_library::favourites::is_marked(database, &what).map_err(unreadable)?;
+
+            Ok(FavouriteMark {
+                kind: request.kind.clone(),
+                session_id: request.session_id.clone(),
+                id: request.id,
+                favourite,
+                changed,
             })
         })
     }
@@ -1567,5 +1651,136 @@ mod tests {
             .expect_err("there is no library to read on such a machine");
 
         assert_eq!(refusal.code, ErrorCode::LibraryUnavailable);
+    }
+
+    /// A request to favourite something.
+    fn asking(kind: &str, session_id: &str, id: i64, favourite: bool) -> SetFavourite {
+        SetFavourite {
+            kind: kind.to_owned(),
+            session_id: session_id.to_owned(),
+            id,
+            favourite,
+        }
+    }
+
+    /// When the tests below claim things happened.
+    fn at() -> SystemTime {
+        SystemTime::UNIX_EPOCH + core::time::Duration::from_secs(1_786_000_000)
+    }
+
+    #[test]
+    fn a_sitting_and_the_recording_in_it_can_both_be_favourited_and_unfavourited() {
+        // Issue #58's first acceptance criterion at the boundary the window
+        // actually reaches: the mark has to *persist*, and it is the reads on
+        // this same reader that say whether it did.
+        let library = library_with_a_missing_recording("favourite-round-trip");
+        let recording_id = 1;
+
+        for (kind, session_id, id) in [
+            ("session", "cs2-20260811-201400", 0),
+            ("recording", "", recording_id),
+        ] {
+            let marked = library
+                .set_favourite(&asking(kind, session_id, id, true), at())
+                .expect("a favourite is written");
+            assert!(marked.favourite, "{kind} should be a favourite now");
+            assert!(marked.changed, "{kind} was not one before");
+
+            // Again, which is a second click on a full star. It must not look
+            // like a failure and must not move the instant it was first marked.
+            let again = library
+                .set_favourite(&asking(kind, session_id, id, true), at())
+                .expect("marking twice is not an error");
+            assert!(again.favourite, "{kind}");
+            assert!(!again.changed, "{kind} was already a favourite");
+
+            let cleared = library
+                .set_favourite(&asking(kind, session_id, id, false), at())
+                .expect("a favourite is cleared");
+            assert!(!cleared.favourite, "{kind}");
+            assert!(cleared.changed, "{kind} was a favourite until now");
+        }
+    }
+
+    #[test]
+    fn the_mark_a_favourite_reports_is_the_one_the_library_read_answers_with() {
+        // The reply is not what was asked for, it is what is true. A row the
+        // index does not hold is written to by nothing, and a window told
+        // "favourited" would draw a star it loses on the next read.
+        let library = library_with_a_missing_recording("favourite-read-back");
+
+        let answer = library
+            .set_favourite(&asking("recording", "", 9_999, true), at())
+            .expect("a write against a row that is not there is not an error");
+
+        assert!(
+            !answer.favourite,
+            "nothing was written, so nothing is favourited"
+        );
+        assert!(!answer.changed);
+
+        // And the session listing agrees, which is the read a screen makes.
+        let page = library
+            .sessions(&LibrarySessions::default())
+            .expect("the library reads");
+        assert!(!page.sessions[0].recordings[0].favourite);
+    }
+
+    #[test]
+    fn a_target_that_names_nothing_is_refused_rather_than_marking_row_zero() {
+        // Both halves of the target are optional on the wire — one kind reads
+        // each — so a request that filled in neither would otherwise favourite
+        // whatever row happens to sit at identifier zero.
+        for (kind, session_id, id, expected) in [
+            ("session", "", 0, "session_id"),
+            ("recording", "", 0, "id"),
+            ("clip", "", 0, "id"),
+        ] {
+            let refusal = LibraryReader::at(None)
+                .set_favourite(&asking(kind, session_id, id, true), at())
+                .expect_err("a target that names nothing is refused");
+
+            assert_eq!(refusal.code, ErrorCode::InvalidParameters, "{kind}");
+            assert!(
+                refusal.message.contains(expected) && refusal.message.contains(kind),
+                "a refusal has to name the field that was missing: {}",
+                refusal.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_kind_nothing_can_be_favourited_by_is_refused_and_says_what_can() {
+        // A screenshot is in issue #58's scope and has no table in the schema,
+        // so this is the message somebody gets when the two disagree.
+        let refusal = LibraryReader::at(None)
+            .set_favourite(&asking("screenshot", "", 1, true), at())
+            .expect_err("screenshots have nowhere to keep a mark");
+
+        assert_eq!(refusal.code, ErrorCode::InvalidParameters);
+        for named in ["session", "recording", "clip"] {
+            assert!(
+                refusal.message.contains(named),
+                "the refusal should say what can be favourited: {}",
+                refusal.message
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_is_read_before_the_library_is_opened() {
+        // A malformed request is the caller's mistake whatever the state of the
+        // machine, and `LibraryReader::at(None)` is a machine with no library at
+        // all: these refusals arrive as `InvalidParameters` rather than as
+        // `LibraryUnavailable`, which is what the tests above rely on.
+        let refusal = LibraryReader::at(None)
+            .set_favourite(&asking("session", "cs2-20260811-201400", 0, true), at())
+            .expect_err("there is no library on such a machine");
+
+        assert_eq!(
+            refusal.code,
+            ErrorCode::LibraryUnavailable,
+            "a well-formed request against no library is the machine's problem, not the caller's"
+        );
     }
 }

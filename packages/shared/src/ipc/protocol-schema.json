@@ -46,6 +46,7 @@
         "library_trash",
         "restore_from_trash",
         "empty_trash",
+        "set_favourite",
         "plugins",
         "export_recording",
         "get_hotkeys",
@@ -170,6 +171,7 @@
         "library_trash",
         "restored",
         "trash_emptied",
+        "favourited",
         "plugins"
       ],
       "tolerates_unrecognised": false
@@ -500,6 +502,13 @@
       ],
       "optional": []
     },
+    "reply.favourited": {
+      "required": [
+        "mark",
+        "reply"
+      ],
+      "optional": []
+    },
     "reply.hotkeys": {
       "required": [
         "hotkeys",
@@ -802,6 +811,12 @@
       "name": "empty_trash",
       "params": "empty_trash",
       "reply": "reply.trash_emptied",
+      "available_in_this_build": true
+    },
+    {
+      "name": "set_favourite",
+      "params": "set_favourite",
+      "reply": "reply.favourited",
       "available_in_this_build": true
     },
     {
@@ -1565,6 +1580,28 @@
       },
       "parses": true,
       "discriminant": "response.ok.trash_emptied"
+    },
+    {
+      "name": "a sitting marked a favourite, which is what cleanup then protects",
+      "direction": "server",
+      "frame": {
+        "id": 17,
+        "outcome": {
+          "ok": {
+            "mark": {
+              "changed": true,
+              "favourite": true,
+              "id": 0,
+              "kind": "session",
+              "session_id": "counter-strike-2-20260814-201500"
+            },
+            "reply": "favourited"
+          }
+        },
+        "type": "response"
+      },
+      "parses": true,
+      "discriminant": "response.ok.favourited"
     },
     {
       "name": "what is installed, and what each plugin asks for",
