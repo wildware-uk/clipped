@@ -713,12 +713,19 @@ fn day_of(timestamp: &str) -> Option<Date> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::test_support::scratch_directory;
+    use crate::test_support::{scratch_directory, Scratch};
 
     /// An empty library of this test's own.
-    fn library(name: &str) -> Database {
+    ///
+    /// The directory comes back with the database and has to outlive it:
+    /// dropping it is what removes the directory, and Windows will not remove a
+    /// database file that is still open. Bindings in one `let` are dropped in
+    /// reverse order, so `let (directory, database) = library(..)` closes the
+    /// database first.
+    fn library(name: &str) -> (Scratch, Database) {
         let directory = scratch_directory(name);
-        Database::open(directory.join("library.db")).expect("a database opens")
+        let database = Database::open(directory.join("library.db")).expect("a database opens");
+        (directory, database)
     }
 
     /// Adds a session, on the given day of August 2026, and returns its
@@ -768,7 +775,7 @@ mod tests {
 
     #[test]
     fn a_page_is_newest_first_and_the_cursor_continues_after_its_last_session() {
-        let database = library("browse-paging");
+        let (_directory, database) = library("browse-paging");
         for day in 1..=5 {
             let session = add_session(&database, day, Some("cs2"));
             add_recording(&database, &session, 1, false);
@@ -832,7 +839,7 @@ mod tests {
         // AGENTS.md section 27: the screen has to be able to say "this file has
         // gone". Leaving the row out would make it indistinguishable from a
         // session that never recorded anything.
-        let database = library("browse-missing");
+        let (_directory, database) = library("browse-missing");
         let session = add_session(&database, 1, Some("cs2"));
         add_recording(&database, &session, 1, true);
 
@@ -851,7 +858,7 @@ mod tests {
 
     #[test]
     fn a_query_selects_sessions_by_what_the_sitting_is() {
-        let database = library("browse-search");
+        let (_directory, database) = library("browse-search");
         let counter_strike = add_session(&database, 1, Some("cs2"));
         add_recording(&database, &counter_strike, 1, false);
         let minecraft = add_session(&database, 2, Some("minecraft"));
@@ -877,7 +884,7 @@ mod tests {
         // `limit` rows from SQL, so a search whose matches are spread through
         // the library answers three rows and claims there are no more. The walk
         // has to keep reading until the page is full.
-        let database = library("browse-search-paging");
+        let (_directory, database) = library("browse-search-paging");
         for day in 1..=6 {
             let game = if day % 2 == 0 { "cs2" } else { "minecraft" };
             let session = add_session(&database, day, Some(game));
@@ -905,7 +912,7 @@ mod tests {
 
     #[test]
     fn an_empty_library_is_an_empty_page_rather_than_a_failure() {
-        let database = library("browse-empty");
+        let (_directory, database) = library("browse-empty");
         let page = list_sessions(&database, &SessionListing::default()).expect("a page");
         assert_eq!(page, SessionPage::default());
     }
@@ -914,7 +921,7 @@ mod tests {
     fn a_cursor_that_cannot_be_read_starts_at_the_newest_session() {
         // A cursor is a string a window kept across a restart. Refusing to draw
         // a library because of one would be the least useful possible answer.
-        let database = library("browse-bad-cursor");
+        let (_directory, database) = library("browse-bad-cursor");
         let session = add_session(&database, 1, Some("cs2"));
         add_recording(&database, &session, 1, false);
 
@@ -938,8 +945,8 @@ mod tests {
     /// from "a function exists which would clamp one if it were called". What a
     /// sitting holds is beside the point here — the clamp counts sittings — so
     /// they hold nothing, which keeps two hundred of them cheap.
-    fn library_of(name: &str, sessions: usize) -> Database {
-        let database = library(name);
+    fn library_of(name: &str, sessions: usize) -> (Scratch, Database) {
+        let (directory, database) = library(name);
         let connection = database.connection();
         // One transaction for the lot. Two hundred commits would make this slow
         // enough that somebody stops running it.
@@ -969,7 +976,7 @@ mod tests {
                 .expect("a session inserts");
         }
         connection.execute_batch("COMMIT").expect("it commits");
-        database
+        (directory, database)
     }
 
     /// The identifier of the sitting [`library_of`] inserted `index`th.
@@ -986,7 +993,7 @@ mod tests {
         // that to a page it was able to receive in the first place — an
         // unclamped ten thousand is a query that walks the library.
         const SESSIONS: usize = MAX_PAGE_LIMIT + 5;
-        let database = library_of("browse-clamp", SESSIONS);
+        let (_directory, database) = library_of("browse-clamp", SESSIONS);
 
         let unasked = list_sessions(&database, &SessionListing::default()).expect("a page");
         assert_eq!(
@@ -1053,7 +1060,7 @@ mod tests {
 
     #[test]
     fn a_session_projects_the_tags_and_favourites_of_what_is_inside_it() {
-        let database = library("browse-projection");
+        let (_directory, database) = library("browse-projection");
         let session = add_session(&database, 1, Some("cs2"));
         let recording = add_recording(&database, &session, 1, false);
         database
@@ -1127,7 +1134,7 @@ mod tests {
         // the title rather than adding it, so the first name was overwritten by
         // the second and could not be searched for at all — by `title:` or by
         // typing it (issue #520).
-        let database = library("clip-titles");
+        let (_directory, database) = library("clip-titles");
         let session = add_session(&database, 1, Some("cs2"));
         for (index, title) in [(1, "Ace on Mirage"), (2, "Clutch on Inferno")] {
             database
@@ -1159,7 +1166,7 @@ mod tests {
         // `event:` is in the language, the matcher implements it, and
         // `session_events` has rows in it — and nothing joined the two, so
         // every `event:` term was false for every session (issue #520).
-        let database = library("session-events");
+        let (_directory, database) = library("session-events");
         let session = add_session(&database, 2, Some("cs2"));
         for kind in ["kill", "round_win"] {
             database
@@ -1206,8 +1213,8 @@ mod tests {
 
     /// A library with one of everything a query can ask about, and several
     /// things it should *not* find.
-    fn varied_library(name: &str) -> Database {
-        let database = library(name);
+    fn varied_library(name: &str) -> (Scratch, Database) {
+        let (directory, database) = library(name);
         let connection = database.connection();
 
         // Cyrillic, so that a folding that only handles ASCII fails here rather
@@ -1380,7 +1387,7 @@ mod tests {
                 .expect("an event inserts");
         }
 
-        database
+        (directory, database)
     }
 
     /// The queries the two are compared over.
@@ -1479,7 +1486,8 @@ mod tests {
         // Four may select nothing: `tag:spoiler` and `title:deleted` name what
         // is in the trash, `-duration:<1h` names a sitting longer than an hour,
         // and `nothing-in-this-library` says so.
-        agree_about(&varied_library("search-differential"), CASES, 4);
+        let (_directory, database) = varied_library("search-differential");
+        agree_about(&database, CASES, 4);
     }
 
     #[test]
@@ -1490,7 +1498,8 @@ mod tests {
         // correctly too. The queries that actually divide the two are in
         // [`CASES`] — `ТАЩУ`, `game:мир`, `tag:лучшее`, `event:убийство` — each
         // of which asks about text whose case the fold has to change.
-        agree_about(&varied_library("search-documented"), DOCUMENTED, 0);
+        let (_directory, database) = varied_library("search-documented");
+        agree_about(&database, DOCUMENTED, 0);
     }
 
     #[test]
@@ -1499,7 +1508,7 @@ mod tests {
         // projection without any query looking odd: `browse` reads recordings
         // and clips with `deleted_at IS NULL`, so a deleted row's title, tag,
         // duration and favourite are not the sitting's.
-        let database = varied_library("search-trash");
+        let (_directory, database) = varied_library("search-trash");
 
         assert!(
             found(&database, "title:deleted").is_empty(),
@@ -1524,7 +1533,7 @@ mod tests {
         // `IFNULL(SUM(...), 0)` makes the sum a number; the `> 0` guard beside
         // it is what stops that number being an answer. Without the guard this
         // sitting would be selected by every `duration:<` in the language.
-        let database = varied_library("search-no-duration");
+        let (_directory, database) = varied_library("search-no-duration");
 
         let short = found(&database, "duration:<1h");
         assert!(

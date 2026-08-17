@@ -398,12 +398,15 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     use super::*;
-    use crate::test_support::scratch_directory;
+    use crate::test_support::{scratch_directory, Scratch};
 
-    fn database(name: &str) -> (std::path::PathBuf, Database) {
-        let path = scratch_directory(name).join("library.db");
+    /// The scratch directory comes back with the database so that it outlives
+    /// the test: dropping it takes the directory with it.
+    fn database(name: &str) -> (Scratch, std::path::PathBuf, Database) {
+        let directory = scratch_directory(name);
+        let path = directory.join("library.db");
         let database = Database::open(&path).expect("a database can be opened");
-        (path, database)
+        (directory, path, database)
     }
 
     /// A write that inserts one game, named after `index`.
@@ -432,7 +435,7 @@ mod tests {
 
     #[test]
     fn queued_writes_reach_the_database() {
-        let (path, database) = database("writer-basics");
+        let (_scratch, path, database) = database("writer-basics");
         let writer = Writer::spawn(database, WriteSettings::default());
         let queue = writer.queue();
 
@@ -455,7 +458,7 @@ mod tests {
         const HELD: Duration = Duration::from_secs(1);
         const SUBMISSIONS: usize = 5_000;
 
-        let (path, database) = database("writer-never-waits");
+        let (_scratch, path, database) = database("writer-never-waits");
         let writer = Writer::spawn(
             database,
             WriteSettings {
@@ -507,7 +510,7 @@ mod tests {
         const SUBMISSIONS: usize = 10_000;
         const MAX_BATCH: usize = 256;
 
-        let (path, database) = database("writer-batches");
+        let (_scratch, path, database) = database("writer-batches");
         let commits = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&commits);
         database
@@ -557,7 +560,7 @@ mod tests {
 
     #[test]
     fn a_write_that_fails_does_not_take_the_rest_of_its_batch_with_it() {
-        let (path, database) = database("writer-partial-failure");
+        let (_scratch, path, database) = database("writer-partial-failure");
         let writer = Writer::spawn(
             database,
             WriteSettings {
@@ -597,7 +600,7 @@ mod tests {
 
     #[test]
     fn a_full_queue_refuses_a_write_rather_than_blocking_the_thread_that_offered_it() {
-        let (_path, database) = database("writer-full-queue");
+        let (_scratch, _path, database) = database("writer-full-queue");
         let writer = Writer::spawn(
             database,
             WriteSettings {
@@ -650,7 +653,7 @@ mod tests {
         // (AGENTS.md section 15).
         //
         // The panic message the test harness prints for this is expected.
-        let (_path, database) = database("writer-panics");
+        let (_scratch, _path, database) = database("writer-panics");
         let writer = Writer::spawn(database, WriteSettings::default());
         writer
             .queue()
@@ -681,7 +684,7 @@ mod tests {
         // A recorder shutting down has usually just queued the end of a
         // session. Losing it because the writer was asked to stop in the same
         // breath would make the last session of every run the unreliable one.
-        let (path, database) = database("writer-drains-on-stop");
+        let (_scratch, path, database) = database("writer-drains-on-stop");
         let writer = Writer::spawn(database, WriteSettings::default());
         let queue = writer.queue();
         for index in 0..200 {

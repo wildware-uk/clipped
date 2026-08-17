@@ -23,7 +23,7 @@
 //! scanned.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use clipped_library::index::{
@@ -31,18 +31,16 @@ use clipped_library::index::{
 };
 use clipped_storage::Database;
 
+mod support;
+
 fn observed_at() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_545_000)
 }
 
-fn scratch_directory(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "clipped-reconciliation-{}-{name}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("a scratch directory can be created");
-    directory
+/// See `crates/library/tests/support/mod.rs`. Bind the answer to a variable that outlives the
+/// test body: the directory goes when it does.
+fn scratch_directory(name: &str) -> support::Scratch {
+    support::Scratch::new(&format!("reconciliation-{name}"))
 }
 
 /// A session with one recording, one saved replay and one generated highlight.

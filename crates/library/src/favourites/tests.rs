@@ -9,16 +9,14 @@
 use super::*;
 
 use crate::accounting::cleanup;
+use crate::test_support::Scratch;
 
 /// A library with one session, two recordings in it and a clip.
-fn library(name: &str) -> (std::path::PathBuf, Database) {
-    let directory = std::env::temp_dir().join(format!(
-        "clipped-favourites-{}-{name}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("a scratch directory");
+///
+/// The directory comes back first so that it is dropped last: the database has
+/// the file inside it open, and Windows will not remove a file that is.
+fn library(name: &str) -> (Scratch, Database) {
+    let directory = Scratch::new(&format!("favourites-{name}"));
 
     let database = Database::open(directory.join("library.db")).expect("a library can be opened");
     database
@@ -47,7 +45,7 @@ fn at(seconds: u64) -> SystemTime {
 
 #[test]
 fn a_mark_persists_and_can_be_read_back() {
-    let (directory, database) = library("persists");
+    let (_directory, database) = library("persists");
 
     for what in [
         Favourite::Session("sitting".to_owned()),
@@ -64,15 +62,13 @@ fn a_mark_persists_and_can_be_read_back() {
             "{what} is marked afterwards"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
 fn marking_something_twice_keeps_the_instant_it_was_first_marked() {
     // "When did you favourite this" answers when it was first favourited. A
     // second click on a full star must not quietly change it.
-    let (directory, database) = library("twice");
+    let (_directory, database) = library("twice");
     let what = Favourite::Recording(1);
 
     assert!(mark(&database, &what, at(1_000_000_000)).expect("it can be marked"));
@@ -93,13 +89,11 @@ fn marking_something_twice_keeps_the_instant_it_was_first_marked() {
         stamp.starts_with("2001-"),
         "the first instant survives the second mark: {stamp}"
     );
-
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
 fn unmarking_clears_it_and_unmarking_nothing_is_not_a_failure() {
-    let (directory, database) = library("unmark");
+    let (_directory, database) = library("unmark");
     let what = Favourite::Clip(1);
 
     assert!(mark(&database, &what, at(1_800_000_000)).expect("it can be marked"));
@@ -112,8 +106,6 @@ fn unmarking_clears_it_and_unmarking_nothing_is_not_a_failure() {
         "nothing was changed, and the answer says so"
     );
     assert!(!is_marked(&database, &missing).expect("nor is reading one"));
-
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -121,7 +113,7 @@ fn automatic_cleanup_skips_a_favourite() {
     // The issue's second acceptance criterion, from this side: enforced in
     // `accounting::cleanup` and asserted here against a real mark rather than a
     // hand-built candidate.
-    let (directory, database) = library("cleanup");
+    let (_directory, database) = library("cleanup");
     mark(&database, &Favourite::Recording(1), at(1_800_000_000)).expect("it can be marked");
 
     let candidates = cleanup::candidates(&database).expect("the candidates can be read");
@@ -140,8 +132,6 @@ fn automatic_cleanup_skips_a_favourite() {
         "a favourite is not automatic to delete"
     );
     assert!(other.is_deletable(), "and the one beside it still is");
-
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -149,7 +139,7 @@ fn favouriting_a_session_protects_its_recordings_without_marking_them() {
     // The third acceptance criterion, and the rule the module documents. Both
     // halves matter: the recordings are protected, and they are *not*
     // individually marked — so unfavouriting the sitting leaves no trail.
-    let (directory, database) = library("session");
+    let (_directory, database) = library("session");
     mark(
         &database,
         &Favourite::Session("sitting".to_owned()),
@@ -181,8 +171,6 @@ fn favouriting_a_session_protects_its_recordings_without_marking_them() {
         after.iter().all(cleanup::Candidate::is_deletable),
         "unfavouriting the sitting releases its recordings"
     );
-
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -190,7 +178,7 @@ fn a_recording_marked_in_its_own_right_survives_the_session_being_unfavourited()
     // The case the cascade was rejected for. Somebody favourites a sitting,
     // then favourites one recording in it deliberately, then unfavourites the
     // sitting — and expects that one recording to still be theirs.
-    let (directory, database) = library("own-right");
+    let (_directory, database) = library("own-right");
     mark(
         &database,
         &Favourite::Session("sitting".to_owned()),
@@ -216,8 +204,6 @@ fn a_recording_marked_in_its_own_right_survives_the_session_being_unfavourited()
         Some(cleanup::Protection::Favourite),
         "and the one they marked themselves is still theirs"
     );
-
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -225,7 +211,7 @@ fn clearing_a_mark_that_was_never_set_changes_nothing_and_says_so() {
     // The same defect `locks::unlock` had, and it reaches a window: `changed`
     // on a `favourited` reply is what tells "you did that" from "that was
     // already so", and unmarking something unmarked claimed the first.
-    let (directory, database) = library("idempotent-unmark");
+    let (_directory, database) = library("idempotent-unmark");
 
     for what in [
         Favourite::Session("sitting".to_owned()),
@@ -244,6 +230,4 @@ fn clearing_a_mark_that_was_never_set_changes_nothing_and_says_so() {
         "a real clearing still reports one, or the guard above would be satisfied by a function \
          that always answered `false`"
     );
-
-    let _ = std::fs::remove_dir_all(directory);
 }

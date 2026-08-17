@@ -19,6 +19,8 @@ use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+mod support;
+
 /// The moment a run is stamped with, so that what is written does not depend on
 /// when the test ran (AGENTS.md section 25).
 fn observed_at() -> SystemTime {
@@ -32,20 +34,23 @@ fn observed_later() -> SystemTime {
 
 /// A library on disk: a folder of recordings and the index of it.
 struct Library {
+    /// Held only so that it is dropped when this is, which is what removes the
+    /// directory. Underscored because nothing reads it; see
+    /// `crates/library/tests/support/mod.rs`.
+    _directory: support::Scratch,
     root: PathBuf,
     database: PathBuf,
 }
 
 impl Library {
     fn new(name: &str) -> Self {
-        let directory =
-            std::env::temp_dir().join(format!("clipped-indexing-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
+        let directory = support::Scratch::new(&format!("indexing-{name}"));
         let root = directory.join("clips");
         fs::create_dir_all(&root).expect("a scratch library can be created");
         Self {
             root,
             database: directory.join("library.db"),
+            _directory: directory,
         }
     }
 
