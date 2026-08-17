@@ -49,6 +49,10 @@ import type {
   ErrorOutcome,
   EventStream,
   ExportRecordingParams,
+  OpenPlaybackParams,
+  PlaybackOpenedReply,
+  PlaybackStream,
+  PlaybackTrack,
   ExportSummary,
   ConflictingHotkey,
   Feature,
@@ -435,6 +439,22 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     bytes: 'required',
     missing: 'required',
   }),
+  open_playback: fields<OpenPlaybackParams>({
+    source: 'required',
+    audio_track: 'optional',
+  }),
+  playback_stream: fields<PlaybackStream>({
+    path: 'required',
+    audio_track: 'optional',
+    audio_tracks: 'optional',
+    prepared: 'optional',
+  }),
+  playback_track: fields<PlaybackTrack>({
+    index: 'required',
+    name: 'optional',
+    language: 'optional',
+    default: 'optional',
+  }),
   export_recording: fields<ExportRecordingParams>({
     source: 'required',
     destination: 'required',
@@ -514,6 +534,10 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
   'reply.recording_exported': fields<RecordingExportedReply>({
     reply: 'required',
     export: 'required',
+  }),
+  'reply.playback_opened': fields<PlaybackOpenedReply>({
+    reply: 'required',
+    playback: 'required',
   }),
   'reply.shutting_down': fields<ShuttingDownReply>({
     reply: 'required',
@@ -676,6 +700,12 @@ const TYPESCRIPT_COMMANDS: readonly {
     available_in_this_build: true,
   },
   {
+    name: 'open_playback',
+    params: 'open_playback',
+    reply: 'reply.playback_opened',
+    available_in_this_build: true,
+  },
+  {
     name: 'get_hotkeys',
     params: null,
     reply: 'reply.hotkeys',
@@ -762,6 +792,12 @@ function replyDiscriminant(reply: Reply): string {
       // `lossless` would reach the same discriminant for an MP4 that holds the
       // whole recording and one that quietly does not.
       return reply.export.lossless ? 'recording_exported' : 'recording_exported.lossy';
+    case 'playback_opened':
+      // Whether a copy had to be made is part of the path: it is the difference
+      // between an answer that cost nothing and one that read the whole
+      // recording, and a mirror that dropped `prepared` would reach the same
+      // discriminant for both.
+      return `playback_opened.${reply.playback.prepared === true ? 'prepared' : 'as_recorded'}`;
     case 'shutting_down':
       // Whether a recording is being finished is the whole of what this reply
       // says, so it is part of the path: dropping the field would otherwise

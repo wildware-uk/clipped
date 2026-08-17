@@ -60,6 +60,16 @@ clipped-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# The background worker `src/thumbnail` runs on: one low-priority thread, a
+# bounded queue that drops the oldest request, and a real blocking
+# suspend/resume for the duration of a recording. `clipped-waveform` needs
+# exactly the same thing, and both crates implemented it for themselves until
+# issue #293 (AGENTS.md section 55). `clipped-background` is layer 0, so this
+# follows the dependency direction, and it is also where the Windows
+# thread-priority calls `src/thumbnail/windows/priority.rs` used to make moved
+# to.
+clipped-background.workspace = true
+
 # The raw FFmpeg FFI, for `src/thumbnail`. Making a thumbnail means demuxing a
 # finished recording, seeking in it, decoding a frame of whatever video codec is
 # in it, scaling that frame and encoding a JPEG, and there is no lower-layer
@@ -83,12 +93,6 @@ rusty_ffmpeg.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
-    # `GetCurrentThread`, `SetThreadPriority`, `GetThreadPriority` and the
-    # `THREAD_MODE_BACKGROUND_BEGIN`/`THREAD_PRIORITY_LOWEST` constants, for
-    # `src/thumbnail/windows/priority.rs`. Generating thumbnails for a library
-    # must not take processor or disk bandwidth from a game that is being
-    # recorded (AGENTS.md section 18), and on Windows that is the mechanism.
-    "Win32_System_Threading",
 ] }
 
 [build-dependencies]

@@ -28,7 +28,9 @@ One half of the "never interferes with a recording" promise is also mechanism
 without a caller. `ThumbnailService::suspend_for_recording` and `resume` are
 built and tested — a real blocking suspend, not a flag — and **nothing outside
 this crate calls either**. What protects a recording today is entirely the
-worker's thread and I/O priority (`windows/priority.rs`), which is real and
+worker's thread and I/O priority (`crates/background/src/windows/priority.rs`,
+moved out of this module by
+[#293](https://github.com/wildware-uk/clipped/issues/293)), which is real and
 proven by reading the priority back. Suspending the worker while a recording
 runs needs a caller in `apps/recorder`, and there is none.
 
@@ -421,15 +423,15 @@ suspension is a flag nobody reads.
 
 ## Where the code is
 
-|                                |                                                                     |
-| ------------------------------ | ------------------------------------------------------------------- |
-| Module                         | `crates/library/src/thumbnail`                                      |
-| Choosing a frame               | `choose.rs`                                                         |
-| Decoding, scaling and encoding | `render.rs`                                                         |
-| The cache                      | `cache.rs`                                                          |
-| The background worker          | `service.rs`                                                        |
-| Thread priority                | `windows/priority.rs`                                               |
-| Tests                          | `crates/library/tests/thumbnails.rs`, and unit tests in each module |
+|                                                                  |                                                                     |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Module                                                           | `crates/library/src/thumbnail`                                      |
+| Choosing a frame                                                 | `choose.rs`                                                         |
+| Decoding, scaling and encoding                                   | `render.rs`                                                         |
+| The cache                                                        | `cache.rs`                                                          |
+| Wiring this module's cache and renderer to the background worker | `service.rs`                                                        |
+| The queue, the thread, suspension and thread priority            | `crates/background` (issue #293)                                    |
+| Tests                                                            | `crates/library/tests/thumbnails.rs`, and unit tests in each module |
 
 ```text
 cargo test -p clipped-library
@@ -460,11 +462,14 @@ call.
 
 The alternative is a `clipped-thumbnails` crate beside `clipped-waveform`, which
 is the shape [#66](https://github.com/wildware-uk/clipped/issues/66) chose for the
-same kind of work. That was not done here because creating a crate means editing
-the layer table, the layering test and the architecture document — shared files
-that several M6 tickets were touching in the same week — and because it is worth
-deciding together with the duplication it would fix:
-[#293](https://github.com/wildware-uk/clipped/issues/293) covers extracting the
-source identity, the background worker and the thread-priority calls that this
-module and `clipped-waveform` now each have their own copy of, and the crate
-placement is a question on it.
+same kind of work. That is still not done: the source identity, the background
+worker and the thread-priority calls this module and `clipped-waveform` used to
+each have their own copy of moved into `clipped-background`
+([#293](https://github.com/wildware-uk/clipped/issues/293),
+`crates/background/src/lib.rs`), a new layer-0 crate rather than the
+layer-1 `clipped-thumbnails` #66 chose — because layer 0 is what let both
+`clipped-waveform` and this module depend on it without either depending on the
+other. What stays here is the frame-choosing, the decode-scale-encode pipeline
+and the JPEG-plus-JSON cache format, which is thumbnail-specific in a way the
+worker never was. Moving *that* out from under `clipped-library` — the
+`clipped-thumbnails` question above — is still open.

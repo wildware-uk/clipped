@@ -73,3 +73,4 @@ Correcting a typo or clarifying wording in place is fine.
 | [0008](0008-codec-patent-position.md) | AV1 is the codec Clipped commits to, and the AVC and HEVC exposure is named rather than assumed away | Proposed |
 | [0009](0009-the-recorder-registers-global-hotkeys.md) | The recorder registers the global hotkeys, and a press becomes a protocol command | Accepted |
 | [0010](0010-user-labelled-event-kinds.md) | A user-labelled event kind carries its own text, and a host subsystem gets its own source | Accepted |
+| [0011](0011-what-the-webview-plays.md) | The window plays the archival recording itself, and the recorder chooses which sound track it carries | Accepted |

@@ -331,7 +331,7 @@ not the same — two recorders speaking protocol 1 can differ in what was compil
 into them. A UI that offers a button whose command will be refused has told the
 user something untrue (AGENTS.md section 27), and `features` is how it avoids
 that. Today: `recording`, `status_events`, `bookmarks`, `screenshots`,
-`shutdown`, `library`, `export`, `hotkeys`, `replay`, `automatic`.
+`shutdown`, `library`, `export`, `playback`, `hotkeys`, `replay`, `automatic`.
 
 `automatic` is the clearest case of why a feature is not a version. Protocol 2
 says a recorder can *describe* an automatic sitting; `automatic` says it
@@ -356,6 +356,11 @@ before [`export_recording`](#export_recording) refuses it with
 `unknown_command`, and the cost of finding that out late is worse than for a
 library: the person has already chosen a file name for a file that was never
 going to be written.
+
+`playback` is the check in front of a player. A recorder built before
+[`open_playback`](#open_playback) has no way to open a recording for playback and
+refuses the command by name, and a window that had already drawn a transport
+would be showing a control that cannot work.
 
 `hotkeys` is the one where the two answers are *opposites*. A recorder built
 before [`get_hotkeys`](#get_hotkeys) registers no global hotkey at all, so every
@@ -551,6 +556,7 @@ twice. It is absent for a recording that is not part of a sitting.
 | `empty_trash` | `items`, `bytes` | `trash_emptied` | yes |
 | `plugins` | none | `plugins` | yes |
 | `export_recording` | `source`, `destination` | `recording_exported` | yes |
+| `open_playback` | `source`, `audio_track` (optional) | `playback_opened` | yes |
 | `get_hotkeys` | none | `hotkeys` | yes |
 | `shutdown` | `finalise_recording` (optional) | `shutting_down` | yes |
 | `apply_settings` | not yet defined | — | no — M7, [#108](https://github.com/wildware-uk/clipped/issues/108) |
@@ -1079,6 +1085,76 @@ says what, in words. It is never a picture or a sound track: a container that
 cannot carry one of those is a refusal, because a file missing one of its audio
 tracks looks exactly like a file that never had it.
 
+### `open_playback`
+
+Opens a finished recording so that the desktop window can play it, on one of its
+sound tracks ([#304](https://github.com/wildware-uk/clipped/issues/304)).
+
+```json
+{"type":"request","id":13,"command":"open_playback",
+ "params":{"source":"D:\clips\cs2-20260811-201400-1.mkv","audio_track":3}}
+```
+
+`source` is required and has no default, for the reason
+[`export_recording`](#export_recording)'s has none. `audio_track` is optional and
+is a **stream index of the file** rather than an ordinal among the sound tracks
+— the two differ by however many picture tracks come first. Absent means the
+track a player should choose on its own, which the recorder decides: the one the
+container flags as the default, falling back to the first.
+
+```json
+{"type":"response","id":13,"outcome":{"ok":{
+  "reply":"playback_opened",
+  "playback":{"path":"D:\clips\cs2-20260811-201400-1.mkv",
+              "audio_track":1,
+              "audio_tracks":[
+                {"index":1,"name":"Compatibility Mix","default":true},
+                {"index":2,"name":"Game","default":false},
+                {"index":3,"name":"Microphone","default":false}],
+              "prepared":false}}}}
+```
+
+**`path` is usually the recording itself, and `prepared` says so.** A WebView2
+plays a Clipped recording as it stands — Matroska, AV1 picture, uncompressed PCM
+sound — which [ADR 0011](adr/0011-what-the-webview-plays.md) measures rather than
+assumes. So opening a recording on its default track writes nothing at all: the
+file is opened, its streams are described, and it is closed.
+
+`prepared` is `true` when `path` is a **copy carrying one sound track**, which is
+what a request for any track other than the first produces. That exists because
+a media element cannot choose one: `HTMLMediaElement.audioTracks` is not
+implemented in Chromium, and its demuxer takes the first sound track the
+container declares — ignoring Matroska's default-track flag. So hearing the
+microphone on its own means being handed a file that holds the microphone. The
+copy is still a stream copy (`clipped_muxer::remux_to_mp4_carrying`); nothing is
+decoded and nothing is encoded, and it goes in
+`%LOCALAPPDATA%\Clipped\playback`, never beside the recording. A prepared copy is
+a cache entry: it is in nobody's library, and it is swept after a day.
+
+`audio_tracks` is every sound track of the **recording**, not of the file being
+played, because it is what a window offers next. It is absent for a recording
+with no sound at all — a capture that found no audio device — which a window has
+to be able to tell from a track that would not play.
+
+**There is deliberately no duration and no picture size.** The media element
+measures both from the file it is given; a figure sent from here would be a
+second answer to the same question, and the two would disagree for exactly the
+files where it matters — a recording a killed recorder left, whose container may
+carry no duration at all
+([#283](https://github.com/wildware-uk/clipped/issues/283)).
+
+Two refusals, both `playback_failed` and both saying which:
+
+- **the recording's file has gone** — checked before the muxer, so the answer
+  names the file and says what probably happened to it rather than being
+  FFmpeg's account of an I/O error;
+- **the sound track asked for is not one the recording has** — refused rather
+  than quietly answered with the default, because a window that asked for the
+  microphone and was handed the compatibility mix would play something, with
+  sound, and look exactly as though it had worked.
+
+The recording is opened for reading and is never modified, on either path.
+
 ### `get_hotkeys`
 
 Where every global hotkey stands. The recorder registers them —
@@ -1388,6 +1464,7 @@ person reads, written to AGENTS.md section 28.
 | `shutting_down` | The recorder has accepted a [`shutdown`](#shutdown) and will not start a recording. |
 | `destination_exists` | Something is already where a file was going to be written, and Clipped does not overwrite (AGENTS.md section 56). Choose another name; nothing was changed. |
 | `export_failed` | A finished recording could not be copied into the container asked for. The message is the muxer's own, naming what stopped it. |
+| `playback_failed` | A recording could not be opened for playback: its file has gone, it could not be read, or the sound track asked for is not one it has. The message says which. |
 | `library_unavailable` | The recording library could not be read, and the message says why. **Never an empty library**, which is a successful reply carrying no sessions. |
 | `internal` | The recorder is at fault and cannot say more usefully. |
 

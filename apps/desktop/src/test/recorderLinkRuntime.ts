@@ -105,6 +105,15 @@ export interface CommandAnswers {
   readonly exportRecording?: (args: Record<string, unknown>) => unknown;
   /** What `open_recording` answers, given the path it was sent. */
   readonly openRecording?: (args: Record<string, unknown>) => unknown;
+  /**
+   * What `open_playback` answers, given the recording and the track it was
+   * asked for.
+   *
+   * The default is a rejection, like the other recorder commands: a stub that
+   * quietly answered with an address would let a screen test pass while the
+   * screen drew a player over a recorder nobody asked (issue #304).
+   */
+  readonly openPlayback?: (args: Record<string, unknown>) => unknown;
   /** What `reveal_recording` answers, given the path it was sent. */
   readonly revealRecording?: (args: Record<string, unknown>) => unknown;
   /**
@@ -265,6 +274,11 @@ export function stubRecorderLinkRuntime(
       if (command === 'open_recording') {
         return answered(
           commands.openRecording === undefined ? undefined : () => commands.openRecording?.(args),
+        );
+      }
+      if (command === 'open_playback') {
+        return answered(
+          commands.openPlayback === undefined ? undefined : () => commands.openPlayback?.(args),
         );
       }
       if (command === 'reveal_recording') {
