@@ -546,32 +546,26 @@ pub fn microphone_level(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Scratch;
     use std::collections::BTreeMap;
     use std::fs;
 
-    /// A directory of this test's own, removed when it is dropped.
-    struct TestDirectory(PathBuf);
+    /// A directory of this test's own, removed when the test that made it
+    /// passes.
+    ///
+    /// The removal is [`Scratch`]'s rather than this type's own. What it had
+    /// was `let _ = fs::remove_dir_all(…)` in [`Drop`]: that takes a failing
+    /// test's evidence with it, and it cannot report a removal that did not
+    /// happen — the defect PR #597 was written to expose (issue #598).
+    struct TestDirectory(Scratch);
 
     impl TestDirectory {
         fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "clipped-recorder-settings-{label}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("the temporary directory can be created");
-            Self(path)
+            Self(Scratch::new(&format!("recorder-settings-{label}")))
         }
 
         fn file(&self) -> PathBuf {
             self.0.join("settings.json")
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

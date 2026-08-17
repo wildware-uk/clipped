@@ -205,26 +205,26 @@ mod tests {
     use super::*;
     use crate::catalogue::error::CatalogueError;
     use crate::catalogue::SCHEMA_VERSION;
+    use crate::test_support::Scratch;
 
-    /// A directory of one test's own, removed when it is dropped.
+    /// A directory of one test's own, removed when the test that made it
+    /// passes.
     ///
     /// Shared with `super::edits`'s tests, which write the same kind of file
     /// into the same kind of place.
+    ///
+    /// The removal is [`Scratch`]'s rather than this type's own. What it had
+    /// was `let _ = fs::remove_dir_all(…)` in [`Drop`], which took a failing
+    /// test's evidence with it and, worse, could not report a removal that did
+    /// not happen (issue #598).
     #[derive(Debug)]
-    pub(super) struct TestDirectory(pub(super) PathBuf);
+    pub(super) struct TestDirectory(Scratch);
 
     impl TestDirectory {
-        /// Named for the test, the process and the thread, so that tests
-        /// running in parallel cannot share one.
+        /// Named for the test, so that a directory left behind by a failure
+        /// says which one left it.
         pub(super) fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "clipped-catalogue-{label}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("the temporary directory can be created");
-            Self(path)
+            Self(Scratch::new(&format!("catalogue-{label}")))
         }
 
         /// Writes an overlay file into it and returns its path.
@@ -237,12 +237,6 @@ mod tests {
         /// Where an overlay in it would be, whether or not one is there.
         pub(super) fn path(&self) -> PathBuf {
             self.0.join(OVERLAY_FILE_NAME)
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

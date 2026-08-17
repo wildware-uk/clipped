@@ -69,6 +69,11 @@ pub mod watch;
 #[cfg(test)]
 pub(crate) mod test_events;
 
+/// The scratch directory the tests in this crate write their files in. Never
+/// built into the recorder.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::error::Error;
 use std::fmt;
 

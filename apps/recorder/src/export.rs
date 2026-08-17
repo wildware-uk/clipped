@@ -321,24 +321,19 @@ fn summarise(source: &Path, destination: &Path, summary: &RemuxSummary) -> Expor
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::AtomicU32;
     use std::time::Duration;
 
     use super::*;
+    use crate::test_support::Scratch;
 
-    /// A directory of this test's own; several of these run at once.
-    fn scratch(name: &str) -> PathBuf {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-
-        let directory = std::env::temp_dir().join(format!(
-            "clipped-export-{name}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
-        directory
+    /// A directory of this test's own, removed again when the test that made it
+    /// passes; several of these run at once.
+    ///
+    /// This used to return a bare path and nothing ever removed it
+    /// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)). See
+    /// [`Scratch`] for what the returned value does and how to hold it.
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("export-{name}"))
     }
 
     #[test]
@@ -379,8 +374,6 @@ mod tests {
             b"somebody else's footage",
             "a refused export must not have touched what was already there"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -450,8 +443,6 @@ mod tests {
             !directory.join("not-a-recording.mp4").exists(),
             "a refused export must not leave a stub behind"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// Every report a copy of `total` would make, at the muxer's own rate.

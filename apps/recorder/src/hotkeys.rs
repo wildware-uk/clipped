@@ -472,6 +472,8 @@ fn row_for(status: &ActionStatus) -> HotkeyBinding {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use crate::test_support::Scratch;
+
     use clipped_hotkeys::{Bindings, Hotkey, HotkeyAction, HotkeyService, Registration, ACTIONS};
     use clipped_ipc::{
         ActiveRecording, Command, CommandHandler, ErrorCode, HotkeyState, ProtocolError,
@@ -924,7 +926,6 @@ mod tests {
         );
 
         drop(watching);
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A recorder over a library, a settings file and a games file of this
@@ -942,13 +943,14 @@ mod tests {
         ))
     }
 
-    /// A directory of this test's own.
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("clipped-hotkeys-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory can be made");
-        directory
+    /// A directory of this test's own, removed again when the test that made it
+    /// passes.
+    ///
+    /// This used to return a bare path and nothing ever removed it
+    /// ([issue #598](https://github.com/wildware-uk/clipped/issues/598)). See
+    /// [`Scratch`] for what the returned value does and how to hold it.
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("hotkeys-{name}"))
     }
 
     /// A window that is in front and cannot be captured is a different answer

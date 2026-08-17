@@ -24,23 +24,24 @@ use clipped_waveform::{
 };
 
 use super::*;
+use crate::test_support::Scratch as ScratchDirectory;
 
-/// A directory of this test's own, deleted when the guard is dropped.
+/// A directory of this test's own, removed when the test that made it passes.
 ///
-/// Named after the test rather than after a counter, so that two of these
-/// running at once cannot collide and so that a leftover directory says which
-/// test left it.
+/// Named after the test as well as after the process, so that a directory a
+/// failure left behind says which test left it. The removal is
+/// [`ScratchDirectory`]'s: what this had was `let _ = fs::remove_dir_all(…)` in
+/// [`Drop`], which took a failing test's evidence with it and could not report
+/// a removal that did not happen (issue #598).
 struct Scratch {
-    root: PathBuf,
+    root: ScratchDirectory,
 }
 
 impl Scratch {
     fn new(test: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("clipped-preview-{}-{test}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("the scratch directory can be made");
-        Self { root }
+        Self {
+            root: ScratchDirectory::new(&format!("preview-{test}")),
+        }
     }
 
     fn join(&self, name: &str) -> PathBuf {
@@ -55,12 +56,6 @@ impl Scratch {
         let path = self.root.join(name);
         fs::write(&path, bytes).expect("the stand-in recording can be written");
         path
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 

@@ -534,6 +534,7 @@ fn indexed_item(database: &Database, session_id: &str, index: u32) -> Option<Tra
 mod tests {
     use super::*;
     use crate::cli::{Cli, Command};
+    use crate::test_support::Scratch;
     use clap::Parser;
 
     fn args(arguments: &[&str]) -> RecoverArgs {
@@ -611,20 +612,18 @@ mod tests {
         assert!(error.source().is_some(), "the cause should stay reachable");
     }
 
-    /// A directory under the system temporary directory, removed when dropped.
-    struct TemporaryDirectory(PathBuf);
+    /// A directory under the system temporary directory, removed when the test
+    /// that made it passes.
+    ///
+    /// The removal is [`Scratch`]'s rather than this type's own. What it had
+    /// was `let _ = fs::remove_dir_all(…)` in [`Drop`]: that takes a failing
+    /// test's evidence with it, and it cannot report a removal that did not
+    /// happen — the defect PR #597 was written to expose (issue #598).
+    struct TemporaryDirectory(Scratch);
 
     impl TemporaryDirectory {
         fn new(purpose: &str) -> Self {
-            use core::sync::atomic::{AtomicU64, Ordering};
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "clipped-recover-cli-{purpose}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir_all(&path).expect("a temporary directory can be created");
-            Self(path)
+            Self(Scratch::new(&format!("recover-cli-{purpose}")))
         }
 
         fn path(&self) -> &Path {
@@ -634,12 +633,6 @@ mod tests {
         /// A fresh library index, in this same temporary directory.
         fn database(&self) -> Database {
             Database::open(self.0.join("library.db")).expect("a library index can be opened")
-        }
-    }
-
-    impl Drop for TemporaryDirectory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 

@@ -16,17 +16,16 @@ use std::fs;
 
 use super::*;
 use crate::catalogue::MatchStrength;
+use crate::test_support::Scratch;
 
-/// An empty directory of this test's own, removed first if it survived.
-fn scratch(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "clipped-riot-{}-{name}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("a scratch directory can be made");
-    directory
+/// An empty directory of this test's own, removed again when the test passes.
+///
+/// This used to return a bare path and nothing ever removed it, which is
+/// where the 203 `clipped-riot-*` directories counted in
+/// [issue #598](https://github.com/wildware-uk/clipped/issues/598) came from.
+/// See [`Scratch`] for what the returned value does and how to hold it.
+fn scratch(name: &str) -> Scratch {
+    Scratch::new(&format!("riot-{name}"))
 }
 
 /// A product directory holding the settings Riot writes for something that is
@@ -87,7 +86,7 @@ fn offered_but_not_installed(metadata: &Path, product: &str) {
 
 /// The three products the real machine had settings for, written the way it
 /// had them.
-fn a_real_machine(name: &str) -> (PathBuf, Riot) {
+fn a_real_machine(name: &str) -> (Scratch, Riot) {
     let metadata = scratch(name);
     installed(
         &metadata,
@@ -383,7 +382,11 @@ fn a_settings_file_that_cannot_be_read_costs_no_other_product() {
 
 #[test]
 fn a_metadata_directory_that_is_not_there_says_which_one() {
-    let missing = scratch("missing").join("nothing-here");
+    // Bound rather than used in place: a `Scratch` used as a temporary is
+    // dropped at the end of the statement, which removes the directory the
+    // missing path is named inside before the assertion has run.
+    let directory = scratch("missing");
+    let missing = directory.join("nothing-here");
 
     let error = Riot::read_at(&missing).expect_err("there is nothing to read");
 

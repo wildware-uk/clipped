@@ -2011,6 +2011,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::test_support::Scratch;
 
     /// One game, which is all any test here needs to launch.
     const GAMES: &str = r#"
@@ -2030,16 +2031,16 @@ name = "test-game.exe"
     /// build the same thing from `std::env::temp_dir` (AGENTS.md sections 10
     /// and 55).
     #[derive(Debug)]
-    struct TestDirectory(PathBuf);
+    ///
+    /// The removal is [`Scratch`]'s rather than this type's own. What it had
+    /// was `let _ = fs::remove_dir_all(…)` in [`Drop`]: that takes a failing
+    /// test's evidence with it, and it cannot report a removal that did not
+    /// happen — the defect PR #597 was written to expose (issue #598).
+    struct TestDirectory(Scratch);
 
     impl TestDirectory {
         fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "clipped-watch-{label}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&path);
+            let path = Scratch::new(&format!("watch-{label}"));
             fs::create_dir_all(path.join("recordings")).expect("the directory can be created");
             fs::create_dir_all(path.join("settings")).expect("the directory can be created");
             Self(path)
@@ -2071,12 +2072,6 @@ name = "test-game.exe"
                 .collect();
             names.sort();
             names
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
