@@ -473,7 +473,13 @@ fn discard_all(
 
         record_discarded(recording, now).map_err(|source| RecoverError::RecordNotUpdated {
             session: recording.session_id().to_owned(),
-            trash_path: entry.path.clone(),
+            // A recording always names a file -- `recordings.path` is `NOT
+            // NULL` -- and where there was nothing to move that name is still
+            // where the file would be. Only a clip can be pathless.
+            trash_path: entry
+                .path
+                .clone()
+                .unwrap_or_else(|| recording.output().to_path_buf()),
             source,
         })?;
 
@@ -488,12 +494,12 @@ fn discard_all(
             moved,
             "an interrupted recording was discarded"
         );
-        if moved {
+        if let Some(trash_path) = entry.path.as_ref().filter(|_| moved) {
             eprintln!(
                 "Discarded {}: moved to the trash at {}, and listed there — restorable until \
                  the trash is emptied or its retention expires it.",
                 recording.output().display(),
-                entry.path.display()
+                trash_path.display()
             );
         } else {
             eprintln!(
@@ -724,10 +730,13 @@ mod tests {
             1,
             "the discarded recording should have a row in the trash: {listed:?}"
         );
+        let listed_path = listed[0]
+            .path
+            .as_deref()
+            .expect("a recording in the trash names its file");
         assert!(
-            listed[0].path.starts_with(&trash_directory),
-            "the listed row should point at the file inside the trash: {:?}",
-            listed[0].path
+            listed_path.starts_with(&trash_directory),
+            "the listed row should point at the file inside the trash: {listed_path:?}"
         );
 
         assert!(
@@ -820,7 +829,11 @@ mod tests {
         .expect("a retry should finish the job rather than failing again");
 
         assert!(
-            first_send.path.exists(),
+            first_send
+                .path
+                .as_deref()
+                .expect("a recording in the trash names its file")
+                .exists(),
             "the file should not have been moved a second time"
         );
         let listed = trash.list(&database).expect("the trash can be listed");

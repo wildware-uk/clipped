@@ -1079,10 +1079,13 @@ function readEventMark(value: JsonValue | undefined): LibraryEventMark {
 function readRestoredItem(value: JsonValue | undefined): RestoredItem {
   const item = object(value, 'a restored item');
   const what = 'a restored item';
+  const path = optionalStringField(item, 'path', what);
   return {
     kind: stringField(item, 'kind', what),
     id: numberField(item, 'id', what),
-    path: stringField(item, 'path', what),
+    // Optional: a clip nothing has exported comes back with no file, and there
+    // is no path to report (issue #593).
+    ...(path === undefined ? {} : { path }),
     file_restored: booleanField(item, 'file_restored', what),
     renamed: booleanField(item, 'renamed', what),
   };
@@ -1147,17 +1150,24 @@ function readTrashListing(value: JsonValue | undefined): TrashListing {
  * retention this build cannot work out, and a file the index never measured,
  * are both real states, and inventing a date or a zero would be a screen saying
  * something nobody measured.
+ *
+ * `path` and `original_path` are optional for a different reason: an item can
+ * have no file at all. A clip nothing has exported is a range of a recording,
+ * so it was never anywhere and there is nowhere to put it back
+ * ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
  */
 function readTrashedItem(value: JsonValue | undefined): TrashedItem {
   const item = object(value, 'a trashed item');
   const what = 'a trashed item';
   const expires = optionalStringField(item, 'expires_at', what);
   const size = optionalNumberField(item, 'size_bytes', what);
+  const path = optionalStringField(item, 'path', what);
+  const originalPath = optionalStringField(item, 'original_path', what);
   return {
     kind: stringField(item, 'kind', what),
     id: numberField(item, 'id', what),
-    path: stringField(item, 'path', what),
-    original_path: stringField(item, 'original_path', what),
+    ...(path === undefined ? {} : { path }),
+    ...(originalPath === undefined ? {} : { original_path: originalPath }),
     deleted_at: stringField(item, 'deleted_at', what),
     ...(expires === undefined ? {} : { expires_at: expires }),
     ...(size === undefined ? {} : { size_bytes: size }),

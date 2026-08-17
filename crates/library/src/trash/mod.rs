@@ -66,6 +66,49 @@
 //! back from a backup — and destroying it to make room for a restore would be
 //! exactly the deletion nobody asked for.
 //!
+//! # An item with no file is in the trash too, and can be put back
+//!
+//! `clips.path` is nullable — `0004_clips_without_a_file.sql` made it so
+//! deliberately, because a generated highlight is a *range of a recording* and
+//! costs no disk and no encoder time until somebody exports it. So a clip the
+//! user deletes may have no file at all, and the question is whether the trash
+//! should hold it, list it and restore it, or quietly leave it out.
+//!
+//! It holds it, and the reasoning is the trash's own rather than
+//! [issue #591](https://github.com/wildware-uk/clipped/issues/591)'s, which
+//! asked the same question of the library screen. Three reasons, in the order
+//! they matter:
+//!
+//! - **This module deletes and restores *rows*, not files.** That is the whole
+//!   design: a delete marks a row and moves a file, and a restore clears the
+//!   marks and moves it back, so that the favourite, the tags, the bookmarks
+//!   and the clips survive. The file half has always been allowed to be absent
+//!   — `vault::Stowed::NoFile` and [`RestoreOutcome::file_restored`] exist for
+//!   an item whose media the user removed in Explorer — and a clip that never
+//!   had a file is that same state reached from the other side. What is put
+//!   back is the clip: what it is called, what it is made of (`clips.edit`) and
+//!   why it exists.
+//! - **A hidden item would be unreachable in every direction.**
+//!   [`Trash::expire`] and [`Trash::empty`] are both built from [`Trash::list`],
+//!   so a row that listing filtered out would be marked deleted for ever: never
+//!   shown, never restorable, never destroyed, and never counted by the
+//!   confirmation [`EmptyTrash`] checks — which would then disagree with what
+//!   is actually there. Filtering here does not hide an item, it strands one
+//!   (AGENTS.md section 56).
+//! - **Hiding a row is deleting it, one screen further out** (AGENTS.md
+//!   section 27), which is #591's argument and applies here too.
+//!
+//! What follows is that [`TrashEntry::path`] and
+//! [`TrashEntry::original_path`] are optional, and that nothing in this module
+//! reads `path` as though the schema required one. `recordings.path` *is* `NOT
+//! NULL`, so only a clip can be pathless; the queries here are shared by both
+//! tables and so must allow it.
+//!
+//! No path is also not `missing_since`, which `crate::index` sets when a file
+//! it expected is not there: no path is "there is no file yet", `missing_since`
+//! is "there was one and it has gone". A screen that conflated them would tell
+//! somebody a highlight had been lost when nothing was ever written.
+//!
 //! # The Windows Recycle Bin's role: none
 //!
 //! Asked and answered on [issue #103], where `clipped-recorder recover
@@ -205,15 +248,24 @@ impl Trash {
             return Err(TrashError::AlreadyInTrash { item, deleted_at });
         }
 
-        let stowed = vault::stow(&self.directory, &row.path, at)?;
+        // Two different reasons there is nothing to move, and both end here: a
+        // clip nothing ever exported has no file to begin with, and an item
+        // whose media the user removed in Explorer no longer has one. What is
+        // being deleted is the row either way.
+        let stowed = match &row.path {
+            Some(file) => vault::stow(&self.directory, file, at)?,
+            None => vault::Stowed::NoFile,
+        };
         let moved_to = match &stowed {
             vault::Stowed::Moved(path) => Some(path.clone()),
             vault::Stowed::NoFile => None,
         };
         // A row whose media had already gone keeps the path it had: there is no
         // file in the trash for it to name, and `deleted_from` still records
-        // where the recording used to be.
-        let path = moved_to.clone().unwrap_or_else(|| row.path.clone());
+        // where the recording used to be. A row that never had one keeps that
+        // too — it goes to the trash with no path, exactly as it sat in the
+        // library.
+        let path = moved_to.clone().or_else(|| row.path.clone());
         let deleted_at = crate::index::moment::rfc3339(at);
 
         let written = database.connection().execute(
@@ -224,19 +276,19 @@ impl Trash {
             ),
             params![
                 item.id,
-                path.display().to_string(),
+                text(path.as_deref()),
                 deleted_at,
-                row.path.display().to_string(),
+                text(row.path.as_deref()),
             ],
         );
         if let Err(error) = written {
-            return Err(self.put_back(moved_to.as_deref(), &row.path, error));
+            return Err(self.put_back(moved_to.as_deref(), row.path.as_deref(), error));
         }
 
         info!(
             item = %item,
-            from = %RedactedPath::new(&row.path),
-            to = %RedactedPath::new(&path),
+            from = %redacted(row.path.as_deref()),
+            to = %redacted(path.as_deref()),
             file_moved = moved_to.is_some(),
             "a library item was moved to the trash"
         );
@@ -297,18 +349,24 @@ impl Trash {
         if row.deleted_at.is_none() {
             return Err(TrashError::NotInTrash { item });
         }
-        let original_path = row.deleted_from.clone().unwrap_or_else(|| row.path.clone());
+        let original_path = row.deleted_from.clone().or_else(|| row.path.clone());
 
-        // Two ways there is nothing to move: the item's media had already gone
-        // when it was deleted, and somebody has emptied the trash directory by
-        // hand since. Both restore the row, which is the metadata the user
-        // asked for back, and report that no file came with it.
-        let moved = row.path != original_path && vault::is_there(&row.path);
-        let path = if moved {
-            vault::restore_to(&row.path, &original_path)?
-        } else {
-            original_path.clone()
+        // Three ways there is nothing to move, and all three restore the row —
+        // which is the metadata the user asked to have back — and report that
+        // no file came with it: the item never had one, its media had already
+        // gone when it was deleted, or somebody has emptied the trash directory
+        // by hand since.
+        let to_move = match (row.path.as_deref(), original_path.as_deref()) {
+            (Some(here), Some(there)) if here != there && vault::is_there(here) => {
+                Some((here, there))
+            }
+            _ => None,
         };
+        let path = match to_move {
+            Some((here, there)) => Some(vault::restore_to(here, there)?),
+            None => original_path.clone(),
+        };
+        let moved = to_move.is_some();
 
         let written = database.connection().execute(
             &format!(
@@ -316,19 +374,19 @@ impl Trash {
                 item.kind.table(),
                 item.kind.id_column()
             ),
-            params![item.id, path.display().to_string()],
+            params![item.id, text(path.as_deref())],
         );
         if let Err(error) = written {
-            let moved_from = moved.then(|| path.clone());
-            return Err(self.put_back(moved_from.as_deref(), &row.path, error));
+            let moved_from = if moved { path.clone() } else { None };
+            return Err(self.put_back(moved_from.as_deref(), row.path.as_deref(), error));
         }
-        if moved {
-            vault::tidy(&self.directory, &row.path);
+        if let Some(here) = row.path.as_deref().filter(|_| moved) {
+            vault::tidy(&self.directory, here);
         }
 
         info!(
             item = %item,
-            to = %RedactedPath::new(&path),
+            to = %redacted(path.as_deref()),
             diverted = path != original_path,
             file_restored = moved,
             "a library item was restored from the trash"
@@ -360,10 +418,19 @@ impl Trash {
             ))?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
-                let path = PathBuf::from(row.get::<_, String>(1)?);
+                // `Option`, because `clips.path` is nullable and this statement
+                // is run against `clips` as well as `recordings`. It used to be
+                // a `String`, which was safe only because the sole writer of
+                // `deleted_at` reads the row first and so happened to reject a
+                // pathless clip before it could ever be marked — an invariant
+                // of the call graph that no query, type or comment stated, and
+                // that `Trash::send` deliberately no longer holds
+                // ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
+                let path = row.get::<_, Option<String>>(1)?.map(PathBuf::from);
                 let original_path = row
                     .get::<_, Option<String>>(3)?
-                    .map_or_else(|| path.clone(), PathBuf::from);
+                    .map(PathBuf::from)
+                    .or_else(|| path.clone());
                 let item = TrashItem {
                     kind,
                     id: row.get(0)?,
@@ -405,7 +472,7 @@ impl Trash {
         let dependent_clips = dependent_clips(database, item);
         Ok(row.deleted_at.map(|deleted_at| TrashEntry {
             item,
-            original_path: row.deleted_from.unwrap_or_else(|| row.path.clone()),
+            original_path: row.deleted_from.or_else(|| row.path.clone()),
             path: row.path,
             deleted_at,
             size_bytes: row.size_bytes,
@@ -511,7 +578,7 @@ impl Trash {
                 Err(error) => {
                     warn!(
                         item = %entry.item,
-                        path = %RedactedPath::new(&entry.path),
+                        path = %redacted(entry.path.as_deref()),
                         %error,
                         "an item could not be removed from the trash, and will be tried again"
                     );
@@ -539,7 +606,13 @@ impl Trash {
     /// at again; a file removed before its row leaves an entry whose next sweep
     /// tidies it up.
     fn destroy(&self, database: &mut Database, entry: &TrashEntry) -> Result<Removal, TrashError> {
-        let file = vault::discard(&self.directory, &entry.path)?;
+        let file = match entry.path.as_deref() {
+            Some(path) => vault::discard(&self.directory, path)?,
+            // Nothing was ever written for it, so there is nothing to unlink
+            // and no bytes to reclaim. The row still goes: an entry that can
+            // never be restored or acted on is not a record of anything.
+            None => FileOutcome::AlreadyGone,
+        };
         database.connection().execute(
             &format!(
                 "DELETE FROM {} WHERE {} = ?1",
@@ -565,10 +638,13 @@ impl Trash {
     fn put_back(
         &self,
         moved_to: Option<&Path>,
-        belongs_at: &Path,
+        belongs_at: Option<&Path>,
         error: clipped_storage::rusqlite::Error,
     ) -> TrashError {
-        let Some(file) = moved_to else {
+        // Nothing was moved, or there is nowhere for it to go back to, and in
+        // both cases the index refusing the change is the whole of what
+        // happened.
+        let (Some(file), Some(belongs_at)) = (moved_to, belongs_at) else {
             return TrashError::Database(error);
         };
         match vault::move_back(file, belongs_at) {
@@ -598,7 +674,14 @@ impl Trash {
             ))?
             .query_row(params![item.id], |row| {
                 Ok(ItemRow {
-                    path: PathBuf::from(row.get::<_, String>(0)?),
+                    // `Option`, because `clips.path` is nullable. Read as a
+                    // `String` this answered `InvalidColumnType` for a clip
+                    // nothing had exported, and because every operation in this
+                    // module starts here that became the answer to *restoring*
+                    // one: `library_unavailable` where the truth was
+                    // `invalid_parameters`
+                    // ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
+                    path: row.get::<_, Option<String>>(0)?.map(PathBuf::from),
                     deleted_at: row.get(1)?,
                     deleted_from: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
                     size_bytes: row.get(3)?,
@@ -612,10 +695,30 @@ impl Trash {
 /// One row of `recordings` or `clips`, in the columns the trash cares about.
 #[derive(Debug)]
 struct ItemRow {
-    path: PathBuf,
+    /// The file, when the row names one.
+    ///
+    /// [`None`] only for a clip: `recordings.path` is `NOT NULL` and
+    /// `clips.path` has been nullable since `0004_clips_without_a_file.sql`.
+    path: Option<PathBuf>,
     deleted_at: Option<String>,
     deleted_from: Option<PathBuf>,
     size_bytes: Option<i64>,
+}
+
+/// A path as the index stores it, or NULL where there is none.
+fn text(path: Option<&Path>) -> Option<String> {
+    path.map(|path| path.display().to_string())
+}
+
+/// A path for a log line, redacted, or a phrase where there is none.
+///
+/// `RedactedPath` cannot say "no file", and a log line reading `path=` with
+/// nothing after it is one a reader cannot tell from a bug.
+fn redacted(path: Option<&Path>) -> String {
+    path.map_or_else(
+        || "(no file)".to_owned(),
+        |path| RedactedPath::new(path).to_string(),
+    )
 }
 
 /// How many clips name `item` as the recording they were cut from.

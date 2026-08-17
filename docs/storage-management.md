@@ -527,6 +527,60 @@ in the trash exactly as it keeps a favourite (`crates/library/src/index/ingest.r
 lists the three authorities). Without that, re-indexing would lose the only
 record of where the deleted file is and no restore would work afterwards.
 
+### An item with no file is in the trash too
+
+`clips.path` is nullable, and deliberately so: `0004_clips_without_a_file.sql`
+made it that way because a generated highlight is a *range of a recording* and
+costs no disk and no encoder time until somebody exports it. So an item the user
+deletes may have no file at all, and the trash has to answer whether it holds it,
+lists it and restores it, or leaves it out.
+
+It holds it, and it is worth saying that this is the trash's own answer rather
+than one inherited from the library screen's
+([issue #591](https://github.com/wildware-uk/clipped/issues/591)) — a trash
+exists so that something can be *put back*, and "put back" plainly means less for
+something that has nothing on disk. Three reasons it is nonetheless the right
+answer, in the order they matter:
+
+- **This module deletes and restores rows, not files.** That is the design of
+  everything above: a delete marks a row and moves a file, a restore clears the
+  marks and moves it back, and what survives is the favourite, the tags, the
+  bookmarks and the clips. The file half has always been allowed to be absent —
+  the row above for a trash somebody emptied in Explorer is exactly that — and a
+  clip that never had a file is that same state reached from the other side.
+  What is put back is the clip: its name, what it is made of (`clips.edit`) and
+  why it exists.
+- **A hidden item would be unreachable in every direction.** Both the retention
+  sweep and "empty the trash" are built from the listing, and emptying is
+  confirmed against the listing the user was shown. A row a filter hid would be
+  marked deleted for ever: never shown, never restorable, never destroyed, and
+  never counted by the confirmation — which would then disagree with what is
+  really there. Filtering does not hide such an item, it strands one (AGENTS.md
+  section 56).
+- **Hiding a row is deleting it, one screen further out** (AGENTS.md
+  section 27), which is #591's argument and holds here too.
+
+So a trash entry's path and original path are both optional, all the way out to
+the window: `TrashedItem.path` and `TrashedItem.original_path` are absent on the
+wire rather than `null` or `""`, because an empty string is a file name a screen
+would try to open, and the trash screen names such an item by what it is instead.
+Restoring one answers `file_restored: false`, which is the same thing it already
+answered for an item whose media had gone.
+
+No path is **not** `missing_since`, and the two are kept apart on purpose: no
+path is "there is no file yet", `missing_since` is "there was one and it has
+gone". A screen that conflated them would tell somebody a highlight had been lost
+when nothing was ever written.
+
+None of this is an invariant anything relies on. Before
+[issue #593](https://github.com/wildware-uk/clipped/issues/593) the listing read
+`path` as though it could not be NULL, which was safe only because the one writer
+of `deleted_at` read the row first and happened to fail on a pathless clip before
+it could be marked — a property of the call graph that no query, type or comment
+stated, and the kind that survives exactly until somebody adds a second writer.
+It is gone rather than written down: the listing reads the column as nullable, so
+there is nothing left to rely on.
+
 ### The Windows Recycle Bin's role: none
 
 Asked on [issue #103](https://github.com/wildware-uk/clipped/issues/103), where

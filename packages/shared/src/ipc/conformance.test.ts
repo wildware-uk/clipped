@@ -90,7 +90,9 @@ import type {
   LibraryGame,
   LibraryEventsReply,
   LibraryTrashReply,
+  RestoredItem,
   RestoredReply,
+  TrashedItem,
   TrashEmptiedReply,
   FavouritedReply,
   LockedReply,
@@ -453,6 +455,26 @@ const TYPESCRIPT_STRUCTURES: Readonly<Record<string, Structure>> = {
     missing_since: 'optional',
     favourite: 'required',
     tags: 'required',
+  }),
+  trashed_item: fields<TrashedItem>({
+    kind: 'required',
+    id: 'required',
+    // Optional, and this is what holds the hand-written mirror to it: an item
+    // with no file is a clip nothing has exported, which was never anywhere and
+    // has nowhere to be put back to (issue #593).
+    path: 'optional',
+    original_path: 'optional',
+    deleted_at: 'required',
+    expires_at: 'optional',
+    size_bytes: 'optional',
+    dependent_clips: 'required',
+  }),
+  restored_item: fields<RestoredItem>({
+    kind: 'required',
+    id: 'required',
+    path: 'optional',
+    file_restored: 'required',
+    renamed: 'required',
   }),
   library_game: fields<LibraryGame>({
     game_id: 'optional',
@@ -1260,6 +1282,81 @@ describe('a clip nothing has exported yet', () => {
     expect(clip).not.toHaveProperty('path');
     expect(clip).not.toHaveProperty('missing_since');
     expect(clip?.title).toBe('Ace on Mirage');
+  });
+});
+
+describe('a thing in the trash that has no file', () => {
+  /**
+   * Issue #593's wire half, asserted on the frames themselves.
+   *
+   * The frames are the recorder's own -- `crates/ipc/src/schema.rs` builds them
+   * out of the real `TrashedItem` and `RestoredItem` and serialises them with
+   * the real `serde`, and they are committed here -- so what this reads is what
+   * goes down the pipe. #576 and #586 were both fields whose absence a *parsed*
+   * reply could not distinguish from their presence, which is why the keys are
+   * checked on the raw JSON before anything in this package touches it.
+   */
+  const listing = sampleNamed('a clip with no file waiting in the trash').frame;
+  const restored = sampleNamed('a clip with no file put back, which brings no file with it').frame;
+
+  it('is listed with no `path` and no `original_path` key at all', () => {
+    const sent = listing as {
+      outcome: { ok: { trash: { items: Record<string, unknown>[] } } };
+    };
+    const item = sent.outcome.ok.trash.items[0];
+    if (item === undefined) {
+      throw new Error('the sample carries a trash with something in it');
+    }
+
+    // Absent, not `''`: an empty string is a file name a screen would open,
+    // and nothing that never had a file has anywhere to be put back to.
+    expect(Object.keys(item)).not.toContain('path');
+    expect(Object.keys(item)).not.toContain('original_path');
+    expect(item['kind']).toBe('clip');
+    expect(item['id']).toBe(7);
+  });
+
+  it('is read as an item with no file rather than refusing the whole trash', () => {
+    const result = parseServerMessage(listing);
+    expect(
+      result.ok,
+      result.ok ? '' : `a trash holding a pathless clip was rejected: ${result.problem}`,
+    ).toBe(true);
+    if (!result.ok || result.message.type !== 'response' || !('ok' in result.message.outcome)) {
+      throw new Error('the sample is a successful response');
+    }
+    const reply = result.message.outcome.ok;
+    if (reply.reply !== 'library_trash') {
+      throw new Error('the sample is a trash listing');
+    }
+
+    expect(reply.trash.items).toHaveLength(1);
+    const item = reply.trash.items[0];
+    expect(item).not.toHaveProperty('path');
+    expect(item).not.toHaveProperty('original_path');
+    expect(item?.deleted_at).toBe('2026-08-15T09:00:00+01:00');
+  });
+
+  it('comes back out of the trash with no file, rather than not coming back', () => {
+    const sent = restored as { outcome: { ok: { restored: Record<string, unknown> } } };
+    expect(Object.keys(sent.outcome.ok.restored)).not.toContain('path');
+
+    const result = parseServerMessage(restored);
+    expect(
+      result.ok,
+      result.ok ? '' : `a restored pathless clip was rejected: ${result.problem}`,
+    ).toBe(true);
+    if (!result.ok || result.message.type !== 'response' || !('ok' in result.message.outcome)) {
+      throw new Error('the sample is a successful response');
+    }
+    const reply = result.message.outcome.ok;
+    if (reply.reply !== 'restored') {
+      throw new Error('the sample is a restored item');
+    }
+
+    expect(reply.restored).not.toHaveProperty('path');
+    expect(reply.restored.file_restored).toBe(false);
+    expect(reply.restored.id).toBe(7);
   });
 });
 

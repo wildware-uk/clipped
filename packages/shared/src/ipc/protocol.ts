@@ -1314,16 +1314,26 @@ export interface TrashedItem {
   readonly kind: string;
   /** The library's own identifier for it. */
   readonly id: number;
-  /** Where the file is now, inside the trash. */
-  readonly path: string;
+  /**
+   * Where the file is now, inside the trash.
+   *
+   * Absent for an item that has no file: a clip nothing has exported is a range
+   * of a recording, and deleting it deletes the clip rather than a file
+   * ([issue #593](https://github.com/wildware-uk/clipped/issues/593)). Absent
+   * rather than `''`, which is a file name a screen would try to open.
+   */
+  readonly path?: string;
   /**
    * Where it was, and where restoring puts it back.
    *
    * The one a person recognises. A screen that showed only the trash's own copy
    * would be asking them to identify a recording by a name they have never
    * seen.
+   *
+   * Absent for the same reason `path` is: something that never had a file was
+   * never anywhere, and a screen names it by what it is instead.
    */
-  readonly original_path: string;
+  readonly original_path?: string;
   /** When it was deleted, RFC 3339 with an offset. */
   readonly deleted_at: string;
   /** When it will be removed for good, where the recorder knows. */
@@ -1360,14 +1370,19 @@ export interface RestoredItem {
   readonly kind: string;
   /** Its identifier. */
   readonly id: number;
-  /** Where the file is now, which is where the index now points. */
-  readonly path: string;
+  /**
+   * Where the file is now, which is where the index now points.
+   *
+   * Absent for an item that has no file, which comes back with none.
+   */
+  readonly path?: string;
   /**
    * Whether there was a file to move back.
    *
-   * `false` for something whose media had already gone before it was deleted:
-   * the row returns to the library and reports itself missing, which is the
-   * truth rather than a row with no explanation.
+   * `false` for something whose media had already gone before it was deleted,
+   * and for something that never had any: the row returns to the library and
+   * reports itself missing or fileless, which is the truth rather than a row
+   * with no explanation.
    */
   readonly file_restored: boolean;
   /** Whether it had to go somewhere else, because something was in the way. */

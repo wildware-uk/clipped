@@ -1146,6 +1146,17 @@ wrong it gains one the way `library_sessions` has one.
 named for the trash; asking somebody to identify their own recording by a name
 they have never seen is not showing it to them.
 
+**An item with no file carries no `path` and no `original_path` at all.** A
+generated highlight is a range of a recording until somebody exports it, so a
+deleted one has no file to be in the trash and nowhere to be put back to. It is
+still something the user deleted, and it is listed: the retention sweep and
+`empty_trash` are both built from this listing, so an item left out of it would
+be marked deleted for ever — never shown, never restorable, never destroyed, and
+never counted by the confirmation `empty_trash` checks. The keys are absent
+rather than `null` or `""`, because an empty string is a file name a window would
+try to open, and a screen names such an item by what it is instead
+([#593](https://github.com/wildware-uk/clipped/issues/593)).
+
 **`total_items` and `total_bytes` travel together** because emptying takes them
 back: a window that showed "3 recordings, 12 GB" and then emptied a trash that
 had gained a fourth is refused rather than deleting something nobody saw
@@ -1178,10 +1189,18 @@ Named by kind and identifier, which is what a listing gave. A path would be the
 wrong key: the file inside the trash is not the thing the index knows about.
 
 `file_restored` is `false` for something whose media had already gone before it
-was deleted — the row comes back and reports itself missing, which is the truth
-rather than a row with no explanation. `renamed` is `true` when something was
-occupying the original location, so the file went somewhere else rather than
-over the top of it.
+was deleted, and for something that never had any — the row comes back and
+reports itself missing or fileless, which is the truth rather than a row with no
+explanation. `renamed` is `true` when something was occupying the original
+location, so the file went somewhere else rather than over the top of it.
+
+`path` is absent when what came back has no file, for the same reason it is
+absent from a listing. Naming something the trash does not hold is
+`invalid_parameters` and not `library_unavailable`: before
+[#593](https://github.com/wildware-uk/clipped/issues/593) the recorder read
+`clips.path` into a non-nullable field here, so restoring a clip that has no file
+blamed the library — "try again, or check the drive" — for a request that was
+simply about something not in the trash.
 
 ### `empty_trash`
 

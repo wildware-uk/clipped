@@ -1,4 +1,10 @@
-import type { ExportProgress, LibraryRecording, TrashListing, TrashedItem } from '@clipped/shared';
+import type {
+  ExportProgress,
+  LibraryRecording,
+  RestoredItem,
+  TrashListing,
+  TrashedItem,
+} from '@clipped/shared';
 import { exportFraction } from '@clipped/shared';
 import { type ReactNode, useState } from 'react';
 import { useNavigate } from 'react-router';
@@ -133,14 +139,32 @@ function Trash(): ReactNode {
   const [outcome, setOutcome] = useState<string | undefined>(undefined);
   const [confirming, setConfirming] = useState(false);
 
+  /**
+   * What to say about something that came back.
+   *
+   * Three outcomes and not two. The third is an item that never had a file: a
+   * clip nothing has exported is a range of a recording, so nothing has gone
+   * and nothing will show as missing, and saying it had would be telling
+   * somebody they had lost something they still have
+   * ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
+   */
+  const putBack = (restored: RestoredItem): string => {
+    if (restored.file_restored) {
+      const renamed = restored.renamed
+        ? ', under a new name because something was in the way'
+        : '';
+      return `Put ${restored.path} back${renamed}.`;
+    }
+    if (restored.path === undefined) {
+      return 'Put it back in your library. It has no file, because nothing has exported it yet.';
+    }
+    return `${restored.path} is back in your library, and its file had already gone before it was deleted, so it will show as missing.`;
+  };
+
   const restore = (item: TrashedItem) => {
     restoreFromTrash(item.kind, item.id)
       .then((restored) => {
-        setOutcome(
-          restored.file_restored
-            ? `Put ${restored.path} back${restored.renamed ? ', under a new name because something was in the way' : ''}.`
-            : `${restored.path} is back in your library, and its file had already gone before it was deleted, so it will show as missing.`,
-        );
+        setOutcome(putBack(restored));
         again();
       })
       .catch((thrown: unknown) => {
@@ -224,7 +248,18 @@ function Trash(): ReactNode {
                    * showing them anything.
                    */}
                   <td>
-                    <code className="clipped-code">{item.original_path}</code>
+                    {/*
+                     * An item can have no file at all: a clip nothing has
+                     * exported is a range of a recording, so it was never
+                     * anywhere and there is nowhere to put it back to
+                     * (issue #593). Saying so beats an empty cell, which a
+                     * reader cannot tell from a missing value.
+                     */}
+                    {item.original_path === undefined ? (
+                      <span className="clipped-muted">No file — nothing was exported</span>
+                    ) : (
+                      <code className="clipped-code">{item.original_path}</code>
+                    )}
                     {item.dependent_clips > 0 && (
                       <span className="clipped-muted">
                         {' '}

@@ -530,6 +530,14 @@ fn structures() -> BTreeMap<String, Structure> {
             structure_of(&exemplar_library_game(), &[]),
         ),
         (
+            "trashed_item".to_owned(),
+            structure_of(&exemplar_trashed_item(), &[]),
+        ),
+        (
+            "restored_item".to_owned(),
+            structure_of(&exemplar_restored_item(), &[]),
+        ),
+        (
             "export_recording".to_owned(),
             structure_of(&exemplar_export_recording(), &[]),
         ),
@@ -1092,9 +1100,8 @@ fn samples() -> Vec<Sample> {
                         items: vec![crate::library::TrashedItem {
                             kind: "recording".to_owned(),
                             id: 1,
-                            path: r"D:\\Clips.trash\\clipped-cs2-20260814-201500.mkv".to_owned(),
-                            original_path: r"D:\\Clips\\clipped-cs2-20260814-201500.mkv"
-                                .to_owned(),
+                            path: Some(r"D:\\Clips.trash\\clipped-cs2-20260814-201500.mkv".to_owned()),
+                            original_path: Some(r"D:\\Clips\\clipped-cs2-20260814-201500.mkv".to_owned()),
                             deleted_at: "2026-08-15T09:00:00+01:00".to_owned(),
                             expires_at: Some("2026-09-14T09:00:00+01:00".to_owned()),
                             size_bytes: Some(2_147_483_648),
@@ -1113,6 +1120,51 @@ fn samples() -> Vec<Sample> {
             }),
         ),
         (
+            "a clip with no file waiting in the trash",
+            ServerMessage::Response(Response {
+                id: 14,
+                outcome: Outcome::Ok(Reply::LibraryTrash {
+                    trash: crate::library::TrashListing {
+                        items: vec![crate::library::TrashedItem {
+                            kind: "clip".to_owned(),
+                            id: 7,
+                            // A highlight nobody exported, deleted. There is no
+                            // file to be in the trash and none to have come
+                            // from, so both keys are **absent** rather than
+                            // null or blank — an empty string is a file name a
+                            // window would try to open (issue #593).
+                            path: None,
+                            original_path: None,
+                            deleted_at: "2026-08-15T09:00:00+01:00".to_owned(),
+                            expires_at: None,
+                            size_bytes: None,
+                            dependent_clips: 0,
+                        }],
+                        total_items: 1,
+                        total_bytes: 0,
+                        directory: r"D:\\Clips.trash".to_owned(),
+                    },
+                }),
+            }),
+        ),
+        (
+            "a clip with no file put back, which brings no file with it",
+            ServerMessage::Response(Response {
+                id: 15,
+                outcome: Outcome::Ok(Reply::Restored {
+                    restored: crate::library::RestoredItem {
+                        kind: "clip".to_owned(),
+                        id: 7,
+                        path: None,
+                        // Nothing was moved, because there was nothing to move.
+                        // The clip is back in the library exactly as it was.
+                        file_restored: false,
+                        renamed: false,
+                    },
+                }),
+            }),
+        ),
+        (
             "one recording put back where it was",
             ServerMessage::Response(Response {
                 id: 15,
@@ -1120,7 +1172,7 @@ fn samples() -> Vec<Sample> {
                     restored: crate::library::RestoredItem {
                         kind: "recording".to_owned(),
                         id: 1,
-                        path: r"D:\\Clips\\clipped-cs2-20260814-201500.mkv".to_owned(),
+                        path: Some(r"D:\\Clips\\clipped-cs2-20260814-201500.mkv".to_owned()),
                         file_restored: true,
                         renamed: false,
                     },
@@ -2463,6 +2515,38 @@ fn exemplar_library_clip() -> LibraryClip {
     }
 }
 
+/// One thing waiting in the trash, with every optional field present.
+///
+/// `path` and `original_path` among them, and they are optional: an item can
+/// have no file at all — a clip nothing has exported is a range of a recording
+/// — so it was never anywhere and there is nowhere to put it back
+/// ([issue #593](https://github.com/wildware-uk/clipped/issues/593)). A mirror
+/// that made either field required would refuse the frame such a clip arrives
+/// in, and the trash screen would go blank for the one item on it.
+fn exemplar_trashed_item() -> crate::library::TrashedItem {
+    crate::library::TrashedItem {
+        kind: "recording".to_owned(),
+        id: 1,
+        path: Some(r"D:\Clips.trash\clipped-cs2-20260814-201500.mkv".to_owned()),
+        original_path: Some(r"D:\Clips\clipped-cs2-20260814-201500.mkv".to_owned()),
+        deleted_at: "2026-08-15T09:00:00+01:00".to_owned(),
+        expires_at: Some("2026-09-14T09:00:00+01:00".to_owned()),
+        size_bytes: Some(2_147_483_648),
+        dependent_clips: 2,
+    }
+}
+
+/// What came back out of the trash, with every optional field present.
+fn exemplar_restored_item() -> crate::library::RestoredItem {
+    crate::library::RestoredItem {
+        kind: "recording".to_owned(),
+        id: 1,
+        path: Some(r"D:\Clips\clipped-cs2-20260814-201500.mkv".to_owned()),
+        file_restored: true,
+        renamed: false,
+    }
+}
+
 /// What the library holds for one game, with every optional field present.
 fn exemplar_library_game() -> LibraryGame {
     LibraryGame {
@@ -3020,8 +3104,12 @@ fn every_reply() -> Vec<Reply> {
                 items: vec![crate::library::TrashedItem {
                     kind: "recording".to_owned(),
                     id: 1,
-                    path: r"D:\Clips.trash\clipped-cs2-20260814-201500.mkv".to_owned(),
-                    original_path: r"D:\Clips\clipped-cs2-20260814-201500.mkv".to_owned(),
+                    // `Some`, or the fields are skipped and the schema
+                    // would not see them. They are optional because a clip
+                    // nothing has exported has no file to be anywhere
+                    // (issue #593).
+                    path: Some(r"D:\Clips.trash\clipped-cs2-20260814-201500.mkv".to_owned()),
+                    original_path: Some(r"D:\Clips\clipped-cs2-20260814-201500.mkv".to_owned()),
                     deleted_at: "2026-08-15T09:00:00+01:00".to_owned(),
                     // `Some`, or the field is skipped and the schema would not
                     // see it.
@@ -3038,7 +3126,7 @@ fn every_reply() -> Vec<Reply> {
             restored: crate::library::RestoredItem {
                 kind: "recording".to_owned(),
                 id: 1,
-                path: r"D:\\Clips\\clipped-cs2-20260814-201500.mkv".to_owned(),
+                path: Some(r"D:\\Clips\\clipped-cs2-20260814-201500.mkv".to_owned()),
                 file_restored: true,
                 renamed: false,
             },
@@ -3267,6 +3355,8 @@ mod tests {
             "library_recording",
             "library_clip",
             "library_game",
+            "trashed_item",
+            "restored_item",
             "reply.library_sessions",
             "reply.library_games",
             "reply.settings",

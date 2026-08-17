@@ -99,12 +99,22 @@ pub struct TrashEntry {
     pub item: TrashItem,
     /// Where the file is now, inside the trash.
     ///
-    /// Equal to [`original_path`](Self::original_path) in the one case where
-    /// there was no file to move: an item whose media the user had already
+    /// Equal to [`original_path`](Self::original_path) in the case where there
+    /// was a file but nothing to move: an item whose media the user had already
     /// deleted from Explorer before deleting it here.
-    pub path: PathBuf,
+    ///
+    /// [`None`] where there is no file at all — a clip nothing has exported,
+    /// which is what `0004_clips_without_a_file.sql` made `clips.path` nullable
+    /// for. That is a different state from the one above and is deliberately
+    /// not folded into it: there is no file *yet*, rather than one that has
+    /// gone. See the module documentation for why such an item is in the trash
+    /// at all ([issue #593](https://github.com/wildware-uk/clipped/issues/593)).
+    pub path: Option<PathBuf>,
     /// Where it was, and where restoring puts it back.
-    pub original_path: PathBuf,
+    ///
+    /// [`None`] for an item that never had a file, which restores to no file
+    /// and reports [`RestoreOutcome::file_restored`] as `false`.
+    pub original_path: Option<PathBuf>,
     /// When it was deleted, as RFC 3339 with an offset — the form every
     /// timestamp in the schema takes.
     pub deleted_at: String,
@@ -158,14 +168,18 @@ pub struct RestoreOutcome {
     /// Which recording or clip it is.
     pub item: TrashItem,
     /// Where the file is now, and what the index now says.
-    pub path: PathBuf,
+    ///
+    /// [`None`] for an item that has no file — a clip nothing has exported —
+    /// which is restored to having none, exactly as it was.
+    pub path: Option<PathBuf>,
     /// Where it was before it was deleted.
-    pub original_path: PathBuf,
+    pub original_path: Option<PathBuf>,
     /// Whether there was a file to move back.
     ///
-    /// `false` for an item whose media had already gone before it was deleted:
-    /// the row is restored to the library and reports itself missing, which is
-    /// the truth rather than a broken row with no explanation.
+    /// `false` for an item whose media had already gone before it was deleted,
+    /// and for one that never had any: the row is restored to the library and
+    /// reports itself missing or fileless, which is the truth rather than a
+    /// broken row with no explanation.
     pub file_restored: bool,
 }
 
@@ -187,6 +201,11 @@ pub enum FileOutcome {
     /// It was deleted from the trash.
     Deleted,
     /// There was nothing there to delete.
+    ///
+    /// Either the file had gone — somebody emptied the trash directory by hand
+    /// — or the item never had one, which is the normal state of a clip nothing
+    /// has exported. Neither returns any bytes to the volume, which is the only
+    /// thing this distinction would change.
     AlreadyGone,
     /// It is not inside the trash directory, so it was left exactly where it is.
     LeftInPlace,
@@ -197,8 +216,8 @@ pub enum FileOutcome {
 pub struct Removal {
     /// Which recording or clip it was.
     pub item: TrashItem,
-    /// The file it named.
-    pub path: PathBuf,
+    /// The file it named, where it named one.
+    pub path: Option<PathBuf>,
     /// What it measured.
     pub size_bytes: Option<i64>,
     /// What happened to the file.
@@ -310,8 +329,8 @@ mod tests {
     fn entry(size_bytes: Option<i64>) -> TrashEntry {
         TrashEntry {
             item: TrashItem::recording(1),
-            path: PathBuf::from("trash"),
-            original_path: PathBuf::from("original"),
+            path: Some(PathBuf::from("trash")),
+            original_path: Some(PathBuf::from("original")),
             deleted_at: "2026-08-12T09:00:00+01:00".to_owned(),
             dependent_clips: 0,
             size_bytes,
@@ -337,7 +356,7 @@ mod tests {
     fn only_a_file_that_was_actually_deleted_reclaims_anything() {
         let removal = |file| Removal {
             item: TrashItem::recording(1),
-            path: PathBuf::from("x"),
+            path: Some(PathBuf::from("x")),
             size_bytes: Some(1_000),
             file,
         };
@@ -360,8 +379,8 @@ mod tests {
     fn a_restore_that_landed_where_it_came_from_is_not_a_diversion() {
         let outcome = |path: &str| RestoreOutcome {
             item: TrashItem::recording(1),
-            path: PathBuf::from(path),
-            original_path: PathBuf::from("a.mkv"),
+            path: Some(PathBuf::from(path)),
+            original_path: Some(PathBuf::from("a.mkv")),
             file_restored: true,
         };
 
