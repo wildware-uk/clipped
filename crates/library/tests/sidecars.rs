@@ -38,23 +38,23 @@
 //! numbers.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use clipped_library::index::{reconcile, IndexControl, IndexPace, IndexSettings};
 use clipped_storage::Database;
 use serde_json::Value;
 
+mod support;
+
 fn observed_at() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(1_786_545_000)
 }
 
-fn scratch_directory(name: &str) -> PathBuf {
-    let directory =
-        std::env::temp_dir().join(format!("clipped-sidecars-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("a scratch directory can be created");
-    directory
+/// See `tests/support/mod.rs`. Bind the answer to a variable that outlives the
+/// test body: the directory goes when it does.
+fn scratch_directory(name: &str) -> support::Scratch {
+    support::Scratch::new(&format!("sidecars-{name}"))
 }
 
 /// Indexes a directory and answers the database.

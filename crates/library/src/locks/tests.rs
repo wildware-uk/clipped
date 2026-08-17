@@ -12,16 +12,14 @@
 use super::*;
 
 use crate::accounting::cleanup;
+use crate::test_support::Scratch;
 
 /// A library with one sitting and two recordings in it.
-fn library(name: &str) -> (std::path::PathBuf, Database) {
-    let directory = std::env::temp_dir().join(format!(
-        "clipped-locks-{}-{name}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("a scratch directory");
+///
+/// The directory comes back first so that it is dropped last: the database has
+/// the file inside it open, and Windows will not remove a file that is.
+fn library(name: &str) -> (Scratch, Database) {
+    let directory = Scratch::new(&format!("locks-{name}"));
 
     let database = Database::open(directory.join("library.db")).expect("a library can be opened");
     database
@@ -60,7 +58,7 @@ fn stamp(database: &Database, recording: i64) -> Option<String> {
 
 #[test]
 fn a_lock_persists_and_can_be_read_back() {
-    let (directory, database) = library("persists");
+    let (_directory, database) = library("persists");
 
     for what in [
         Lockable::Session("sitting".to_owned()),
@@ -88,15 +86,13 @@ fn a_lock_persists_and_can_be_read_back() {
             "{what} is unlocked again"
         );
     }
-
-    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
 fn locking_something_already_locked_does_not_move_the_moment_it_was_locked() {
     // "When did you lock this" has one answer, and a second click on a closed
     // padlock is not a new decision.
-    let (directory, database) = library("idempotent");
+    let (_directory, database) = library("idempotent");
     let what = Lockable::Recording(1);
 
     assert!(lock(&database, &what, at(1_000)).expect("it locks"));
@@ -107,15 +103,13 @@ fn locking_something_already_locked_does_not_move_the_moment_it_was_locked() {
         "nothing changed, and the caller is told so"
     );
     assert_eq!(stamp(&database, 1).as_deref(), Some(first.as_str()));
-
-    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
 fn a_target_that_is_not_there_locks_nothing_and_is_not_an_error() {
     // The row may have gone between a screen drawing it and somebody clicking
     // it, which is not worth a failure.
-    let (directory, database) = library("absent");
+    let (_directory, database) = library("absent");
 
     for what in [
         Lockable::Session("gone".to_owned()),
@@ -134,15 +128,13 @@ fn a_target_that_is_not_there_locks_nothing_and_is_not_an_error() {
             "{what} was not unlocked either"
         );
     }
-
-    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
 fn locking_a_sitting_protects_the_recordings_in_it_without_marking_them() {
     // The decision recorded on issue #472, as behaviour: the cascade is real,
     // and it is a cascade of *protection* rather than of marks.
-    let (directory, database) = library("cascade");
+    let (_directory, database) = library("cascade");
 
     lock(
         &database,
@@ -172,8 +164,6 @@ fn locking_a_sitting_protects_the_recordings_in_it_without_marking_them() {
     // mark is not copied.
     unlock(&database, &Lockable::Session("sitting".to_owned())).expect("it unlocks");
     assert!(!protects(&database, 1).expect("it can be asked"));
-
-    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
@@ -181,7 +171,7 @@ fn automatic_cleanup_will_not_take_a_locked_recording_or_one_in_a_locked_sitting
     // The point of the column. Each is asserted with the *reason* the sweep
     // gives, because "it was not deleted" is also true of a recording the sweep
     // simply did not reach.
-    let (directory, database) = library("cleanup");
+    let (_directory, database) = library("cleanup");
 
     lock(&database, &Lockable::Recording(1), at(1_000)).expect("it locks");
     lock(
@@ -215,8 +205,6 @@ fn automatic_cleanup_will_not_take_a_locked_recording_or_one_in_a_locked_sitting
         candidates.iter().all(|candidate| !candidate.is_deletable()),
         "nothing in a locked sitting may be swept"
     );
-
-    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
@@ -226,7 +214,7 @@ fn a_lock_outlives_a_trip_through_the_trash() {
     // absence later. Nothing in this module makes this true — `locked_at` and
     // `deleted_at` are different columns — which is exactly why it is asserted
     // rather than assumed.
-    let (directory, database) = library("trash");
+    let (_directory, database) = library("trash");
     let what = Lockable::Recording(1);
 
     lock(&database, &what, at(1_000)).expect("it locks");
@@ -258,8 +246,6 @@ fn a_lock_outlives_a_trip_through_the_trash() {
         Some(before.as_str()),
         "and it is the same lock, from the same moment, rather than a new one"
     );
-
-    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
@@ -268,7 +254,7 @@ fn clearing_a_lock_that_was_never_set_changes_nothing_and_says_so() {
     // not, and an `UPDATE` that writes NULL where NULL already is matches its
     // row and reports one change — so "you unlocked that" was said about
     // something that had never been locked.
-    let (directory, database) = library("idempotent-unlock");
+    let (_directory, database) = library("idempotent-unlock");
 
     for what in [
         Lockable::Session("sitting".to_owned()),
@@ -284,6 +270,4 @@ fn clearing_a_lock_that_was_never_set_changes_nothing_and_says_so() {
     // satisfied by a function that always answered `false`.
     lock(&database, &Lockable::Recording(1), at(1_000)).expect("it locks");
     assert!(unlock(&database, &Lockable::Recording(1)).expect("it unlocks"));
-
-    let _ = std::fs::remove_dir_all(directory);
 }

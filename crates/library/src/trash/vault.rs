@@ -398,7 +398,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::index::test_support::scratch_directory;
+    use crate::test_support::scratch_directory;
 
     /// 2026-08-12T08:15:00Z.
     fn moment() -> SystemTime {
@@ -412,7 +412,8 @@ mod tests {
 
     #[test]
     fn two_deletions_in_the_same_second_get_directories_of_their_own() {
-        let trash = scratch_directory("vault-same-second").join("Trash");
+        let directory = scratch_directory("vault-same-second");
+        let trash = directory.join("Trash");
 
         let first = create_entry_directory(&trash, moment()).expect("the first entry");
         let second = create_entry_directory(&trash, moment()).expect("the second entry");
@@ -608,7 +609,8 @@ mod tests {
         // row that says where it is. `|` is not legal in a Windows file name,
         // so asking about it fails with something that is deliberately not
         // "no such file".
-        let path = scratch_directory("vault-illegible").join("a|b.mkv");
+        let directory = scratch_directory("vault-illegible");
+        let path = directory.join("a|b.mkv");
         let answer = fs::symlink_metadata(&path);
         assert!(
             matches!(&answer, Err(error) if error.kind() != io::ErrorKind::NotFound),

@@ -167,13 +167,7 @@ mod scan_tests {
         // A scan runs after every reconciliation. Asking for a picture of a
         // file that is not there puts a decode failure in the log once per
         // scan, for something the user already knows about.
-        let directory = std::env::temp_dir().join(format!(
-            "clipped-thumbnail-scan-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        let directory = crate::test_support::Scratch::new("thumbnail-scan");
         let database = clipped_storage::Database::open(directory.join("library.db"))
             .expect("a library can be opened");
 
@@ -202,7 +196,5 @@ mod scan_tests {
             vec![std::path::PathBuf::from("here.mkv")],
             "only the recording that is actually on disk and not in the trash"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 }

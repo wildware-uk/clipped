@@ -30,6 +30,7 @@
 //! tripwire nothing has trodden on is doing its job.
 
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -39,20 +40,55 @@ use clipped_storage::{Database, StorageError, WriteSettings, Writer};
 /// The bytes standing in for a recording nobody can make again.
 const RECORDING: &[u8] = b"not really Matroska, but it is the user's and it is irreplaceable";
 
-/// A scratch directory of this test's own.
+/// A scratch directory of this test's own, removed when the test that made it
+/// ends.
 ///
 /// Duplicated from the crate's internal test support rather than shared with
 /// it: `#[cfg(test)]` modules are not visible to an integration test, and a
-/// twelve-line helper is not worth a public API that exists for tests
+/// thirty-line helper is not worth a public API that exists for tests
 /// (AGENTS.md section 44).
-fn scratch_directory(name: &str) -> PathBuf {
+///
+/// The removal is the point. Emptying on the way in leaves the *last* run's
+/// copy behind for good, because the process identifier is part of the name and
+/// the next run picks a different one — which is how `%TEMP%` on one machine
+/// came to hold four hundred of these
+/// ([issue #595](https://github.com/wildware-uk/clipped/issues/595)). A failing
+/// test keeps its directory: [`Drop`] runs while a panicking thread unwinds, so
+/// [`std::thread::panicking`] is what tells the two cases apart, and the
+/// evidence a failure needs survives.
+struct Scratch(PathBuf);
+
+impl Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("scratch directory kept for diagnosis: {}", self.0.display());
+            return;
+        }
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            eprintln!(
+                "scratch directory could not be removed: {} ({error})",
+                self.0.display()
+            );
+        }
+    }
+}
+
+fn scratch_directory(name: &str) -> Scratch {
     let directory = std::env::temp_dir().join(format!(
         "clipped-storage-separation-{}-{name}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).expect("a scratch directory can be created");
-    directory
+    Scratch(directory)
 }
 
 /// Everything about the recording that would change if something wrote to it.

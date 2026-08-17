@@ -86,3 +86,6 @@ pub mod search;
 pub mod thumbnail;
 pub mod trash;
 pub mod virtual_clip;
+
+#[cfg(test)]
+mod test_support;

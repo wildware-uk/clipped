@@ -22,6 +22,8 @@ use clipped_library::trash::{EmptyTrash, FileOutcome, Retention, Trash, TrashErr
 use clipped_storage::Database;
 use serde_json::json;
 
+mod support;
+
 /// A day, for moving `now` around without waiting for one.
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -38,7 +40,20 @@ fn unix(seconds: u64) -> SystemTime {
 }
 
 /// A library on disk: a folder of recordings, a trash beside it, and the index.
+///
+/// Everything it makes is inside the one scratch directory, which is what makes
+/// removing it a single [`fs::remove_dir_all`]. The trash is a sibling of the
+/// *recordings folder* and a child of the scratch directory, which is the
+/// distinction `apps/recorder/tests/recover_command.rs` had to make a second
+/// removal for: there the recordings folder **is** the scratch directory, so
+/// the trash falls outside it. Here it does not, and this is where a later
+/// change would break that: move the trash out of `directory` and the leak
+/// comes back.
 struct Library {
+    /// Held only so that it is dropped when this is, which is what removes the
+    /// directory. Underscored because nothing reads it; see
+    /// `tests/support/mod.rs`.
+    _directory: support::Scratch,
     root: PathBuf,
     trash: Trash,
     database: PathBuf,
@@ -46,9 +61,7 @@ struct Library {
 
 impl Library {
     fn new(name: &str) -> Self {
-        let directory =
-            std::env::temp_dir().join(format!("clipped-trash-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
+        let directory = support::Scratch::new(&format!("trash-{name}"));
         let root = directory.join("Recordings");
         fs::create_dir_all(&root).expect("a scratch library can be created");
         Self {
@@ -58,6 +71,7 @@ impl Library {
             trash: Trash::new(directory.join("Trash")),
             root,
             database: directory.join("library.db"),
+            _directory: directory,
         }
     }
 

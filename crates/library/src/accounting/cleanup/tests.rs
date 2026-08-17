@@ -286,13 +286,7 @@ fn an_unlimited_library_never_deletes_anything() {
 fn the_protections_are_read_out_of_a_real_database() {
     // The half the arithmetic above cannot check: that the query produces the
     // protections the rules act on. Everything else here hands `plan` a list.
-    let directory = std::env::temp_dir().join(format!(
-        "clipped-cleanup-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let directory = crate::test_support::Scratch::new("cleanup");
     let database = Database::open(directory.join("library.db")).expect("a library can be opened");
 
     let connection = database.connection();
@@ -340,8 +334,6 @@ fn the_protections_are_read_out_of_a_real_database() {
         "the clip cut from it is what protects it"
     );
     assert_eq!(by_id(4).protection, Some(Protection::Missing));
-
-    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -349,13 +341,7 @@ fn a_deletion_goes_to_the_trash_and_can_be_restored_from_it() {
     // The third acceptance criterion, and the reason this feature is safe to
     // have at all: nothing is unlinked. Every automatic deletion is a move that
     // the person it happened to can undo.
-    let directory = std::env::temp_dir().join(format!(
-        "clipped-cleanup-apply-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let directory = crate::test_support::Scratch::new("cleanup-apply");
 
     let media = directory.join("old.mkv");
     std::fs::write(&media, b"footage").expect("a recording to delete");
@@ -406,6 +392,4 @@ fn a_deletion_goes_to_the_trash_and_can_be_restored_from_it() {
         media.exists(),
         "restoring is what makes automatic deletion safe to have at all"
     );
-
-    let _ = std::fs::remove_dir_all(&directory);
 }

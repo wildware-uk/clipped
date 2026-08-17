@@ -129,7 +129,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::index::test_support::scratch_directory;
+    use crate::test_support::scratch_directory;
 
     const NOW: &str = "2026-08-12T09:00:00+01:00";
     const TUESDAY: &str = "2026-08-11T14:00:00+01:00";

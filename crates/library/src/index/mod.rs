@@ -77,9 +77,6 @@ mod scan;
 mod sidecar;
 mod summary;
 
-#[cfg(test)]
-pub(crate) mod test_support;
-
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};

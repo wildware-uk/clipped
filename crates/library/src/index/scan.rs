@@ -213,22 +213,19 @@ fn is_media(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::test_support::scratch_directory;
+    use crate::test_support::scratch_directory;
 
     #[test]
     fn a_walk_finds_sidecars_and_media_and_ignores_everything_else() {
         let directory = scratch_directory("walk-finds");
+        let root = directory.to_path_buf();
         fs::write(directory.join("clipped-a.session.json"), "{}").expect("a sidecar");
         fs::write(directory.join("clipped-a.mkv"), "").expect("a recording");
         fs::write(directory.join("exported.MP4"), "").expect("a clip");
         fs::write(directory.join("clipped-a.session.json.tmp"), "{}").expect("a temporary file");
         fs::write(directory.join("notes.txt"), "").expect("something else");
 
-        let found = walk(
-            std::slice::from_ref(&directory),
-            8,
-            &IndexControl::default(),
-        );
+        let found = walk(std::slice::from_ref(&root), 8, &IndexControl::default());
 
         assert_eq!(found.sidecars.len(), 1, "{:?}", found.sidecars);
         assert_eq!(found.media.len(), 2, "{:?}", found.media);
@@ -256,11 +253,12 @@ mod tests {
     #[test]
     fn a_walk_stops_when_it_is_cancelled() {
         let directory = scratch_directory("walk-cancelled");
+        let root = directory.to_path_buf();
         fs::write(directory.join("clipped-a.session.json"), "{}").expect("a sidecar");
         let control = IndexControl::default();
         control.cancel();
 
-        let found = walk(&[directory], 8, &control);
+        let found = walk(std::slice::from_ref(&root), 8, &control);
 
         assert!(found.cancelled);
         assert!(found.sidecars.is_empty());
@@ -269,6 +267,7 @@ mod tests {
     #[test]
     fn a_walk_does_not_descend_past_its_depth_limit() {
         let directory = scratch_directory("walk-depth");
+        let root = directory.to_path_buf();
         let deep = directory.join("one").join("two").join("three");
         fs::create_dir_all(&deep).expect("the tree can be created");
         fs::write(deep.join("clipped-deep.session.json"), "{}").expect("a sidecar");
@@ -278,12 +277,8 @@ mod tests {
         )
         .expect("a sidecar");
 
-        let shallow = walk(
-            std::slice::from_ref(&directory),
-            1,
-            &IndexControl::default(),
-        );
-        let full = walk(&[directory], 8, &IndexControl::default());
+        let shallow = walk(std::slice::from_ref(&root), 1, &IndexControl::default());
+        let full = walk(std::slice::from_ref(&root), 8, &IndexControl::default());
 
         assert_eq!(shallow.sidecars.len(), 1, "{:?}", shallow.sidecars);
         assert_eq!(full.sidecars.len(), 2, "{:?}", full.sidecars);
@@ -292,11 +287,12 @@ mod tests {
     #[test]
     fn a_directory_inside_two_roots_is_walked_once() {
         let directory = scratch_directory("walk-overlap");
+        let root = directory.to_path_buf();
         let inner = directory.join("inner");
         fs::create_dir_all(&inner).expect("the tree can be created");
         fs::write(inner.join("clipped-a.mkv"), "").expect("a recording");
 
-        let found = walk(&[directory, inner], 8, &IndexControl::default());
+        let found = walk(&[root, inner], 8, &IndexControl::default());
 
         assert_eq!(found.media.len(), 1, "{:?}", found.media);
     }
@@ -304,11 +300,8 @@ mod tests {
     #[test]
     fn a_root_is_covered_whatever_case_it_is_written_in() {
         let directory = scratch_directory("walk-case");
-        let found = walk(
-            std::slice::from_ref(&directory),
-            8,
-            &IndexControl::default(),
-        );
+        let root = directory.to_path_buf();
+        let found = walk(std::slice::from_ref(&root), 8, &IndexControl::default());
 
         let shouted = PathBuf::from(directory.to_string_lossy().to_uppercase()).join("a.mkv");
 
